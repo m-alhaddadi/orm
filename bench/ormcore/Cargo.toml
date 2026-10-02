@@ -1,0 +1,19 @@
+[package]
+name = "ormcore"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ormcore"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["extension-module", "chrono"] }
+sea-orm = { version = "2.0", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
+chrono = "0.4"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
