@@ -1,0 +1,374 @@
+{
+  "env": {
+    "baseline": "gorm",
+    "cgo_call_ns": 65.9668855,
+    "cpus": 4,
+    "gorm": "1.31",
+    "platform": "linux/amd64",
+    "postgres": "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)",
+    "runtime": "go1.25.0",
+    "transport": "tcp"
+  },
+  "results": [
+    {
+      "contender": "gorm",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 109.463,
+      "p95_us": 176.158,
+      "mean_us": 122.46157600000001,
+      "us_per_row": 109.463
+    },
+    {
+      "contender": "gorm",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 225.61,
+      "p95_us": 405.934,
+      "mean_us": 252.31287666666668,
+      "us_per_row": 4.5122
+    },
+    {
+      "contender": "gorm",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 2790.629,
+      "p95_us": 4138.825,
+      "mean_us": 2934.42418,
+      "us_per_row": 2.790629
+    },
+    {
+      "contender": "gorm",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 171.4405,
+      "p95_us": 346.104,
+      "mean_us": 201.711408,
+      "us_per_row": 171.4405
+    },
+    {
+      "contender": "gorm",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 370.68,
+      "p95_us": 711.965,
+      "mean_us": 424.96250333333336,
+      "us_per_row": 7.4136
+    },
+    {
+      "contender": "gorm",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 4100.6675,
+      "p95_us": 5474.53,
+      "mean_us": 4226.151360000001,
+      "us_per_row": 4.100667499999999
+    },
+    {
+      "contender": "gorm",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 790.9215,
+      "p95_us": 1073.813,
+      "mean_us": 823.2725479999999,
+      "us_per_row": 790.9215
+    },
+    {
+      "contender": "gorm",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 1660.06,
+      "p95_us": 2521.174,
+      "mean_us": 1781.0547,
+      "us_per_row": 33.2012
+    },
+    {
+      "contender": "gorm",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 15882.647,
+      "p95_us": 20126.428,
+      "mean_us": 19293.032233333335,
+      "us_per_row": 15.882647
+    },
+    {
+      "contender": "gorm",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 753.2315,
+      "p95_us": 1162.918,
+      "mean_us": 817.50932,
+      "us_per_row": 753.2315
+    },
+    {
+      "contender": "gorm",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 32836.3675,
+      "p95_us": 37557.855,
+      "mean_us": 32869.16005,
+      "us_per_row": 656.72735
+    },
+    {
+      "contender": "gorm",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 658883.747,
+      "p95_us": 723080.53,
+      "mean_us": 661551.1686666666,
+      "us_per_row": 658.883747
+    },
+    {
+      "contender": "pgx",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 76.861,
+      "p95_us": 122.541,
+      "mean_us": 85.292547,
+      "us_per_row": 76.861
+    },
+    {
+      "contender": "pgx",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 125.3025,
+      "p95_us": 281.735,
+      "mean_us": 151.31570333333335,
+      "us_per_row": 2.50605
+    },
+    {
+      "contender": "pgx",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 1017.1045,
+      "p95_us": 1777.896,
+      "mean_us": 1140.86948,
+      "us_per_row": 1.0171045
+    },
+    {
+      "contender": "pgx",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 133.431,
+      "p95_us": 216.198,
+      "mean_us": 150.210063,
+      "us_per_row": 133.431
+    },
+    {
+      "contender": "pgx",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 237.266,
+      "p95_us": 569.053,
+      "mean_us": 330.9879266666667,
+      "us_per_row": 4.7453199999999995
+    },
+    {
+      "contender": "pgx",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 2326.435,
+      "p95_us": 3076.747,
+      "mean_us": 2263.93598,
+      "us_per_row": 2.326435
+    },
+    {
+      "contender": "pgx",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 515.9385,
+      "p95_us": 722.616,
+      "mean_us": 539.4884159999999,
+      "us_per_row": 515.9385
+    },
+    {
+      "contender": "pgx",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 1155.1385,
+      "p95_us": 1590.937,
+      "mean_us": 1200.762065,
+      "us_per_row": 23.10277
+    },
+    {
+      "contender": "pgx",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 11630.83,
+      "p95_us": 14609.987,
+      "mean_us": 12075.931133333333,
+      "us_per_row": 11.63083
+    },
+    {
+      "contender": "pgx",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 496.5645,
+      "p95_us": 699.261,
+      "mean_us": 536.6719420000001,
+      "us_per_row": 496.5645
+    },
+    {
+      "contender": "pgx",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 19289.6365,
+      "p95_us": 23957.799,
+      "mean_us": 19398.364149999998,
+      "us_per_row": 385.79273
+    },
+    {
+      "contender": "pgx",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 385170.418,
+      "p95_us": 426847.738,
+      "mean_us": 391422.4606666667,
+      "us_per_row": 385.170418
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 243.98,
+      "p95_us": 398.393,
+      "mean_us": 268.270138,
+      "us_per_row": 243.98
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 280.337,
+      "p95_us": 529.058,
+      "mean_us": 314.9896066666667,
+      "us_per_row": 5.606739999999999
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 2784.695,
+      "p95_us": 4246.922,
+      "mean_us": 2925.90396,
+      "us_per_row": 2.784695
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 344.221,
+      "p95_us": 596.307,
+      "mean_us": 390.384716,
+      "us_per_row": 344.221
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 545.7115,
+      "p95_us": 847.599,
+      "mean_us": 572.6247866666666,
+      "us_per_row": 10.91423
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 4643.1325,
+      "p95_us": 7719.378,
+      "mean_us": 5163.5590999999995,
+      "us_per_row": 4.6431325
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 709.6865,
+      "p95_us": 1102.174,
+      "mean_us": 759.126858,
+      "us_per_row": 709.6865
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 1561.5975,
+      "p95_us": 2739.614,
+      "mean_us": 1700.3984950000001,
+      "us_per_row": 31.23195
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 13784.16,
+      "p95_us": 19094.479,
+      "mean_us": 14717.143333333333,
+      "us_per_row": 13.78416
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 622.279,
+      "p95_us": 1112.923,
+      "mean_us": 702.560172,
+      "us_per_row": 622.279
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 34837.4105,
+      "p95_us": 53631.646,
+      "mean_us": 35643.72395,
+      "us_per_row": 696.74821
+    },
+    {
+      "contender": "ormcore-cgo",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 601911.07,
+      "p95_us": 616335.827,
+      "mean_us": 604903.783,
+      "us_per_row": 601.91107
+    }
+  ]
+}

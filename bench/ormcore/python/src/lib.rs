@@ -1,84 +1,16 @@
-//! Feasibility prototype: Python (asyncio) -> PyO3 -> SeaORM -> Postgres.
+//! Python binding: Python (asyncio or sync) -> PyO3 -> ormcore-core (SeaORM) -> Postgres.
 //!
 //! Every public method is one FFI crossing that returns an awaitable. Results are
 //! materialized into Python objects in a single batch pass once the query finishes.
-
-use std::time::Instant;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::{intern, IntoPyObjectExt};
-use sea_orm::{
-    ActiveValue::{NotSet, Set},
-    ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr,
-    EntityTrait, QueryFilter, QueryOrder, QuerySelect,
-};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr};
 
-mod author {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "blog_author")]
-    pub struct Model {
-        #[sea_orm(primary_key)]
-        pub id: i64,
-        pub name: String,
-        pub email: String,
-        pub created_at: DateTimeWithTimeZone,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {
-        #[sea_orm(has_many = "super::post::Entity")]
-        Post,
-    }
-
-    impl Related<super::post::Entity> for Entity {
-        fn to() -> RelationDef {
-            Relation::Post.def()
-        }
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-mod post {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "blog_post")]
-    pub struct Model {
-        #[sea_orm(primary_key)]
-        pub id: i64,
-        pub author_id: i64,
-        pub title: String,
-        #[sea_orm(column_type = "Text")]
-        pub body: String,
-        pub views: i32,
-        pub published: bool,
-        pub created_at: DateTimeWithTimeZone,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {
-        #[sea_orm(
-            belongs_to = "super::author::Entity",
-            from = "Column::AuthorId",
-            to = "super::author::Column::Id"
-        )]
-        Author,
-    }
-
-    impl Related<super::author::Entity> for Entity {
-        fn to() -> RelationDef {
-            Relation::Author.def()
-        }
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
+use ormcore_core::{author, post, NewPost};
 
 fn db_err(e: DbErr) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
@@ -212,75 +144,27 @@ fn post_to_py(
     }
 }
 
-/// Plain Rust struct extracted from a Python dict before the query runs.
-#[derive(Clone)]
-struct NewPost {
-    author_id: i64,
-    title: String,
-    body: String,
-    views: i32,
-    published: bool,
-    created_at: DateTime<FixedOffset>,
+/// Convert a Python dict into the core's `NewPost` before the query runs.
+fn extract_new_post(d: &Bound<'_, PyAny>) -> PyResult<NewPost> {
+    let py = d.py();
+    Ok(NewPost {
+        author_id: d.get_item(intern!(py, "author_id"))?.extract()?,
+        title: d.get_item(intern!(py, "title"))?.extract()?,
+        body: d.get_item(intern!(py, "body"))?.extract()?,
+        views: d.get_item(intern!(py, "views"))?.extract()?,
+        published: d.get_item(intern!(py, "published"))?.extract()?,
+        created_at: d.get_item(intern!(py, "created_at"))?.extract()?,
+    })
 }
 
-impl NewPost {
-    fn extract(d: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let py = d.py();
-        Ok(NewPost {
-            author_id: d.get_item(intern!(py, "author_id"))?.extract()?,
-            title: d.get_item(intern!(py, "title"))?.extract()?,
-            body: d.get_item(intern!(py, "body"))?.extract()?,
-            views: d.get_item(intern!(py, "views"))?.extract()?,
-            published: d.get_item(intern!(py, "published"))?.extract()?,
-            created_at: d.get_item(intern!(py, "created_at"))?.extract()?,
-        })
-    }
-
-    fn into_active(self) -> post::ActiveModel {
-        post::ActiveModel {
-            id: NotSet,
-            author_id: Set(self.author_id),
-            title: Set(self.title),
-            body: Set(self.body),
-            views: Set(self.views),
-            published: Set(self.published),
-            created_at: Set(self.created_at),
-        }
-    }
-}
-
-async fn select_posts(db: &DatabaseConnection, limit: u64) -> Result<Vec<post::Model>, DbErr> {
-    post::Entity::find()
-        .order_by_asc(post::Column::Id)
-        .limit(limit)
-        .all(db)
-        .await
-}
-
-async fn select_posts_with_author(
-    db: &DatabaseConnection,
-    limit: u64,
-) -> Result<Vec<(post::Model, Option<author::Model>)>, DbErr> {
-    post::Entity::find()
-        .find_also_related(author::Entity)
-        .order_by_asc(post::Column::Id)
-        .limit(limit)
-        .all(db)
-        .await
-}
-
-async fn insert_many(db: &DatabaseConnection, rows: Vec<NewPost>) -> Result<Vec<i64>, DbErr> {
-    post::Entity::insert_many(rows.into_iter().map(NewPost::into_active))
-        .exec_with_returning_keys(db)
-        .await
-}
-
-async fn delete_above(db: &DatabaseConnection, id: i64) -> Result<u64, DbErr> {
-    post::Entity::delete_many()
-        .filter(post::Column::Id.gt(id))
-        .exec(db)
-        .await
-        .map(|r| r.rows_affected)
+/// Run a future to completion on the shared Tokio runtime, GIL released.
+fn block_on<F, T>(py: Python<'_>, fut: F) -> PyResult<T>
+where
+    F: std::future::Future<Output = Result<T, DbErr>> + Send,
+    T: Send,
+{
+    py.detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(fut))
+        .map_err(db_err)
 }
 
 #[pyclass(frozen, module = "ormcore")]
@@ -296,7 +180,7 @@ impl Client {
         let mode = Mode::parse(mode)?;
         let db = self.db.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let rows = select_posts(&db, limit).await.map_err(db_err)?;
+            let rows = ormcore_core::select_posts(&db, limit).await.map_err(db_err)?;
             Python::attach(|py| {
                 let items = rows
                     .iter()
@@ -318,7 +202,7 @@ impl Client {
         let mode = Mode::parse(mode)?;
         let db = self.db.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let rows = select_posts_with_author(&db, limit).await.map_err(db_err)?;
+            let rows = ormcore_core::select_posts_with_author(&db, limit).await.map_err(db_err)?;
             Python::attach(|py| {
                 let items = rows
                     .iter()
@@ -333,23 +217,20 @@ impl Client {
     fn insert_posts<'py>(&self, py: Python<'py>, rows: &Bound<'py, PyList>) -> PyResult<Bound<'py, PyAny>> {
         let rows = rows
             .iter()
-            .map(|r| NewPost::extract(&r))
+            .map(|r| extract_new_post(&r))
             .collect::<PyResult<Vec<_>>>()?;
         let db = self.db.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            insert_many(&db, rows).await.map_err(db_err)
+            ormcore_core::insert_many(&db, rows).await.map_err(db_err)
         })
     }
 
     /// `await client.insert_post(dict)` -> new id. Used to measure per-row FFI round trips.
     fn insert_post<'py>(&self, py: Python<'py>, row: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let row = NewPost::extract(row)?;
+        let row = extract_new_post(row)?;
         let db = self.db.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            post::Entity::insert(row.into_active())
-                .exec(&db)
-                .await
-                .map(|r| r.last_insert_id)
+            ormcore_core::insert_one(&db, row).await
                 .map_err(db_err)
         })
     }
@@ -358,7 +239,7 @@ impl Client {
     fn delete_posts_above<'py>(&self, py: Python<'py>, id: i64) -> PyResult<Bound<'py, PyAny>> {
         let db = self.db.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            delete_above(&db, id).await.map_err(db_err)
+            ormcore_core::delete_above(&db, id).await.map_err(db_err)
         })
     }
 
@@ -378,53 +259,65 @@ impl Client {
     ) -> PyResult<Bound<'py, PyAny>> {
         let db = self.db.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let template: Vec<NewPost> = (0..n)
-                .map(|i| NewPost {
-                    author_id: (i % 50) as i64 + 1,
-                    title: format!("Bench post {i}"),
-                    body: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(4),
-                    views: i as i32,
-                    published: i % 2 == 0,
-                    created_at: Utc::now().fixed_offset(),
-                })
-                .collect();
-            let mut out = Vec::with_capacity(iters);
-            for i in 0..warmup + iters {
-                let start = Instant::now();
-                match op.as_str() {
-                    "read" => {
-                        let rows = select_posts(&db, n as u64).await.map_err(db_err)?;
-                        std::hint::black_box(rows);
-                    }
-                    "read_join" => {
-                        let rows = select_posts_with_author(&db, n as u64).await.map_err(db_err)?;
-                        std::hint::black_box(rows);
-                    }
-                    "write_bulk" => {
-                        let ids = insert_many(&db, template.clone()).await.map_err(db_err)?;
-                        std::hint::black_box(ids);
-                    }
-                    "write_loop" => {
-                        for row in template.iter().cloned() {
-                            let r = post::Entity::insert(row.into_active())
-                                .exec(&db)
-                                .await
-                                .map_err(db_err)?;
-                            std::hint::black_box(r);
-                        }
-                    }
-                    _ => return Err(PyValueError::new_err(format!("unknown op {op}"))),
-                }
-                let elapsed = start.elapsed().as_nanos() as u64;
-                if op.starts_with("write") {
-                    delete_above(&db, cleanup_above).await.map_err(db_err)?;
-                }
-                if i >= warmup {
-                    out.push(elapsed);
-                }
-            }
-            Ok(out)
+            ormcore_core::bench_loop(&db, &op, n, iters, warmup, cleanup_above)
+                .await
+                .map_err(PyRuntimeError::new_err)
         })
+    }
+
+    // --- sync API -------------------------------------------------------------
+    // Same queries, but the calling Python thread blocks on the Tokio runtime with the
+    // GIL released, so there is no asyncio <-> Tokio hand-off.
+
+    /// `client.fetch_posts_sync(limit, mode)` -> list of dicts or Post objects.
+    #[pyo3(signature = (limit, mode = "obj"))]
+    fn fetch_posts_sync(&self, py: Python<'_>, limit: u64, mode: &str) -> PyResult<Py<PyList>> {
+        let mode = Mode::parse(mode)?;
+        let rows = block_on(py, ormcore_core::select_posts(&self.db, limit))?;
+        let items = rows
+            .iter()
+            .map(|p| post_to_py(py, p, None, mode))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, items)?.unbind())
+    }
+
+    /// `client.fetch_posts_with_author_sync(limit, mode)` -> posts with `author` joined.
+    #[pyo3(signature = (limit, mode = "obj"))]
+    fn fetch_posts_with_author_sync(&self, py: Python<'_>, limit: u64, mode: &str) -> PyResult<Py<PyList>> {
+        let mode = Mode::parse(mode)?;
+        let rows = block_on(py, ormcore_core::select_posts_with_author(&self.db, limit))?;
+        let items = rows
+            .iter()
+            .map(|(p, a)| post_to_py(py, p, a.as_ref(), mode))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, items)?.unbind())
+    }
+
+    /// `client.insert_posts_sync([dict, ...])` -> list of new ids.
+    fn insert_posts_sync(&self, py: Python<'_>, rows: &Bound<'_, PyList>) -> PyResult<Vec<i64>> {
+        let rows = rows
+            .iter()
+            .map(|r| extract_new_post(&r))
+            .collect::<PyResult<Vec<_>>>()?;
+        block_on(py, ormcore_core::insert_many(&self.db, rows))
+    }
+
+    /// `client.insert_post_sync(dict)` -> new id.
+    fn insert_post_sync(&self, py: Python<'_>, row: &Bound<'_, PyAny>) -> PyResult<i64> {
+        let row = extract_new_post(row)?;
+        block_on(py, async {
+            ormcore_core::insert_one(&self.db, row).await
+        })
+    }
+
+    /// `client.delete_posts_above_sync(id)` -> rows deleted.
+    fn delete_posts_above_sync(&self, py: Python<'_>, id: i64) -> PyResult<u64> {
+        block_on(py, ormcore_core::delete_above(&self.db, id))
+    }
+
+    /// `client.noop_sync()` -> None. Measures the bare block_on round trip.
+    fn noop_sync(&self, py: Python<'_>) -> PyResult<()> {
+        block_on(py, async { Ok(()) })
     }
 
     /// `await client.noop()` -> None. Measures the bare asyncio <-> Tokio bridge cost.
@@ -449,11 +342,7 @@ impl Client {
 #[pyo3(signature = (url, max_connections = 1))]
 fn connect(py: Python<'_>, url: String, max_connections: u32) -> PyResult<Bound<'_, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let mut opts = ConnectOptions::new(url);
-        opts.max_connections(max_connections)
-            .min_connections(1)
-            .sqlx_logging(false);
-        let db = Database::connect(opts).await.map_err(db_err)?;
+        let db = ormcore_core::connect(&url, max_connections).await.map_err(db_err)?;
         Ok(Client { db })
     })
 }

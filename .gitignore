@@ -3,3 +3,5 @@ target/
 __pycache__/
 *.so
 bench/log-*.txt
+node_modules/
+*.node

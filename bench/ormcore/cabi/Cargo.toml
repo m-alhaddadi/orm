@@ -1,0 +1,12 @@
+[package]
+name = "ormcore-cabi"
+version = "0.1.0"
+edition = "2021"
+description = "C ABI over ormcore-core, consumed by Go via cgo (see ormcore.h)."
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+ormcore-core.workspace = true
+chrono.workspace = true

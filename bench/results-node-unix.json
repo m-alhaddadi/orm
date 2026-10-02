@@ -1,0 +1,377 @@
+{
+  "env": {
+    "runtime": "node 22.22.0",
+    "drizzle": "0.45",
+    "postgres": "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)",
+    "cpus": 4,
+    "platform": "linux 6.18.44-fc-v51",
+    "transport": "unix",
+    "baseline": "drizzle-pg",
+    "bridge_us": {
+      "plain async function": 0.155,
+      "napi async fn (Tokio -> Promise)": 41.274
+    }
+  },
+  "results": [
+    {
+      "contender": "drizzle-pg",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 364.4755,
+      "p95_us": 750.436,
+      "mean_us": 419.283716,
+      "us_per_row": 364.4755
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 500.03,
+      "p95_us": 940.799,
+      "mean_us": 579.47272,
+      "us_per_row": 10.000599999999999
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 3323.5955,
+      "p95_us": 4262.264,
+      "mean_us": 3438.40574,
+      "us_per_row": 3.3235954999999997
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 652.376,
+      "p95_us": 988.284,
+      "mean_us": 664.265584,
+      "us_per_row": 652.376
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 1064.3155,
+      "p95_us": 1310.839,
+      "mean_us": 1087.7065,
+      "us_per_row": 21.28631
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 7195.535,
+      "p95_us": 9209.331,
+      "mean_us": 7279.3398,
+      "us_per_row": 7.195535
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 740.727,
+      "p95_us": 1157.31,
+      "mean_us": 812.715334,
+      "us_per_row": 740.727
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 3158.6115,
+      "p95_us": 4058.772,
+      "mean_us": 3287.3905449999997,
+      "us_per_row": 63.17223
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 50005.3065,
+      "p95_us": 58859.416,
+      "mean_us": 50874.19143333333,
+      "us_per_row": 50.005306499999996
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 651.1505,
+      "p95_us": 925.88,
+      "mean_us": 689.948416,
+      "us_per_row": 651.1505
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 32908.16,
+      "p95_us": 39799.326,
+      "mean_us": 32849.49595,
+      "us_per_row": 658.1632000000001
+    },
+    {
+      "contender": "drizzle-pg",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 564270.616,
+      "p95_us": 659588.574,
+      "mean_us": 574934.5283333333,
+      "us_per_row": 564.270616
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 202.27,
+      "p95_us": 314.073,
+      "mean_us": 225.63734,
+      "us_per_row": 202.27
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 419.757,
+      "p95_us": 628.315,
+      "mean_us": 446.79599,
+      "us_per_row": 8.39514
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 3371.2615,
+      "p95_us": 5216.22,
+      "mean_us": 3628.78456,
+      "us_per_row": 3.3712615
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 423.8555,
+      "p95_us": 569.29,
+      "mean_us": 446.07345000000004,
+      "us_per_row": 423.8555
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 784.0365,
+      "p95_us": 1095.215,
+      "mean_us": 833.7328033333333,
+      "us_per_row": 15.68073
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 6075.388,
+      "p95_us": 8100.44,
+      "mean_us": 6269.67582,
+      "us_per_row": 6.075388
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 512.0905,
+      "p95_us": 771.15,
+      "mean_us": 566.521956,
+      "us_per_row": 512.0905
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 1518.273,
+      "p95_us": 2125.929,
+      "mean_us": 1585.430265,
+      "us_per_row": 30.36546
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 15348.9245,
+      "p95_us": 18801.51,
+      "mean_us": 15760.872533333333,
+      "us_per_row": 15.348924499999999
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 497.997,
+      "p95_us": 722.706,
+      "mean_us": 515.9122,
+      "us_per_row": 497.997
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 27264.927,
+      "p95_us": 30918.382,
+      "mean_us": 27109.86945,
+      "us_per_row": 545.29854
+    },
+    {
+      "contender": "ormcore-async",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 556653.915,
+      "p95_us": 578014.186,
+      "mean_us": 561358.0366666666,
+      "us_per_row": 556.653915
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 206.27,
+      "p95_us": 334.777,
+      "mean_us": 237.72061,
+      "us_per_row": 206.27
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 368.774,
+      "p95_us": 476.593,
+      "mean_us": 394.10887333333335,
+      "us_per_row": 7.37548
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 3476.072,
+      "p95_us": 4603.242,
+      "mean_us": 3562.69052,
+      "us_per_row": 3.4760720000000003
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 315.4335,
+      "p95_us": 455.074,
+      "mean_us": 335.15930599999996,
+      "us_per_row": 315.4335
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 596.3915,
+      "p95_us": 1117.817,
+      "mean_us": 699.8723033333333,
+      "us_per_row": 11.927829999999998
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 6562.5395,
+      "p95_us": 9547.048,
+      "mean_us": 7071.32912,
+      "us_per_row": 6.5625395
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 512.9575,
+      "p95_us": 903.485,
+      "mean_us": 563.128374,
+      "us_per_row": 512.9575
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 1416.013,
+      "p95_us": 2356.317,
+      "mean_us": 1522.37113,
+      "us_per_row": 28.320259999999998
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 15270.2685,
+      "p95_us": 17568.008,
+      "mean_us": 15715.4781,
+      "us_per_row": 15.2702685
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 505.2535,
+      "p95_us": 914.762,
+      "mean_us": 552.9557219999999,
+      "us_per_row": 505.2535
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 25139.7585,
+      "p95_us": 47537.705,
+      "mean_us": 26162.50385,
+      "us_per_row": 502.79517
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 493840.684,
+      "p95_us": 565642.566,
+      "mean_us": 514081.703,
+      "us_per_row": 493.840684
+    }
+  ]
+}

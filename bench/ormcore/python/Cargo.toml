@@ -1,0 +1,15 @@
+[package]
+name = "ormcore"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ormcore"
+crate-type = ["cdylib"]
+
+[dependencies]
+ormcore-core.workspace = true
+sea-orm.workspace = true
+chrono.workspace = true
+pyo3 = { version = "0.29", features = ["extension-module", "chrono"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }

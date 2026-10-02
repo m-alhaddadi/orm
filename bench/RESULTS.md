@@ -1,200 +1,466 @@
 # Phase 0 results: performance feasibility
 
-**Question:** Is `Python (asyncio) → PyO3 → SeaORM → Postgres` fast enough to build on,
-once FFI and Python object materialization are counted?
+**Question:** Is one Rust ORM core (SeaORM on Postgres), called natively from Python,
+Node, Bun and Go, fast enough compared with each language's own ORM?
 
-**Answer: yes.** For reads and bulk writes, the PyO3 + SeaORM path (`ormcore-*`) was
-**2.2–4.5× faster than Django's async ORM** and **2.0–3.6× faster than SQLAlchemy async** at
-every size tested (1, 50 and 1000 rows). It also stays within 1.2–2.7× of pure Rust.
-Building the Python objects costs about **0.9 µs per row**, compared with
-**~8 µs per row** for Django. The one place the Rust stack lost was a
-**driver bug over TCP** (sqlx doesn't set `TCP_NODELAY`; details below), and it has a
-clear fix.
+**Answer: yes for Python and JS, about even for Go.**
 
-## Headline numbers (Unix socket, median ms per call, lower is better)
+| language | binding | vs its native ORM | verdict |
+|---|---|---|---|
+| **Python** | PyO3 | **2–4.5× faster** than Django / SQLAlchemy async on reads and bulk writes | Big win: Python object building is slow and Rust replaces most of it. |
+| **Node** | napi-rs | **up to 2× faster** on small queries, **3.3× faster** on bulk writes, **even** on 1000-row reads | Win, except large reads (napi builds JS objects slowly). |
+| **Bun** | same napi addon | **up to 4.8× faster** on bulk writes; 1000-row reads **0.8–1.0×** | Same picture as Node. Bun's own `pg` path is fast at reads. |
+| **Go** | cgo (C ABI) | **0.4–1.2×** vs GORM; raw pgx is faster than both | No speed win. Go is already compiled; Rust only adds a copy. |
 
-| operation | N | django-async | sqla-asyncpg | **ormcore-obj** | rust-only (floor) |
-|---|---:|---:|---:|---:|---:|
-| read posts | 1 | 0.90 | 0.79 | **0.35** | 0.13 |
-| read posts | 50 | 1.48 | 1.18 | **0.51** | 0.19 |
-| read posts | 1000 | 9.75 | 7.70 | **2.22** | 1.35 |
-| read posts + author JOIN | 1000 | 18.62 | 11.61 | **4.15** | 2.78 |
-| bulk insert | 50 | 3.93 | 4.50 | **1.52** | 1.12 |
-| bulk insert | 1000 | 42.65 | 49.22 | **13.63** | 11.25 |
-| insert one-by-one (N commits) | 1000 | 1122 | 1572 | **686** | 481 |
+The engine is worth it for speed in Python and JS. In Go it gives consistency (the same
+models, queries and behaviour as the other languages), not speed.
 
-## What the data says about the design assumptions
+## Summary
 
-| Assumption in PLAN.md | Verdict | Evidence |
-|---|---|---|
-| FFI overhead is usually small | **True for the call itself; the async bridge is the real fixed cost** | One `await` through `pyo3-async-runtimes` costs ~115 µs with no DB work, about the same as Django's `sync_to_async` (~127 µs). That accounts for most of the 0.35 ms vs 0.13 ms gap at N=1. |
-| Object materialization is the expensive part | **True, and it's where Rust wins** | Read 1000: Rust floor 1.35 ms, PyO3 objects 2.22 ms (≈0.9 µs/row incl. a tz-aware `datetime`; ≈1.4 µs/row with the joined author object), Django 9.75 ms (≈8.4 µs/row over the floor). |
-| Database latency dominates | **True for small and per-commit workloads** | Single-row inserts sit at 0.4–1.1 ms per row for everyone, dominated by WAL fsync on commit. At N=1 every stack is within ~1 ms. |
-| Batch, don't cross the boundary row by row | **Confirmed** | 1000 rows: bulk insert 13.6 ms vs 686 ms one-by-one (50×). That's mostly per-commit cost; each extra crossing adds ~0.2 ms on top. |
-| `#[pyclass]` objects vs dicts | **No meaningful difference** | `ormcore-obj` ≈ `ormcore-dict` everywhere, because fields are converted to Python once at materialization time, not lazily per access. |
+| question | answer |
+|---|---|
+| Sync or async: which is faster? | **Sync, by ~0.1–0.2 ms per call** (no event-loop hand-off). **Async handles more traffic** under concurrent load. Ship both, with async as the primary API. |
+| Unix socket or TCP? | **About the same for everyone** (TCP ≤ ~0.3 ms slower per call), once sqlx's missing `TCP_NODELAY` is patched. Before the patch, large SeaORM writes over TCP were ~4× slower. |
+| How much does the language → Rust call cost? | Go cgo call: **~70 ns**. Node/Bun async (Promise ↔ Tokio): **~40 µs**. Python async (asyncio ↔ Tokio): **~115 µs**. Sync calls in every language: **~0**. |
 
-## Finding: sqlx does not set `TCP_NODELAY`
+## Cross-language: median ms per call, Unix socket
 
-Over localhost TCP, SeaORM's 1000-row bulk insert took **~55 ms**. Server-side logging
-showed Postgres spending only ~8 ms on it. Over a Unix socket the same insert takes
-**~12 ms**.
+Read 1 post:
 
-The cause is in sqlx 0.9 (SeaORM's driver). It never calls `set_nodelay(true)` on its
-`TcpStream` (`sqlx-core/src/net/socket/mod.rs`). Large multi-packet requests
-(here 43 KB of SQL plus 6000 bind parameters) then stall on Nagle's algorithm combined
-with delayed ACKs, adding about 40 ms. libpq (psycopg) and asyncpg both set `TCP_NODELAY`,
-so Django and SQLAlchemy don't have this problem. Small requests are unaffected:
-reads over TCP look the same as over the Unix socket.
+| | native ORM | Rust core, async | Rust core, sync | pure Rust floor |
+|---|---:|---:|---:|---:|
+| Python | 0.79 (Django async) · 0.43 (Django sync) | 0.32 | 0.20 | 0.14 |
+| Node | 0.36 (Drizzle) | 0.20 | 0.21 | 0.14 |
+| Bun | 0.24 (Drizzle) | 0.23 | 0.21 | 0.14 |
+| Go | 0.13 (GORM) · 0.11 (pgx) | — | 0.22 (cgo) | 0.14 |
 
-**This must be fixed before any real use.** Options: a custom connector that sets
-`TCP_NODELAY`, an upstream patch to sqlx, or a different driver
-(`tokio-postgres` sets it). This also supports keeping the engine replaceable behind
-our own IR.
+Read 1000 posts:
 
-## Where the remaining overhead is (ormcore vs rust-only)
+| | native ORM | Rust core, async | Rust core, sync | pure Rust floor |
+|---|---:|---:|---:|---:|
+| Python | 10.25 (Django async) · 9.72 (Django sync) | 2.50 | 2.30 | 1.43 |
+| Node | 3.32 (Drizzle) | 3.37 | 3.48 | 1.43 |
+| Bun | 2.76 (Drizzle) | 3.63 | 3.40 | 1.43 |
+| Go | 2.52 (GORM) · 0.90 (pgx) | — | 2.59 (cgo) | 1.43 |
 
-- **~115 µs fixed per `await`**: the asyncio ↔ Tokio hop (Tokio worker wake-up,
-  `call_soon_threadsafe`, event-loop wake-up). This dominates N=1 calls. Candidates to
-  try: a current-thread runtime, completing the asyncio future without the extra
-  thread hop, or a sync fast path for very cheap queries.
-- **~0.9 µs per row** to build Python objects (string copies plus `datetime`
-  construction); ~1.4 µs per row including a joined author object.
-- **~0.7–2.4 µs per row** on writes to extract Python dicts into Rust structs (bulk insert
-  1000: 11.9–13.6 ms vs 11.25 ms; `-obj` and `-dict` run the same write code, so the
-  spread is noise).
+Bulk insert 1000 posts:
+
+| | native ORM | Rust core, async | Rust core, sync | pure Rust floor |
+|---|---:|---:|---:|---:|
+| Python | 41.94 (Django async) · 43.14 (Django sync) | 12.77 | 13.55 | 12.22 |
+| Node | 50.01 (Drizzle) | 15.35 | 15.27 | 12.22 |
+| Bun | 68.54 (Drizzle) | 15.84 | 14.38 | 12.22 |
+| Go | 16.68 (GORM) · 12.48 (pgx) | — | 14.75 (cgo) | 12.22 |
+
+"Pure Rust floor" is SeaORM timed inside Rust with no foreign objects (measured from
+the Python harness, `rust-only`).
+
+## What each language teaches
+
+**Python.** Building objects is where Django and SQLAlchemy spend their time: ~8–9 µs
+per row over the Rust floor, against ~0.6–0.8 µs for the PyO3 binding. That gap is the
+whole case for the engine.
+
+**Node / Bun.** Writes are the big win: the Rust side builds and sends a 1000-row INSERT
+3–5× faster than Drizzle on `pg`. Large reads are even, because napi creates each JS
+object property by property (~2 µs per row), which costs about what V8 saves by
+parsing rows itself. Possible fixes: return rows as arrays or a columnar buffer
+instead of objects, or build objects lazily.
+
+**Go.** pgx is a very fast native driver: it reads 1000 rows in 0.9 ms, faster than
+SeaORM itself (1.43 ms). The cgo call is cheap (~70 ns), but copying each row out of
+Rust memory into Go strings and times costs about as much as GORM's reflection, so we
+land level with GORM. Each cgo call also ties up an OS thread while it waits on Postgres,
+which matters under heavy concurrency. Use the Rust core from Go for consistency across
+languages, not for speed.
+
+**Single-row inserts** are dominated everywhere by the per-commit WAL fsync
+(0.3–1.5 ms per row). The ORM matters least there.
+
+## Transport: Unix socket vs TCP
+
+Every contender in every language was measured over both the Unix socket and localhost
+TCP. All drivers in a run use the same transport. Results were consistent between the
+two: TCP is up to ~0.1–0.3 ms slower per call, and the rankings didn't change.
+
+### sqlx doesn't set `TCP_NODELAY` (fixed by a vendored patch)
+
+Before the patch, SeaORM's 1000-row bulk insert over TCP took **~55 ms**. Postgres's
+own logs showed it spending only ~8 ms on the statement, and the same insert over the
+Unix socket took ~12 ms. The cause: sqlx 0.9 never calls `set_nodelay(true)`, so large
+multi-packet requests stall on Nagle's algorithm combined with delayed ACKs, adding
+about 40 ms. libpq, asyncpg, `pg` and pgx all set `TCP_NODELAY`.
+
+**Fix:** `bench/ormcore/patches/sqlx-core` holds sqlx-core 0.9.0 plus a one-line
+`stream.set_nodelay(true)` change, wired in through `[patch.crates-io]`. It applies to all
+four bindings. We should send this fix upstream and drop the patch once sqlx ships it.
+
+| Rust core bulk insert, N=1000, TCP | before patch | after patch |
+|---|---:|---:|
+| Python `ormcore-obj` | 54.5 ms | 13.9 ms |
+| Python `rust-only` | 55.9 ms | 12.6 ms |
+
+## Async vs sync
+
+An async call into Rust pays to hand the result from Tokio back to the language's event
+loop. A sync call blocks the caller on the runtime and pays nothing extra:
+
+| language → Rust | median per call |
+|---|---:|
+| Python `future_into_py` (asyncio ↔ Tokio) | ~113 µs |
+| Python: Django `sync_to_async`, for comparison | ~132 µs |
+| Node napi async fn (Promise ↔ Tokio) | ~41 µs |
+| Bun napi async fn | ~37 µs |
+| Go cgo call (always sync) | ~70 ns |
+| Any sync call (`block_on`), excluding I/O | ~0.2 µs |
+
+In practice:
+- **Python:** sync is ~0.1–0.2 ms faster on small queries (read 1 post: 0.20 vs 0.32 ms).
+- **Node/Bun:** the gap is smaller (~40 µs), and sync and async are often within noise.
+- **Large results:** async and sync are about the same, because materialization and the
+  database dominate.
+
+This is single-query latency. Async exists so a server can keep other requests moving
+while one waits on Postgres, and this sequential benchmark doesn't measure that.
+Recommendation: **async as the primary API, plus a sync API** (scripts, sync Django views,
+Celery, CLIs). Go uses its normal blocking style.
 
 ## Notes and caveats
 
 - Hardware: shared cloud VM, 4 vCPU Xeon @ 2.1 GHz, Postgres 16.14 on the same host,
-  default durability settings. Absolute numbers are noisy (look at p95 in the JSON). The
-  ratios were stable across the Unix and TCP runs.
-- Versions: Python 3.11, Django 5.2.17 (psycopg 3.3), SQLAlchemy 2.1.2 (asyncpg / psycopg),
-  SeaORM 2.0.4 (sqlx 0.9), PyO3 0.29, pyo3-async-runtimes 0.29.
-- Django's async ORM still runs queries in a worker thread via `sync_to_async`, so for
-  small queries Django sync is faster than Django async (0.45 vs 0.90 ms at N=1).
-- SQLAlchemy opens a transaction per session (BEGIN … ROLLBACK/COMMIT round trips).
-  That's idiomatic usage, so it was left in.
-- `ormcore` uses compile-time SeaORM entities that mirror the Django tables. This matches
-  the decision that schema → IR → engine translation happens at compile time.
-- Not measured yet: concurrency (many in-flight queries), free-threaded Python, uvloop,
-  Node bindings.
+  default durability settings. Absolute numbers are noisy (see p95 in the JSON); the
+  rankings were stable across runs and transports.
+- Versions: Python 3.11, Django 5.2.17 (psycopg 3.3), SQLAlchemy 2.1.2 (asyncpg, psycopg);
+  Node 22.22, Bun 1.3.14, Drizzle 0.45 (`pg` 8.23); Go 1.25, GORM 1.31, pgx 5.11;
+  SeaORM 2.0.4 (sqlx 0.9 + `TCP_NODELAY` patch), PyO3 0.29, napi-rs 3.
+- Defaults were kept for each ORM, so every contender runs as idiomatic code:
+  - SQLAlchemy opens a transaction per session.
+  - GORM wraps each `Create` in BEGIN/COMMIT.
+  - Drizzle on `pg` doesn't prepare statements.
+- The Rust core uses compile-time SeaORM entities that mirror the Django tables. This
+  matches the decision that schema → IR → engine translation happens at compile time.
+- Not measured yet: concurrent load (many in-flight queries), free-threaded Python,
+  uvloop, alternative result encodings for JS and Go.
 
 ## Full results
 
-Generated by `python bench/report.py bench/results-unix.json bench/results-tcp.json`.
-Raw data (median, p95, mean, iterations): `results-unix.json`, `results-tcp.json`.
+Generated by `python bench/report.py bench/results-*.json`. Raw data (median, p95, mean,
+iterations) is in `bench/results-<lang>-<transport>.json`. Run everything with
+`bench/run_all.sh`.
 
-### Async bridge cost (no DB work)
-
-Generated by `python bench/bridge_overhead.py`.
-
-| bridge | median µs per await |
-|---|---:|
-| plain Python coroutine | 0.2 |
-| PyO3 `future_into_py` (Tokio thread → asyncio) | 115.3 |
-| Django `sync_to_async` (thread_sensitive) | 127.0 |
-
-### Transport: unix — median ms per call (× = speed-up vs `django-async`)
+### python 3.11.15, transport: unix — median ms per call (× = speed-up vs `django-async`)
 
 #### Read N posts
 
 | contender | N=1 | N=50 | N=1000 |
 |---|---:|---:|---:|
-| `django-sync` | 0.45 (2.0×) | 0.87 (1.7×) | 9.82 (1.0×) |
-| `django-async` | 0.90 | 1.48 | 9.75 |
-| `django-async-dict` | 1.00 (0.9×) | 1.31 (1.1×) | 6.92 (1.4×) |
-| `sqla-asyncpg` | 0.79 (1.1×) | 1.18 (1.3×) | 7.70 (1.3×) |
-| `sqla-psycopg` | 1.07 (0.8×) | 1.31 (1.1×) | 7.80 (1.2×) |
-| `ormcore-obj` | 0.35 (2.5×) | 0.51 (2.9×) | 2.22 (4.4×) |
-| `ormcore-dict` | 0.27 (3.3×) | 0.40 (3.7×) | 2.25 (4.3×) |
-| `rust-only` | 0.13 (6.7×) | 0.19 (7.7×) | 1.35 (7.2×) |
+| `django-sync` | 0.43 (1.9×) | 0.86 (1.6×) | 9.72 (1.1×) |
+| `django-async` | 0.79 | 1.38 | 10.25 |
+| `django-async-dict` | 0.92 (0.9×) | 1.39 (1.0×) | 6.84 (1.5×) |
+| `sqla-asyncpg` | 0.91 (0.9×) | 1.12 (1.2×) | 7.75 (1.3×) |
+| `sqla-psycopg` | 0.96 (0.8×) | 1.30 (1.1×) | 7.90 (1.3×) |
+| `ormcore-obj` | 0.32 (2.5×) | 0.49 (2.8×) | 2.50 (4.1×) |
+| `ormcore-dict` | 0.28 (2.9×) | 0.44 (3.2×) | 2.38 (4.3×) |
+| `ormcore-sync` | 0.20 (4.1×) | 0.23 (5.9×) | 2.30 (4.5×) |
+| `rust-only` | 0.14 (5.9×) | 0.20 (7.0×) | 1.43 (7.2×) |
 
 #### Read N posts + author (JOIN)
 
 | contender | N=1 | N=50 | N=1000 |
 |---|---:|---:|---:|
-| `django-sync` | 0.92 (1.4×) | 1.77 (1.2×) | 18.48 (1.0×) |
-| `django-async` | 1.29 | 2.09 | 18.62 |
-| `django-async-dict` | 1.29 (1.0×) | 1.86 (1.1×) | 12.38 (1.5×) |
-| `sqla-asyncpg` | 1.11 (1.2×) | 1.64 (1.3×) | 11.61 (1.6×) |
-| `sqla-psycopg` | 1.37 (0.9×) | 2.35 (0.9×) | 11.76 (1.6×) |
-| `ormcore-obj` | 0.46 (2.8×) | 0.80 (2.6×) | 4.15 (4.5×) |
-| `ormcore-dict` | 0.49 (2.6×) | 0.81 (2.6×) | 4.27 (4.4×) |
-| `rust-only` | 0.19 (6.6×) | 0.36 (5.8×) | 2.78 (6.7×) |
+| `django-sync` | 0.95 (1.4×) | 1.82 (1.2×) | 18.98 (1.0×) |
+| `django-async` | 1.30 | 2.16 | 18.57 |
+| `django-async-dict` | 1.35 (1.0×) | 2.02 (1.1×) | 12.24 (1.5×) |
+| `sqla-asyncpg` | 1.12 (1.2×) | 1.76 (1.2×) | 11.32 (1.6×) |
+| `sqla-psycopg` | 1.21 (1.1×) | 2.11 (1.0×) | 11.57 (1.6×) |
+| `ormcore-obj` | 0.53 (2.5×) | 0.81 (2.7×) | 4.16 (4.5×) |
+| `ormcore-dict` | 0.50 (2.6×) | 0.86 (2.5×) | 4.59 (4.0×) |
+| `ormcore-sync` | 0.28 (4.6×) | 0.49 (4.4×) | 4.28 (4.3×) |
+| `rust-only` | 0.20 (6.4×) | 0.38 (5.7×) | 3.36 (5.5×) |
 
 #### Bulk insert N posts (one statement)
 
 | contender | N=1 | N=50 | N=1000 |
 |---|---:|---:|---:|
-| `django-sync` | 0.97 (1.5×) | 3.84 (1.0×) | 43.38 (1.0×) |
-| `django-async` | 1.41 | 3.93 | 42.65 |
-| `sqla-asyncpg` | 1.57 (0.9×) | 4.50 (0.9×) | 49.22 (0.9×) |
-| `sqla-psycopg` | 1.65 (0.9×) | 5.23 (0.8×) | 70.89 (0.6×) |
-| `ormcore-obj` | 0.64 (2.2×) | 1.52 (2.6×) | 13.63 (3.1×) |
-| `ormcore-dict` | 0.69 (2.0×) | 1.42 (2.8×) | 11.92 (3.6×) |
-| `rust-only` | 0.42 (3.3×) | 1.12 (3.5×) | 11.25 (3.8×) |
+| `django-sync` | 0.93 (1.4×) | 3.99 (1.0×) | 43.14 (1.0×) |
+| `django-async` | 1.33 | 3.95 | 41.94 |
+| `sqla-asyncpg` | 1.55 (0.9×) | 4.71 (0.8×) | 57.15 (0.7×) |
+| `sqla-psycopg` | 1.67 (0.8×) | 5.58 (0.7×) | 75.15 (0.6×) |
+| `ormcore-obj` | 0.67 (2.0×) | 1.62 (2.4×) | 12.77 (3.3×) |
+| `ormcore-dict` | 0.72 (1.9×) | 1.67 (2.4×) | 13.29 (3.2×) |
+| `ormcore-sync` | 0.49 (2.7×) | 1.33 (3.0×) | 13.55 (3.1×) |
+| `rust-only` | 0.29 (4.6×) | 1.14 (3.5×) | 12.22 (3.4×) |
 
 #### Insert N posts one at a time (N calls, N commits)
 
 | contender | N=1 | N=50 | N=1000 |
 |---|---:|---:|---:|
-| `django-sync` | 0.84 (1.5×) | 41.34 (1.3×) | 795 (1.4×) |
-| `django-async` | 1.26 | 52.95 | 1122 |
-| `sqla-asyncpg` | 1.64 (0.8×) | 77.42 (0.7×) | 1572 (0.7×) |
-| `sqla-psycopg` | 1.58 (0.8×) | 75.86 (0.7×) | 1689 (0.7×) |
-| `ormcore-obj` | 0.67 (1.9×) | 33.95 (1.6×) | 686 (1.6×) |
-| `ormcore-dict` | 0.71 (1.8×) | 34.37 (1.5×) | 698 (1.6×) |
-| `rust-only` | 0.52 (2.4×) | 20.13 (2.6×) | 481 (2.3×) |
+| `django-sync` | 0.64 (1.8×) | 38.43 (1.3×) | 801 (1.4×) |
+| `django-async` | 1.13 | 48.79 | 1123 |
+| `sqla-asyncpg` | 1.58 (0.7×) | 72.86 (0.7×) | 1397 (0.8×) |
+| `sqla-psycopg` | 1.73 (0.7×) | 83.41 (0.6×) | 1515 (0.7×) |
+| `ormcore-obj` | 0.66 (1.7×) | 32.08 (1.5×) | 654 (1.7×) |
+| `ormcore-dict` | 0.69 (1.6×) | 31.27 (1.6×) | 681 (1.6×) |
+| `ormcore-sync` | 0.55 (2.0×) | 24.51 (2.0×) | 488 (2.3×) |
+| `rust-only` | 0.33 (3.4×) | 14.90 (3.3×) | 352 (3.2×) |
 
-### Transport: tcp — median ms per call (× = speed-up vs `django-async`)
+### python 3.11.15, transport: tcp — median ms per call (× = speed-up vs `django-async`)
 
 #### Read N posts
 
 | contender | N=1 | N=50 | N=1000 |
 |---|---:|---:|---:|
-| `django-sync` | 0.49 (2.1×) | 1.09 (1.3×) | 9.60 (1.1×) |
-| `django-async` | 1.01 | 1.45 | 10.38 |
-| `django-async-dict` | 1.15 (0.9×) | 1.48 (1.0×) | 7.11 (1.5×) |
-| `sqla-asyncpg` | 1.10 (0.9×) | 1.43 (1.0×) | 8.15 (1.3×) |
-| `sqla-psycopg` | 1.10 (0.9×) | 1.57 (0.9×) | 8.67 (1.2×) |
-| `ormcore-obj` | 0.31 (3.3×) | 0.39 (3.8×) | 2.48 (4.2×) |
-| `ormcore-dict` | 0.32 (3.1×) | 0.48 (3.0×) | 2.60 (4.0×) |
-| `rust-only` | 0.15 (6.5×) | 0.24 (6.1×) | 1.60 (6.5×) |
+| `django-sync` | 0.50 (2.0×) | 0.96 (1.6×) | 9.51 (1.1×) |
+| `django-async` | 0.99 | 1.56 | 10.49 |
+| `django-async-dict` | 1.17 (0.9×) | 1.54 (1.0×) | 7.44 (1.4×) |
+| `sqla-asyncpg` | 1.36 (0.7×) | 1.82 (0.9×) | 8.85 (1.2×) |
+| `sqla-psycopg` | 1.13 (0.9×) | 1.63 (1.0×) | 8.80 (1.2×) |
+| `ormcore-obj` | 0.30 (3.3×) | 0.55 (2.8×) | 2.74 (3.8×) |
+| `ormcore-dict` | 0.29 (3.4×) | 0.50 (3.1×) | 2.63 (4.0×) |
+| `ormcore-sync` | 0.23 (4.3×) | 0.27 (5.9×) | 2.34 (4.5×) |
+| `rust-only` | 0.17 (5.9×) | 0.25 (6.2×) | 1.86 (5.6×) |
 
 #### Read N posts + author (JOIN)
 
 | contender | N=1 | N=50 | N=1000 |
 |---|---:|---:|---:|
-| `django-sync` | 0.96 (1.4×) | 1.88 (1.2×) | 17.60 (1.0×) |
-| `django-async` | 1.35 | 2.27 | 18.07 |
-| `django-async-dict` | 1.44 (0.9×) | 2.07 (1.1×) | 12.67 (1.4×) |
-| `sqla-asyncpg` | 1.36 (1.0×) | 2.04 (1.1×) | 11.72 (1.5×) |
-| `sqla-psycopg` | 1.47 (0.9×) | 2.29 (1.0×) | 12.53 (1.4×) |
-| `ormcore-obj` | 0.43 (3.2×) | 0.79 (2.9×) | 4.69 (3.9×) |
-| `ormcore-dict` | 0.44 (3.1×) | 0.82 (2.8×) | 4.63 (3.9×) |
-| `rust-only` | 0.23 (6.0×) | 0.41 (5.5×) | 3.45 (5.2×) |
+| `django-sync` | 1.02 (1.4×) | 1.93 (1.2×) | 17.81 (1.1×) |
+| `django-async` | 1.46 | 2.34 | 19.59 |
+| `django-async-dict` | 1.50 (1.0×) | 2.02 (1.2×) | 12.24 (1.6×) |
+| `sqla-asyncpg` | 1.82 (0.8×) | 2.39 (1.0×) | 13.12 (1.5×) |
+| `sqla-psycopg` | 1.89 (0.8×) | 2.37 (1.0×) | 13.19 (1.5×) |
+| `ormcore-obj` | 0.48 (3.0×) | 0.78 (3.0×) | 4.56 (4.3×) |
+| `ormcore-dict` | 0.42 (3.5×) | 0.83 (2.8×) | 4.93 (4.0×) |
+| `ormcore-sync` | 0.33 (4.4×) | 0.65 (3.6×) | 4.37 (4.5×) |
+| `rust-only` | 0.23 (6.4×) | 0.61 (3.8×) | 4.20 (4.7×) |
 
 #### Bulk insert N posts (one statement)
 
 | contender | N=1 | N=50 | N=1000 |
 |---|---:|---:|---:|
-| `django-sync` | 0.75 (2.2×) | 3.98 (1.1×) | 43.10 (1.0×) |
-| `django-async` | 1.61 | 4.21 | 42.68 |
-| `sqla-asyncpg` | 1.93 (0.8×) | 4.73 (0.9×) | 50.99 (0.8×) |
-| `sqla-psycopg` | 1.79 (0.9×) | 5.18 (0.8×) | 67.17 (0.6×) |
-| `ormcore-obj` | 0.74 (2.2×) | 1.51 (2.8×) | 54.53 (0.8×) |
-| `ormcore-dict` | 0.76 (2.1×) | 1.63 (2.6×) | 54.38 (0.8×) |
-| `rust-only` | 0.35 (4.6×) | 1.17 (3.6×) | 55.92 (0.8×) |
+| `django-sync` | 1.34 (1.3×) | 3.89 (1.2×) | 40.97 (1.2×) |
+| `django-async` | 1.70 | 4.49 | 47.28 |
+| `sqla-asyncpg` | 1.93 (0.9×) | 4.86 (0.9×) | 53.79 (0.9×) |
+| `sqla-psycopg` | 1.91 (0.9×) | 5.49 (0.8×) | 79.52 (0.6×) |
+| `ormcore-obj` | 0.85 (2.0×) | 1.71 (2.6×) | 13.87 (3.4×) |
+| `ormcore-dict` | 0.82 (2.1×) | 1.58 (2.8×) | 12.43 (3.8×) |
+| `ormcore-sync` | 0.70 (2.4×) | 1.44 (3.1×) | 12.38 (3.8×) |
+| `rust-only` | 0.68 (2.5×) | 1.48 (3.0×) | 12.55 (3.8×) |
 
 #### Insert N posts one at a time (N calls, N commits)
 
 | contender | N=1 | N=50 | N=1000 |
 |---|---:|---:|---:|
-| `django-sync` | 0.87 (1.6×) | 35.47 (1.9×) | 800 (1.7×) |
-| `django-async` | 1.44 | 67.14 | 1359 |
-| `sqla-asyncpg` | 1.72 (0.8×) | 78.87 (0.9×) | 1740 (0.8×) |
-| `sqla-psycopg` | 1.78 (0.8×) | 88.07 (0.8×) | 1749 (0.8×) |
-| `ormcore-obj` | 0.76 (1.9×) | 34.75 (1.9×) | 716 (1.9×) |
-| `ormcore-dict` | 0.76 (1.9×) | 37.70 (1.8×) | 727 (1.9×) |
-| `rust-only` | 0.42 (3.4×) | 23.95 (2.8×) | 407 (3.3×) |
+| `django-sync` | 0.86 (1.5×) | 44.71 (1.4×) | 1003 (1.2×) |
+| `django-async` | 1.32 | 63.66 | 1231 |
+| `sqla-asyncpg` | 1.90 (0.7×) | 91.96 (0.7×) | 1870 (0.7×) |
+| `sqla-psycopg` | 2.08 (0.6×) | 102 (0.6×) | 2044 (0.6×) |
+| `ormcore-obj` | 0.75 (1.8×) | 39.26 (1.6×) | 779 (1.6×) |
+| `ormcore-dict` | 0.84 (1.6×) | 42.32 (1.5×) | 819 (1.5×) |
+| `ormcore-sync` | 0.65 (2.0×) | 32.50 (2.0×) | 683 (1.8×) |
+| `rust-only` | 0.51 (2.6×) | 29.30 (2.2×) | 635 (1.9×) |
+
+### node 22.22.0, transport: unix — median ms per call (× = speed-up vs `drizzle-pg`)
+
+#### Read N posts
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.36 | 0.50 | 3.32 |
+| `ormcore-async` | 0.20 (1.8×) | 0.42 (1.2×) | 3.37 (1.0×) |
+| `ormcore-sync` | 0.21 (1.8×) | 0.37 (1.4×) | 3.48 (1.0×) |
+
+#### Read N posts + author (JOIN)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.65 | 1.06 | 7.20 |
+| `ormcore-async` | 0.42 (1.5×) | 0.78 (1.4×) | 6.08 (1.2×) |
+| `ormcore-sync` | 0.32 (2.1×) | 0.60 (1.8×) | 6.56 (1.1×) |
+
+#### Bulk insert N posts (one statement)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.74 | 3.16 | 50.01 |
+| `ormcore-async` | 0.51 (1.4×) | 1.52 (2.1×) | 15.35 (3.3×) |
+| `ormcore-sync` | 0.51 (1.4×) | 1.42 (2.2×) | 15.27 (3.3×) |
+
+#### Insert N posts one at a time (N calls, N commits)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.65 | 32.91 | 564 |
+| `ormcore-async` | 0.50 (1.3×) | 27.26 (1.2×) | 557 (1.0×) |
+| `ormcore-sync` | 0.51 (1.3×) | 25.14 (1.3×) | 494 (1.1×) |
+
+### node 22.22.0, transport: tcp — median ms per call (× = speed-up vs `drizzle-pg`)
+
+#### Read N posts
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.50 | 0.49 | 3.27 |
+| `ormcore-async` | 0.25 (2.0×) | 0.51 (1.0×) | 3.98 (0.8×) |
+| `ormcore-sync` | 0.23 (2.1×) | 0.29 (1.7×) | 3.41 (1.0×) |
+
+#### Read N posts + author (JOIN)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.63 | 0.88 | 5.62 |
+| `ormcore-async` | 0.46 (1.4×) | 0.92 (1.0×) | 6.40 (0.9×) |
+| `ormcore-sync` | 0.32 (2.0×) | 0.51 (1.7×) | 5.92 (0.9×) |
+
+#### Bulk insert N posts (one statement)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.95 | 3.19 | 50.33 |
+| `ormcore-async` | 0.69 (1.4×) | 1.63 (2.0×) | 15.10 (3.3×) |
+| `ormcore-sync` | 0.69 (1.4×) | 1.48 (2.2×) | 13.68 (3.7×) |
+
+#### Insert N posts one at a time (N calls, N commits)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.87 | 31.23 | 654 |
+| `ormcore-async` | 0.67 (1.3×) | 33.51 (0.9×) | 752 (0.9×) |
+| `ormcore-sync` | 0.64 (1.4×) | 30.29 (1.0×) | 720 (0.9×) |
+
+### bun 1.3.14, transport: unix — median ms per call (× = speed-up vs `drizzle-pg`)
+
+#### Read N posts
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.24 | 0.41 | 2.76 |
+| `ormcore-async` | 0.23 (1.1×) | 0.46 (0.9×) | 3.63 (0.8×) |
+| `ormcore-sync` | 0.21 (1.2×) | 0.37 (1.1×) | 3.40 (0.8×) |
+
+#### Read N posts + author (JOIN)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.53 | 0.87 | 7.10 |
+| `ormcore-async` | 0.42 (1.3×) | 0.77 (1.1×) | 6.63 (1.1×) |
+| `ormcore-sync` | 0.28 (1.9×) | 0.83 (1.0×) | 6.49 (1.1×) |
+
+#### Bulk insert N posts (one statement)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.82 | 4.03 | 68.54 |
+| `ormcore-async` | 0.58 (1.4×) | 1.54 (2.6×) | 15.84 (4.3×) |
+| `ormcore-sync` | 0.50 (1.6×) | 1.34 (3.0×) | 14.38 (4.8×) |
+
+#### Insert N posts one at a time (N calls, N commits)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.80 | 37.48 | 670 |
+| `ormcore-async` | 0.57 (1.4×) | 31.10 (1.2×) | 606 (1.1×) |
+| `ormcore-sync` | 0.51 (1.6×) | 26.92 (1.4×) | 489 (1.4×) |
+
+### bun 1.3.14, transport: tcp — median ms per call (× = speed-up vs `drizzle-pg`)
+
+#### Read N posts
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.24 | 0.43 | 3.67 |
+| `ormcore-async` | 0.27 (0.9×) | 0.46 (0.9×) | 3.80 (1.0×) |
+| `ormcore-sync` | 0.23 (1.0×) | 0.34 (1.3×) | 3.68 (1.0×) |
+
+#### Read N posts + author (JOIN)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.63 | 0.85 | 6.17 |
+| `ormcore-async` | 0.49 (1.3×) | 0.80 (1.1×) | 6.82 (0.9×) |
+| `ormcore-sync` | 0.29 (2.2×) | 0.56 (1.5×) | 6.72 (0.9×) |
+
+#### Bulk insert N posts (one statement)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.90 | 3.96 | 61.27 |
+| `ormcore-async` | 0.65 (1.4×) | 1.56 (2.5×) | 13.62 (4.5×) |
+| `ormcore-sync` | 0.73 (1.2×) | 1.60 (2.5×) | 17.19 (3.6×) |
+
+#### Insert N posts one at a time (N calls, N commits)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `drizzle-pg` | 0.86 | 37.80 | 827 |
+| `ormcore-async` | 0.72 (1.2×) | 39.33 (1.0×) | 768 (1.1×) |
+| `ormcore-sync` | 0.82 (1.0×) | 39.30 (1.0×) | 715 (1.2×) |
+
+### go1.25.0, transport: unix — median ms per call (× = speed-up vs `gorm`)
+
+#### Read N posts
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `gorm` | 0.13 | 0.26 | 2.52 |
+| `pgx` | 0.11 (1.2×) | 0.12 (2.1×) | 0.90 (2.8×) |
+| `ormcore-cgo` | 0.22 (0.6×) | 0.28 (0.9×) | 2.59 (1.0×) |
+
+#### Read N posts + author (JOIN)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `gorm` | 0.18 | 0.39 | 4.84 |
+| `pgx` | 0.14 (1.3×) | 0.21 (1.8×) | 1.84 (2.6×) |
+| `ormcore-cgo` | 0.28 (0.6×) | 0.43 (0.9×) | 4.34 (1.1×) |
+
+#### Bulk insert N posts (one statement)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `gorm` | 0.66 | 1.56 | 16.68 |
+| `pgx` | 0.45 (1.5×) | 1.10 (1.4×) | 12.48 (1.3×) |
+| `ormcore-cgo` | 0.53 (1.3×) | 1.41 (1.1×) | 14.75 (1.1×) |
+
+#### Insert N posts one at a time (N calls, N commits)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `gorm` | 0.62 | 25.44 | 482 |
+| `pgx` | 0.43 (1.5×) | 14.95 (1.7×) | 291 (1.7×) |
+| `ormcore-cgo` | 0.53 (1.2×) | 26.79 (0.9×) | 545 (0.9×) |
+
+### go1.25.0, transport: tcp — median ms per call (× = speed-up vs `gorm`)
+
+#### Read N posts
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `gorm` | 0.11 | 0.23 | 2.79 |
+| `pgx` | 0.08 (1.4×) | 0.13 (1.8×) | 1.02 (2.7×) |
+| `ormcore-cgo` | 0.24 (0.4×) | 0.28 (0.8×) | 2.78 (1.0×) |
+
+#### Read N posts + author (JOIN)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `gorm` | 0.17 | 0.37 | 4.10 |
+| `pgx` | 0.13 (1.3×) | 0.24 (1.6×) | 2.33 (1.8×) |
+| `ormcore-cgo` | 0.34 (0.5×) | 0.55 (0.7×) | 4.64 (0.9×) |
+
+#### Bulk insert N posts (one statement)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `gorm` | 0.79 | 1.66 | 15.88 |
+| `pgx` | 0.52 (1.5×) | 1.16 (1.4×) | 11.63 (1.4×) |
+| `ormcore-cgo` | 0.71 (1.1×) | 1.56 (1.1×) | 13.78 (1.2×) |
+
+#### Insert N posts one at a time (N calls, N commits)
+
+| contender | N=1 | N=50 | N=1000 |
+|---|---:|---:|---:|
+| `gorm` | 0.75 | 32.84 | 659 |
+| `pgx` | 0.50 (1.5×) | 19.29 (1.7×) | 385 (1.7×) |
+| `ormcore-cgo` | 0.62 (1.2×) | 34.84 (0.9×) | 602 (1.1×) |
 
