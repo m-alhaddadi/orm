@@ -1,0 +1,301 @@
+"""Column and relation descriptors used by model classes.
+
+Model modules are generated from the schema (see ``examples/blog``); these classes are
+what the generated code is made of.
+
+Column fields are *non-data* descriptors: on the class they return a
+:class:`~orm.expr.ColumnRef` for building queries, while on an instance the value lives
+in the instance ``__dict__``, so reading ``user.email`` is a plain attribute lookup.
+Relations are data descriptors because they guard access to related objects that were
+not loaded (async code can't lazy-load on attribute access).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Never, TypeVar, cast, overload
+
+from .errors import NotLoaded
+from .expr import ColumnRef, RelationPath
+
+if TYPE_CHECKING:
+    from .model import Model
+    from .query import RelatedSet
+
+T = TypeVar("T")
+# Related model type; for a nullable to-one relation it is `Target | None`.
+M = TypeVar("M")
+MM = TypeVar("MM", bound="Model")
+P = TypeVar("P", bound="RelationPath[Any]")
+OnDelete = Literal["cascade", "set_null", "restrict", "no_action"]
+
+
+class _Missing:
+    def __repr__(self) -> str:
+        return "MISSING"
+
+
+MISSING: Any = _Missing()
+
+
+class Field(Generic[T]):
+    """A column. ``T`` is the Python type of its value (``int | None`` if nullable)."""
+
+    type_name: ClassVar[str]
+
+    name: str
+    column: str
+    model: type[Model]
+
+    def __init__(
+        self,
+        *,
+        primary_key: bool = False,
+        auto_increment: bool = False,
+        nullable: bool = False,
+        unique: bool = False,
+        index: bool = False,
+        column: str | None = None,
+        default: T | Callable[[], T] = MISSING,
+        default_now: bool = False,
+    ) -> None:
+        self.primary_key = primary_key
+        self.auto_increment = auto_increment
+        self.nullable = nullable
+        self.unique = unique
+        self.index = index
+        self._column = column
+        self.default = default
+        self.default_now = default_now
+
+    def __set_name__(self, owner: type[Model], name: str) -> None:
+        self.name = name
+        self.column = self._column or name
+        self.model = owner
+
+    @overload
+    def __get__(self, obj: None, owner: type[Any]) -> ColumnRef[T]: ...
+    @overload
+    def __get__(self, obj: object, owner: type[Any]) -> T: ...
+    def __get__(self, obj: object | None, owner: type[Any]) -> ColumnRef[T] | T:
+        if obj is None:
+            return ColumnRef(owner, (), self)
+        # Only reached when the value is absent from the instance __dict__.
+        raise AttributeError(
+            f"{owner.__name__}.{self.name} has no value yet "
+            "(it is assigned by the database on save)"
+        )
+
+    @property
+    def has_server_value(self) -> bool:
+        """True if the database fills the column when the insert leaves it out."""
+        return self.auto_increment or self.default_now or self.default is not MISSING
+
+    def python_default(self) -> Any:
+        d = self.default
+        return d() if callable(d) else d
+
+    def ir(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"name": self.name, "column": self.column, "type": self.type_name}
+        for flag in ("nullable", "primary_key", "auto_increment", "unique", "index", "default_now"):
+            if getattr(self, flag):
+                out[flag] = True
+        if self.default is not MISSING and not callable(self.default):
+            out["default"] = self.default
+        return out
+
+    def __repr__(self) -> str:
+        owner = getattr(self, "model", None)
+        where = f"{owner.__name__}.{self.name}" if owner else "unbound"
+        return f"<{type(self).__name__} {where}>"
+
+
+class BigInt(Field[T]):
+    type_name = "big_int"
+
+
+class Integer(Field[T]):
+    type_name = "int"
+
+
+class Float(Field[T]):
+    type_name = "float"
+
+
+class Boolean(Field[T]):
+    type_name = "bool"
+
+
+class String(Field[T]):
+    type_name = "string"
+
+    def __init__(self, max_length: int | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.max_length = max_length
+
+    def ir(self) -> dict[str, Any]:
+        out = super().ir()
+        if self.max_length is not None:
+            out["max_length"] = self.max_length
+        return out
+
+
+class Text(Field[T]):
+    type_name = "text"
+
+
+class DateTime(Field[T]):
+    """``timestamptz``. Values are timezone-aware ``datetime`` objects."""
+
+    type_name = "date_time"
+
+
+class Date(Field[T]):
+    type_name = "date"
+
+
+# -- relations ----------------------------------------------------------------------------
+
+
+class Relation(Generic[M, P]):
+    kind: ClassVar[str]
+
+    name: str
+    model: type[Model]
+
+    def __init__(self, target: str | type[M]) -> None:
+        self._target = target
+
+    def __set_name__(self, owner: type[Model], name: str) -> None:
+        self.name = name
+        self.model = owner
+
+    @property
+    def target(self) -> type[M]:
+        if isinstance(self._target, str):
+            from .model import registry
+
+            self._target = registry.get(self._target)  # type: ignore[assignment]
+        return self._target  # type: ignore[return-value]
+
+    @property
+    def target_name(self) -> str:
+        return self._target if isinstance(self._target, str) else self._target.__name__
+
+    def ir(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} {self.model.__name__}.{self.name} -> {self.target_name}>"
+
+
+class BelongsTo(Relation[M, P]):
+    """To-one relation through a foreign key column on this model.
+
+    ``Post.author = BelongsTo("User", via="author_id")``: ``post.author_id`` holds the
+    key, ``post.author`` the related object once loaded with ``select_related``.
+    """
+
+    kind = "one"
+
+    def __init__(
+        self,
+        target: str | type[M],
+        *,
+        via: str,
+        to: str | None = None,
+        on_delete: OnDelete = "cascade",
+    ) -> None:
+        super().__init__(target)
+        self.via = via
+        self._to = to
+        self.on_delete = on_delete
+
+    @property
+    def to(self) -> str:
+        return self._to or cast("type[Model]", self.target)._meta.pk.name
+
+    @overload
+    def __get__(self, obj: None, owner: type[Any]) -> P: ...
+    @overload
+    def __get__(self, obj: object, owner: type[Any]) -> M: ...
+    def __get__(self, obj: object | None, owner: type[Any]) -> Any:
+        if obj is None:
+            return RelationPath(owner, (self.name,), cast("type[Model]", self.target))
+        d = obj.__dict__
+        key = d.get(self.via)
+        if self.name in d:
+            related = d[self.name]
+            if related is None and key is None:
+                return None
+            if related is not None and getattr(related, self.to, None) == key:
+                return related
+        elif key is None and self.via in d:
+            return None
+        raise NotLoaded(
+            f"{owner.__name__}.{self.name} is not loaded; use "
+            f"select_related({owner.__name__}.{self.name}) or query "
+            f"{self.target_name} by {owner.__name__}.{self.via}"
+        )
+
+    def __set__(self, obj: Model, value: M | None) -> None:
+        d = obj.__dict__
+        d[self.name] = value
+        d[self.via] = None if value is None else getattr(value, self.to, None)
+
+    def ir(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "kind": "one",
+            "target": self.target_name,
+            "from": self.via,
+            "to": self.to,
+            "foreign_key": True,
+            "on_delete": self.on_delete,
+        }
+
+
+class HasMany(Relation[MM, P]):
+    """To-many relation: rows of ``target`` whose ``via`` column points at this model.
+
+    ``User.posts = HasMany("Post", via="author_id")``. On an instance, ``user.posts``
+    is a :class:`~orm.query.RelatedSet` (a query over the user's posts that also serves
+    rows loaded by ``prefetch_related``).
+    """
+
+    kind = "many"
+
+    def __init__(self, target: str | type[MM], *, via: str, from_: str | None = None) -> None:
+        super().__init__(target)
+        self.via = via
+        self._from = from_
+
+    @property
+    def from_(self) -> str:
+        return self._from or self.model._meta.pk.name
+
+    @overload
+    def __get__(self, obj: None, owner: type[Any]) -> P: ...
+    @overload
+    def __get__(self, obj: object, owner: type[Any]) -> RelatedSet[MM]: ...
+    def __get__(self, obj: object | None, owner: type[Any]) -> Any:
+        if obj is None:
+            return RelationPath(owner, (self.name,), self.target)
+        from .query import RelatedSet
+
+        return RelatedSet(self, obj)  # type: ignore[arg-type]
+
+    def __set__(self, obj: Model, value: Never) -> None:
+        raise AttributeError(
+            f"{self.model.__name__}.{self.name} is read-only; create related rows with "
+            f"{self.model.__name__.lower()}.{self.name}.create(...)"
+        )
+
+    def ir(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "kind": "many",
+            "target": self.target_name,
+            "from": self.from_,
+            "to": self.via,
+        }

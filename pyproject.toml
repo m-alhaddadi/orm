@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "orm"
+version = "0.1.0"
+description = "Async Python ORM with a Rust core (SeaORM engine for the MVP)"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "mypy>=1.11", "pyright"]
+
+[tool.maturin]
+manifest-path = "native/Cargo.toml"
+python-source = "python"
+module-name = "orm._native"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+pythonpath = ["examples"]
+
+[tool.mypy]
+strict = true
+mypy_path = "python:examples"

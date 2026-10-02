@@ -188,14 +188,16 @@ once you count FFI and Python object materialization?
   bulk writes. Follow-ups: sqlx's missing `TCP_NODELAY` (≈40 ms stall on large
   statements over TCP) and the ~115 µs asyncio ↔ Tokio bridge cost per call.
 
-### Phase 1 — First prototype
+### Phase 1 — First prototype  (in progress, see [`docs/python-api.md`](docs/python-api.md))
 
-1. Schema parser
-2. ORM IR
-3. Python API prototype
-4. PyO3 binding
-5. SeaORM adapter
-6. PostgreSQL support
+1. Schema parser — not started; `examples/blog/models.py` / `.pyi` are hand-written
+   in the shape codegen will emit
+2. ORM IR — ✅ first cut: schema IR + query/mutation IR (`native/src/ir.rs`)
+3. Python API prototype — ✅ `python/orm`: Django-style managers and loading,
+   SQLAlchemy-style typed expressions, relation-path filters (`User.posts.created_at`)
+4. PyO3 binding — ✅ `native/` (`orm._native`), one call per operation
+5. SeaORM adapter — ✅ IR → sea-query planner, executed on SeaORM's pool, transactions
+6. PostgreSQL support — ✅ (only backend)
 
 Avoid initially: multiple databases, full migration engine, advanced ORM features,
 multiple language bindings. Validate the architecture and API first.
