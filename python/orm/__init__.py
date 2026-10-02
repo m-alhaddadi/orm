@@ -7,7 +7,7 @@ expressions over model attributes, Django-style managers on top::
     users = await User.objects.filter(User.posts.created_at < yesterday)
 """
 
-from . import fields
+from . import fields, schema
 from .db import Database, connect, get_database
 from .errors import (
     DatabaseError,
@@ -20,12 +20,24 @@ from .errors import (
     QueryError,
 )
 from .expr import ColumnRef, Condition, Expression, Ordering, RelationPath, and_, not_, or_
-from .model import Model, registry
+from .model import Model, Registry, registry
+from .schema import Check, Exclude, Extension, Function, Index, Key, Sql, Trigger, Unique
 from .query import QuerySet, RelatedSet
 from .write import InsertMany, InsertOne, OnConflictMany, OnConflictOne
 
 __all__ = [
     "fields",
+    "schema",
+    "Registry",
+    "Index",
+    "Key",
+    "Unique",
+    "Check",
+    "Exclude",
+    "Trigger",
+    "Function",
+    "Extension",
+    "Sql",
     "Database",
     "connect",
     "get_database",

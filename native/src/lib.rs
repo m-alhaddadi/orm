@@ -5,9 +5,10 @@
 //! back as a list of tuples built in one pass, in schema field order.
 
 mod convert;
-mod ddl;
 mod errors;
+mod ext;
 mod ir;
+mod migrate;
 mod plan;
 mod schema;
 
@@ -70,14 +71,28 @@ impl PySchema {
         })
     }
 
-    /// DDL for every model, in dependency order.
+    /// Idempotent DDL for the whole schema, in dependency order.
     fn ddl(&self) -> PyResult<Vec<String>> {
-        let (tables, indexes) = ddl::create_statements(&self.inner).map_err(query_err)?;
-        Ok(tables
-            .iter()
-            .map(|t| t.to_string(PostgresQueryBuilder))
-            .chain(indexes.iter().map(|i| i.to_string(PostgresQueryBuilder)))
-            .collect())
+        migrate::create_all(&self.inner).map_err(query_err)
+    }
+
+    /// The database schema as a snapshot (JSON), the format migrations store.
+    fn snapshot(&self) -> PyResult<String> {
+        let s = migrate::snapshot(&self.inner).map_err(query_err)?;
+        serde_json::to_string_pretty(&s).map_err(|e| query_err(e.to_string()))
+    }
+
+    /// The migration from `previous` (a snapshot; `None` for an empty database) to this
+    /// schema, as JSON: `{"up": [step], "down": [step], "snapshot": {...}}` where a
+    /// step is `{"summary", "sql", "warning"?}`.
+    #[pyo3(signature = (previous = None))]
+    fn migration(&self, previous: Option<&str>) -> PyResult<String> {
+        let previous = match previous {
+            Some(json) => migrate::parse_snapshot(json).map_err(query_err)?,
+            None => migrate::DbSchema::default(),
+        };
+        let plan = migrate::plan(&self.inner, &previous).map_err(query_err)?;
+        serde_json::to_string(&plan).map_err(|e| query_err(e.to_string()))
     }
 }
 
@@ -202,6 +217,17 @@ struct Engine {
 }
 
 impl Engine {
+    fn run_script<'py>(&self, py: Python<'py>, statements: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.db.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let tx = db.begin().await.map_err(db_err)?;
+            for s in &statements {
+                tx.execute_unprepared(s).await.map_err(db_err)?;
+            }
+            tx.commit().await.map_err(db_err)
+        })
+    }
+
     fn conn(&self, tx: Option<&Bound<'_, Transaction>>) -> Conn {
         match tx {
             Some(tx) => Conn::Tx(tx.get().slot.clone()),
@@ -327,29 +353,63 @@ impl Engine {
         })
     }
 
-    fn create_tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (tables, indexes) = ddl::create_statements(&self.schema).map_err(query_err)?;
-        let conn = Conn::Pool(self.db.clone());
+    /// Raw query returning rows of text: every selected column must be text (cast it).
+    /// For tooling such as the migration runner, not for application queries.
+    #[pyo3(signature = (sql, tx = None))]
+    fn fetch_text<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        tx: Option<&Bound<'py, Transaction>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let conn = self.conn(tx);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            for t in &tables {
-                conn.execute(build(t)).await.map_err(db_err)?;
+            let rows = conn.query_all(Statement::from_string(DbBackend::Postgres, sql)).await.map_err(db_err)?;
+            let mut out: Vec<Vec<Option<String>>> = Vec::with_capacity(rows.len());
+            for r in &rows {
+                let n = r.column_names().len();
+                out.push((0..n).map(|i| r.try_get_by_index::<Option<String>>(i)).collect::<Result<_, _>>().map_err(db_err)?);
             }
-            for i in &indexes {
-                conn.execute(build(i)).await.map_err(db_err)?;
-            }
-            Ok(())
+            Python::attach(|py| {
+                let list = PyList::empty(py);
+                for row in out {
+                    list.append(PyTuple::new(py, row)?)?;
+                }
+                list.into_py_any(py)
+            })
         })
     }
 
+    fn create_tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stmts = migrate::create_all(&self.schema).map_err(query_err)?;
+        self.run_script(py, stmts)
+    }
+
     fn drop_tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let drops = ddl::drop_statements(&self.schema).map_err(query_err)?;
-        let conn = Conn::Pool(self.db.clone());
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            for d in &drops {
-                conn.execute(build(d)).await.map_err(db_err)?;
+        let stmts = migrate::drop_all(&self.schema).map_err(query_err)?;
+        self.run_script(py, stmts)
+    }
+
+    /// Runs SQL statements in order, in one transaction (Postgres DDL is transactional).
+    #[pyo3(signature = (statements, tx = None))]
+    fn execute_script<'py>(
+        &self,
+        py: Python<'py>,
+        statements: Vec<String>,
+        tx: Option<&Bound<'py, Transaction>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        match tx {
+            Some(tx) => {
+                let conn = Conn::Tx(tx.get().slot.clone());
+                pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                    for s in &statements {
+                        conn.execute_unprepared(s).await.map_err(db_err)?;
+                    }
+                    Ok(())
+                })
             }
-            Ok(())
-        })
+            None => self.run_script(py, statements),
+        }
     }
 
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {

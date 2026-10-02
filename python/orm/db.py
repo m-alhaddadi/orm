@@ -10,7 +10,7 @@ from typing import Any
 
 from . import _native
 from .errors import NotConnected
-from .model import registry
+from .model import Registry, registry
 
 __all__ = ["Database", "connect", "get_database"]
 
@@ -64,15 +64,24 @@ class Database:
         await tx.commit()
 
     async def execute(self, sql: str) -> int:
-        """Run raw SQL; returns the number of rows affected."""
+        """Run raw SQL (one or more statements); returns the number of rows affected."""
         return await self._engine.execute(sql, self._tx())
 
+    async def _fetch_text(self, sql: str) -> list[tuple[str | None, ...]]:
+        return await self._engine.fetch_text(sql, self._tx())
+
     async def create_tables(self) -> None:
-        """CREATE TABLE IF NOT EXISTS for every registered model (development helper
-        until migrations exist)."""
+        """Create the whole schema (extensions, tables, constraints, indexes, functions,
+        triggers) with ``IF NOT EXISTS`` / ``OR REPLACE`` DDL, in one transaction.
+
+        A development and test helper: it never alters what exists. Use migrations
+        (:mod:`orm.migrations`) for databases that evolve.
+        """
         await self._engine.create_tables()
 
     async def drop_tables(self) -> None:
+        """``DROP TABLE ... CASCADE`` every model table and drop generated functions;
+        extensions stay."""
         await self._engine.drop_tables()
 
     async def close(self) -> None:
@@ -85,9 +94,12 @@ class Database:
         return f"<Database {self.url.split('@')[-1]}>"
 
 
-async def connect(url: str, *, max_connections: int = 10, default: bool = True) -> Database:
+async def connect(
+    url: str, *, max_connections: int = 10, default: bool = True, registry: Registry = registry
+) -> Database:
     """Open a connection pool. Import your model modules first: the schema is compiled
-    from the models registered at this point.
+    from the models registered at this point (in ``registry``, the default one unless
+    given).
 
     With ``default=True`` (the default) queries use this database unless
     ``.using(db)`` says otherwise.

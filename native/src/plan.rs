@@ -21,7 +21,7 @@ use sea_orm::sea_query::{
 
 use crate::convert::py_to_value;
 use crate::errors::query_err;
-use crate::ir::{ArithOp, CmpOp, ColType, Delete, Expr, Operation, RelKind, Select, Update};
+use crate::ir::{ArithOp, CmpOp, ColType, Delete, Expr, FieldIr, Operation, RelKind, Select, Update};
 use crate::schema::Schema;
 
 pub struct PrefetchPlan {
@@ -52,6 +52,28 @@ pub enum Plan {
     Delete(DeleteStatement),
 }
 
+/// What a bound value is compared with or assigned to: its type drives the conversion
+/// and its field the `write_sql` template.
+#[derive(Clone, Copy, Default)]
+struct Hint<'s> {
+    ty: Option<ColType>,
+    field: Option<&'s FieldIr>,
+}
+
+impl<'s> Hint<'s> {
+    fn ty(ty: ColType) -> Self {
+        Hint { ty: Some(ty), field: None }
+    }
+
+    fn or(self, other: Hint<'s>) -> Self {
+        if self.ty.is_some() {
+            self
+        } else {
+            other
+        }
+    }
+}
+
 struct Scope {
     path: Vec<String>,
     model: usize,
@@ -60,6 +82,31 @@ struct Scope {
 
 fn col(alias: &str, column: &str) -> SExpr {
     SExpr::col((Alias::new(alias), Alias::new(column)))
+}
+
+/// A column as it is read: through the field's `read_sql` template, if any.
+fn read_col(alias: &str, f: &FieldIr) -> SExpr {
+    match &f.read_sql {
+        Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), col(alias, &f.column)),
+        None => col(alias, &f.column),
+    }
+}
+
+/// A column in `RETURNING` (unqualified), through `read_sql` if any.
+fn returning_col(f: &FieldIr) -> SExpr {
+    let c = SExpr::col(Alias::new(&f.column));
+    match &f.read_sql {
+        Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), c),
+        None => c,
+    }
+}
+
+/// A bound value for a field: through the field's `write_sql` template, if any.
+fn bind(v: sea_query::Value, f: Option<&FieldIr>) -> SExpr {
+    match f.and_then(|f| f.write_sql.as_ref()) {
+        Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), SExpr::val(v)),
+        None => SExpr::val(v),
+    }
 }
 
 fn fold(items: Vec<SExpr>, and: bool) -> SExpr {
@@ -250,7 +297,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     fn leaf(&mut self, e: &Expr) -> PyResult<SExpr> {
         Ok(match e {
             Expr::Cmp { op, l, r } => {
-                let hint = self.type_of(l).or_else(|| self.type_of(r));
+                let hint = self.hint_of(l).or(self.hint_of(r));
                 let l = self.value(l, hint)?;
                 let r = self.value(r, hint)?;
                 match op {
@@ -263,7 +310,7 @@ impl<'s, 'py> Planner<'s, 'py> {
                 }
             }
             Expr::In { item, values, neg } => {
-                let hint = self.type_of(item);
+                let hint = self.hint_of(item);
                 let item = self.value(item, hint)?;
                 let values = values.iter().map(|v| self.value(v, hint)).collect::<PyResult<Vec<_>>>()?;
                 if *neg {
@@ -273,7 +320,7 @@ impl<'s, 'py> Planner<'s, 'py> {
                 }
             }
             Expr::IsNull { item, neg } => {
-                let item = self.value(item, None)?;
+                let item = self.value(item, Hint::default())?;
                 if *neg {
                     item.is_not_null()
                 } else {
@@ -281,7 +328,7 @@ impl<'s, 'py> Planner<'s, 'py> {
                 }
             }
             Expr::Like { item, pattern, ci, neg } => {
-                let item = self.value(item, None)?;
+                let item = self.value(item, Hint::default())?;
                 let pattern = match pattern.as_ref() {
                     Expr::Param { i } => LikeExpr::new(self.param(*i)?.extract::<String>()?),
                     _ => return Err(query_err("LIKE pattern must be a string parameter".into())),
@@ -293,7 +340,7 @@ impl<'s, 'py> Planner<'s, 'py> {
                     (true, true) => item.not_ilike(pattern),
                 }
             }
-            other => self.value(other, Some(ColType::Bool))?,
+            other => self.value(other, Hint::ty(ColType::Bool))?,
         })
     }
 
@@ -303,11 +350,16 @@ impl<'s, 'py> Planner<'s, 'py> {
         self.params.get(i).ok_or_else(|| query_err(format!("parameter {i} out of range")))
     }
 
-    fn type_of(&self, e: &Expr) -> Option<ColType> {
+    fn hint_of(&self, e: &Expr) -> Hint<'s> {
         match e {
-            Expr::Col { path, name } => self.schema.col_type(self.root, path, name).ok(),
-            Expr::Arith { l, r, .. } => self.type_of(l).or_else(|| self.type_of(r)),
-            _ => None,
+            Expr::Col { path, name } => {
+                let schema = self.schema;
+                let field = schema.walk(self.root, path).ok().and_then(|m| schema.model(m).field(name).ok());
+                Hint { ty: field.map(|f| f.ty), field }
+            }
+            // Arithmetic results are plain values: no write_sql cast.
+            Expr::Arith { l, r, .. } => Hint { ty: self.hint_of(l).or(self.hint_of(r)).ty, field: None },
+            _ => Hint::default(),
         }
     }
 
@@ -331,13 +383,14 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
     }
 
-    fn value(&mut self, e: &Expr, hint: Option<ColType>) -> PyResult<SExpr> {
+    fn value(&mut self, e: &Expr, hint: Hint<'s>) -> PyResult<SExpr> {
         Ok(match e {
             Expr::Col { path, name } => self.resolve(path, name)?,
-            Expr::Param { i } => SExpr::val(py_to_value(self.param(*i)?, hint)?),
+            Expr::Param { i } => bind(py_to_value(self.param(*i)?, hint.ty)?, hint.field),
             Expr::Const { value } => SExpr::val(*value),
             Expr::Arith { op, l, r } => {
-                let hint = self.type_of(l).or_else(|| self.type_of(r)).or(hint);
+                let inner = self.hint_of(l).or(self.hint_of(r));
+                let hint = Hint { ty: inner.ty.or(hint.ty), field: None };
                 let l = self.value(l, hint)?;
                 let r = self.value(r, hint)?;
                 match op {
@@ -404,7 +457,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             for p in paths.into_iter().filter(|p| !p.is_empty()) {
                 self.ensure_join(p, "order_by")?;
             }
-            let e = self.value(&o.expr, None)?;
+            let e = self.value(&o.expr, Hint::default())?;
             stmt.order_by_expr(e, if o.desc { SOrder::Desc } else { SOrder::Asc });
         }
         if let Some(n) = q.limit {
@@ -424,13 +477,13 @@ impl<'s, 'py> Planner<'s, 'py> {
         let mut stmt = Query::select();
         let mut types = vec![];
         for f in root.fields() {
-            stmt.expr(col(root.table(), &f.column));
+            stmt.expr(read_col(root.table(), f));
             types.push(f.ty);
         }
         for path in &q.select_related {
             let (alias, model) = self.ensure_join(path, "select_related")?;
             for f in schema.model(model).fields() {
-                stmt.expr(col(&alias, &f.column));
+                stmt.expr(read_col(&alias, f));
                 types.push(f.ty);
             }
         }
@@ -448,7 +501,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             let tm = schema.model(target);
             let mut sub = Query::select();
             for f in tm.fields() {
-                sub.expr(col(tm.table(), &f.column));
+                sub.expr(read_col(tm.table(), f));
             }
             sub.from(Alias::new(tm.table()))
                 .order_by_expr(col(tm.table(), &tm.pk_field().column), SOrder::Asc);
@@ -505,7 +558,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
         for a in &q.set {
             let f = root.field(&a.field).map_err(query_err)?;
-            let v = self.value(&a.value, Some(f.ty))?;
+            let v = self.value(&a.value, Hint { ty: Some(f.ty), field: Some(f) })?;
             stmt.value(Alias::new(&f.column), v);
         }
         for w in self.apply_filters(&q.filters)? {
@@ -514,7 +567,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         if !q.returning {
             return Ok((stmt, None));
         }
-        stmt.returning(Query::returning().columns(root.fields().iter().map(|f| Alias::new(&f.column))));
+        stmt.returning(Query::returning().exprs(root.fields().iter().map(returning_col)));
         Ok((stmt, Some(root.fields().iter().map(|f| f.ty).collect())))
     }
 
@@ -566,7 +619,7 @@ pub fn plan_insert(
                 values.push(if item.is_instance_of::<crate::DefaultMarker>() {
                     SExpr::cust("DEFAULT")
                 } else {
-                    SExpr::val(py_to_value(&item, Some(c.ty))?)
+                    bind(py_to_value(&item, Some(c.ty))?, Some(c))
                 });
             }
             if values.len() != cols.len() {
@@ -594,6 +647,6 @@ pub fn plan_insert(
         };
         stmt.on_conflict(clause);
     }
-    stmt.returning(Query::returning().columns(m.fields().iter().map(|f| Alias::new(&f.column))));
+    stmt.returning(Query::returning().exprs(m.fields().iter().map(returning_col)));
     Ok((stmt, m.fields().iter().map(|f| f.ty).collect()))
 }

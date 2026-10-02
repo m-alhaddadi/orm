@@ -205,9 +205,28 @@ once you count FFI and Python object materialization?
 Avoid initially: multiple databases, full migration engine, advanced ORM features,
 multiple language bindings. Validate the architecture and API first.
 
+### Schema objects, migrations, extensions  ✅ first cut, see [`docs/schema.md`](docs/schema.md)
+
+- Indexes (multi-column, expression, partial, covering, any access method, opclasses),
+  unique / check / exclusion constraints, FK `on_update` / deferrable, triggers and SQL
+  functions, column comments, UUID and JSON columns.
+- Migration generator in Rust (`native/src/migrate`): ORM schema → database snapshot →
+  diff against the previous migration's snapshot → ops → Postgres DDL, up and down.
+  Rename hints, name-insensitive matching of indexes / constraints, warnings for
+  destructive steps. Python side: migration files, runner (`orm_migrations` table,
+  checksums, advisory lock), `python -m orm` CLI.
+- Extension system: a Rust catalog maps types / index methods / opclasses / functions
+  to the extension providing them, so using one pulls in `CREATE EXTENSION`.
+  `orm.ext` ships citext, pg_trgm, pgvector, PostGIS and btree_gist helpers; columns
+  of extension types convert through `read_sql` / `write_sql` templates.
+- SeaORM's own tooling (`sea-orm-migration` runner, entity schema sync) was not used:
+  it has no triggers, exclusion constraints, extensions, renames or down migrations,
+  and would tie the migration IR to SeaORM. `sea-schema` introspection is a candidate
+  for drift detection (diffing a live database instead of a snapshot).
+
 ### Later
 
-Node/Bun binding, migrations engine, more databases, extension system, custom engine
+Node/Bun binding, more databases, introspection / drift detection, custom engine
 replacing SeaORM.
 
 ---

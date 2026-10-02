@@ -4,8 +4,9 @@
 # descriptors. models.pyi carries the static types (columns, relation paths, typed
 # constructors and query sets) for editors and type checkers.
 
-from orm import Model, QuerySet
+from orm import Check, Index, Model, QuerySet
 from orm import fields as f
+from orm.ext import pg_trgm
 
 
 class User(Model, table="users"):
@@ -29,6 +30,13 @@ class Post(Model, table="posts"):
 
     author = f.BelongsTo("User", via="author_id", on_delete="cascade")
     comments = f.HasMany("Comment", via="post_id")
+
+    class Meta:
+        indexes = [
+            Index("author_id", "-created_at", where="published"),
+            pg_trgm.TrigramIndex("title"),
+        ]
+        constraints = [Check("views >= 0", name="posts_views_not_negative")]
 
 
 class Comment(Model, table="comments"):

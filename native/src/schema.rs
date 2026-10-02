@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{ColType, FieldIr, ModelIr, RelationIr, SchemaIr};
+use crate::ir::{ExtensionIr, FieldIr, FunctionIr, ModelIr, RelationIr, SchemaIr};
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -52,6 +52,8 @@ impl Model {
 
 pub struct Schema {
     pub models: Vec<Model>,
+    pub extensions: Vec<ExtensionIr>,
+    pub functions: Vec<FunctionIr>,
     model_index: HashMap<String, usize>,
 }
 
@@ -103,7 +105,7 @@ impl Schema {
                 models[t].field(&r.to).map_err(|e| format!("relation {}.{}: {e}", m.ir.name, r.name))?;
             }
         }
-        Ok(Schema { models, model_index })
+        Ok(Schema { models, extensions: ir.extensions, functions: ir.functions, model_index })
     }
 
     pub fn model_idx(&self, name: &str) -> Result<usize> {
@@ -121,10 +123,5 @@ impl Schema {
             cur = self.models[cur].relation(hop)?.1;
         }
         Ok(cur)
-    }
-
-    pub fn col_type(&self, root: usize, path: &[String], name: &str) -> Result<ColType> {
-        let m = self.walk(root, path)?;
-        Ok(self.models[m].field(name)?.ty)
     }
 }

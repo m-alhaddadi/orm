@@ -181,11 +181,9 @@ class QuerySet(Generic[M]):
 
     def sql(self) -> str:
         """The SELECT this query set runs, with parameters inlined (for debugging)."""
-        from .model import registry
-
         params: list[Any] = []
         ir = self._select_ir("select", params)
-        return registry.native().sql(json.dumps(ir), params)
+        return self._model._meta.registry.native().sql(json.dumps(ir), params)
 
     # -- execution -----------------------------------------------------------------------
 

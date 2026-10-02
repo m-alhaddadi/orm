@@ -19,8 +19,8 @@ automatically: each relation hop becomes a correlated `EXISTS`.
 
 | Path | What |
 |---|---|
-| `python/orm/` | Python package: `expr.py` (expressions → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet), `db.py` (connections, transactions) |
-| `native/` | Rust crate `orm._native` (PyO3): `ir.rs` (schema + query IR), `plan.rs` (IR → SQL), `ddl.rs`, `convert.rs`, `lib.rs` |
+| `python/orm/` | Python package: `expr.py` (expressions → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
+| `native/` | Rust crate `orm._native` (PyO3): `ir.rs` (schema + query IR), `plan.rs` (IR → SQL), `migrate/` (migration generator, see [`schema.md`](schema.md)), `ext.rs` (extension catalog), `convert.rs`, `lib.rs` |
 | `examples/blog/` | `schema.orm` plus `models.py` / `models.pyi` written by hand in the shape codegen will emit; `demo.py` |
 | `tests/` | SQL shape tests (no DB), Postgres end-to-end tests, mypy + pyright stub checks |
 
@@ -230,8 +230,8 @@ per row, which can move into Rust later.
 6. **Instance equality** is by model class and primary key (Django).
 7. **One default database** set by `connect()`, `.using(db)` to override, like Django's
    `using()`.
-8. `db.create_tables()` / `drop_tables()` exist as a development helper until
-   migrations do.
+8. `db.create_tables()` / `drop_tables()` stay as a development helper (idempotent
+   `IF NOT EXISTS` DDL). Evolving databases use migrations: see [`schema.md`](schema.md).
 
 ## Not done yet
 
@@ -243,5 +243,6 @@ per row, which can move into Rust later.
 * Building instances in Rust (the remaining per-row cost), caching of compiled plans,
   chunking very large `IN (...)` prefetches.
 * `TCP_NODELAY`: `bench/ormcore` now carries a patched sqlx-core; `native/` does not use it yet.
-* `has_one`, many-to-many, composite keys, UUID / JSON / decimal column types.
+* `has_one`, many-to-many, composite keys, decimal / array column types. (UUID and JSON
+  are done, see [`schema.md`](schema.md).)
 * A sync API.

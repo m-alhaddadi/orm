@@ -23,6 +23,10 @@ model Post @table("posts") {
 
     author:     User      @relation(via: author_id, on_delete: cascade)
     comments:   Comment[] @relation(via: Comment.post_id)
+
+    @@index([author_id, created_at(sort: desc)], where: "published")
+    @@index([title(ops: gin_trgm_ops)], type: gin)     // pulls in the pg_trgm extension
+    @@check("views >= 0", name: "posts_views_not_negative")
 }
 
 model Comment @table("comments") {

@@ -1,0 +1,218 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "name": "pg_trgm"
+    }
+  ],
+  "tables": [
+    {
+      "name": "users",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "identity": true
+        },
+        {
+          "name": "email",
+          "type": "varchar(254)"
+        },
+        {
+          "name": "name",
+          "type": "varchar(100)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "users_pkey",
+        "columns": [
+          "id"
+        ]
+      },
+      "uniques": [
+        {
+          "name": "users_email_key",
+          "columns": [
+            "email"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "posts",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "identity": true
+        },
+        {
+          "name": "author_id",
+          "type": "bigint"
+        },
+        {
+          "name": "title",
+          "type": "varchar(200)"
+        },
+        {
+          "name": "body",
+          "type": "text"
+        },
+        {
+          "name": "views",
+          "type": "integer",
+          "default": "0"
+        },
+        {
+          "name": "published",
+          "type": "boolean",
+          "default": "false"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "posts_pkey",
+        "columns": [
+          "id"
+        ]
+      },
+      "checks": [
+        {
+          "name": "posts_views_not_negative",
+          "expr": "views >= 0"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "posts_author_id_fkey",
+          "columns": [
+            "author_id"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "cascade"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "posts_author_id_idx",
+          "keys": [
+            {
+              "column": "author_id"
+            }
+          ]
+        },
+        {
+          "name": "posts_author_id_created_at_idx",
+          "keys": [
+            {
+              "column": "author_id"
+            },
+            {
+              "column": "created_at",
+              "desc": true
+            }
+          ],
+          "where": "published"
+        },
+        {
+          "name": "posts_title_idx",
+          "method": "gin",
+          "keys": [
+            {
+              "column": "title",
+              "opclass": "gin_trgm_ops"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "comments",
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "identity": true
+        },
+        {
+          "name": "post_id",
+          "type": "bigint"
+        },
+        {
+          "name": "author_id",
+          "type": "bigint",
+          "nullable": true
+        },
+        {
+          "name": "body",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "comments_pkey",
+        "columns": [
+          "id"
+        ]
+      },
+      "foreign_keys": [
+        {
+          "name": "comments_post_id_fkey",
+          "columns": [
+            "post_id"
+          ],
+          "ref_table": "posts",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "cascade"
+        },
+        {
+          "name": "comments_author_id_fkey",
+          "columns": [
+            "author_id"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "set_null"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "comments_post_id_idx",
+          "keys": [
+            {
+              "column": "post_id"
+            }
+          ]
+        },
+        {
+          "name": "comments_author_id_idx",
+          "keys": [
+            {
+              "column": "author_id"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
