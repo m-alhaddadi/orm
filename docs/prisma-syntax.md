@@ -1,0 +1,250 @@
+# Prisma-compatible schema syntax (design)
+
+Status: design only. The parser is written later; the current `.orm` parser in
+`core/src/dsl/` stays until then. This document fixes the syntax that parser will read.
+
+## Decisions
+
+* **The schema is a `.prisma` file.** Models and our constraints, triggers and
+  Postgres features live together in it. Prisma's VS Code extension then gives
+  highlighting, formatting, completion, go-to-definition and rename for the parts it
+  knows. Prisma's language server only loads files whose extension is `.prisma`
+  (`@prisma/schema-files-loader`: `extname(path) !== ".prisma"` is skipped), so a
+  `.orm` file mapped to the Prisma language gets highlighting but no diagnostics,
+  completion or formatting.
+* **When Prisma has a syntax for something, we use it** (`@id`, `@default`,
+  `@relation`, `@@index(type:, where: raw())`, `@db.*`, `@map`, `@@map`, datasource
+  `extensions`). Those lines show no IDE error.
+* **What Prisma lacks is a normal attribute or block with our name**, e.g.
+  `@check(...)`, `@@trigger(...)`, `function name { ... }`. The IDE marks these lines
+  as errors. That is accepted. Comments are never used to carry schema.
+* **Our features follow our design, not Prisma's.** Where Prisma has no support, the
+  syntax, argument names and semantics are ours and may differ from how Prisma would
+  do it. The only constraint is the formatter rules below, so format-on-save never
+  breaks a file. This includes extra arguments on Prisma's own attributes (e.g.
+  `type: hnsw` or `include:` on `@@index`).
+* **We are independent of Prisma at runtime.** Our parser reads the file, our Rust
+  migrator diffs and applies it, our code generators emit the models. Nothing calls the
+  Prisma CLI, engines or generators. We use what Prisma publishes for free: the
+  syntax, the editor extension, and the Apache-2.0 engine source as a reference.
+* **No `generator orm { }` block.** Prisma accepts generator blocks without error, but
+  `provider = "orm"` makes `prisma generate` look for an `orm` generator program and
+  fail. We don't need a marker: the `orm` CLI is given the schema path (flag or
+  `[tool.orm] schema` in `pyproject.toml`), and settings stay where they are today.
+
+## Formatter rules (tested)
+
+Tested with `@prisma/prisma-schema-wasm` 8.1.0 (the formatter and linter inside the
+Prisma VS Code extension) on the two schemas below:
+
+* Formatting never drops or rewrites a line, including our unknown attributes and
+  blocks, and a second format changes nothing.
+* Unknown attributes are kept and aligned with the rest.
+* Inside a model, the formatter puts Prisma's own `@@` attributes (`@@unique`,
+  `@@index`, `@@map`, ...) first and ours after them, each group in its own order. Our
+  parser must not depend on `@@` order.
+* Inside an unknown top-level block (`function x { }`), the formatter removes
+  indentation. Content is kept; SQL doesn't care.
+
+Two rules follow, and the parser should enforce them so a format can't break a file:
+
+1. **Each attribute is on one line.** The formatter treats a `@@trigger(...)` split
+   across lines as two unknown lines and can move them away from the other `@@`
+   attributes. A long trigger body goes in a `function` block instead.
+2. **Multi-line text (`"""..."""`) only appears in top-level blocks.**
+
+## Mapping from the `.orm` syntax
+
+`native` means Prisma syntax with no IDE error; `ours` means an IDE error is expected.
+
+### Top level
+
+| `.orm` | `.prisma` | |
+|---|---|---|
+| (implicit Postgres) | `datasource db { provider = "postgresql" }` | native |
+| `extension postgis(schema: "ext", version: "3.4")` | `extensions = [postgis(schema: "ext", version: "3.4")]` in `datasource` | native |
+| `extension "uuid-ossp"` | `extensions = [uuid_ossp(map: "uuid-ossp")]` | native |
+| `import "extensions/acme.toml"` | `import "extensions/acme.toml"` | ours |
+| `function audit_row { returns: trigger ... }` | `function audit_row { returns = trigger ... }` (`key = value`, like `datasource`) | ours |
+| `model Post @table("posts")` | `model Post { ... @@map("posts") }` | native |
+
+### Fields
+
+Fields are `name Type @attr...` with no colon. `Type?` is nullable, as before.
+
+| `.orm` | `.prisma` | |
+|---|---|---|
+| `BigInt`, `Int`, `Float` | `BigInt`, `Int`, `Float` | native |
+| `Bool` | `Boolean` | native |
+| `String`, `String(n)` | `String`, `String @db.VarChar(n)` | native |
+| `Text` | `String @db.Text` | native |
+| `DateTime`, `Date` | `DateTime`, `DateTime @db.Date` | native |
+| `Uuid` | `String @db.Uuid` | native |
+| `Json` | `Json` (jsonb) | native |
+| `@db_type("numeric(10, 2)")` | `Decimal @db.Decimal(10, 2)` (any `@db.*` Prisma has) | native |
+| extension type `citext` | `String @db.Citext` | native |
+| extension type `vector(384)`, `geography(Point, 4326)` | `Unsupported("vector(384)")` | native; the string is resolved through the extension catalog |
+| `@primary @auto` | `@id @default(autoincrement())` | native; our migrator emits `GENERATED BY DEFAULT AS IDENTITY` |
+| `@unique` | `@unique` | native |
+| `@index` (one column) | `@@index([col])` on the model | native |
+| `@default(0)`, `@default("x")`, `@default(true)` | same | native |
+| `@default(now)` | `@default(now())` | native |
+| `@default(sql("gen_random_uuid()"))` | `@default(dbgenerated("gen_random_uuid()"))` | native |
+| `@default({"a": 1})` | `@default("{\"a\": 1}")` on a `Json` field | native |
+| `@column("db_name")` | `@map("db_name")` | native |
+| `@check("views >= 0")` | `@check("views >= 0")` | ours |
+| `@comment("...")` | `@comment("...")` | ours |
+| `@renamed_from("old")` | `@renamed_from("old")` | ours |
+
+### Relations
+
+Prisma requires both sides of a relation to be declared, which the blog example
+already does.
+
+| `.orm` | `.prisma` | |
+|---|---|---|
+| `author: User @relation(via: author_id)` | `author User @relation(fields: [author_id], references: [id])` | native |
+| `on_delete: cascade / set_null / set_default / restrict / no_action` | `onDelete: Cascade / SetNull / SetDefault / Restrict / NoAction` (same for `onUpdate`) | native |
+| `posts: Post[] @relation(via: Post.author_id)` | `posts Post[]` | native |
+| two relations between the same models | `@relation("name", ...)` on both sides | native |
+| `deferrable: deferred` | `@relation(..., deferrable: deferred)` | ours |
+
+### Model attributes
+
+| `.orm` | `.prisma` | |
+|---|---|---|
+| `@@index([a, b(sort: desc)])` | `@@index([a, b(sort: Desc)])` | native |
+| `where: "published"` | `where: raw("published")` | native |
+| `type: gin` (gist, brin, hash) | `type: Gin` | native |
+| `ops: gin_trgm_ops` | `ops: raw("gin_trgm_ops")` | native |
+| `@@unique([a, b])` | `@@unique([a, b])` | native |
+| `type: hnsw` / `ivfflat` / `bloom`, `nulls: last`, `include:`, `with:`, `nulls_not_distinct:`, `sql("expr")` keys, `collate:` | same arguments in `@@index` / `@@unique` | ours (Prisma flags the argument) |
+| `@@check("...", name: "...")` | same | ours |
+| `@@exclude([...], where: "...")` | same | ours |
+| `@@trigger(name, before: [...], function: f, args: [...])` | same, on one line | ours |
+| `@@comment("...")`, `@@renamed_from("old")` | same | ours |
+
+## The blog example
+
+`examples/blog/schema.orm` in the new syntax, as the formatter leaves it. The only IDE
+error is the `@@check` line.
+
+```prisma
+datasource db {
+  provider   = "postgresql"
+  extensions = [pg_trgm]
+}
+
+model User {
+  id         BigInt    @id @default(autoincrement())
+  email      String    @unique @db.VarChar(254)
+  name       String    @db.VarChar(100)
+  created_at DateTime  @default(now())
+  posts      Post[]
+  comments   Comment[]
+
+  @@map("users")
+}
+
+model Post {
+  id         BigInt    @id @default(autoincrement())
+  author_id  BigInt
+  title      String    @db.VarChar(200)
+  body       String    @db.Text
+  views      Int       @default(0)
+  published  Boolean   @default(false)
+  created_at DateTime  @default(now())
+  author     User      @relation(fields: [author_id], references: [id], onDelete: Cascade)
+  comments   Comment[]
+
+  @@index([author_id])
+  @@index([author_id, created_at(sort: Desc)], where: raw("published"))
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@map("posts")
+  @@check("views >= 0", name: "posts_views_not_negative")
+}
+
+model Comment {
+  id         BigInt   @id @default(autoincrement())
+  post_id    BigInt
+  author_id  BigInt?
+  body       String   @db.Text
+  created_at DateTime @default(now())
+  post       Post     @relation(fields: [post_id], references: [id], onDelete: Cascade)
+  author     User?    @relation(fields: [author_id], references: [id], onDelete: SetNull)
+
+  @@index([post_id])
+  @@index([author_id])
+  @@map("comments")
+}
+```
+
+## Every feature
+
+```prisma
+import "extensions/acme.toml"
+
+datasource db {
+  provider   = "postgresql"
+  extensions = [postgis(schema: "ext", version: "3.4"), uuid_ossp(map: "uuid-ossp"), citext, btree_gist]
+}
+
+function audit_row {
+returns  = trigger
+language = plpgsql
+body     = """
+BEGIN
+INSERT INTO audit_log (tbl) VALUES (TG_TABLE_NAME);
+RETURN NULL;
+END;
+"""
+}
+
+model Account {
+  id         String                                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email      String                                 @unique @db.Citext
+  price      Decimal                                @db.Decimal(10, 2)
+  embedding  Unsupported("vector(384)")?
+  location   Unsupported("geography(Point, 4326)")?
+  born_on    DateTime?                              @db.Date
+  meta       Json                                   @default("{\"a\": 1}")
+  nick       String                                 @map("nickname") @renamed_from("handle") @comment("shown publicly")
+  views      Int                                    @default(0) @check("views >= 0")
+  updated_at DateTime                               @default(now())
+
+  @@unique([email, nick], nulls_not_distinct: true, deferrable: deferred)
+  @@index([email(sort: Desc)], nulls: last, include: [nick], name: "x")
+  @@index([sql("lower(email)", collate: "C")], unique: true)
+  @@index([embedding(ops: vector_cosine_ops)], type: hnsw, with: { m: 16, ef_construction: 64 })
+  @@map("accounts")
+  @@check("char_length(nick) > 0")
+  @@exclude([id(op: "="), sql("tstzrange(updated_at, updated_at)", op: "&&")], where: "views > 0")
+  @@trigger(touch, before: [update], update_of: [nick], when: "OLD.nick <> NEW.nick", body: "BEGIN NEW.updated_at := now(); RETURN NEW; END;")
+  @@trigger(audit, after: [insert, update, delete], for_each: statement, function: audit_row, args: ["accounts"])
+  @@comment("customer accounts")
+  @@renamed_from("customers")
+}
+```
+
+This is the formatter's output, so it is stable under format-on-save. IDE errors:
+`import`, the lines of `function audit_row`, and our attributes and arguments in
+`Account`. Everything else is native Prisma.
+
+## Migrations
+
+The migrator stays ours, in Rust (`core/src/migrate/`), and reads only our IR, so it
+handles triggers, checks, exclusions and functions like any other object. Prisma's
+engine code is a reference, not a dependency:
+
+* Live-database introspection (drift detection, adopting an existing database) is to
+  be written against `pg_catalog`, including `pg_trigger`, `pg_proc`, `pg_constraint`
+  and `pg_policy`. `schema-engine/sql-schema-describer/src/postgres.rs` in
+  `prisma/prisma-engines` (Apache-2.0) shows the catalog queries, but the crate itself
+  depends on Prisma's `psl` and `quaint`, does not read triggers, and keeps only the
+  names of check constraints.
+* Prisma's differ compares Prisma datamodels, so it can't diff our objects.
+
+The migration file layout, the `orm_migrations` table and down migrations stay as
+described in [`schema.md`](schema.md#migrations). A database migrated with Prisma's
+CLI and one migrated with ours are not interchangeable: Prisma doesn't know about our
+triggers and checks and would report drift.
