@@ -15,6 +15,10 @@ pub(crate) fn is_false(b: &bool) -> bool {
     !*b
 }
 
+pub(crate) fn yes() -> bool {
+    true
+}
+
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ColType {
@@ -394,6 +398,8 @@ pub enum Expr {
     In { item: Box<Expr>, values: Vec<Expr>, #[serde(default)] neg: bool },
     IsNull { item: Box<Expr>, #[serde(default)] neg: bool },
     Like { item: Box<Expr>, pattern: Box<Expr>, #[serde(default)] ci: bool, #[serde(default)] neg: bool },
+    /// `EXCLUDED.<field>`: the row proposed for insertion, in an upsert's `DO UPDATE`.
+    Excluded { name: String },
 }
 
 #[derive(Deserialize, Debug)]
@@ -424,6 +430,22 @@ pub struct Select {
     /// inside the same frontend call.
     #[serde(default)]
     pub prefetch: Vec<String>,
+    /// Row lock on the root model's rows (`FOR UPDATE` / `FOR SHARE`). Select only.
+    #[serde(default)]
+    pub lock: Option<Lock>,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy)]
+pub struct Lock {
+    /// `FOR UPDATE` when true, `FOR SHARE` otherwise.
+    #[serde(default = "crate::ir::yes")]
+    pub exclusive: bool,
+    /// Fail at once instead of waiting for rows locked by others (`NOWAIT`).
+    #[serde(default)]
+    pub nowait: bool,
+    /// Leave out rows locked by others (`SKIP LOCKED`).
+    #[serde(default)]
+    pub skip_locked: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -448,6 +470,9 @@ pub struct Delete {
     pub model: String,
     #[serde(default)]
     pub filters: Vec<Expr>,
+    /// Return the deleted rows (every column) instead of a row count.
+    #[serde(default)]
+    pub returning: bool,
 }
 
 #[derive(Deserialize, Debug)]

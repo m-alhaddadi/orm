@@ -10,6 +10,12 @@ create_exception!(
     DatabaseError,
     "Unique, foreign key, check, exclusion or not-null violation."
 );
+create_exception!(
+    _native,
+    LockNotAvailable,
+    DatabaseError,
+    "A row lock taken with `nowait` (or a lock timeout) found the rows locked."
+);
 create_exception!(_native, QueryError, PyValueError, "The query IR does not match the schema.");
 create_exception!(_native, SchemaError, PyValueError, "The schema file or IR is invalid.");
 
@@ -28,6 +34,7 @@ pub fn db_err(e: DbErr) -> PyErr {
     // Class 23: integrity constraint violation.
     match sqlstate(&e) {
         Some(code) if code.starts_with("23") => IntegrityError::new_err(e.to_string()),
+        Some(code) if code == "55P03" => LockNotAvailable::new_err(e.to_string()),
         _ => DatabaseError::new_err(e.to_string()),
     }
 }

@@ -14,7 +14,7 @@ from typing import ClassVar, NotRequired, TypedDict
 
 from typing_extensions import Unpack
 
-from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath
+from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update
 from orm import fields as f
 
 # -- User -------------------------------------------------------------------------------
@@ -55,7 +55,7 @@ class UserUpdate(TypedDict, total=False):
 class UserQuerySet(QuerySet[User]):
     def insert(self, **values: Unpack[UserInsert]) -> InsertOne[User]: ...  # type: ignore[override]
     def insert_many(self, rows: Iterable[UserInsert]) -> InsertMany[User]: ...  # type: ignore[override]
-    async def update(self, **values: Unpack[UserUpdate]) -> int: ...  # type: ignore[override]
+    def update(self, **values: Unpack[UserUpdate]) -> Update[User]: ...  # type: ignore[override]
 
 # -- Post -------------------------------------------------------------------------------
 
@@ -110,7 +110,7 @@ class PostUpdate(TypedDict, total=False):
 class PostQuerySet(QuerySet[Post]):
     def insert(self, **values: Unpack[PostInsert]) -> InsertOne[Post]: ...  # type: ignore[override]
     def insert_many(self, rows: Iterable[PostInsert]) -> InsertMany[Post]: ...  # type: ignore[override]
-    async def update(self, **values: Unpack[PostUpdate]) -> int: ...  # type: ignore[override]
+    def update(self, **values: Unpack[PostUpdate]) -> Update[Post]: ...  # type: ignore[override]
 
 # -- Comment ----------------------------------------------------------------------------
 
@@ -159,7 +159,7 @@ class CommentUpdate(TypedDict, total=False):
 class CommentQuerySet(QuerySet[Comment]):
     def insert(self, **values: Unpack[CommentInsert]) -> InsertOne[Comment]: ...  # type: ignore[override]
     def insert_many(self, rows: Iterable[CommentInsert]) -> InsertMany[Comment]: ...  # type: ignore[override]
-    async def update(self, **values: Unpack[CommentUpdate]) -> int: ...  # type: ignore[override]
+    def update(self, **values: Unpack[CommentUpdate]) -> Update[Comment]: ...  # type: ignore[override]
 
 __all__ = [
     "User",

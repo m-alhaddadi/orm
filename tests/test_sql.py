@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 from blog.models import Comment, Post, User
 
-from orm import QueryError, and_, or_
+from orm import QueryError, and_, excluded, or_
 
 Y = datetime(2026, 10, 1, tzinfo=timezone.utc)
 USER_COLS = 'SELECT "users"."id", "users"."email", "users"."name", "users"."created_at" FROM "users"'
@@ -113,3 +113,33 @@ def test_python_boolean_operators_are_rejected():
 def test_unknown_relation_attribute():
     with pytest.raises(AttributeError, match="no field or relation 'nope'"):
         User.posts.nope  # noqa: B018
+
+
+def test_lock():
+    assert User.objects.lock().sql() == f'{USER_COLS} FOR UPDATE OF "users"'
+    assert User.objects.lock(exclusive=False).sql().endswith('FOR SHARE OF "users"')
+    assert User.objects.lock(nowait=True).sql().endswith('FOR UPDATE OF "users" NOWAIT')
+    assert User.objects.lock(False, skip_locked=True).sql().endswith('FOR SHARE OF "users" SKIP LOCKED')
+    # Only the model's rows: rows joined by select_related stay unlocked.
+    sql = Post.objects.select_related(Post.author).filter(Post.views > 1)[:5].lock().sql()
+    assert sql.endswith('LIMIT 5 FOR UPDATE OF "posts"')
+    with pytest.raises(ValueError):
+        User.objects.lock(nowait=True, skip_locked=True)
+
+
+def test_lock_rejected_where_meaningless():
+    with pytest.raises(QueryError):
+        User.objects.lock().update(name="x")
+    with pytest.raises(QueryError):
+        User.objects.lock().delete()
+
+
+def test_writes_validate_when_built():
+    with pytest.raises(TypeError):
+        User.objects.update(nope=1)
+    with pytest.raises(QueryError):
+        User.objects.all()[:3].delete()
+    with pytest.raises(TypeError):
+        excluded(User.posts.views)
+    with pytest.raises(TypeError):
+        User.objects.insert(email="a", name="b").on_conflict(User.email).do_update(User.name, name="x")

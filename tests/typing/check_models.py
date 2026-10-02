@@ -4,9 +4,10 @@ and pyright. Never executed."""
 from datetime import datetime, timedelta, timezone
 from typing import assert_type
 
-from blog.models import Comment, Post, PostInsert, User, UserQuerySet
+from blog.models import Comment, Post, PostInsert, PostQuerySet, User, UserQuerySet
 
-from orm import ColumnRef, Condition, RelatedSet
+from orm import ColumnRef, Condition, RelatedSet, excluded
+from orm import get_database as orm_db
 
 
 async def check() -> None:
@@ -48,6 +49,16 @@ async def check() -> None:
     skipped = await User.objects.insert(email="a@b.c", name="A").on_conflict(User.email).do_nothing()
     assert_type(skipped, User | None)
     assert_type(await Post.objects.filter(Post.id == 1).update(views=Post.views + 1), int)
+    assert_type(await Post.objects.filter(Post.id == 1).update(views=1).returning(), list[Post])
+    assert_type(await Post.objects.filter(Post.id == 1).delete(), int)
+    assert_type(await Post.objects.filter(Post.id == 1).delete().returning(), list[Post])
+    bumped = await Post.objects.insert(author=alice, title="t", body="b").on_conflict(Post.id).do_update(
+        views=Post.views + excluded(Post.views)
+    )
+    assert_type(bumped, Post)
+    assert_type(Post.objects.lock(exclusive=False, skip_locked=True), PostQuerySet)
+    assert_type(await Post.objects.lock().get(Post.id == 1), Post)
+    assert_type(await orm_db().lock("key", nowait=True), bool)
     await post.update(title="new", views=Post.views + 1)
     await alice.posts.insert(title="t", body="b")
     await post.delete()
@@ -60,6 +71,7 @@ async def errors() -> None:
     await User.objects.insert(email="a@b.c")  # E: missing name
     await User.objects.insert(email="a@b.c", name="A", nope=1)  # E: unknown field
     await Post.objects.update(views="many")  # E: wrong type
+    await Post.objects.update(nope=1).returning()  # E: unknown field
     u = await User.objects.get(User.id == 1)
     u.name = "B"  # E: instances are read-only
     await u.update(name=1)  # E: wrong type

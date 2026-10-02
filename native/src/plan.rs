@@ -16,12 +16,14 @@ use pyo3::types::PyList;
 use sea_orm::sea_query::{
     self,
     extension::postgres::PgExpr, Alias, DeleteStatement, Expr as SExpr, ExprTrait, InsertStatement,
-    JoinType, LikeExpr, Order as SOrder, Query, SelectStatement, UpdateStatement,
+    JoinType, LikeExpr, LockBehavior, LockType, Order as SOrder, Query, SelectStatement, UpdateStatement,
 };
 
 use crate::convert::py_to_value;
 use crate::errors::query_err;
-use orm_core::ir::{ArithOp, CmpOp, ColType, Delete, Expr, FieldIr, Operation, RelKind, Select, Update};
+use orm_core::ir::{
+    ArithOp, Assignment, CmpOp, ColType, Delete, Expr, FieldIr, Lock, Operation, RelKind, Select, Update,
+};
 use orm_core::schema::Schema;
 
 pub struct PrefetchPlan {
@@ -49,7 +51,8 @@ pub enum Plan {
     Exists(SelectStatement),
     /// Column types of the returned rows when the update has `RETURNING`.
     Update(UpdateStatement, Option<Vec<ColType>>),
-    Delete(DeleteStatement),
+    /// Column types of the returned rows when the delete has `RETURNING`.
+    Delete(DeleteStatement, Option<Vec<ColType>>),
 }
 
 /// What a bound value is compared with or assigned to: its type drives the conversion
@@ -121,7 +124,7 @@ fn fold(items: Vec<SExpr>, and: bool) -> SExpr {
 fn col_paths<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
     match e {
         Expr::Col { path, .. } => out.push(path),
-        Expr::Param { .. } | Expr::Const { .. } => {}
+        Expr::Param { .. } | Expr::Const { .. } | Expr::Excluded { .. } => {}
         Expr::Cmp { l, r, .. } | Expr::Arith { l, r, .. } => {
             col_paths(l, out, has_not);
             col_paths(r, out, has_not);
@@ -159,13 +162,15 @@ pub struct Planner<'s, 'py> {
     /// Top-level to-one LEFT JOINs (select_related / order_by), keyed by path.
     joins: Vec<(Scope, SExpr)>,
     next_alias: usize,
+    /// `EXCLUDED.<field>` is only valid in an upsert's `DO UPDATE SET`.
+    allow_excluded: bool,
 }
 
 impl<'s, 'py> Planner<'s, 'py> {
     pub fn new(schema: &'s Schema, model: &str, params: &'s [Bound<'py, PyAny>]) -> PyResult<Self> {
         let root = schema.model_idx(model).map_err(query_err)?;
         let scope = Scope { path: vec![], model: root, alias: schema.model(root).table().to_owned() };
-        Ok(Planner { schema, params, root, scopes: vec![scope], joins: vec![], next_alias: 0 })
+        Ok(Planner { schema, params, root, scopes: vec![scope], joins: vec![], next_alias: 0, allow_excluded: false })
     }
 
     pub fn plan(schema: &'s Schema, op: &Operation, params: &'s [Bound<'py, PyAny>]) -> PyResult<Plan> {
@@ -177,7 +182,10 @@ impl<'s, 'py> Planner<'s, 'py> {
                 let (stmt, types) = Planner::new(schema, &q.model, params)?.update(q)?;
                 Plan::Update(stmt, types)
             }
-            Operation::Delete(q) => Plan::Delete(Planner::new(schema, &q.model, params)?.delete(q)?),
+            Operation::Delete(q) => {
+                let (stmt, types) = Planner::new(schema, &q.model, params)?.delete(q)?;
+                Plan::Delete(stmt, types)
+            }
         })
     }
 
@@ -357,6 +365,10 @@ impl<'s, 'py> Planner<'s, 'py> {
                 let field = schema.walk(self.root, path).ok().and_then(|m| schema.model(m).field(name).ok());
                 Hint { ty: field.map(|f| f.ty), field }
             }
+            Expr::Excluded { name } => {
+                let field = self.schema.model(self.root).field(name).ok();
+                Hint { ty: field.map(|f| f.ty), field }
+            }
             // Arithmetic results are plain values: no write_sql cast.
             Expr::Arith { l, r, .. } => Hint { ty: self.hint_of(l).or(self.hint_of(r)).ty, field: None },
             _ => Hint::default(),
@@ -388,6 +400,13 @@ impl<'s, 'py> Planner<'s, 'py> {
             Expr::Col { path, name } => self.resolve(path, name)?,
             Expr::Param { i } => bind(py_to_value(self.param(*i)?, hint.ty)?, hint.field),
             Expr::Const { value } => SExpr::val(*value),
+            Expr::Excluded { name } => {
+                if !self.allow_excluded {
+                    return Err(query_err("excluded() can only be used in on_conflict(...).do_update()".into()));
+                }
+                let f = self.schema.model(self.root).field(name).map_err(query_err)?;
+                col("excluded", &f.column)
+            }
             Expr::Arith { op, l, r } => {
                 let inner = self.hint_of(l).or(self.hint_of(r));
                 let hint = Hint { ty: inner.ty.or(hint.ty), field: None };
@@ -489,6 +508,9 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
         self.base_select(q, &mut stmt, true)?;
         self.apply_joins(&mut stmt);
+        if let Some(lock) = q.lock {
+            apply_lock(&mut stmt, lock, root.table());
+        }
 
         let mut prefetch = vec![];
         for name in &q.prefetch {
@@ -527,6 +549,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     pub fn count(mut self, q: &Select) -> PyResult<SelectStatement> {
+        no_lock(q, "count")?;
         let mut stmt = Query::select();
         if q.limit.is_some() || q.offset.is_some() {
             let inner = self.sliced_inner(q)?;
@@ -540,6 +563,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     pub fn exists(mut self, q: &Select) -> PyResult<SelectStatement> {
+        no_lock(q, "exists")?;
         let mut inner = self.sliced_inner(q)?;
         if q.limit.is_none() {
             inner.limit(1);
@@ -571,14 +595,38 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok((stmt, Some(root.fields().iter().map(|f| f.ty).collect())))
     }
 
-    pub fn delete(mut self, q: &Delete) -> PyResult<DeleteStatement> {
+    pub fn delete(mut self, q: &Delete) -> PyResult<(DeleteStatement, Option<Vec<ColType>>)> {
         let root = self.schema.model(self.root);
         let mut stmt = Query::delete();
         stmt.from_table(Alias::new(root.table()));
         for w in self.apply_filters(&q.filters)? {
             stmt.and_where(w);
         }
-        Ok(stmt)
+        if !q.returning {
+            return Ok((stmt, None));
+        }
+        stmt.returning(Query::returning().exprs(root.fields().iter().map(returning_col)));
+        Ok((stmt, Some(root.fields().iter().map(|f| f.ty).collect())))
+    }
+}
+
+/// `FOR UPDATE | FOR SHARE OF <root> [NOWAIT | SKIP LOCKED]`. `OF` limits the lock to
+/// the model's own rows: rows joined by `select_related` stay unlocked (Postgres can't
+/// lock the nullable side of a LEFT JOIN anyway).
+fn apply_lock(stmt: &mut SelectStatement, lock: Lock, table: &str) {
+    let ty = if lock.exclusive { LockType::Update } else { LockType::Share };
+    let tables = [Alias::new(table)];
+    match (lock.nowait, lock.skip_locked) {
+        (true, _) => stmt.lock_with_tables_behavior(ty, tables, LockBehavior::Nowait),
+        (_, true) => stmt.lock_with_tables_behavior(ty, tables, LockBehavior::SkipLocked),
+        _ => stmt.lock_with_tables(ty, tables),
+    };
+}
+
+fn no_lock(q: &Select, what: &str) -> PyResult<()> {
+    match q.lock {
+        Some(_) => Err(query_err(format!("{what}() can't lock rows; lock() applies to reading rows"))),
+        None => Ok(()),
     }
 }
 
@@ -586,20 +634,23 @@ impl<'s, 'py> Planner<'s, 'py> {
 pub enum OnConflict {
     /// `ON CONFLICT (<fields>) DO NOTHING`: such rows are skipped (and not returned).
     Nothing(Vec<String>),
-    /// `ON CONFLICT (<fields>) DO UPDATE SET <col> = EXCLUDED.<col>, ...`.
-    Update(Vec<String>, Vec<String>),
+    /// `ON CONFLICT (<fields>) DO UPDATE SET <col> = EXCLUDED.<col>, ..., <field> = <expr>, ...`.
+    /// The expressions see the existing row as the model's columns and the proposed
+    /// row as `EXCLUDED`; their parameters are the ones passed to `plan_insert`.
+    Update(Vec<String>, Vec<String>, Vec<Assignment>),
 }
 
 /// `INSERT INTO <table> (<fields>) VALUES ... [ON CONFLICT ...] RETURNING <all columns>`.
 ///
 /// `rows` is a list of sequences aligned with `fields`; the `DEFAULT` marker becomes the
 /// SQL `DEFAULT` keyword.
-pub fn plan_insert(
+pub fn plan_insert<'py>(
     schema: &Schema,
     model: &str,
     fields: &[String],
-    rows: &Bound<'_, PyList>,
+    rows: &Bound<'py, PyList>,
     on_conflict: Option<OnConflict>,
+    params: &[Bound<'py, PyAny>],
 ) -> PyResult<(InsertStatement, Vec<ColType>)> {
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
     let cols = fields.iter().map(|f| m.field(f)).collect::<Result<Vec<_>, _>>().map_err(query_err)?;
@@ -638,11 +689,20 @@ pub fn plan_insert(
         };
         let clause = match oc {
             OnConflict::Nothing(target) => sea_query::OnConflict::columns(columns(&target)?).do_nothing().to_owned(),
-            OnConflict::Update(target, update) => {
-                if update.is_empty() {
+            OnConflict::Update(target, update, set) => {
+                if update.is_empty() && set.is_empty() {
                     return Err(query_err("on_conflict(...).do_update() has no columns to update".into()));
                 }
-                sea_query::OnConflict::columns(columns(&target)?).update_columns(columns(&update)?).to_owned()
+                let mut clause = sea_query::OnConflict::columns(columns(&target)?);
+                clause.update_columns(columns(&update)?);
+                let mut planner = Planner::new(schema, model, params)?;
+                planner.allow_excluded = true;
+                for a in &set {
+                    let f = m.field(&a.field).map_err(query_err)?;
+                    let v = planner.value(&a.value, Hint { ty: Some(f.ty), field: Some(f) })?;
+                    clause.value(Alias::new(&f.column), v);
+                }
+                clause.to_owned()
             }
         };
         stmt.on_conflict(clause);

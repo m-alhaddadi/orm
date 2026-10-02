@@ -1,4 +1,4 @@
-"""INSERT statements.
+"""INSERT, UPDATE and DELETE statements.
 
 Writes are explicit statements, never side effects of touching an instance::
 
@@ -6,9 +6,13 @@ Writes are explicit statements, never side effects of touching an instance::
     users = await User.objects.insert_many([{"email": ..., "name": ...}, ...])
     user = await User.objects.insert(email="a@b.c", name="A2").on_conflict(User.email).do_update()
     await User.objects.insert_many(rows).on_conflict(User.email).do_nothing()
+    n = await Post.objects.filter(...).update(views=Post.views + 1)
+    posts = await Post.objects.filter(...).update(views=Post.views + 1).returning()
+    n = await Post.objects.filter(...).delete()
 
-A statement runs when awaited, as one ``INSERT ... RETURNING`` that also fills in
-database defaults (ids, timestamps) on the returned instances.
+A statement runs when awaited. Inserts are one ``INSERT ... RETURNING`` that also fills
+in database defaults (ids, timestamps) on the returned instances. Updates and deletes
+return a row count, and use ``RETURNING`` only when ``.returning()`` asks for the rows.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from collections.abc import Generator, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from . import _native
-from .expr import ColumnRef, Expression
+from .expr import ColumnRef, Expression, IRContext
 from .fields import BelongsTo
 
 if TYPE_CHECKING:
@@ -28,7 +32,7 @@ if TYPE_CHECKING:
 R = TypeVar("R")
 M = TypeVar("M", bound="Model")
 
-__all__ = ["InsertOne", "InsertMany", "OnConflictOne", "OnConflictMany"]
+__all__ = ["InsertOne", "InsertMany", "OnConflictOne", "OnConflictMany", "Update", "Delete", "Returning"]
 
 
 def prepare_rows(
@@ -68,6 +72,22 @@ def prepare_rows(
     return fields, aligned, provided
 
 
+def assignments(model: type[Model], values: Mapping[str, Any], ctx: IRContext) -> list[dict[str, Any]]:
+    """``SET`` items as IR: plain values become parameters, expressions compile in
+    ``ctx``. A to-one relation (``author=user``) sets its key column."""
+    meta = model._meta
+    out = []
+    for name, value in values.items():
+        rel = meta.relations.get(name)
+        if isinstance(rel, BelongsTo):
+            name, value = rel.via, (None if value is None else getattr(value, rel.to))
+        if name not in meta.fields:
+            raise TypeError(f"{meta.name} has no field {name!r}")
+        node = value._ir(ctx) if isinstance(value, Expression) else ctx.param(value)
+        out.append({"field": name, "value": node})
+    return out
+
+
 def _field_names(model: type[Model], columns: tuple[ColumnRef[Any], ...], what: str) -> list[str]:
     names = []
     for c in columns:
@@ -78,7 +98,7 @@ def _field_names(model: type[Model], columns: tuple[ColumnRef[Any], ...], what: 
 
 
 class _Insert:
-    __slots__ = ("_qs", "_fields", "_rows", "_provided", "_conflict", "_update", "_used")
+    __slots__ = ("_qs", "_fields", "_rows", "_provided", "_conflict", "_update", "_set", "_used")
 
     def __init__(
         self,
@@ -88,6 +108,7 @@ class _Insert:
         provided: set[str],
         conflict: list[str] | None = None,
         update: list[str] | None = None,
+        set_: tuple[list[dict[str, Any]], list[Any]] | None = None,
     ) -> None:
         self._qs = qs
         self._fields = fields
@@ -95,11 +116,18 @@ class _Insert:
         self._provided = provided
         self._conflict = conflict
         self._update = update
+        self._set = set_  # DO UPDATE assignments (IR) and their parameters
         self._used = False
 
-    def _derive(self, cls: type[Any], conflict: list[str], update: list[str] | None) -> Any:
+    def _derive(
+        self,
+        cls: type[Any],
+        conflict: list[str],
+        update: list[str] | None,
+        set_: tuple[list[dict[str, Any]], list[Any]] | None = None,
+    ) -> Any:
         self._used = True
-        return cls(self._qs, self._fields, self._rows, self._provided, conflict, update)
+        return cls(self._qs, self._fields, self._rows, self._provided, conflict, update, set_)
 
     async def _execute(self) -> list[Any]:
         from .db import resolve
@@ -108,7 +136,7 @@ class _Insert:
             return []
         model = self._qs.model
         db = resolve(self._qs._db)
-        rows = await db._insert(model._meta.name, self._fields, self._rows, self._conflict, self._update)
+        rows = await db._insert(model._meta.name, self._fields, self._rows, self._conflict, self._update, self._set)
         make = model._from_row
         objs = [make(r) for r in rows]
         if self._qs._db is not None:
@@ -123,7 +151,8 @@ class _Insert:
     def __repr__(self) -> str:
         clause = ""
         if self._conflict is not None:
-            action = "do_nothing()" if self._update is None else f"do_update({', '.join(self._update)})"
+            names = [*(self._update or ()), *(a["field"] + "=..." for a in (self._set or ([], []))[0])]
+            action = "do_nothing()" if self._update is None else f"do_update({', '.join(names)})"
             clause = f" on_conflict({', '.join(self._conflict)}).{action}"
         return f"<{type(self).__name__} {self._qs.model.__name__} x{len(self._rows)}{clause}>"
 
@@ -171,21 +200,33 @@ class _OnConflict:
         self._insert = insert
         self._target = target
 
-    def _update_fields(self, columns: tuple[ColumnRef[Any], ...]) -> list[str]:
+    def _do_update(self, cls: type[Any], columns: tuple[ColumnRef[Any], ...], values: dict[str, Any]) -> Any:
         model = self._insert._qs.model
-        if columns:
-            return _field_names(model, columns, "do_update")
-        pk = model._meta.pk.name
-        return [f for f in self._insert._fields if f in self._insert._provided and f not in self._target and f != pk]
+        if columns or values:
+            update = _field_names(model, columns, "do_update")
+        else:
+            pk = model._meta.pk.name
+            ins = self._insert
+            update = [f for f in ins._fields if f in ins._provided and f not in self._target and f != pk]
+        set_ = None
+        if values:
+            params: list[Any] = []
+            set_ = (assignments(model, values, IRContext(model, params)), params)
+            overlap = set(update) & {a["field"] for a in set_[0]}
+            if overlap:
+                raise TypeError(f"do_update() sets {', '.join(sorted(overlap))} twice")
+        return self._insert._derive(cls, self._target, update, set_)
 
 
 class OnConflictOne(_OnConflict, Generic[R]):
     __slots__ = ()
 
-    def do_update(self, *columns: ColumnRef[Any]) -> InsertOne[R]:
-        """``ON CONFLICT DO UPDATE``: overwrite ``columns`` (default: every field given
-        to ``insert``, except the conflict columns) with the new values."""
-        return self._insert._derive(InsertOne, self._target, self._update_fields(columns))  # type: ignore[no-any-return]
+    def do_update(self, *columns: ColumnRef[Any], **values: Any) -> InsertOne[R]:
+        """``ON CONFLICT DO UPDATE``: overwrite ``columns`` with the new values, and set
+        ``values`` (plain values or expressions such as
+        ``views=Post.views + excluded(Post.views)``). With neither, every field given to
+        ``insert`` is overwritten, except the conflict columns."""
+        return self._do_update(InsertOne, columns, values)  # type: ignore[no-any-return]
 
     def do_nothing(self) -> InsertOne[R | None]:
         """``ON CONFLICT DO NOTHING``: keep the existing row; ``await`` gives ``None``."""
@@ -195,11 +236,108 @@ class OnConflictOne(_OnConflict, Generic[R]):
 class OnConflictMany(_OnConflict, Generic[M]):
     __slots__ = ()
 
-    def do_update(self, *columns: ColumnRef[Any]) -> InsertMany[M]:
-        """``ON CONFLICT DO UPDATE``: overwrite ``columns`` (default: every field given
-        in the rows, except the conflict columns) with the new values."""
-        return self._insert._derive(InsertMany, self._target, self._update_fields(columns))  # type: ignore[no-any-return]
+    def do_update(self, *columns: ColumnRef[Any], **values: Any) -> InsertMany[M]:
+        """``ON CONFLICT DO UPDATE``: overwrite ``columns`` with the new values, and set
+        ``values`` (plain values or expressions such as
+        ``views=Post.views + excluded(Post.views)``). With neither, every field given in
+        the rows is overwritten, except the conflict columns."""
+        return self._do_update(InsertMany, columns, values)  # type: ignore[no-any-return]
 
     def do_nothing(self) -> InsertMany[M]:
         """``ON CONFLICT DO NOTHING``: skip conflicting rows."""
         return self._insert._derive(InsertMany, self._target, None)  # type: ignore[no-any-return]
+
+
+# -- UPDATE / DELETE -----------------------------------------------------------------------
+
+
+class _SetStatement(Generic[M]):
+    """An UPDATE or DELETE over a query set, compiled (and validated) when created."""
+
+    __slots__ = ("_qs", "_ir", "_params", "_used")
+    _verb = ""
+
+    def __init__(self, qs: QuerySet[M], ir: dict[str, Any] | None, params: list[Any]) -> None:
+        self._qs = qs
+        self._ir = ir  # None: nothing to do (an update without values)
+        self._params = params
+        self._used = False
+
+    def returning(self) -> Returning[M]:
+        """Run with ``RETURNING`` and give the affected rows as instances instead of a
+        count."""
+        self._used = True
+        return Returning(self._qs, None if self._ir is None else {**self._ir, "returning": True}, self._params)
+
+    async def _count(self) -> int:
+        if self._ir is None:
+            return 0
+        n: int = await self._qs._run(self._ir, self._params)
+        return n
+
+    def __await__(self) -> Generator[Any, None, int]:
+        self._used = True
+        return self._count().__await__()
+
+    def __del__(self) -> None:
+        if not getattr(self, "_used", True):
+            warnings.warn(f"{self!r} was never awaited, so nothing was {self._verb}", RuntimeWarning, stacklevel=2)
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} {self._qs!r}>"
+
+
+class Update(_SetStatement[M]):
+    """``await`` gives the number of rows updated; ``.returning()`` the rows."""
+
+    __slots__ = ()
+    _verb = "updated"
+
+    @classmethod
+    def build(cls, qs: QuerySet[M], values: Mapping[str, Any]) -> Update[M]:
+        params: list[Any] = []
+        ir = qs._mutation_ir("update", params)
+        ir["set"] = assignments(qs.model, values, IRContext(qs.model, params))
+        return cls(qs, ir if ir["set"] else None, params)
+
+
+class Delete(_SetStatement[M]):
+    """``await`` gives the number of rows deleted; ``.returning()`` the rows."""
+
+    __slots__ = ()
+    _verb = "deleted"
+
+    @classmethod
+    def build(cls, qs: QuerySet[M]) -> Delete[M]:
+        params: list[Any] = []
+        return cls(qs, qs._mutation_ir("delete", params), params)
+
+
+class Returning(Generic[M]):
+    """An UPDATE or DELETE with ``RETURNING``: ``await`` gives the affected rows."""
+
+    __slots__ = ("_qs", "_ir", "_params", "_used")
+
+    def __init__(self, qs: QuerySet[M], ir: dict[str, Any] | None, params: list[Any]) -> None:
+        self._qs = qs
+        self._ir = ir
+        self._params = params
+        self._used = False
+
+    async def _rows(self) -> list[M]:
+        if self._ir is None:
+            return []
+        rows = await self._qs._run(self._ir, self._params)
+        return self._qs._adopt([self._qs.model._from_row(r) for r in rows])
+
+    def __await__(self) -> Generator[Any, None, list[M]]:
+        self._used = True
+        return self._rows().__await__()
+
+    def __del__(self) -> None:
+        if not getattr(self, "_used", True):
+            warnings.warn(f"{self!r} was never awaited, so nothing ran", RuntimeWarning, stacklevel=2)
+
+    def __repr__(self) -> str:
+        op = "?" if self._ir is None else self._ir["op"]
+        return f"<Returning {op} {self._qs!r}>"

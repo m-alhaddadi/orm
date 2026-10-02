@@ -1,6 +1,8 @@
 """End-to-end tests against Postgres (python -> PyO3 -> SeaORM -> Postgres)."""
 
 import asyncio
+import contextvars
+import warnings
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -237,6 +239,95 @@ async def test_update_and_delete(clean):
     await carol.update(name="Caroline")
     await carol.refresh()
     assert carol.name == "Caroline"
+
+
+async def test_update_and_delete_returning(clean):
+    alice, bob, carol, (a1, a2, b1) = await seed()
+    posts = await Post.objects.filter(Post.author_id == alice.id).update(views=Post.views + 1).returning()
+    assert sorted(p.views for p in posts) == [6, 51]
+    assert await Post.objects.filter(Post.views > 1000).update(views=0).returning() == []
+    assert await Post.objects.update().returning() == []  # nothing to set: no SQL
+
+    gone = await Post.objects.filter(Post.views > 90).delete().returning()
+    assert [p.title for p in gone] == ["bob's old"]
+    assert await Post.objects.count() == 2
+
+    # A statement that is never awaited warns, like an un-awaited coroutine.
+    with pytest.warns(RuntimeWarning, match="never awaited"):
+        Post.objects.update(views=0)
+        import gc
+
+        gc.collect()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        await Post.objects.update(views=0)
+    assert {p.views for p in await Post.objects} == {0}
+
+
+async def test_upsert_with_expressions(clean):
+    alice = await User.objects.insert(email="a@x.io", name="Alice")
+    p = await Post.objects.insert(author=alice, title="t", body="b", views=3)
+    again = {"id": p.id, "author": alice, "title": "t2", "body": "b", "views": 4}
+    p2 = await Post.objects.insert(**again).on_conflict(Post.id).do_update(views=Post.views + orm.excluded(Post.views))
+    assert (p2.id, p2.views, p2.title) == (p.id, 7, "t")  # only the given assignment ran
+    p3 = await Post.objects.insert(**again).on_conflict(Post.id).do_update(Post.title, published=True)
+    assert (p3.views, p3.title, p3.published) == (7, "t2", True)
+    rows = [{**again, "views": 1}, {"author": alice, "title": "new", "body": "b", "views": 2}]
+    out = await Post.objects.insert_many(rows).on_conflict(Post.id).do_update(views=orm.excluded(Post.views) * 100)
+    assert sorted(o.views for o in out) == [2, 100]
+    with pytest.raises(orm.QueryError):
+        await Post.objects.update(views=orm.excluded(Post.views))
+
+
+async def _in_new_tx(fn):
+    """Run ``fn`` in a separate transaction (a task outside the caller's one)."""
+
+    async def run():
+        async with orm.get_database().transaction():
+            return await fn()
+
+    return await asyncio.create_task(run(), context=contextvars.Context())
+
+
+async def test_row_locks(clean):
+    alice, bob, carol, (a1, a2, b1) = await seed()
+    db = orm.get_database()
+    with pytest.raises(orm.TransactionRequired):
+        await User.objects.lock().get(User.id == alice.id)
+    with pytest.raises(orm.QueryError):
+        await User.objects.lock().count()
+
+    async with db.transaction():
+        locked = await User.objects.lock().get(User.id == alice.id)
+        assert locked == alice
+        with pytest.raises(orm.LockNotAvailable):
+            await _in_new_tx(lambda: User.objects.lock(nowait=True).get(User.id == alice.id))
+        with pytest.raises(orm.LockNotAvailable):  # exclusive blocks shared too
+            await _in_new_tx(lambda: User.objects.lock(False, nowait=True).get(User.id == alice.id))
+        others = await _in_new_tx(lambda: User.objects.order_by(User.id).lock(skip_locked=True))
+        assert names(others) == ["Bob", "Carol"]
+        # Plain reads aren't blocked.
+        assert (await _in_new_tx(lambda: User.objects.get(User.id == alice.id))).name == "Alice"
+
+    async with db.transaction():
+        await Post.objects.select_related(Post.author).lock(exclusive=False).filter(Post.id == a1.id)
+        # Shared locks coexist; the joined author row isn't locked at all.
+        assert len(await _in_new_tx(lambda: Post.objects.lock(False, nowait=True).filter(Post.id == a1.id))) == 1
+        await _in_new_tx(lambda: User.objects.lock(nowait=True).get(User.id == alice.id))
+        with pytest.raises(orm.LockNotAvailable):
+            await _in_new_tx(lambda: Post.objects.lock(nowait=True).filter(Post.id == a1.id))
+
+
+async def test_advisory_locks(clean):
+    db = orm.get_database()
+    with pytest.raises(orm.TransactionRequired):
+        await db.lock("import")
+    async with db.transaction():
+        assert await db.lock("import") is True
+        assert await _in_new_tx(lambda: db.lock("import", nowait=True)) is False
+        assert await _in_new_tx(lambda: db.lock("other", nowait=True)) is True
+        assert await _in_new_tx(lambda: db.lock(42, exclusive=False, nowait=True)) is True
+    assert await _in_new_tx(lambda: db.lock("import", nowait=True)) is True  # released at commit
 
 
 async def test_integrity_error(clean):

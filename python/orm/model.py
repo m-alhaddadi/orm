@@ -243,10 +243,10 @@ class Model:
         """
         if not values:
             return
-        rows = await self._row_query()._update(values, returning=True)
+        rows = await self._row_query().update(**values).returning()
         if not rows:
             raise self.DoesNotExist(f"{type(self).__name__} {self.pk!r} no longer exists")
-        self._apply_row(rows[0])
+        self._apply_row(tuple(rows[0].__dict__[n] for n in self._meta.field_names))
 
     async def delete(self) -> None:
         """``DELETE ... WHERE pk = ...``. The instance keeps its last values."""

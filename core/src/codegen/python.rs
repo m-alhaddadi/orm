@@ -196,7 +196,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         .unwrap();
         writeln!(
             body,
-            "    async def update(self, **values: Unpack[{name}Update]) -> int: ...  # type: ignore[override]\n"
+            "    def update(self, **values: Unpack[{name}Update]) -> Update[{name}]: ...  # type: ignore[override]\n"
         )
         .unwrap();
     }
@@ -225,7 +225,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     }
     pyi.push_str(
         "\nfrom typing_extensions import Unpack\n\n\
-         from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath\n\
+         from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update\n\
          from orm import fields as f\n\n",
     );
     pyi.push_str(&body);

@@ -143,10 +143,15 @@ await alice.posts.insert(title="...", body="...")   # FK filled in
 alice = await User.objects.insert(email="a@x.io", name="Al").on_conflict(User.email).do_update()
 maybe = await User.objects.insert(email="a@x.io", name="Al").on_conflict(User.email).do_nothing()  # None if it existed
 await User.objects.insert_many(rows).on_conflict(User.email).do_update(User.name)
+# ... with expressions: the existing row is `Post.<col>`, the proposed one `excluded(Post.<col>)`
+await Post.objects.insert_many(rows).on_conflict(Post.slug).do_update(views=Post.views + excluded(Post.views))
 
 # UPDATE / DELETE over a query: set-based, returns the row count
 await Post.objects.filter(Post.author.name == "Alice").update(views=Post.views + 1)
 await Post.objects.filter(Post.views < 10).delete()
+# ... or the affected rows, with RETURNING (only added when you ask for it)
+posts = await Post.objects.filter(...).update(views=Post.views + 1).returning()   # list[Post]
+gone = await Post.objects.filter(...).delete().returning()
 
 # One row, by primary key
 await post.update(title="New", views=Post.views + 1)   # UPDATE ... RETURNING; refreshes `post`
@@ -159,7 +164,12 @@ await post.refresh()
   default (`DEFAULT` in the VALUES list), and `RETURNING` reads them back.
 * `do_update()` with no columns overwrites the fields you passed except the conflict
   columns, so `created_at` isn't reset to `now()`. Pass columns to choose them.
-* An insert statement that is never awaited emits a `RuntimeWarning`, the same safety
+* `do_update(*columns, **values)`: `columns` take the proposed values, `values` are
+  plain values or expressions. With neither, every field passed to the insert except
+  the conflict columns is overwritten.
+* `update()` and `delete()` validate when called and return a statement: awaiting it
+  gives the row count (no `RETURNING` in the SQL), `.returning()` gives the rows.
+* A write statement that is never awaited emits a `RuntimeWarning`, the same safety
   net an un-awaited coroutine has.
 * `instance.update()` changes exactly the fields named, and the instance then shows
   what the database stored, including expression results and concurrent changes to
@@ -191,6 +201,30 @@ async with db.transaction():          # commit on success, rollback on exception
 
 The current transaction lives in a `ContextVar`, so queries inside the block use it
 without passing it around. Tasks started inside the block inherit it.
+
+### Locks
+
+```python
+async with db.transaction():
+    post = await Post.objects.lock().get(Post.id == 1)                      # FOR UPDATE
+    await Post.objects.filter(...).lock(exclusive=False)                     # FOR SHARE
+    jobs = await Job.objects.filter(Job.state == "ready").lock(skip_locked=True).limit(10)
+    await Post.objects.lock(nowait=True).get(...)       # raises orm.LockNotAvailable if locked
+    await db.lock("import:42")                          # advisory lock on a name, not a row
+    got = await db.lock(42, exclusive=False, nowait=True)   # False instead of waiting
+```
+
+* `lock(exclusive=True, *, nowait=False, skip_locked=False)`: `exclusive` is
+  `FOR UPDATE`, otherwise `FOR SHARE`. Only the model's own rows are locked
+  (`FOR ... OF <table>`), never rows joined by `select_related`.
+* Locks are held until the transaction ends, so both `lock()` and `db.lock()` raise
+  `orm.TransactionRequired` outside `db.transaction()`. `count()` / `exists()` /
+  `update()` / `delete()` on a locked query set raise `QueryError` (writes lock the rows
+  they change anyway).
+* `db.lock(key)` is a transaction-scoped Postgres advisory lock. Postgres keys are
+  64-bit integers; a `str` key is hashed to one in Python (first 8 bytes of BLAKE2b,
+  signed big-endian).
+* No optimistic locking (version columns) on purpose.
 
 ## The FFI boundary
 
@@ -237,8 +271,9 @@ per row, which can move into Rust later.
 ## Not done yet
 
 * `values()` / `values_list()`, aggregates beyond `count()`, `annotate`, `distinct`,
-  `in_bulk`, `select_for_update`, `update().returning()` for query sets, upsert with
-  expression updates (`views = views + EXCLUDED.views`).
+  `in_bulk`.
+* `update_many(rows)`: a different value per row, keyed by primary key, in one
+  statement (undecided).
 * Nested `prefetch_related` paths and `Prefetch(queryset=...)`.
 * Building instances in Rust (the remaining per-row cost), caching of compiled plans,
   chunking very large `IN (...)` prefetches.

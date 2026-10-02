@@ -29,6 +29,8 @@ __all__ = [
     "Condition",
     "Ordering",
     "Literal",
+    "Excluded",
+    "excluded",
     "and_",
     "or_",
     "not_",
@@ -224,6 +226,30 @@ class ColumnRef(Expression[T]):
 
     def __repr__(self) -> str:
         return ".".join((self._root.__name__, *self._path, self._field.name))
+
+
+class Excluded(Expression[T]):
+    """``excluded(Post.views)``: the value a conflicting insert proposed for a column,
+    usable in ``on_conflict(...).do_update(views=Post.views + excluded(Post.views))``."""
+
+    __slots__ = ("_column",)
+
+    def __init__(self, column: ColumnRef[T]) -> None:
+        if not isinstance(column, ColumnRef) or column._path:
+            raise TypeError(f"excluded() takes a column of the inserted model, got {column!r}")
+        self._column = column
+
+    def _ir(self, ctx: IRContext) -> IR:
+        self._column._ir(ctx)  # checks the model
+        return {"t": "excluded", "name": self._column._field.name}
+
+    def __repr__(self) -> str:
+        return f"excluded({self._column!r})"
+
+
+def excluded(column: ColumnRef[T]) -> Excluded[T]:
+    """The row an upsert tried to insert: ``EXCLUDED.<column>`` in ``DO UPDATE``."""
+    return Excluded(column)
 
 
 class RelationPath(Generic[M]):

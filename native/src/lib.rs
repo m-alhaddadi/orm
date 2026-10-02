@@ -65,7 +65,7 @@ impl PySchema {
             Plan::Select(p) => p.stmt.to_string(PostgresQueryBuilder),
             Plan::Count(s) | Plan::Exists(s) => s.to_string(PostgresQueryBuilder),
             Plan::Update(s, _) => s.to_string(PostgresQueryBuilder),
-            Plan::Delete(s) => s.to_string(PostgresQueryBuilder),
+            Plan::Delete(s, _) => s.to_string(PostgresQueryBuilder),
         })
     }
 
@@ -253,7 +253,7 @@ impl Engine {
 impl Engine {
     /// Runs one query IR document. Returns, by operation:
     /// select -> `(rows, {relation: rows})`, count -> int, exists -> bool,
-    /// update / delete -> rows affected (update with `returning` -> rows).
+    /// update / delete -> rows affected (with `returning` -> rows).
     #[pyo3(signature = (op_json, params, tx = None))]
     fn run<'py>(
         &self,
@@ -302,9 +302,13 @@ impl Engine {
                     let rows = conn.query_all(build(&s)).await.map_err(db_err)?;
                     Python::attach(|py| rows_to_py(py, &rows, &types)?.into_py_any(py))
                 }
-                Plan::Delete(s) => {
+                Plan::Delete(s, None) => {
                     let n = conn.execute(build(&s)).await.map_err(db_err)?;
                     Python::attach(|py| n.into_py_any(py))
+                }
+                Plan::Delete(s, Some(types)) => {
+                    let rows = conn.query_all(build(&s)).await.map_err(db_err)?;
+                    Python::attach(|py| rows_to_py(py, &rows, &types)?.into_py_any(py))
                 }
             }
         })
@@ -313,8 +317,10 @@ impl Engine {
     /// `INSERT ... RETURNING` every column; returns the inserted rows as tuples.
     ///
     /// With `conflict` (unique field names) rows hitting that constraint update the
-    /// `update` fields from the new row, or are skipped if `update` is None.
-    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, tx = None))]
+    /// `update` fields from the new row and apply the `set` assignments (JSON list of
+    /// `{"field", "value"}` IR, parameters in `params`), or are skipped if `update` is
+    /// None.
+    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None))]
     #[allow(clippy::too_many_arguments)]
     fn insert<'py>(
         &self,
@@ -324,13 +330,19 @@ impl Engine {
         rows: &Bound<'py, PyList>,
         conflict: Option<Vec<String>>,
         update: Option<Vec<String>>,
+        set: Option<&str>,
+        params: Vec<Bound<'py, PyAny>>,
         tx: Option<&Bound<'py, Transaction>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let set: Vec<ir::Assignment> = match set {
+            Some(json) => serde_json::from_str(json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
+            None => vec![],
+        };
         let on_conflict = conflict.map(|target| match update {
-            Some(update) => plan::OnConflict::Update(target, update),
+            Some(update) => plan::OnConflict::Update(target, update, set),
             None => plan::OnConflict::Nothing(target),
         });
-        let (stmt, types) = plan::plan_insert(&self.schema, model, &fields, rows, on_conflict)?;
+        let (stmt, types) = plan::plan_insert(&self.schema, model, &fields, rows, on_conflict, &params)?;
         let conn = self.conn(tx);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let rows = conn.query_all(build(&stmt)).await.map_err(db_err)?;
@@ -490,6 +502,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DEFAULT", Py::new(py, DefaultMarker)?)?;
     m.add("DatabaseError", py.get_type::<errors::DatabaseError>())?;
     m.add("IntegrityError", py.get_type::<errors::IntegrityError>())?;
+    m.add("LockNotAvailable", py.get_type::<errors::LockNotAvailable>())?;
     m.add("QueryError", py.get_type::<errors::QueryError>())?;
     m.add("SchemaError", py.get_type::<errors::SchemaError>())?;
     Ok(())

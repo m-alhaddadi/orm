@@ -7,7 +7,7 @@ import json
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from .errors import QueryError
+from .errors import QueryError, TransactionRequired
 from .expr import (
     ColumnRef,
     Condition,
@@ -21,7 +21,7 @@ from .expr import (
     not_,
 )
 from .fields import BelongsTo, HasMany
-from .write import InsertMany, InsertOne, prepare_rows
+from .write import Delete, InsertMany, InsertOne, Update, prepare_rows
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -49,7 +49,7 @@ class QuerySet(Generic[M]):
     ``exclude(User.posts.published == False)`` keeps users with no unpublished post.
     """
 
-    __slots__ = ("_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_db")
+    __slots__ = ("_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db")
 
     def __init__(self, model: type[M]) -> None:
         self._model = model
@@ -59,6 +59,7 @@ class QuerySet(Generic[M]):
         self._offset: int | None = None
         self._related: tuple[tuple[str, ...], ...] = ()
         self._prefetch: tuple[str, ...] = ()
+        self._lock: dict[str, bool] | None = None
         self._db: Database | None = None
 
     @property
@@ -145,6 +146,20 @@ class QuerySet(Generic[M]):
                 prefetch.append(p._path[0])
         return self._clone(_prefetch=tuple(prefetch))
 
+    def lock(self, exclusive: bool = True, *, nowait: bool = False, skip_locked: bool = False) -> Self:
+        """Lock the rows this query reads until the transaction ends.
+
+        ``exclusive=True`` is ``FOR UPDATE`` (others can't lock, update or delete the
+        rows), ``False`` is ``FOR SHARE`` (others can read-lock them too, but not change
+        them). Only this model's rows are locked, not rows joined by ``select_related``.
+        Rows locked by another transaction are waited for, unless ``nowait`` (raise
+        :class:`~orm.LockNotAvailable`) or ``skip_locked`` (leave them out, e.g. for job
+        queues). Must run inside ``db.transaction()``.
+        """
+        if nowait and skip_locked:
+            raise ValueError("lock() takes nowait or skip_locked, not both")
+        return self._clone(_lock={"exclusive": exclusive, "nowait": nowait, "skip_locked": skip_locked})
+
     def using(self, db: Database | None) -> Self:
         return self._clone(_db=db)
 
@@ -171,11 +186,17 @@ class QuerySet(Generic[M]):
             ir["select_related"] = [list(p) for p in self._related]
         if self._prefetch and op == "select":
             ir["prefetch"] = list(self._prefetch)
+        if self._lock is not None:
+            if op != "select":
+                raise QueryError(f"{op}() can't lock rows; lock() applies to reading rows")
+            ir["lock"] = self._lock
         return ir
 
     def _mutation_ir(self, op: str, params: list[Any]) -> dict[str, Any]:
         if self._limit is not None or self._offset is not None:
             raise QueryError(f"{op}() is not supported on a sliced query set")
+        if self._lock is not None:
+            raise QueryError(f"{op}() locks the rows it changes; drop lock()")
         ctx = IRContext(self._model, params)
         return {"op": op, "model": self._model._meta.name, "filters": [f._ir(ctx) for f in self._filters]}
 
@@ -197,8 +218,19 @@ class QuerySet(Generic[M]):
 
     async def _fetch(self) -> list[M]:
         params: list[Any] = []
-        rows, prefetched = await self._run(self._select_ir("select", params), params)
-        objs = self._materialize(rows, prefetched)
+        ir = self._select_ir("select", params)
+        if self._lock is not None:
+            from .db import resolve
+
+            if resolve(self._db)._tx() is None:
+                raise TransactionRequired(
+                    "lock() outside a transaction would release the locks as soon as the "
+                    "query ends; run it inside `async with db.transaction():`"
+                )
+        rows, prefetched = await self._run(ir, params)
+        return self._adopt(self._materialize(rows, prefetched))
+
+    def _adopt(self, objs: list[M]) -> list[M]:
         if self._db is not None:  # instance writes go back to the same database
             for o in objs:
                 o.__dict__["_db"] = self._db
@@ -310,37 +342,16 @@ class QuerySet(Generic[M]):
         b: bool = await self._run(self._select_ir("exists", params), params)
         return b
 
-    async def update(self, **values: Any) -> int:
+    def update(self, **values: Any) -> Update[M]:
         """``UPDATE`` every matching row; values may be expressions, e.g.
-        ``views=Post.views + 1``. Returns the number of rows updated."""
-        n: int = await self._update(values, returning=False)
-        return n
+        ``views=Post.views + 1``. ``await`` gives the number of rows updated;
+        ``await qs.update(...).returning()`` gives the updated rows instead."""
+        return Update.build(self, values)
 
-    async def _update(self, values: dict[str, Any], *, returning: bool) -> Any:
-        meta = self._model._meta
-        params: list[Any] = []
-        ir = self._mutation_ir("update", params)
-        ctx = IRContext(self._model, params)
-        assignments = []
-        for name, value in values.items():
-            rel = meta.relations.get(name)
-            if isinstance(rel, BelongsTo):
-                name, value = rel.via, (None if value is None else getattr(value, rel.to))
-            if name not in meta.fields:
-                raise TypeError(f"{meta.name} has no field {name!r}")
-            node = value._ir(ctx) if isinstance(value, Expression) else ctx.param(value)
-            assignments.append({"field": name, "value": node})
-        if not assignments:
-            return [] if returning else 0
-        ir["set"] = assignments
-        ir["returning"] = returning
-        return await self._run(ir, params)
-
-    async def delete(self) -> int:
-        """``DELETE`` every matching row. Returns the number of rows deleted."""
-        params: list[Any] = []
-        n: int = await self._run(self._mutation_ir("delete", params), params)
-        return n
+    def delete(self) -> Delete[M]:
+        """``DELETE`` every matching row. ``await`` gives the number of rows deleted;
+        ``await qs.delete().returning()`` gives the deleted rows instead."""
+        return Delete.build(self)
 
     def insert(self, **values: Any) -> InsertOne[M]:
         """``INSERT`` one row; ``await`` gives the new instance with database defaults

@@ -14,17 +14,19 @@ from .errors import (
     DatabaseError,
     DoesNotExist,
     IntegrityError,
+    LockNotAvailable,
     MultipleObjectsReturned,
     NotConnected,
     NotLoaded,
     ORMError,
     QueryError,
     SchemaError,
+    TransactionRequired,
 )
-from .expr import ColumnRef, Condition, Expression, Ordering, RelationPath, and_, not_, or_
+from .expr import ColumnRef, Condition, Expression, Ordering, RelationPath, and_, excluded, not_, or_
 from .model import Model, Registry, define, load, loads, registry
 from .query import QuerySet, RelatedSet
-from .write import InsertMany, InsertOne, OnConflictMany, OnConflictOne
+from .write import Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update
 
 __all__ = [
     "fields",
@@ -43,6 +45,9 @@ __all__ = [
     "InsertMany",
     "OnConflictOne",
     "OnConflictMany",
+    "Update",
+    "Delete",
+    "Returning",
     "Expression",
     "ColumnRef",
     "RelationPath",
@@ -51,13 +56,16 @@ __all__ = [
     "and_",
     "or_",
     "not_",
+    "excluded",
     "ORMError",
     "DatabaseError",
     "IntegrityError",
+    "LockNotAvailable",
     "QueryError",
     "SchemaError",
     "DoesNotExist",
     "MultipleObjectsReturned",
     "NotLoaded",
     "NotConnected",
+    "TransactionRequired",
 ]

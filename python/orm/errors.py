@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from ._native import DatabaseError, IntegrityError, QueryError, SchemaError
+from ._native import DatabaseError, IntegrityError, LockNotAvailable, QueryError, SchemaError
 
 __all__ = [
     "ORMError",
     "DatabaseError",
     "IntegrityError",
+    "LockNotAvailable",
     "QueryError",
     "SchemaError",
     "DoesNotExist",
     "MultipleObjectsReturned",
     "NotLoaded",
     "NotConnected",
+    "TransactionRequired",
 ]
 
 
@@ -39,3 +41,8 @@ class NotLoaded(ORMError, AttributeError):
 
 class NotConnected(ORMError, RuntimeError):
     """No database: call ``await orm.connect(url)`` first."""
+
+
+class TransactionRequired(ORMError, RuntimeError):
+    """A lock was asked for outside ``db.transaction()``, where it would be released
+    as soon as the statement ends."""

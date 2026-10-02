@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,7 +10,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from . import _native
-from .errors import NotConnected
+from .errors import NotConnected, TransactionRequired
 from .model import Registry, registry
 
 __all__ = ["Database", "connect", "get_database"]
@@ -42,8 +43,10 @@ class Database:
         rows: list[list[Any]],
         conflict: list[str] | None = None,
         update: list[str] | None = None,
+        set_: tuple[list[dict[str, Any]], list[Any]] | None = None,
     ) -> list[tuple[Any, ...]]:
-        return await self._engine.insert(model, fields, rows, conflict, update, self._tx())
+        set_json, params = (json.dumps(set_[0]), set_[1]) if set_ is not None else (None, [])
+        return await self._engine.insert(model, fields, rows, conflict, update, set_json, params, self._tx())
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
@@ -62,6 +65,31 @@ class Database:
             raise
         _current_tx.reset(token)
         await tx.commit()
+
+    async def lock(self, key: int | str, exclusive: bool = True, *, nowait: bool = False) -> bool:
+        """Take an advisory lock on ``key`` until the transaction ends: a lock on a
+        name rather than on rows, e.g. "only one worker imports this file at a time".
+
+        ``exclusive=False`` takes a shared lock (any number of shared holders, but no
+        exclusive one). Waits for the lock unless ``nowait``, in which case it returns
+        ``False`` instead of waiting. A ``str`` key is hashed to a 64-bit one (the first
+        8 bytes of its BLAKE2b digest, signed big-endian). Must run inside
+        ``db.transaction()``.
+        """
+        if self._tx() is None:
+            raise TransactionRequired(
+                "db.lock() outside a transaction would release the lock at once; "
+                "run it inside `async with db.transaction():`"
+            )
+        if isinstance(key, bool) or not isinstance(key, (int, str)):
+            raise TypeError(f"lock key must be an int or a str, got {key!r}")
+        if isinstance(key, str):
+            key = int.from_bytes(hashlib.blake2b(key.encode(), digest_size=8).digest(), "big", signed=True)
+        if not -(2**63) <= key < 2**63:
+            raise ValueError("lock key must fit in 64 bits")
+        fn = "pg_" + ("try_" if nowait else "") + "advisory_xact_lock" + ("" if exclusive else "_shared")
+        rows = await self._fetch_text(f"SELECT {fn}({int(key)})::text")
+        return not nowait or rows[0][0] == "true"
 
     async def execute(self, sql: str) -> int:
         """Run raw SQL (one or more statements); returns the number of rows affected."""
