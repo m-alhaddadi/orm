@@ -427,6 +427,11 @@ impl Client {
         })
     }
 
+    /// `await client.noop()` -> None. Measures the bare asyncio <-> Tokio bridge cost.
+    fn noop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(()) })
+    }
+
     /// `await client.execute(sql)` -> rows affected. Raw escape hatch for setup.
     fn execute<'py>(&self, py: Python<'py>, sql: String) -> PyResult<Bound<'py, PyAny>> {
         let db = self.db.clone();

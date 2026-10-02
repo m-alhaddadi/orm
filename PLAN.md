@@ -170,12 +170,12 @@ execution — the runtime stays in Rust.
 
 ## Roadmap
 
-### Phase 0 — Performance feasibility check  ← current
+### Phase 0 — Performance feasibility check  ✅ done, see [`bench/RESULTS.md`](bench/RESULTS.md)
 
 Question: is `Python → PyO3 → SeaORM → Postgres` competitive with a mature Python ORM
 once you count FFI and Python object materialization?
 
-- Django project on PostgreSQL with 3 models (`Author`, `Post`, `Comment`), seeded with
+- All async (asyncio). Django project on PostgreSQL with 3 models (`Author`, `Post`, `Comment`), seeded with
   1000 posts.
 - Read and write 1, 50 and 1000 objects through:
   - Django ORM (model instances, and `.values()` dicts)
@@ -184,6 +184,9 @@ once you count FFI and Python object materialization?
   - Pure Rust SeaORM (no Python, as a lower bound)
 - Also measure the "bad" pattern: N separate single-row calls across the FFI boundary.
 - Deliverable: `bench/RESULTS.md`.
+- Outcome: PyO3 + SeaORM is 2–4.5× faster than Django / SQLAlchemy async for reads and
+  bulk writes. Follow-ups: sqlx's missing `TCP_NODELAY` (≈40 ms stall on large
+  statements over TCP) and the ~115 µs asyncio ↔ Tokio bridge cost per call.
 
 ### Phase 1 — First prototype
 
