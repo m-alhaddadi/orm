@@ -38,6 +38,8 @@ pub struct Capabilities {
     pub update_from_values: bool,
     /// `SAVEPOINT` for nested transactions.
     pub savepoints: bool,
+    /// `SELECT DISTINCT ON (...)`.
+    pub distinct_on: bool,
 }
 
 impl Dialect {
@@ -60,6 +62,7 @@ impl Dialect {
                 lock_skip_locked: true,
                 update_from_values: true,
                 savepoints: true,
+                distinct_on: true,
             },
         }
     }
@@ -92,6 +95,7 @@ impl Target {
                 "lock_skip_locked" => &mut self.caps.lock_skip_locked,
                 "update_from_values" => &mut self.caps.update_from_values,
                 "savepoints" => &mut self.caps.savepoints,
+                "distinct_on" => &mut self.caps.distinct_on,
                 other => return Err(format!("unknown capability {other:?}")),
             };
             *flag = false;

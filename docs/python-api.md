@@ -19,11 +19,13 @@ automatically: each relation hop becomes a correlated `EXISTS`.
 
 | Path | What |
 |---|---|
-| `python/orm/` | Python package: `expr.py` (expressions → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
+| `python/orm/` | Python package: `expr.py` (expressions, `func` → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet), `select.py` (`select()`, `Row`), `write.py` (insert / update / delete statements), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
 | `core/` | Rust crate `orm-core`, no binding code: schema language, IR (`ir.rs`), extensions, migrations, code generation, the `orm` CLI (see [`schema.md`](schema.md)) |
 | `native/` | Rust crate `orm._native` (PyO3) on top of `orm-core`: `plan.rs` (IR → sea-query statements), `db/` (drivers: `mod.rs` traits, `postgres.rs`), `convert.rs` (Python ↔ values), `lib.rs` |
 | `examples/blog/` | `schema.orm`, the `models.py` / `models.pyi` generated from it, its migrations, `demo.py` |
 | `tests/` | SQL shape tests (no DB), Postgres end-to-end tests, mypy + pyright stub checks |
+
+Python 3.11 or newer (`select()` rows are typed with `TypeVarTuple`).
 
 ```bash
 uv venv .venv && . .venv/bin/activate
@@ -123,6 +125,78 @@ post.author                         # NotLoaded unless select_related
 ```
 
 The main query and its prefetch queries run in the same Rust call.
+
+### Big tables: batches
+
+```python
+async for post in Post.objects.filter(Post.published).iterate(batch_size=1000):
+    ...
+async for batch in Post.objects.batches(500):      # list[Post] per batch
+    await search_index.add(batch)
+```
+
+Each batch is `WHERE <filters> AND id > <last id> ORDER BY id LIMIT n` (keyset paging, no
+`OFFSET`), so memory stays flat and every batch is an index range scan. `select_related`,
+`prefetch_related` and `lock()` apply per batch; `order_by` and slicing are rejected.
+
+## Columns and aggregates: `select()`
+
+`select()` is the one way to read anything other than whole instances. It replaces
+Django's `values()`, `values_list()`, `aggregate()` and `annotate()`:
+
+```python
+rows = await (
+    Post.objects.filter(Post.published)
+    .select(Post.author_id, func.count().label("posts"), func.sum(Post.views).label("views"))
+    .group_by(Post.author_id)
+    .having(func.count() > 2)
+    .order_by(func.count().desc())
+)
+rows[0].posts; rows[0][1]; author_id, posts, views = rows[0]    # Row: a tuple with names
+
+await Post.objects.select(func.max(Post.views)).scalar()         # int | None
+await Post.objects.filter(...).select(Post.id).scalars()          # list[int]
+await qs.select(...).first() / .one()                             # one Row
+await Post.objects.select(Post.title, Post.author.name.label("author"))   # to-one: LEFT JOIN
+await Post.objects.select(Post.author_id).distinct()
+await Post.objects.select(Post.title).distinct(Post.author_id).order_by(Post.author_id, Post.views.desc())
+
+# The model plus computed values (Django's annotate):
+for user, n_posts, views in await User.objects.select(User, func.count(User.posts), func.sum(User.posts.views)):
+    ...
+# Aggregates over relations also filter:
+await User.objects.filter(func.count(User.posts) > 2)
+# Subqueries:
+await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(User.id)))
+```
+
+| Django | here |
+|---|---|
+| `values("id", "title")` / `values_list(...)` | `select(Post.id, Post.title)` |
+| `values_list("id", flat=True)` | `select(Post.id).scalars()` |
+| `aggregate(total=Sum("views"))` | `select(func.sum(Post.views)).scalar()` |
+| `values("author").annotate(n=Count("id"))` | `select(Post.author_id, func.count()).group_by(Post.author_id)` |
+| `annotate(n=Count("posts"))` → `user.n` | `select(User, func.count(User.posts))` → `(user, n)` rows |
+
+* **Rows** are `Row`s: tuple subclasses (index, unpack, compare with tuples) whose items
+  also have names: the field name for columns, `.label()` for expressions, the function
+  name for functions (`count`, `sum`), the lower-case model name for a model. Two columns
+  with the same name must be labelled. Statically a row is `Row[int, int, int | None]`
+  (from overloads of `select()`), so unpacking and indexing are typed; names are `Any`.
+  Selecting fewer columns is about twice as fast as building instances (1000 rows: 1.2 ms
+  vs 2.3 ms here).
+* **Aggregates** are `func.count` / `sum` / `avg` / `min` / `max`; scalar functions are
+  `lower`, `upper`, `length`, `abs`, `coalesce`, `now`. Over the model's own columns an
+  aggregate summarizes the rows (of each `group_by()` group). Over a relation path it is
+  computed **per row in a correlated subquery**: `func.count(User.posts)` is `(SELECT
+  COUNT(*) FROM posts WHERE posts.author_id = users.id)`. So two aggregates over different
+  relations never multiply each other, unlike Django's JOIN-based `annotate(Count(...),
+  Count(...))`, and they work in `filter()` too.
+* Integer `SUM`s come back as `int` (cast to `bigint`), `AVG` as `float`.
+* Columns through to-one relations are `LEFT JOIN`ed; a to-many column outside an
+  aggregate is rejected (it would repeat rows).
+* `lock()` works with plain column selects, not with aggregates, `group_by` or
+  `distinct`. `select_related` / `prefetch_related` don't combine with `select()`.
 
 ## Writes
 
@@ -318,8 +392,8 @@ TLS on, the TLS cost hides the difference)
 
 ## Not done yet
 
-* `values()` / `values_list()`, aggregates beyond `count()`, `annotate`, `distinct`,
-  `in_bulk`.
+* `in_bulk`, `exists()` as an expression, scalar subqueries, window functions, more SQL
+  functions (one line each in the planner).
 * Drivers for MySQL and SQLite; schema checks against a dialect's capabilities.
 * Nested `prefetch_related` paths and `Prefetch(queryset=...)`.
 * Building instances in Rust (the remaining per-row cost), caching of compiled plans,

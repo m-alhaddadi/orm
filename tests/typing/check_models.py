@@ -6,7 +6,7 @@ from typing import assert_type
 
 from blog.models import Comment, Post, PostInsert, PostQuerySet, User, UserQuerySet
 
-from orm import ColumnRef, Condition, RelatedSet, excluded
+from orm import ColumnRef, Condition, RelatedSet, Row, excluded, func
 from orm import get_database as orm_db
 
 
@@ -58,6 +58,21 @@ async def check() -> None:
     assert_type(bumped, Post)
     assert_type(await Post.objects.update_many([{"id": 1, "views": 2}]), int)
     assert_type(await Post.objects.update_many([{"id": 1, "author": alice}]).returning(), list[Post])
+    grouped = await Post.objects.select(Post.author_id, func.count(), func.sum(Post.views)).group_by(Post.author_id)
+    assert_type(grouped, list[Row[int, int, int | None]])
+    aid, n, total = grouped[0]
+    assert_type((aid, n, total), tuple[int, int, int | None])
+    assert_type(grouped[0][1], int)
+    grouped[0].anything  # untyped name access
+    assert_type(await Post.objects.select(func.max(Post.views)).scalar(), int | None)
+    assert_type(await Post.objects.select(Post.title).scalars(), list[str])
+    pairs = await User.objects.select(User, func.count(User.posts))
+    assert_type(pairs[0][0], User)
+    async for batch in Post.objects.batches(100):
+        assert_type(batch, list[Post])
+    async for one in Post.objects.iterate():
+        assert_type(one, Post)
+    Post.objects.filter(Post.author_id.in_(User.objects.select(User.id)))
     assert_type(Post.objects.lock(exclusive=False, skip_locked=True), PostQuerySet)
     assert_type(await Post.objects.lock().get(Post.id == 1), Post)
     assert_type(await orm_db().lock("key", nowait=True), bool)
@@ -75,6 +90,8 @@ async def errors() -> None:
     await Post.objects.update(views="many")  # E: wrong type
     await Post.objects.update(nope=1).returning()  # E: unknown field
     await Post.objects.update_many([{"views": 2}])  # E: missing primary key
+    await Post.objects.select(Post.id, Post.title).scalars()  # E: scalars() needs one column
+    func.lower(Post.views)  # E: lower() of an int column
     await Post.objects.update_many([{"id": 1, "views": Post.views + 1}])  # E: no expressions
     u = await User.objects.get(User.id == 1)
     u.name = "B"  # E: instances are read-only

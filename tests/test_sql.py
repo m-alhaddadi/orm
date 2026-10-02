@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 from blog.models import Comment, Post, User
 
-from orm import QueryError, and_, excluded, or_
+from orm import QueryError, and_, excluded, func, or_
 
 Y = datetime(2026, 10, 1, tzinfo=timezone.utc)
 USER_COLS = 'SELECT "users"."id", "users"."email", "users"."name", "users"."created_at" FROM "users"'
@@ -190,3 +190,75 @@ def test_update_many_validation():
         Post.objects.all()[:2].update_many([{"id": 1, "views": 1}])
     with pytest.raises(ValueError):
         Post.objects.update_many([{"id": 1, "views": 1}], batch_size=0)
+
+
+def test_select_group_by_having():
+    sql = (
+        Post.objects.filter(Post.published)
+        .select(Post.author_id, func.count().label("n"), func.sum(Post.views))
+        .group_by(Post.author_id)
+        .having(func.count() > 2)
+        .sql()
+    )
+    assert sql == (
+        'SELECT "posts"."author_id", COUNT(*), CAST(SUM("posts"."views") AS BIGINT) FROM "posts" '
+        'WHERE "posts"."published" = TRUE GROUP BY "posts"."author_id" HAVING (COUNT(*)) > 2'
+    )
+
+
+def test_aggregate_over_relation_is_a_correlated_subquery():
+    sql = User.objects.select(User.id, func.count(User.posts), func.max(User.posts.views)).sql()
+    assert sql == (
+        'SELECT "users"."id", '
+        '(SELECT COUNT(*) FROM "posts" AS "a1" WHERE "a1"."author_id" = "users"."id"), '
+        '(SELECT MAX("a2"."views") FROM "posts" AS "a2" WHERE "a2"."author_id" = "users"."id") FROM "users"'
+    )
+    # Two hops join inside the subquery; in WHERE it filters per row, no EXISTS / JOIN outside.
+    w = where(User.objects.filter(func.count(User.posts.comments) > 3))
+    assert w == (
+        '(SELECT COUNT(*) FROM "posts" AS "a1" INNER JOIN "comments" AS "a2" ON "a2"."post_id" = "a1"."id" '
+        'WHERE "a1"."author_id" = "users"."id") > 3'
+    )
+
+
+def test_select_to_one_columns_join_and_to_many_is_rejected():
+    sql = Post.objects.select(Post.title, Post.author.name.label("author")).sql()
+    assert sql == (
+        'SELECT "posts"."title", "j1"."name" FROM "posts" LEFT JOIN "users" AS "j1" ON "j1"."id" = "posts"."author_id"'
+    )
+    with pytest.raises(QueryError, match="aggregate it"):
+        User.objects.select(User.posts.title).sql()
+
+
+def test_subquery_and_distinct():
+    inner = User.objects.filter(User.name == "A").select(User.id)
+    assert where(Post.objects.filter(Post.author_id.in_(inner))) == (
+        '"posts"."author_id" IN (SELECT "users"."id" FROM "users" WHERE "users"."name" = \'A\')'
+    )
+    assert "NOT IN (SELECT" in where(Post.objects.filter(Post.author_id.not_in(inner)))
+    with pytest.raises(QueryError, match="exactly one column"):
+        Post.objects.filter(Post.author_id.in_(User.objects.select(User.id, User.name))).sql()
+    assert Post.objects.select(Post.author_id).distinct().sql().startswith('SELECT DISTINCT "posts"."author_id"')
+    sql = Post.objects.select(Post.title).distinct(Post.author_id).order_by(Post.author_id, Post.views.desc()).sql()
+    assert sql.startswith('SELECT DISTINCT ON ("posts"."author_id") "posts"."title" FROM "posts"')
+
+
+def test_select_validation():
+    with pytest.raises(ValueError, match="label"):
+        Post.objects.select(Post.id, User.id)  # both named "id"
+    with pytest.raises(TypeError):
+        Post.objects.select(User)
+    with pytest.raises(TypeError):
+        Post.objects.select(1)
+    with pytest.raises(QueryError):
+        Post.objects.select_related(Post.author).select(Post.id)
+    with pytest.raises(QueryError, match="unknown function"):
+        Post.objects.select(orm_func("nope", Post.id)).sql()
+    with pytest.raises(QueryError, match="lock"):
+        Post.objects.lock().select(func.count()).sql()
+
+
+def orm_func(name, *args):
+    from orm.expr import Func
+
+    return Func(name, args)

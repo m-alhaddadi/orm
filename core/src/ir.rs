@@ -400,6 +400,29 @@ pub enum Expr {
     Like { item: Box<Expr>, pattern: Box<Expr>, #[serde(default)] ci: bool, #[serde(default)] neg: bool },
     /// `EXCLUDED.<field>`: the row proposed for insertion, in an upsert's `DO UPDATE`.
     Excluded { name: String },
+    /// A SQL function. Aggregates (`count`, `sum`, ...) whose arguments go through a
+    /// to-many relation are computed per row in a correlated subquery; `count` with no
+    /// argument (or a relation path in `rel`) counts rows.
+    Func {
+        name: String,
+        #[serde(default)]
+        args: Vec<Expr>,
+        /// `count(User.posts)`: the relation whose rows are counted.
+        #[serde(default)]
+        rel: Option<Vec<String>>,
+        #[serde(default)]
+        distinct: bool,
+    },
+    /// `<item> [NOT] IN (SELECT <one column> ...)`.
+    InSelect { item: Box<Expr>, select: Box<Select>, #[serde(default)] neg: bool },
+}
+
+/// One entry of `select(...)`: every column of the root model, or an expression.
+#[derive(Deserialize, Debug)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum SelectItem {
+    Model,
+    Expr { expr: Expr },
 }
 
 #[derive(Deserialize, Debug)]
@@ -433,6 +456,19 @@ pub struct Select {
     /// Row lock on the root model's rows (`FOR UPDATE` / `FOR SHARE`). Select only.
     #[serde(default)]
     pub lock: Option<Lock>,
+    /// `select(...)`: the columns to return instead of the root model's fields.
+    #[serde(default)]
+    pub columns: Option<Vec<SelectItem>>,
+    #[serde(default)]
+    pub group_by: Vec<Expr>,
+    /// Conditions on groups, AND-ed.
+    #[serde(default)]
+    pub having: Vec<Expr>,
+    /// `SELECT DISTINCT`; with `distinct_on`, `DISTINCT ON (...)`.
+    #[serde(default)]
+    pub distinct: bool,
+    #[serde(default)]
+    pub distinct_on: Vec<Expr>,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy)]

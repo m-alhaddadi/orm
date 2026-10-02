@@ -335,6 +335,101 @@ async def test_fallback_sql_runs_on_postgres(clean):
         await db.close()
 
 
+async def test_select_rows(clean):
+    alice, bob, carol, (a1, a2, b1) = await seed()
+    from orm import func
+
+    rows = await (
+        Post.objects.select(Post.author_id, func.count().label("posts"), func.sum(Post.views).label("views"))
+        .group_by(Post.author_id)
+        .order_by(Post.author_id)
+    )
+    assert rows == [(alice.id, 2, 55), (bob.id, 1, 100)]
+    r = rows[0]
+    assert (r.author_id, r.posts, r.views) == (alice.id, 2, 55)
+    assert r._asdict() == {"author_id": alice.id, "posts": 2, "views": 55}
+    assert repr(r) == f"Row(author_id={alice.id}, posts=2, views=55)"
+    author_id, posts, views = r
+    assert isinstance(r, tuple) and type(r).__name__ == "Row"
+    import pickle
+
+    assert pickle.loads(pickle.dumps(r)) == r and pickle.loads(pickle.dumps(r)).posts == 2
+
+    many = await Post.objects.select(Post.author_id, func.count()).group_by(Post.author_id).having(func.count() > 1)
+    assert many == [(alice.id, 2)]
+
+    assert await Post.objects.select(func.max(Post.views)).scalar() == 100
+    assert await Post.objects.filter(Post.views > 1000).select(func.max(Post.views)).scalar() is None
+    assert await Post.objects.filter(Post.views > 1000).select(Post.id).scalar() is None
+    assert await Post.objects.select(func.count()).scalar() == 3
+    assert await Post.objects.select(func.avg(Post.views)).scalar() == pytest.approx(155 / 3)
+    assert sorted(await Post.objects.select(Post.title).scalars()) == ["bob's old", "new post", "old draft"]
+    assert await Post.objects.select(func.lower(Post.title)).order_by(Post.id).first() == ("old draft",)
+    one = await Post.objects.filter(Post.id == b1.id).select(Post.title, Post.author.name.label("author")).one()
+    assert (one.title, one.author) == ("bob's old", "Bob")
+    with pytest.raises(orm.DoesNotExist):
+        await Post.objects.filter(Post.id == -1).select(Post.id).one()
+    with pytest.raises(orm.MultipleObjectsReturned):
+        await Post.objects.select(Post.id).one()
+    with pytest.raises(orm.QueryError):
+        await Post.objects.select(Post.id, Post.title).scalars()
+    assert sorted(await Post.objects.select(Post.author_id).distinct().scalars()) == sorted([alice.id, bob.id])
+    top = await Post.objects.select(Post.author_id, Post.title).distinct(Post.author_id).order_by(
+        Post.author_id, Post.views.desc()
+    )
+    assert top == [(alice.id, "new post"), (bob.id, "bob's old")]
+    assert [r async for r in Post.objects.select(Post.id).order_by(Post.id)] == [(a1.id,), (a2.id,), (b1.id,)]
+
+
+async def test_select_model_with_relation_aggregates(clean):
+    alice, bob, carol, (a1, a2, b1) = await seed()
+    from orm import func
+
+    rows = await User.objects.select(User, func.count(User.posts).label("posts"), func.sum(User.posts.views)).order_by(
+        User.id
+    )
+    assert [(u.name, n, v) for u, n, v in rows] == [("Alice", 2, 55), ("Bob", 1, 100), ("Carol", 0, None)]
+    assert rows[0].user == alice and rows[0].posts == 2
+    # Two counts over different relations don't multiply each other (no JOIN fan-out).
+    rows = await User.objects.select(User.name, func.count(User.posts), func.count(User.comments).label("c")).order_by(
+        User.id
+    )
+    assert rows == [("Alice", 2, 1), ("Bob", 1, 1), ("Carol", 0, 0)]
+    # Comments on a user's posts: two hops in one subquery.
+    assert await User.objects.filter(User.id == alice.id).select(func.count(User.posts.comments)).scalar() == 2
+    # Aggregates over relations filter per row.
+    assert names(await User.objects.filter(func.count(User.posts) >= 1)) == ["Alice", "Bob"]
+    assert names(await User.objects.filter(func.coalesce(func.sum(User.posts.views), 0) > 60)) == ["Bob"]
+
+
+async def test_subqueries(clean):
+    alice, bob, carol, (a1, a2, b1) = await seed()
+    authors = User.objects.filter(User.name.in_(["Alice", "Carol"])).select(User.id)
+    assert {p.title for p in await Post.objects.filter(Post.author_id.in_(authors))} == {"old draft", "new post"}
+    assert [p.title for p in await Post.objects.filter(Post.author_id.not_in(authors))] == ["bob's old"]
+    popular = Post.objects.filter(Post.views >= 50).select(Post.author_id)
+    assert names(await User.objects.filter(User.id.in_(popular))) == ["Alice", "Bob"]
+
+
+async def test_batches(clean):
+    alice = await User.objects.insert(email="a@x.io", name="A")
+    posts = await Post.objects.insert_many([{"author": alice, "title": f"p{i}", "body": "b"} for i in range(25)])
+    sizes = [len(b) async for b in Post.objects.batches(10)]
+    assert sizes == [10, 10, 5]
+    seen = [p.id async for p in Post.objects.filter(Post.views == 0).iterate(batch_size=7)]
+    assert seen == sorted(p.id for p in posts)
+    assert [len(b) async for b in Post.objects.filter(Post.id < 0).batches(10)] == []
+    assert [len(b) async for b in Post.objects.all()[:0].filter(Post.id > 0).limit(None).batches(25)] == [25]
+    batch = await anext(Post.objects.select_related(Post.author).batches(3))
+    assert batch[0].author == alice
+    with pytest.raises(orm.QueryError):
+        await anext(Post.objects.order_by(Post.title).batches(10))
+    with pytest.raises(orm.QueryError):
+        await anext(Post.objects.all()[:5].batches(10))
+    async with orm.get_database().transaction():
+        assert len(await anext(Post.objects.lock(skip_locked=True).batches(4))) == 4
+
+
 async def _in_new_tx(fn):
     """Run ``fn`` in a separate transaction (a task outside the caller's one)."""
 

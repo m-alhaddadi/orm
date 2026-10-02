@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Unpack, overload
 
 from .errors import QueryError, TransactionRequired
 from .expr import (
@@ -28,8 +28,15 @@ if TYPE_CHECKING:
 
     from .db import Database
     from .model import Model
+    from .select import Select
 
 M = TypeVar("M", bound="Model")
+T1 = TypeVar("T1")
+T2 = TypeVar("T2")
+T3 = TypeVar("T3")
+T4 = TypeVar("T4")
+T5 = TypeVar("T5")
+T6 = TypeVar("T6")
 
 __all__ = ["QuerySet", "RelatedSet"]
 
@@ -163,6 +170,97 @@ class QuerySet(Generic[M]):
     def using(self, db: Database | None) -> Self:
         return self._clone(_db=db)
 
+    # -- select(...) ----------------------------------------------------------------------
+    # Each column is an expression (its value type) or the model itself (an instance).
+
+    @overload
+    def select(self, a: Expression[T1] | type[T1], /) -> Select[T1]: ...
+    @overload
+    def select(self, a: Expression[T1] | type[T1], b: Expression[T2] | type[T2], /) -> Select[T1, T2]: ...
+    @overload
+    def select(
+        self, a: Expression[T1] | type[T1], b: Expression[T2] | type[T2], c: Expression[T3] | type[T3], /
+    ) -> Select[T1, T2, T3]: ...
+    @overload
+    def select(
+        self,
+        a: Expression[T1] | type[T1],
+        b: Expression[T2] | type[T2],
+        c: Expression[T3] | type[T3],
+        d: Expression[T4] | type[T4],
+        /,
+    ) -> Select[T1, T2, T3, T4]: ...
+    @overload
+    def select(
+        self,
+        a: Expression[T1] | type[T1],
+        b: Expression[T2] | type[T2],
+        c: Expression[T3] | type[T3],
+        d: Expression[T4] | type[T4],
+        e: Expression[T5] | type[T5],
+        /,
+    ) -> Select[T1, T2, T3, T4, T5]: ...
+    @overload
+    def select(
+        self,
+        a: Expression[T1] | type[T1],
+        b: Expression[T2] | type[T2],
+        c: Expression[T3] | type[T3],
+        d: Expression[T4] | type[T4],
+        e: Expression[T5] | type[T5],
+        f: Expression[T6] | type[T6],
+        /,
+    ) -> Select[T1, T2, T3, T4, T5, T6]: ...
+    @overload
+    def select(self, *items: Expression[Any] | type[Model]) -> Select[Unpack[tuple[Any, ...]]]: ...
+    def select(self, *items: Any) -> Any:
+        """Rows of the given columns and aggregates instead of instances: see
+        :mod:`orm.select`. ``await qs.select(Post.id, Post.title)`` gives ``Row``s,
+        ``.scalars()`` / ``.scalar()`` one column's values."""
+        from .select import Select
+
+        return Select(self, items)
+
+    # -- batches --------------------------------------------------------------------------
+
+    async def batches(self, size: int = 1000) -> AsyncIterator[list[M]]:
+        """The rows in lists of ``size``, walking the primary key (``WHERE pk > last
+        ORDER BY pk LIMIT size``), so memory stays flat and each batch is an index
+        range scan. ``select_related``, ``prefetch_related`` and ``lock()`` apply per
+        batch; a custom ``order_by`` or slicing is rejected.
+
+        ::
+
+            async for batch in Post.objects.filter(Post.published).batches(500):
+                await index(batch)
+        """
+        if size < 1:
+            raise ValueError("batch size must be at least 1")
+        if self._order:
+            raise QueryError("batches() walk the primary key in order; drop order_by()")
+        if self._limit is not None or self._offset is not None:
+            raise QueryError("batches() can't be used on a sliced query set")
+        pk = self._model._meta.pk_ref()
+        last: Any = None
+        while True:
+            page = self if last is None else self.filter(pk > last)
+            objs = await page.order_by(pk)[:size]._fetch()
+            if objs:
+                yield objs
+            if len(objs) < size:
+                return
+            last = objs[-1].pk
+
+    async def iterate(self, batch_size: int = 1000) -> AsyncIterator[M]:
+        """Every row, fetched ``batch_size`` at a time (see :meth:`batches`)::
+
+            async for post in Post.objects.iterate():
+                ...
+        """
+        async for batch in self.batches(batch_size):
+            for obj in batch:
+                yield obj
+
     def _check_path(self, p: RelationPath[Any]) -> None:
         if not isinstance(p, RelationPath):
             raise TypeError(f"expected a relation such as {self._model.__name__}.<relation>, got {p!r}")
@@ -219,6 +317,11 @@ class QuerySet(Generic[M]):
     async def _fetch(self) -> list[M]:
         params: list[Any] = []
         ir = self._select_ir("select", params)
+        self._check_lock()
+        rows, prefetched = await self._run(ir, params)
+        return self._adopt(self._materialize(rows, prefetched))
+
+    def _check_lock(self) -> None:
         if self._lock is not None:
             from .db import resolve
 
@@ -227,8 +330,6 @@ class QuerySet(Generic[M]):
                     "lock() outside a transaction would release the locks as soon as the "
                     "query ends; run it inside `async with db.transaction():`"
                 )
-        rows, prefetched = await self._run(ir, params)
-        return self._adopt(self._materialize(rows, prefetched))
 
     def _adopt(self, objs: list[M]) -> list[M]:
         if self._db is not None:  # instance writes go back to the same database

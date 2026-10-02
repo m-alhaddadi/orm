@@ -22,7 +22,8 @@ use sea_query::{
 use crate::convert::py_to_value;
 use crate::errors::query_err;
 use orm_core::ir::{
-    ArithOp, Assignment, CmpOp, ColType, Delete, Expr, FieldIr, Lock, Operation, RelKind, Select, Update,
+    ArithOp, Assignment, CmpOp, ColType, Delete, Expr, FieldIr, Lock, Operation, RelKind, Select, SelectItem,
+    Update,
 };
 use orm_core::dialect::{Capabilities, Target};
 use orm_core::schema::Schema;
@@ -121,11 +122,59 @@ fn fold(items: Vec<SExpr>, and: bool) -> SExpr {
     }
 }
 
+const AGGREGATES: [&str; 5] = ["count", "sum", "avg", "min", "max"];
+const SCALAR_FUNCS: [&str; 6] = ["lower", "upper", "length", "abs", "coalesce", "now"];
+
+fn is_aggregate(name: &str) -> bool {
+    AGGREGATES.contains(&name)
+}
+
+/// Whether `e` contains an aggregate computed in this query (not in a subquery).
+fn has_local_aggregate(e: &Expr) -> bool {
+    match e {
+        Expr::Func { name, args, rel, .. } => {
+            let mut paths = vec![];
+            let mut has_not = false;
+            for a in args {
+                col_paths_all(a, &mut paths, &mut has_not);
+            }
+            (is_aggregate(name) && rel.is_none() && paths.iter().all(|p| p.is_empty()))
+                || args.iter().any(has_local_aggregate)
+        }
+        Expr::Cmp { l, r, .. } | Expr::Arith { l, r, .. } => has_local_aggregate(l) || has_local_aggregate(r),
+        Expr::And { items } | Expr::Or { items } => items.iter().any(has_local_aggregate),
+        Expr::Not { item } | Expr::IsNull { item, .. } => has_local_aggregate(item),
+        _ => false,
+    }
+}
+
+/// Like `col_paths`, but also inside aggregates.
+fn col_paths_all<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
+    match e {
+        Expr::Func { args, .. } => {
+            for a in args {
+                col_paths_all(a, out, has_not);
+            }
+        }
+        other => col_paths(other, out, has_not),
+    }
+}
+
 /// Collects every column path referenced by `e`; sets `has_not` if `e` contains a `NOT`.
+/// Aggregates and subqueries are opaque: an aggregate over a relation is its own
+/// correlated subquery, so its paths don't make the surrounding condition an `EXISTS`.
 fn col_paths<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
     match e {
         Expr::Col { path, .. } => out.push(path),
         Expr::Param { .. } | Expr::Const { .. } | Expr::Excluded { .. } => {}
+        Expr::Func { name, args, .. } => {
+            if !is_aggregate(name) {
+                for a in args {
+                    col_paths(a, out, has_not);
+                }
+            }
+        }
+        Expr::InSelect { item, .. } => col_paths(item, out, has_not),
         Expr::Cmp { l, r, .. } | Expr::Arith { l, r, .. } => {
             col_paths(l, out, has_not);
             col_paths(r, out, has_not);
@@ -356,6 +405,21 @@ impl<'s, 'py> Planner<'s, 'py> {
                     item.is_in(values)
                 }
             }
+            Expr::InSelect { item, select, neg } => {
+                let hint = self.hint_of(item);
+                let item = self.value(item, hint)?;
+                if select.columns.as_ref().map(Vec::len) != Some(1)
+                    || matches!(select.columns.as_deref(), Some([SelectItem::Model]))
+                {
+                    return Err(query_err("in_() takes a query that selects exactly one column".into()));
+                }
+                let sub = Planner::new(self.schema, self.target, &select.model, self.params)?.select(select)?;
+                if *neg {
+                    item.not_in_subquery(sub.stmt)
+                } else {
+                    item.in_subquery(sub.stmt)
+                }
+            }
             Expr::IsNull { item, neg } => {
                 let item = self.value(item, Hint::default())?;
                 if *neg {
@@ -407,6 +471,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             }
             // Arithmetic results are plain values: no write_sql cast.
             Expr::Arith { l, r, .. } => Hint { ty: self.hint_of(l).or(self.hint_of(r)).ty, field: None },
+            Expr::Func { .. } => Hint { ty: self.expr_type(e).ok(), field: None },
             _ => Hint::default(),
         }
     }
@@ -443,6 +508,7 @@ impl<'s, 'py> Planner<'s, 'py> {
                 let f = self.schema.model(self.root).field(name).map_err(query_err)?;
                 col("excluded", &f.column)
             }
+            Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
             Expr::Arith { op, l, r } => {
                 let inner = self.hint_of(l).or(self.hint_of(r));
                 let hint = Hint { ty: inner.ty.or(hint.ty), field: None };
@@ -457,6 +523,265 @@ impl<'s, 'py> Planner<'s, 'py> {
             }
             cond => self.cond(cond)?,
         })
+    }
+
+    // -- functions ----------------------------------------------------------------------
+
+    /// The column type of an expression's result, which decodes it.
+    fn expr_type(&self, e: &Expr) -> PyResult<ColType> {
+        Ok(match e {
+            Expr::Col { path, name } => {
+                let m = self.schema.walk(self.root, path).map_err(query_err)?;
+                self.schema.model(m).field(name).map_err(query_err)?.ty
+            }
+            Expr::Arith { l, r, .. } => match self.expr_type(l) {
+                Ok(t) => t,
+                Err(_) => self.expr_type(r)?,
+            },
+            Expr::Func { name, args, .. } => {
+                let first = || match args.first() {
+                    Some(a) => self.expr_type(a),
+                    None => Err(query_err(format!("{name}() needs an argument"))),
+                };
+                match name.as_str() {
+                    "count" => ColType::BigInt,
+                    "avg" => ColType::Float,
+                    "length" => ColType::Int,
+                    "lower" | "upper" => ColType::Text,
+                    "now" => ColType::DateTime,
+                    // SUM of integers is cast to bigint (see `func`).
+                    "sum" => match first()? {
+                        ColType::Int | ColType::BigInt => ColType::BigInt,
+                        t => t,
+                    },
+                    _ => first()?,
+                }
+            }
+            Expr::Cmp { .. }
+            | Expr::And { .. }
+            | Expr::Or { .. }
+            | Expr::Not { .. }
+            | Expr::In { .. }
+            | Expr::IsNull { .. }
+            | Expr::Like { .. }
+            | Expr::Const { .. }
+            | Expr::InSelect { .. } => ColType::Bool,
+            Expr::Param { .. } => {
+                return Err(query_err("select() takes columns and expressions, not plain values".into()))
+            }
+            Expr::Excluded { .. } => return Err(query_err("excluded() is only valid in do_update()".into())),
+        })
+    }
+
+    /// `name(args)`. An aggregate whose arguments (or `rel`) go through relations below
+    /// the current scope is computed per row, in a correlated subquery over those
+    /// relations: `func.count(User.posts)` is `(SELECT COUNT(*) FROM posts WHERE
+    /// posts.author_id = users.id)`, never a JOIN that would multiply rows.
+    fn func(&mut self, name: &str, args: &[Expr], rel: Option<&[String]>, distinct: bool) -> PyResult<SExpr> {
+        if !is_aggregate(name) && !SCALAR_FUNCS.contains(&name) {
+            return Err(query_err(format!("unknown function {name}()")));
+        }
+        if is_aggregate(name) {
+            let base = self.scope().path.clone();
+            let mut paths = vec![];
+            let mut has_not = false;
+            for a in args {
+                col_paths_all(a, &mut paths, &mut has_not);
+            }
+            let below: Vec<&[String]> = match rel {
+                Some(r) => vec![r],
+                None => paths.into_iter().filter(|p| p.len() > base.len() && p.starts_with(&base)).collect(),
+            };
+            if let Some(path) = below.first().map(|p| p.to_vec()) {
+                if below.iter().any(|p| *p != path.as_slice()) {
+                    return Err(query_err(format!(
+                        "{name}() over relations needs all its columns on one relation path"
+                    )));
+                }
+                return self.aggregate_subquery(name, args, &path, rel.is_some(), distinct);
+            }
+            if rel.is_none() && args.is_empty() && name != "count" {
+                return Err(query_err(format!("{name}() needs an argument")));
+            }
+        }
+        self.call(name, args, distinct)
+    }
+
+    /// The SQL call itself, arguments planned in the current scope.
+    fn call(&mut self, name: &str, args: &[Expr], distinct: bool) -> PyResult<SExpr> {
+        let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
+        let hint = Hint { ty: hint.ty, field: None };
+        let planned = args.iter().map(|a| self.value(a, hint)).collect::<PyResult<Vec<_>>>()?;
+        let d = if distinct { "DISTINCT " } else { "" };
+        let one = |tpl: &str, planned: Vec<SExpr>| -> PyResult<SExpr> {
+            match <[SExpr; 1]>::try_from(planned) {
+                Ok([a]) => Ok(SExpr::cust_with_expr(tpl.to_owned(), a)),
+                Err(_) => Err(query_err(format!("{name}() takes one argument"))),
+            }
+        };
+        Ok(match name {
+            "count" if planned.is_empty() => SExpr::cust("COUNT(*)"),
+            "count" => one(&format!("COUNT({d}$1)"), planned)?,
+            "sum" => {
+                let ty = args.first().map(|a| self.expr_type(a)).transpose()?;
+                if matches!(ty, Some(ColType::Int | ColType::BigInt)) {
+                    one(&format!("CAST(SUM({d}$1) AS BIGINT)"), planned)?
+                } else {
+                    one(&format!("SUM({d}$1)"), planned)?
+                }
+            }
+            "avg" => one(&format!("CAST(AVG({d}$1) AS DOUBLE PRECISION)"), planned)?,
+            "min" => one("MIN($1)", planned)?,
+            "max" => one("MAX($1)", planned)?,
+            "lower" => one("LOWER($1)", planned)?,
+            "upper" => one("UPPER($1)", planned)?,
+            "length" => one("LENGTH($1)", planned)?,
+            "abs" => one("ABS($1)", planned)?,
+            "now" if planned.is_empty() => SExpr::cust("CURRENT_TIMESTAMP"),
+            "coalesce" if !planned.is_empty() => {
+                let slots = (1..=planned.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+                SExpr::cust_with_exprs(format!("COALESCE({slots})"), planned)
+            }
+            _ => return Err(query_err(format!("wrong arguments for {name}()"))),
+        })
+    }
+
+    /// `(SELECT <agg> FROM <hop 1> a1 [JOIN <hop 2> a2 ON ...] WHERE a1.to = <scope>.from)`.
+    fn aggregate_subquery(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        path: &[String],
+        count_rows: bool,
+        distinct: bool,
+    ) -> PyResult<SExpr> {
+        let schema = self.schema;
+        let base = self.scope().path.clone();
+        let hops = &path[base.len()..];
+        let mut sub = Query::select();
+        let mut outer = (self.scope().alias.clone(), self.scope().model);
+        let pushed = self.scopes.len();
+        for (k, hop) in hops.iter().enumerate() {
+            let m = schema.model(outer.1);
+            let (rel, target) = m.relation(hop).map_err(query_err)?;
+            let from_col = &m.field(&rel.from).map_err(query_err)?.column;
+            let tm = schema.model(target);
+            let to_col = &tm.field(&rel.to).map_err(query_err)?.column;
+            let alias = self.alias("a");
+            let link = col(&alias, to_col).eq(col(&outer.0, from_col));
+            if k == 0 {
+                sub.from_as(Alias::new(tm.table()), Alias::new(&alias)).and_where(link);
+            } else {
+                sub.join_as(JoinType::InnerJoin, Alias::new(tm.table()), Alias::new(&alias), link);
+            }
+            self.scopes.push(Scope { path: path[..base.len() + k + 1].to_vec(), model: target, alias: alias.clone() });
+            outer = (alias, target);
+        }
+        let agg = if count_rows && args.is_empty() { self.call("count", &[], false) } else { self.call(name, args, distinct) };
+        self.scopes.truncate(pushed);
+        sub.expr(agg?);
+        Ok(SExpr::SubQuery(None, Box::new(sub.into())))
+    }
+
+    // -- select(...) ----------------------------------------------------------------------
+
+    fn select_columns(mut self, q: &Select, items: &[SelectItem]) -> PyResult<SelectPlan> {
+        if !q.select_related.is_empty() || !q.prefetch.is_empty() {
+            return Err(query_err("select() can't be combined with select_related / prefetch_related".into()));
+        }
+        if items.is_empty() {
+            return Err(query_err("select() needs at least one column".into()));
+        }
+        let schema = self.schema;
+        let root = schema.model(self.root);
+        let mut stmt = Query::select();
+        let mut types = vec![];
+        let mut aggregated = !q.group_by.is_empty() || !q.having.is_empty();
+        for item in items {
+            match item {
+                SelectItem::Model => {
+                    for f in root.fields() {
+                        stmt.expr(read_col(root.table(), f));
+                        types.push(f.ty);
+                    }
+                }
+                SelectItem::Expr { expr } => {
+                    self.join_paths(expr, "select()")?;
+                    aggregated |= has_local_aggregate(expr);
+                    types.push(self.expr_type(expr)?);
+                    let mut e = self.value(expr, Hint::default())?;
+                    if let Expr::Col { path, name } = expr {
+                        let m = schema.walk(self.root, path).map_err(query_err)?;
+                        let f = schema.model(m).field(name).map_err(query_err)?;
+                        if let Some(t) = &f.read_sql {
+                            e = SExpr::cust_with_expr(t.replace("{}", "$1"), e);
+                        }
+                    }
+                    stmt.expr(e);
+                }
+            }
+        }
+        for g in &q.group_by {
+            self.join_paths(g, "group_by()")?;
+            let e = self.value(g, Hint::default())?;
+            stmt.add_group_by([e]);
+        }
+        for h in &q.having {
+            let e = self.cond(h)?;
+            stmt.and_having(e);
+        }
+        if !q.distinct_on.is_empty() {
+            self.require(self.caps.distinct_on, "distinct(on=...)")?;
+            let mut cols = vec![];
+            for e in &q.distinct_on {
+                let Expr::Col { path, name } = e else {
+                    return Err(query_err("distinct(on=...) takes columns".into()));
+                };
+                self.join_paths(e, "distinct(on=...)")?;
+                let (alias, column) = self.resolve_parts(path, name)?;
+                cols.push((Alias::new(alias), Alias::new(column)));
+            }
+            stmt.distinct_on(cols);
+        } else if q.distinct {
+            stmt.distinct();
+        }
+        self.base_select(q, &mut stmt, true)?;
+        self.apply_joins(&mut stmt);
+        if let Some(lock) = q.lock {
+            if aggregated || q.distinct || !q.distinct_on.is_empty() {
+                return Err(query_err("lock() can't be used with aggregates, group_by() or distinct()".into()));
+            }
+            apply_lock(&mut stmt, lock, self.caps.lock_of.then(|| root.table()));
+        }
+        Ok(SelectPlan { stmt, types, prefetch: vec![] })
+    }
+
+    /// LEFT JOINs for the to-one paths `e` reads outside aggregates.
+    fn join_paths(&mut self, e: &Expr, why: &str) -> PyResult<()> {
+        let (mut paths, mut has_not) = (vec![], false);
+        col_paths(e, &mut paths, &mut has_not);
+        for p in paths.into_iter().filter(|p| !p.is_empty()) {
+            self.ensure_join(p, why).map_err(|_| {
+                query_err(format!(
+                    "{why} can follow only to-one relations, {} goes through a to-many one: \
+                     aggregate it instead, e.g. func.count(...)",
+                    p.join(".")
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn resolve_parts(&self, path: &[String], name: &str) -> PyResult<(String, String)> {
+        let s = self
+            .scopes
+            .iter()
+            .rev()
+            .chain(self.joins.iter().map(|(s, _)| s))
+            .find(|s| s.path == path)
+            .ok_or_else(|| query_err(format!("{}.{name} is not reachable here", path.join("."))))?;
+        let f = self.schema.model(s.model).field(name).map_err(query_err)?;
+        Ok((s.alias.clone(), f.column.clone()))
     }
 
     // -- joins (select_related / order_by) ----------------------------------------------
@@ -527,6 +852,12 @@ impl<'s, 'py> Planner<'s, 'py> {
     // -- statements ---------------------------------------------------------------------
 
     pub fn select(mut self, q: &Select) -> PyResult<SelectPlan> {
+        if let Some(items) = &q.columns {
+            return self.select_columns(q, items);
+        }
+        if !q.group_by.is_empty() || !q.having.is_empty() || q.distinct || !q.distinct_on.is_empty() {
+            return Err(query_err("group_by / having / distinct need select(...)".into()));
+        }
         let schema = self.schema;
         let root = schema.model(self.root);
         let mut stmt = Query::select();

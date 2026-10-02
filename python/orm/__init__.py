@@ -23,9 +23,10 @@ from .errors import (
     SchemaError,
     TransactionRequired,
 )
-from .expr import ColumnRef, Condition, Expression, Ordering, RelationPath, and_, excluded, not_, or_
+from .expr import ColumnRef, Condition, Expression, Func, Ordering, RelationPath, and_, excluded, func, not_, or_
 from .model import Model, Registry, define, load, loads, registry
 from .query import QuerySet, RelatedSet
+from .select import Row, Select
 from .write import Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update, UpdateMany
 
 __all__ = [
@@ -41,6 +42,8 @@ __all__ = [
     "registry",
     "QuerySet",
     "RelatedSet",
+    "Select",
+    "Row",
     "InsertOne",
     "InsertMany",
     "OnConflictOne",
@@ -58,6 +61,8 @@ __all__ = [
     "or_",
     "not_",
     "excluded",
+    "func",
+    "Func",
     "ORMError",
     "DatabaseError",
     "IntegrityError",

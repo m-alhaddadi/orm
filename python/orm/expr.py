@@ -11,11 +11,13 @@ dictionaries consumed by the native engine (see ``core/src/ir.rs``).
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, overload
 
 if TYPE_CHECKING:
     from .fields import Field
     from .model import Model
+    from .select import Select
 
 T = TypeVar("T")
 M = TypeVar("M", bound="Model")
@@ -31,6 +33,9 @@ __all__ = [
     "Literal",
     "Excluded",
     "excluded",
+    "Func",
+    "Labeled",
+    "func",
     "and_",
     "or_",
     "not_",
@@ -104,13 +109,22 @@ class Expression(Node, Generic[T]):
 
     __hash__ = object.__hash__
 
-    def in_(self, values: Iterable[T]) -> Condition:
+    def in_(self, values: Iterable[T] | Select[T]) -> Condition:
+        """``IN (values)``, or ``IN (SELECT ...)`` for a one-column ``select()`` query."""
+        from .select import Select
+
+        if isinstance(values, Select):
+            return InSelect(self, values, neg=False)
         values = list(values)
         if not values:
             return Const(False)
         return In(self, [_wrap(v) for v in values], neg=False)
 
-    def not_in(self, values: Iterable[T]) -> Condition:
+    def not_in(self, values: Iterable[T] | Select[T]) -> Condition:
+        from .select import Select
+
+        if isinstance(values, Select):
+            return InSelect(self, values, neg=True)
         values = list(values)
         if not values:
             return Const(True)
@@ -179,6 +193,12 @@ class Expression(Node, Generic[T]):
     def __invert__(self: Expression[bool]) -> Condition:
         return ~as_condition(self)
 
+    # Naming ----------------------------------------------------------------------------------
+
+    def label(self, name: str) -> Labeled[T]:
+        """The name of this expression in ``select()`` rows: ``row.<name>``."""
+        return Labeled(self, name)
+
     # Ordering --------------------------------------------------------------------------------
 
     def asc(self) -> Ordering:
@@ -245,6 +265,110 @@ class Excluded(Expression[T]):
 
     def __repr__(self) -> str:
         return f"excluded({self._column!r})"
+
+
+class Labeled(Expression[T]):
+    __slots__ = ("_inner", "_name")
+
+    def __init__(self, inner: Expression[T], name: str) -> None:
+        if not name.isidentifier() or name.startswith("_"):
+            raise ValueError(f"label {name!r} must be an identifier not starting with '_'")
+        self._inner = inner
+        self._name = name
+
+    def _ir(self, ctx: IRContext) -> IR:
+        return self._inner._ir(ctx)
+
+    def __repr__(self) -> str:
+        return f"{self._inner!r}.label({self._name!r})"
+
+
+class Func(Expression[T]):
+    """A SQL function call; build it with :data:`func`."""
+
+    __slots__ = ("_name", "_args", "_rel", "_distinct")
+
+    def __init__(
+        self, name: str, args: tuple[Any, ...] = (), rel: RelationPath[Any] | None = None, distinct: bool = False
+    ) -> None:
+        self._name = name
+        self._args = tuple(_wrap(a) for a in args)
+        self._rel = rel
+        self._distinct = distinct
+
+    def _ir(self, ctx: IRContext) -> IR:
+        ir: IR = {"t": "func", "name": self._name, "args": [a._ir(ctx) for a in self._args]}
+        if self._rel is not None:
+            if self._rel._root is not ctx.root:
+                raise ValueError(f"{self._rel!r} does not start at {ctx.root.__name__}")
+            ir["rel"] = list(self._rel._path)
+        if self._distinct:
+            ir["distinct"] = True
+        return ir
+
+    def __repr__(self) -> str:
+        args = [repr(a) for a in self._args] + ([repr(self._rel)] if self._rel is not None else [])
+        return f"func.{self._name}({', '.join(args)})"
+
+
+N = TypeVar("N", int, float)
+
+
+class _Functions:
+    """``func.count(...)``, ``func.sum(...)``, ...: SQL functions as expressions.
+
+    An aggregate over a relation path is computed per row of the query, in a correlated
+    subquery: ``func.count(User.posts)`` is each user's number of posts, and
+    ``func.sum(User.posts.views)`` their posts' total views. Over the model's own
+    columns, aggregates summarize the rows of each ``group_by()`` group (or all rows).
+    """
+
+    __slots__ = ()
+
+    def count(self, what: Expression[Any] | RelationPath[Any] | None = None, *, distinct: bool = False) -> Func[int]:
+        """``COUNT(*)`` without argument, ``COUNT(expr)`` (non-NULL values), or the rows
+        of a relation: ``func.count(User.posts)``."""
+        if isinstance(what, RelationPath):
+            return Func("count", rel=what)
+        return Func("count", () if what is None else (what,), distinct=distinct)
+
+    @overload
+    def sum(self, expr: Expression[N], *, distinct: bool = False) -> Func[N | None]: ...
+    @overload
+    def sum(self, expr: Expression[N | None], *, distinct: bool = False) -> Func[N | None]: ...
+    def sum(self, expr: Expression[Any], *, distinct: bool = False) -> Func[Any]:
+        """``SUM``; integer sums come back as ``int`` (cast to bigint)."""
+        return Func("sum", (expr,), distinct=distinct)
+
+    def avg(self, expr: Expression[Any], *, distinct: bool = False) -> Func[float | None]:
+        return Func("avg", (expr,), distinct=distinct)
+
+    def min(self, expr: Expression[T]) -> Func[T | None]:
+        return Func("min", (expr,))
+
+    def max(self, expr: Expression[T]) -> Func[T | None]:
+        return Func("max", (expr,))
+
+    def lower(self, expr: Expression[str] | Expression[str | None]) -> Func[str]:
+        return Func("lower", (expr,))
+
+    def upper(self, expr: Expression[str] | Expression[str | None]) -> Func[str]:
+        return Func("upper", (expr,))
+
+    def length(self, expr: Expression[str] | Expression[str | None]) -> Func[int]:
+        return Func("length", (expr,))
+
+    def abs(self, expr: Expression[T]) -> Func[T]:
+        return Func("abs", (expr,))
+
+    def coalesce(self, expr: Expression[T | None], default: T | Expression[T]) -> Func[T]:
+        return Func("coalesce", (expr, default))
+
+    def now(self) -> Func[datetime]:
+        return Func("now")
+
+
+func = _Functions()
 
 
 def excluded(column: ColumnRef[T]) -> Excluded[T]:
@@ -362,6 +486,21 @@ class Arith(Expression[Any]):
     def __repr__(self) -> str:
         sym = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[self.op]
         return f"({self.left!r} {sym} {self.right!r})"
+
+
+class InSelect(Condition):
+    __slots__ = ("item", "select", "neg")
+
+    def __init__(self, item: Expression[Any], select: Any, neg: bool) -> None:
+        self.item = item
+        self.select = select
+        self.neg = neg
+
+    def _ir(self, ctx: IRContext) -> IR:
+        return {"t": "in_select", "item": self.item._ir(ctx), "select": self.select._subquery_ir(ctx.params), "neg": self.neg}
+
+    def __repr__(self) -> str:
+        return f"{self.item!r} {'NOT IN' if self.neg else 'IN'} ({self.select!r})"
 
 
 class In(Condition):
