@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from blog.models import Comment, Post, User  # noqa: F401  (registers the models)
+from blog.models import Comment, Post, PostTag, Profile, Tag, User  # noqa: F401  (registers the models)
 
 import orm
 
@@ -25,4 +25,4 @@ async def db():
 @pytest.fixture
 async def clean(db):
     yield db
-    await db.execute("TRUNCATE comments, posts, users RESTART IDENTITY CASCADE")
+    await db.execute("TRUNCATE post_tags, tags, profiles, comments, posts, users RESTART IDENTITY CASCADE")

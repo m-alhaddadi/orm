@@ -153,3 +153,62 @@ async def test_extension_types_at_runtime():
     finally:
         await db.execute("DROP TABLE IF EXISTS ext_docs")
         await db.close()
+
+
+ENUM_V1 = """
+enum Status {
+  draft
+  published
+}
+
+model Doc {
+  id      BigInt   @id @default(autoincrement())
+  status  Status   @default(draft)
+  history Status[] @default([draft])
+
+  @@map("docs")
+}
+"""
+# a value added in the middle and one at the end
+ENUM_V2 = ENUM_V1.replace("  draft\n  published\n", "  draft\n  review\n  published\n  archived\n")
+# `review` removed again: the type is recreated
+ENUM_V3 = ENUM_V1.replace("  draft\n  published\n", "  draft\n  published\n  archived\n")
+
+
+async def test_enum_migrations(tmp_path):
+    regs = [models(v) for v in (ENUM_V1, ENUM_V2, ENUM_V3)]
+    db = await connect(regs[2])
+
+    async def drop():
+        await db.execute("DROP TABLE IF EXISTS docs, orm_migrations CASCADE; DROP TYPE IF EXISTS status, status_old")
+
+    await drop()
+    try:
+        for i, reg in enumerate(regs):
+            Migrations(tmp_path, reg).make(f"v{i + 1}")
+        migrator = Migrator(db, Migrations(tmp_path, regs[2]))
+        await migrator.upgrade(target="0002")
+        labels = "SELECT string_agg(enumlabel, ',' ORDER BY enumsortorder) FROM pg_enum JOIN pg_type t ON t.oid = enumtypid WHERE typname = 'status'"
+        assert await scalar(db, labels) == "draft,review,published,archived"
+        await db.execute("INSERT INTO docs (status, history) VALUES ('published', '{draft,published}'), ('archived', DEFAULT)")
+        await migrator.upgrade()
+        assert await scalar(db, labels) == "draft,published,archived"
+        Doc = regs[2].get("Doc")
+        Status = regs[2].get_enum("Status")
+        docs = await Doc.objects.using(db).order_by(Doc.id)
+        assert [(d.status, d.history) for d in docs] == [
+            (Status.published, [Status.draft, Status.published]),
+            (Status.archived, [Status.draft]),
+        ]
+        # a row still using a value that a migration removes makes it fail (and roll back)
+        await migrator.downgrade()  # back to v2: recreated with review again
+        await db.execute("UPDATE docs SET status = 'review' WHERE id = 1")
+        with pytest.raises(orm.DatabaseError, match="invalid input value for enum"):
+            await migrator.upgrade()
+        assert await scalar(db, labels) == "draft,review,published,archived"
+        await db.execute("UPDATE docs SET status = 'draft'")
+        await migrator.downgrade(target="zero")
+        assert await scalar(db, "SELECT to_regtype('status')::text") is None
+    finally:
+        await drop()
+        await db.close()

@@ -213,6 +213,10 @@ fn trigger_def(table: &str, t: &Trigger, idempotent: bool) -> String {
     s
 }
 
+fn enum_values(values: &[String]) -> String {
+    values.iter().map(|v| quote_literal(v)).collect::<Vec<_>>().join(", ")
+}
+
 fn comment(c: &Option<String>) -> String {
     c.as_deref().map(quote_literal).unwrap_or_else(|| "NULL".into())
 }
@@ -234,6 +238,47 @@ pub fn render(op: &Op, idempotent: bool) -> String {
         }
         Op::DropExtension(e) => format!("DROP EXTENSION IF EXISTS {}", ident(&e.name)),
         Op::CreateFunction(f) => function_def(f),
+        Op::CreateEnum(e) => {
+            let create = format!("CREATE TYPE {} AS ENUM ({})", e.sql(), enum_values(&e.values));
+            if idempotent {
+                // CREATE TYPE has no IF NOT EXISTS
+                format!("DO {}", dollar_quote(&format!("BEGIN\n    {create};\nEXCEPTION WHEN duplicate_object THEN NULL;\nEND")))
+            } else {
+                create
+            }
+        }
+        Op::DropEnum(e) => format!("DROP TYPE {}", e.sql()),
+        Op::AddEnumValue { name, value, before } => {
+            let mut s = format!("ALTER TYPE {} ADD VALUE {}", ident(name), quote_literal(value));
+            if let Some(b) = before {
+                s.push_str(&format!(" BEFORE {}", quote_literal(b)));
+            }
+            s
+        }
+        Op::RecreateEnum { from, to, columns } => {
+            let old = format!("{}_old", from.name);
+            let mut out = vec![
+                format!("ALTER TYPE {} RENAME TO {}", from.sql(), ident(&old)),
+                format!("CREATE TYPE {} AS ENUM ({})", to.sql(), enum_values(&to.values)),
+            ];
+            for c in columns {
+                let (t, col) = (ident(&c.table), ident(&c.column));
+                if c.default.is_some() {
+                    out.push(format!("ALTER TABLE {t} ALTER COLUMN {col} DROP DEFAULT"));
+                }
+                let arr = if c.array { "[]" } else { "" };
+                out.push(format!(
+                    "ALTER TABLE {t} ALTER COLUMN {col} TYPE {ty}{arr} USING {col}::text{arr}::{ty}{arr}",
+                    ty = to.sql()
+                ));
+                if let Some(d) = &c.default {
+                    out.push(format!("ALTER TABLE {t} ALTER COLUMN {col} SET DEFAULT {d}"));
+                }
+            }
+            out.push(format!("DROP TYPE {}", ident(&old)));
+            out.join(";\n")
+        }
+        Op::CommentOnType { name, comment: c } => format!("COMMENT ON TYPE {} IS {}", ident(name), comment(c)),
         Op::DropFunction(f) => format!("DROP FUNCTION {}", function_sig(f)),
         Op::CreateTable { table, foreign_keys } => {
             let mut lines: Vec<String> = table.columns.iter().map(column_def).collect();
@@ -294,6 +339,11 @@ pub fn summary(op: &Op) -> String {
         Op::DropExtension(e) => format!("drop extension {}", e.name),
         Op::CreateFunction(f) => format!("create or replace function {}({})", f.name, f.args),
         Op::DropFunction(f) => format!("drop function {}({})", f.name, f.args),
+        Op::CreateEnum(e) => format!("create enum {}", e.name),
+        Op::DropEnum(e) => format!("drop enum {}", e.name),
+        Op::AddEnumValue { name, value, .. } => format!("add value {value:?} to enum {name}"),
+        Op::RecreateEnum { to, .. } => format!("recreate enum {} with values {}", to.name, to.values.join(", ")),
+        Op::CommentOnType { name, .. } => format!("comment on type {name}"),
         Op::CreateTable { table, .. } => format!("create table {}", table.name),
         Op::DropTable { table } => format!("drop table {table}"),
         Op::RenameTable { from, to } => format!("rename table {from} to {to}"),

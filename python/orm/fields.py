@@ -12,6 +12,7 @@ not loaded (async code can't lazy-load on attribute access).
 
 from __future__ import annotations
 
+import enum
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Never, TypeVar, cast, overload
 
@@ -20,7 +21,7 @@ from .expr import ColumnRef, RelationPath
 
 if TYPE_CHECKING:
     from .model import Model
-    from .query import RelatedSet
+    from .query import ManyRelatedSet, RelatedSet
 
 T = TypeVar("T")
 # Related model type; for a nullable to-one relation it is `Target | None`.
@@ -174,9 +175,59 @@ class Json(Field[T]):
     type_name = "json"
 
 
+class Decimal(Field[T]):
+    """``numeric``. Values are exact ``decimal.Decimal``s; ints, floats and decimal
+    strings are accepted as input."""
+
+    type_name = "decimal"
+
+
+class Array(Field[T]):
+    """An array column (``text[]``, ``integer[]``, ...). Values are lists; ``of`` is the
+    IR type of the elements and ``enum`` their enum, if any."""
+
+    type_name = "array"
+
+    def __init__(self, of: str, *, enum: str | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.of = of
+        self.enum_name = enum
+
+    def ir(self) -> dict[str, Any]:
+        out = super().ir()
+        out["type"] = self.of
+        out["array"] = True
+        if self.enum_name is not None:
+            out["enum"] = self.enum_name
+        return out
+
+
+class Enum(Field[T]):
+    """A column of a schema enum. Values are members of its Python enum class
+    (``StrEnum`` or ``IntEnum``); plain stored values are accepted as input too.
+    ``stored`` is the IR type the values are stored as."""
+
+    type_name = "enum"
+
+    def __init__(self, enum: str, *, stored: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.enum_name = enum
+        self.stored = stored
+
+    @property
+    def enum_class(self) -> type[enum.Enum]:
+        return self.model._meta.registry.get_enum(self.enum_name)
+
+    def ir(self) -> dict[str, Any]:
+        out = super().ir()
+        out["type"] = self.stored
+        out["enum"] = self.enum_name
+        return out
+
+
 # IR column type -> descriptor class, for models built from a compiled schema.
 BY_TYPE: dict[str, type[Field[Any]]] = {
-    c.type_name: c for c in (BigInt, Integer, Float, Boolean, String, Text, DateTime, Date, Uuid, Json)
+    c.type_name: c for c in (BigInt, Integer, Float, Boolean, String, Text, DateTime, Date, Uuid, Json, Decimal)
 }
 
 
@@ -323,4 +374,110 @@ class HasMany(Relation[MM, P]):
             "target": self.target_name,
             "from": self.from_,
             "to": self.via,
+        }
+
+
+class HasOne(Relation[M, P]):
+    """One-to-one relation whose key is on the other model: ``User.profile`` when
+    ``Profile.user_id`` (unique) points at the user. On an instance it is the related
+    object, or ``None``, once loaded with ``select_related`` / ``prefetch_related``."""
+
+    kind = "one"
+
+    def __init__(self, target: str | type[M], *, via: str, from_: str | None = None) -> None:
+        super().__init__(target)
+        self.via = via
+        self._from = from_
+
+    @property
+    def from_(self) -> str:
+        return self._from or self.model._meta.pk.name
+
+    @overload
+    def __get__(self, obj: None, owner: type[Any]) -> P: ...
+    @overload
+    def __get__(self, obj: object, owner: type[Any]) -> M: ...
+    def __get__(self, obj: object | None, owner: type[Any]) -> Any:
+        if obj is None:
+            return RelationPath(owner, (self.name,), cast("type[Model]", self.target))
+        d = obj.__dict__
+        if self.name in d:
+            return d[self.name]
+        raise NotLoaded(
+            f"{owner.__name__}.{self.name} is not loaded; use select_related({owner.__name__}.{self.name}) "
+            f"or prefetch_related({owner.__name__}.{self.name})"
+        )
+
+    def __set__(self, obj: Model, value: Never) -> None:
+        raise AttributeError(
+            f"{self.model.__name__}.{self.name} is read-only; the key is "
+            f"{self.target_name}.{self.via}"
+        )
+
+    def ir(self) -> dict[str, Any]:
+        return {"name": self.name, "kind": "one", "target": self.target_name, "from": self.from_, "to": self.via}
+
+
+class ManyToMany(Relation[MM, P]):
+    """Many-to-many relation through a join model: ``Post.tags`` when ``PostTag`` rows
+    link posts (``source``, its key column) and tags (``target_field``). On an instance,
+    ``post.tags`` is a :class:`~orm.query.ManyRelatedSet`: a query over the post's tags
+    that also adds and removes links."""
+
+    kind = "many"
+
+    def __init__(
+        self,
+        target: str | type[MM],
+        *,
+        through: str,
+        source: str,
+        target_field: str,
+        from_: str | None = None,
+        to: str | None = None,
+    ) -> None:
+        super().__init__(target)
+        self._through = through
+        self.source = source
+        self.target_field = target_field
+        self._from = from_
+        self._to = to
+
+    @property
+    def through(self) -> type[Model]:
+        return self.model._meta.registry.get(self._through)
+
+    @property
+    def from_(self) -> str:
+        return self._from or self.model._meta.pk.name
+
+    @property
+    def to(self) -> str:
+        return self._to or cast("type[Model]", self.target)._meta.pk.name
+
+    @overload
+    def __get__(self, obj: None, owner: type[Any]) -> P: ...
+    @overload
+    def __get__(self, obj: object, owner: type[Any]) -> ManyRelatedSet[MM]: ...
+    def __get__(self, obj: object | None, owner: type[Any]) -> Any:
+        if obj is None:
+            return RelationPath(owner, (self.name,), self.target)
+        from .query import ManyRelatedSet
+
+        return ManyRelatedSet(self, obj)  # type: ignore[arg-type]
+
+    def __set__(self, obj: Model, value: Never) -> None:
+        raise AttributeError(
+            f"{self.model.__name__}.{self.name} is read-only; link rows with "
+            f"`await {self.model.__name__.lower()}.{self.name}.add(...)`"
+        )
+
+    def ir(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "kind": "many",
+            "target": self.target_name,
+            "from": self.from_,
+            "to": self.to,
+            "through": {"model": self._through, "source": self.source, "target": self.target_field},
         }

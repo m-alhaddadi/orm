@@ -6,6 +6,7 @@
 //! ```text
 //! file      := item*
 //! item      := "model" IDENT "{" member* "}"
+//!            | "enum" IDENT "{" (IDENT attr* | "@@" NAME args?)* "}"
 //!            | "datasource" IDENT "{" prop* "}"
 //!            | "generator" IDENT "{" prop* "}"      (read and ignored)
 //!            | "function" IDENT "{" prop* "}"
@@ -257,11 +258,23 @@ pub struct ModelDecl {
     pub blocks: Vec<Attr>,
 }
 
+/// `enum Name { value @map("x") ... @@map("db_name") }`
+#[derive(Debug)]
+pub struct EnumDecl {
+    pub pos: Pos,
+    pub name: String,
+    /// (position, name, attributes) per value
+    pub values: Vec<(Pos, String, Vec<Attr>)>,
+    /// `@@...` attributes
+    pub blocks: Vec<Attr>,
+}
+
 pub type Props = Vec<(String, Pos, Value)>;
 
 #[derive(Debug)]
 pub enum Item {
     Model(ModelDecl),
+    Enum(EnumDecl),
     Datasource { pos: Pos, props: Props },
     Function { pos: Pos, name: String, props: Props },
     Import { pos: Pos, path: String },
@@ -354,11 +367,18 @@ impl Parser<'_> {
                     (_, Tok::Str(path)) => items.push(Item::Import { pos, path }),
                     (p, t) => return err(p, format!("expected a file path string, found {}", describe(&t))),
                 },
-                "enum" | "type" | "view" => return err(pos, format!("`{keyword}` blocks aren't supported yet")),
+                "enum" => {
+                    let (_, name) = self.ident("an enum name")?;
+                    self.in_model = true;
+                    let e = self.enum_block(pos, name)?;
+                    self.in_model = false;
+                    items.push(Item::Enum(e));
+                }
+                "type" | "view" => return err(pos, format!("`{keyword}` blocks aren't supported yet")),
                 _ => {
                     return err(
                         pos,
-                        format!("expected `model`, `datasource`, `generator`, `function` or `import`, found `{keyword}`"),
+                        format!("expected `model`, `enum`, `datasource`, `generator`, `function` or `import`, found `{keyword}`"),
                     )
                 }
             }
@@ -437,6 +457,39 @@ impl Parser<'_> {
             last_line = start.line;
         }
         Ok(ModelDecl { pos, name, members, blocks })
+    }
+
+    fn enum_block(&mut self, pos: Pos, name: String) -> Result<EnumDecl> {
+        self.expect("{")?;
+        let (mut values, mut blocks) = (vec![], vec![]);
+        let mut last_line = 0;
+        loop {
+            if self.eat("}")? {
+                break;
+            }
+            if self.tok == Tok::Eof {
+                return err(pos, format!("enum {name} is not closed with `}}`"));
+            }
+            let start = self.pos;
+            if start.line == last_line {
+                return err(start, format!("enum {name}: one value or attribute per line"));
+            }
+            if self.is("@@") {
+                blocks.push(self.attr("@@")?);
+            } else {
+                let (vpos, value) = self.ident("an enum value, `@@` or `}`")?;
+                let mut attrs = vec![];
+                while self.is("@") && self.pos.line == start.line {
+                    attrs.push(self.attr("@")?);
+                }
+                values.push((vpos, value, attrs));
+            }
+            if self.prev_end.line != start.line || self.is("@") {
+                return err(start, format!("enum {name}: a value or attribute must be on one line"));
+            }
+            last_line = start.line;
+        }
+        Ok(EnumDecl { pos, name, values, blocks })
     }
 
     fn args(&mut self) -> Result<Args> {

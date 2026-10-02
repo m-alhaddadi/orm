@@ -223,7 +223,9 @@ multiple language bindings. Validate the architecture and API first.
   needs no Python.
 - Schema objects: indexes (expression, partial, covering, any method, opclasses,
   storage params), unique / check / exclusion constraints, FK `on_update` /
-  deferrable, triggers and functions, comments, UUID and JSON columns, rename hints.
+  deferrable, triggers and functions, comments, UUID, JSON, decimal, enum (native,
+  text or integer) and array columns, one-to-one and many-to-many (through a join
+  model) relations, rename hints.
 - Extensions are TOML files (`core/extensions/postgres/*.toml`; custom ones are
   `import`ed): types (SQL template, value conversion, `read` / `write` SQL, per-language
   type hints), index methods, opclasses and functions. Using any of them makes the

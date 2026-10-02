@@ -12,8 +12,28 @@ model User {
   created_at DateTime  @default(now())
   posts      Post[]
   comments   Comment[]
+  profile    Profile?
 
   @@map("users")
+}
+
+// One-to-one: the key is on Profile (unique), User.profile is the other side.
+model Profile {
+  id         BigInt   @id @default(autoincrement())
+  user_id    BigInt   @unique
+  role       Role     @default(member)
+  balance    Decimal  @default(0) @db.Decimal(12, 2)
+  links      String[] @default([])
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+}
+
+// A Postgres enum type (the default storage).
+enum Role {
+  member
+  editor
+  admin
 }
 
 model Post {
@@ -26,6 +46,8 @@ model Post {
   created_at DateTime  @default(now())
   author     User      @relation(fields: [author_id], references: [id], onDelete: Cascade)
   comments   Comment[]
+  tags       Tag[]     @relation(through: PostTag)
+  post_tags  PostTag[]
 
   @@index([author_id])
   @@index([author_id, created_at(sort: Desc)], where: raw("published"))
@@ -46,4 +68,36 @@ model Comment {
   @@index([post_id])
   @@index([author_id])
   @@map("comments")
+}
+
+// Many-to-many: Post.tags and Tag.posts go through the PostTag join model.
+model Tag {
+  id        BigInt    @id @default(autoincrement())
+  name      String    @unique @db.VarChar(50)
+  priority  Priority  @default(normal)
+  posts     Post[]    @relation(through: PostTag)
+  post_tags PostTag[]
+
+  @@map("tags")
+}
+
+model PostTag {
+  id      BigInt @id @default(autoincrement())
+  post_id BigInt
+  tag_id  BigInt
+  post    Post   @relation(fields: [post_id], references: [id], onDelete: Cascade)
+  tag     Tag    @relation(fields: [tag_id], references: [id], onDelete: Cascade)
+
+  @@unique([post_id, tag_id])
+  @@index([tag_id])
+  @@map("post_tags")
+}
+
+// An enum stored as integers, limited to these values by a CHECK constraint.
+enum Priority {
+  low    @value(1)
+  normal @value(2)
+  high   @value(3)
+
+  @@storage(int)
 }

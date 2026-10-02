@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ext::Catalog;
 use crate::ir::{
-    ColType, ConstraintIr, Deferrable, FieldIr, ForEach, IndexColumnIr, Nulls, OnDelete, TriggerEvent,
+    ColType, ConstraintIr, EnumStorage, Deferrable, FieldIr, ForEach, IndexColumnIr, Nulls, OnDelete, TriggerEvent,
     TriggerTiming,
 };
 use crate::schema::{Model, Result, Schema};
@@ -35,8 +35,27 @@ pub struct DbSchema {
     pub extensions: Vec<Extension>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub functions: Vec<Function>,
+    /// Enum types (`CREATE TYPE ... AS ENUM`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enums: Vec<EnumType>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<Table>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct EnumType {
+    pub name: String,
+    /// The labels, in order.
+    pub values: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+impl EnumType {
+    /// The type as a column type: always quoted, so any name works.
+    pub fn sql(&self) -> String {
+        super::pg::ident(&self.name)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -281,6 +300,15 @@ pub fn normalize_ws(s: &str) -> String {
 // ---------------------------------------------------------------------------------------
 
 pub fn sql_type(f: &FieldIr) -> String {
+    let base = scalar_sql_type(f);
+    if f.array {
+        format!("{base}[]")
+    } else {
+        base
+    }
+}
+
+fn scalar_sql_type(f: &FieldIr) -> String {
     if let Some(t) = &f.db_type {
         return normalize_ws(t);
     }
@@ -291,6 +319,8 @@ pub fn sql_type(f: &FieldIr) -> String {
         ColType::Bool => "boolean".into(),
         ColType::String => match f.max_length {
             Some(n) => format!("varchar({n})"),
+            // text[], as Prisma does: array operators take text[] parameters as they are
+            None if f.array => "text".into(),
             None => "varchar".into(),
         },
         ColType::Text => "text".into(),
@@ -298,7 +328,18 @@ pub fn sql_type(f: &FieldIr) -> String {
         ColType::Date => "date".into(),
         ColType::Uuid => "uuid".into(),
         ColType::Json => "jsonb".into(),
+        ColType::Decimal => "numeric".into(),
     }
+}
+
+/// A literal as SQL: numbers and booleans as written, strings quoted.
+fn literal(v: &serde_json::Value) -> Option<String> {
+    Some(match v {
+        serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.into(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => quote_literal(s),
+        _ => return None,
+    })
 }
 
 pub fn quote_literal(s: &str) -> String {
@@ -313,12 +354,29 @@ fn default_sql(f: &FieldIr) -> Result<Option<String>> {
         return Ok(Some(normalize_ws(sql)));
     }
     let Some(v) = &f.default else { return Ok(None) };
+    if f.array {
+        let serde_json::Value::Array(items) = v else {
+            return Err(format!("the default of array field {} must be a list", f.name));
+        };
+        let ty = sql_type(f);
+        if items.is_empty() {
+            return Ok(Some(format!("'{{}}'::{ty}")));
+        }
+        let items = items
+            .iter()
+            .map(|i| match i {
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) if f.ty == ColType::Json => {
+                    Some(format!("{}::jsonb", quote_literal(&i.to_string())))
+                }
+                i => literal(i),
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| format!("unsupported default {v} for field {}", f.name))?;
+        return Ok(Some(format!("ARRAY[{}]::{ty}", items.join(", "))));
+    }
     Ok(Some(match v {
-        serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.into(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => quote_literal(s),
-        other if f.ty == ColType::Json => format!("{}::jsonb", quote_literal(&other.to_string())),
-        other => return Err(format!("unsupported default {other} for field {}", f.name)),
+        other if f.ty == ColType::Json && !other.is_string() => format!("{}::jsonb", quote_literal(&other.to_string())),
+        other => literal(other).ok_or_else(|| format!("unsupported default {other} for field {}", f.name))?,
     }))
 }
 
@@ -448,6 +506,16 @@ impl Builder<'_> {
                     with: vec![],
                     nulls_not_distinct: false,
                 });
+            }
+            if let Some(e) = f.enum_idx.map(|i| &schema.enums[i as usize]).filter(|e| e.storage != EnumStorage::Native) {
+                let values = e.values.iter().filter_map(|v| literal(&v.value)).collect::<Vec<_>>().join(", ");
+                let c = super::pg::ident(&f.column);
+                let expr = if f.array {
+                    format!("{c} <@ ARRAY[{values}]::{}", sql_type(f))
+                } else {
+                    format!("{c} IN ({values})")
+                };
+                table.checks.push(Check { name: self.claim(object_name(&[&t, &f.column, "enum", "check"]), m)?, expr });
             }
             if let Some(expr) = &f.check {
                 self.require_expr(expr, &format!("check on {t}.{}", f.column));
@@ -645,6 +713,10 @@ pub fn build(schema: &Schema) -> Result<(DbSchema, Renames)> {
         });
     }
     db.functions.append(&mut b.trigger_functions);
+    for e in schema.enums.iter().filter(|e| e.storage == EnumStorage::Native) {
+        let values = e.values.iter().map(|v| v.value.as_str().unwrap_or_default().to_owned()).collect();
+        db.enums.push(EnumType { name: e.db_name.clone(), values, comment: e.comment.clone() });
+    }
     let mut keys = BTreeSet::new();
     for f in &db.functions {
         if !keys.insert(f.key()) {

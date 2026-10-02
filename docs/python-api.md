@@ -60,6 +60,8 @@ The descriptors behave differently on the class and on an instance:
 | column `User.email` | `ColumnRef[str]`, for queries | `str`, read-only (plain `__dict__` read, no descriptor call) |
 | to-one `Post.author` | `_UserPath` | `User`, if loaded, else `NotLoaded` |
 | to-many `User.posts` | `_PostPath` | `RelatedSet[Post]`: a query set over the user's posts |
+| one-to-one `User.profile` | `_ProfilePath` | `Profile` or `None`, if loaded, else `NotLoaded` |
+| many-to-many `Post.tags` | `_TagPath` | `ManyRelatedSet[Tag]`: the post's tags, with `add()` / `remove()` |
 
 ## Queries
 
@@ -149,6 +151,67 @@ relation level (keys deduplicated, `NULL` keys skipped).
   planned as `ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY views DESC, id)` in a
   subquery and `WHERE _rn <= 3` around it (Django 4.2 does the same).
 
+### One-to-one and many-to-many
+
+```python
+# One-to-one (`profile Profile?` on User, Profile.user_id unique)
+us = await User.objects.select_related(User.profile)        # LEFT JOIN; user.profile is a Profile or None
+us = await User.objects.prefetch_related(User.profile)      # +1 query; profile.user is set back too
+await User.objects.filter(User.profile.role == Role.admin)  # EXISTS, like any relation
+
+# Many-to-many (`tags Tag[] @relation(through: PostTag)`)
+await post.tags                                     # list[Tag]
+await post.tags.add(news, rust)                     # inserts PostTag rows (existing links are kept)
+await post.tags.remove(news)                        # deletes them; returns how many
+await post.tags.set([news, py])                     # exactly these
+await post.tags.clear()
+tag = await post.tags.insert(name="go")             # insert a Tag and link it, in one transaction
+await Post.objects.filter(Post.tags.name == "rust") # one EXISTS over tags JOIN post_tags
+await Post.objects.select(Post.title, func.count(Post.tags))
+await Post.objects.prefetch_related(Post.tags)      # +1 query: tags JOIN post_tags WHERE post_id IN (...)
+await Tag.objects.prefetch_related(Tag.posts.author)
+```
+
+* `user.profile` raises `NotLoaded` until `select_related` / `prefetch_related` loads
+  it, like a to-one relation; it is never a query in disguise.
+* A many-to-many hop is planned as one hop through the join table, so Django's
+  semantics hold: conditions in one `filter()` call must hold for the same tag, separate
+  calls are independent, `exclude()` means "no such tag". Aggregates
+  (`func.count(Post.tags)`) are correlated subqueries over the two tables.
+* `post.tags` is a `ManyRelatedSet`: a query set over the post's tags (filter, order,
+  count, ...) that reads prefetched rows when unchanged, like `user.posts`. `add()`,
+  `remove()`, `set()` take instances or keys. Changing the links drops the prefetched
+  rows. The join model stays an ordinary model for anything else (extra columns,
+  bulk inserts: `await PostTag.objects.insert_many(...)`).
+* Prefetching selects the join row's key next to each tag, so a tag linked to two posts
+  comes back once per post. `Prefetch(Post.tags, Tag.objects...[:3])` slices per post.
+
+### Decimal, enum and array columns
+
+```python
+p = await Profile.objects.insert(user=alice, balance=Decimal("10.25"), role=Role.admin,
+                                 links=["https://a.example"])
+p.balance                                           # Decimal('10.25'), never a float
+await p.update(balance=Profile.balance + Decimal("0.10"))
+await Profile.objects.select(func.sum(Profile.balance)).scalar()   # Decimal
+
+p.role is Role.admin                                # members of the generated enum
+await Profile.objects.filter(Profile.role.in_([Role.admin, "editor"]))   # values work too
+
+await Profile.objects.filter(Profile.links.has("https://a.example"))    # links @> ARRAY[...]
+await Profile.objects.filter(Profile.links.has_any(urls))                # links && ...
+Profile.links.has_all(urls) / Profile.links.contained_by(urls)          # @> / <@
+await Profile.objects.select(func.cardinality(Profile.links))
+```
+
+* Decimal parameters accept `Decimal`, `int`, `float` (through its `str`) and decimal
+  strings; `NaN` and infinities are refused. Values outside the column's precision are
+  the database's error.
+* Enum classes are `StrEnum` (native and text storage) or `IntEnum` (int storage), so
+  members compare equal to their stored values. A value the enum doesn't know (added in
+  the database by hand) reads back as the plain value.
+* Arrays are Python lists both ways (tuples are accepted); elements may be `None`.
+
 ### Big tables: batches
 
 ```python
@@ -215,7 +278,8 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
   COUNT(*) FROM posts WHERE posts.author_id = users.id)`. So two aggregates over different
   relations never multiply each other, unlike Django's JOIN-based `annotate(Count(...),
   Count(...))`, and they work in `filter()` too.
-* Integer `SUM`s come back as `int` (cast to `bigint`), `AVG` as `float`.
+* Integer `SUM`s come back as `int` (cast to `bigint`), `AVG` as `float` (as a
+  `Decimal` over decimal columns).
 * Columns through to-one relations are `LEFT JOIN`ed; a to-many column outside an
   aggregate is rejected (it would repeat rows).
 * `lock()` works with plain column selects, not with aggregates, window functions,
@@ -552,5 +616,7 @@ TLS on, the TLS cost hides the difference)
   clauses for recursive CTEs, filtering on window functions without a CTE.
 * Several shared windows per query, and shared windows with `ORDER BY` / `LIMIT`: needs
   a fix in sea-query (or our own SELECT writer); see Window functions.
-* `has_one`, many-to-many, composite keys, decimal / array column types. (UUID and JSON
-  are done, see [`schema.md`](schema.md).)
+* Composite keys. (One-to-one, many-to-many, decimal, enum, array, UUID and JSON
+  columns are done, see [`schema.md`](schema.md).)
+* `select_related` through a many-to-many relation (it would repeat rows; use
+  `prefetch_related`), and array element access (`links[1]`) or `unnest`.

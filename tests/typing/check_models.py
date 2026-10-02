@@ -2,11 +2,27 @@
 and pyright. Never executed."""
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, assert_type
 
-from blog.models import Comment, Post, PostInsert, PostQuerySet, User, UserQuerySet
+from blog.models import Comment, Post, PostInsert, PostQuerySet, Priority, Profile, Role, Tag, User, UserQuerySet
 
-from orm import ColumnRef, Condition, Prefetch, RelatedSet, Row, Window, WindowDef, excluded, exists, func, outer, window
+from orm import (
+    ColumnRef,
+    Func,
+    Condition,
+    ManyRelatedSet,
+    Prefetch,
+    RelatedSet,
+    Row,
+    Window,
+    WindowDef,
+    excluded,
+    exists,
+    func,
+    outer,
+    window,
+)
 from orm import get_database as orm_db
 
 
@@ -102,6 +118,28 @@ async def check() -> None:
         list[User],
     )
 
+    # Decimal, enum and array columns; one-to-one and many-to-many relations.
+    assert_type(Profile.balance, ColumnRef[Decimal])
+    assert_type(User.profile.role, ColumnRef[Role])
+    assert_type(Tag.priority, ColumnRef[Priority])
+    assert_type(Profile.links, ColumnRef[list[str]])
+    assert_type(Profile.links.has("x"), Condition)
+    assert_type(Post.tags.name, ColumnRef[str])
+    prof = await Profile.objects.insert(user=alice, balance=Decimal("1.50"), role=Role.admin, links=["a"])
+    assert_type(prof.balance, Decimal)
+    assert_type(prof.role, Role)
+    assert_type(prof.links, list[str])
+    assert_type(await Profile.objects.select(func.sum(Profile.balance)).scalar(), Decimal | None)
+    assert_type(await Profile.objects.select(func.avg(Profile.balance)).scalar(), Decimal | None)
+    assert_type(func.cardinality(Profile.links), Func[int])
+    assert_type(alice.profile, Profile | None)
+    assert_type(post.tags, ManyRelatedSet[Tag])
+    assert_type(await post.tags, list[Tag])
+    await post.tags.add(await Tag.objects.get(Tag.id == 1))
+    assert_type(await post.tags.remove(1), int)
+    assert_type(await post.tags.insert(name="go"), Tag)
+    assert_type(await Post.objects.prefetch_related(Post.tags), list[Post])
+
 
 async def errors() -> None:
     User.email < 1  # E: ordering a str column against an int
@@ -122,3 +160,6 @@ async def errors() -> None:
     Prefetch(User.posts, Comment.objects.all())  # E: query set of the wrong model
     func.ntile("2")  # E: buckets are ints
     func.sum(Post.views).over(window(), rows=(None, "x"))  # E: frame bounds are ints
+    await Profile.objects.insert(user_id=1, role="boss")  # E: roles are Role members
+    Post.views.has(1)  # E: not an array
+    await Profile.objects.insert(user_id=1, balance=1.5)  # E: a Decimal

@@ -6,6 +6,7 @@
 //! [`Executor`], [`Transaction`] and [`RowSet`] for one database, and [`connect`] picks
 //! it from the URL scheme. Postgres (tokio-postgres) is the only driver today.
 
+mod numeric;
 mod postgres;
 
 use std::future::Future;
@@ -16,7 +17,7 @@ use pyo3::prelude::*;
 use sea_query::{PostgresQueryBuilder, QueryStatementWriter, Value};
 
 use orm_core::dialect::Dialect;
-use orm_core::ir::ColType;
+use orm_core::ir::ValueType;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type DbResult<T> = Result<T, DbError>;
@@ -51,10 +52,10 @@ impl std::fmt::Display for DbError {
 /// The rows one statement returned, decoded by the schema's column types.
 pub trait RowSet: Send + Sync {
     fn len(&self) -> usize;
-    /// One cell as a Python value.
-    fn cell(&self, py: Python<'_>, row: usize, col: usize, ty: ColType) -> PyResult<Py<PyAny>>;
+    /// One cell as a Python value (enum values as stored: the frontend maps them).
+    fn cell(&self, py: Python<'_>, row: usize, col: usize, ty: ValueType) -> PyResult<Py<PyAny>>;
     /// One cell as a bind parameter (prefetch keys are read back this way).
-    fn value(&self, row: usize, col: usize, ty: ColType) -> DbResult<Value>;
+    fn value(&self, row: usize, col: usize, ty: ValueType) -> DbResult<Value>;
     fn get_i64(&self, row: usize, col: usize) -> DbResult<i64>;
     fn get_bool(&self, row: usize, col: usize) -> DbResult<bool>;
 }

@@ -13,8 +13,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::model::{
-    Check, Column, DbSchema, Exclusion, Extension, ForeignKey, Function, Index, PrimaryKey, Renames, Table, Trigger,
-    Unique,
+    Check, Column, DbSchema, EnumType, Exclusion, Extension, ForeignKey, Function, Index, PrimaryKey, Renames, Table,
+    Trigger, Unique,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +50,15 @@ impl Constraint {
     }
 }
 
+/// A column using an enum type that is recreated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnumColumn {
+    pub table: String,
+    pub column: String,
+    pub default: Option<String>,
+    pub array: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     CreateExtension(Extension),
@@ -57,6 +66,15 @@ pub enum Op {
     /// `CREATE OR REPLACE FUNCTION`
     CreateFunction(Function),
     DropFunction(Function),
+    CreateEnum(EnumType),
+    DropEnum(EnumType),
+    /// `ALTER TYPE ... ADD VALUE <value> [BEFORE <before>]`
+    AddEnumValue { name: String, value: String, before: Option<String> },
+    /// Values were removed or reordered, which Postgres can't do in place: the type is
+    /// renamed, created anew, the `columns` (table, column, default) converted through
+    /// text, and the old type dropped.
+    RecreateEnum { from: EnumType, to: EnumType, columns: Vec<EnumColumn> },
+    CommentOnType { name: String, comment: Option<String> },
     /// Columns, primary key, unique / check / exclusion constraints and the foreign keys
     /// whose target exists by then. Indexes, triggers and comments are separate ops.
     CreateTable { table: Table, foreign_keys: Vec<ForeignKey> },
@@ -107,6 +125,18 @@ impl Op {
                 Constraint::PrimaryKey(_) => return None,
             },
             Op::DropExtension(e) => format!("drops extension {}; other schemas may still use it", e.name),
+            Op::RecreateEnum { from, to, .. } => {
+                let gone: Vec<&str> =
+                    from.values.iter().filter(|v| !to.values.contains(v)).map(String::as_str).collect();
+                if gone.is_empty() {
+                    format!("reorders enum {}; its columns are rewritten", to.name)
+                } else {
+                    format!("removes {} from enum {}; fails if rows still use them", gone.join(", "), to.name)
+                }
+            }
+            Op::AddEnumValue { name, value, .. } => {
+                format!("adds {value:?} to enum {name}; Postgres can't use it in the same transaction")
+            }
             _ => return None,
         })
     }
@@ -256,6 +286,59 @@ pub fn diff(old: &DbSchema, new: &DbSchema, renames: &Renames) -> Vec<Op> {
     for f in &new.functions {
         if old_fns.get(&f.key()) != Some(&f) {
             ops.push(Op::CreateFunction(f.clone()));
+        }
+    }
+
+    // -- enum types ----------------------------------------------------------------------
+    let mut drop_enums = vec![];
+    for e in &new.enums {
+        match old.enums.iter().find(|o| o.name == e.name) {
+            None => {
+                ops.push(Op::CreateEnum(e.clone()));
+                if e.comment.is_some() {
+                    ops.push(Op::CommentOnType { name: e.name.clone(), comment: e.comment.clone() });
+                }
+            }
+            Some(o) => {
+                if o.values != e.values {
+                    // only additions keep the old values in their order
+                    let in_order = e.values.iter().filter(|v| o.values.contains(v)).eq(o.values.iter());
+                    if in_order {
+                        for (i, v) in e.values.iter().enumerate() {
+                            if !o.values.contains(v) {
+                                let before = e.values[i + 1..].iter().find(|x| o.values.contains(x)).cloned();
+                                ops.push(Op::AddEnumValue { name: e.name.clone(), value: v.clone(), before });
+                            }
+                        }
+                    } else {
+                        let ty = o.sql();
+                        let columns = old
+                            .tables
+                            .iter()
+                            .flat_map(|t| {
+                                t.columns
+                                    .iter()
+                                    .filter(|c| c.ty == ty || c.ty == format!("{ty}[]"))
+                                    .map(|c| EnumColumn {
+                                        table: t.name.clone(),
+                                        column: c.name.clone(),
+                                        default: c.default.clone(),
+                                        array: c.ty != ty,
+                                    })
+                            })
+                            .collect();
+                        ops.push(Op::RecreateEnum { from: o.clone(), to: e.clone(), columns });
+                    }
+                }
+                if o.comment != e.comment {
+                    ops.push(Op::CommentOnType { name: e.name.clone(), comment: e.comment.clone() });
+                }
+            }
+        }
+    }
+    for o in &old.enums {
+        if !new.enums.iter().any(|e| e.name == o.name) {
+            drop_enums.push(Op::DropEnum(o.clone()));
         }
     }
 
@@ -515,6 +598,7 @@ pub fn diff(old: &DbSchema, new: &DbSchema, renames: &Renames) -> Vec<Op> {
     ops.extend(create_triggers);
     ops.extend(comments);
 
+    ops.extend(drop_enums);
     for f in &old.functions {
         if !new_fns.contains_key(&f.key()) {
             ops.push(Op::DropFunction(f.clone()));

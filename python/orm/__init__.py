@@ -43,7 +43,7 @@ from .expr import (
     window,
 )
 from .model import Model, Registry, define, load, loads, registry
-from .query import Prefetch, QuerySet, RelatedSet
+from .query import ManyRelatedSet, Prefetch, QuerySet, RelatedSet
 from .cte import Cte, CteColumn
 from .select import Row, Select
 from .write import Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update, UpdateMany
@@ -61,6 +61,7 @@ __all__ = [
     "registry",
     "QuerySet",
     "RelatedSet",
+    "ManyRelatedSet",
     "Prefetch",
     "Cte",
     "CteColumn",

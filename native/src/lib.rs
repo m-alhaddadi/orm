@@ -23,7 +23,7 @@ use crate::db::{DbResult, Driver, Executor, RowSet};
 use crate::errors::{db_err, query_err, schema_err};
 use crate::plan::{Plan, Planner, SelectPlan};
 use orm_core::dialect::{Dialect, Target};
-use orm_core::ir::{ColType, Operation};
+use orm_core::ir::{Operation, ValueType};
 
 /// Marker for "use the column's server default" in insert rows.
 #[pyclass(frozen, module = "orm._native", name = "_Default")]
@@ -57,9 +57,9 @@ fn update_many_plan<'py>(
     params: &[Bound<'py, PyAny>],
     returning: bool,
     batch_size: Option<usize>,
-) -> PyResult<(Vec<sea_query::UpdateStatement>, Option<Vec<ColType>>)> {
+) -> PyResult<(Vec<sea_query::UpdateStatement>, Option<Vec<ValueType>>)> {
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
-    let types = fields.iter().map(|f| m.field(f).map(|f| f.ty)).collect::<Result<Vec<_>, _>>().map_err(query_err)?;
+    let types = fields.iter().map(|f| m.field(f).map(|f| f.value_type())).collect::<Result<Vec<_>, _>>().map_err(query_err)?;
     let mut values = Vec::with_capacity(rows.len());
     for row in rows.iter() {
         let row = row
@@ -231,10 +231,10 @@ impl RowSet for EmptyRows {
     fn len(&self) -> usize {
         0
     }
-    fn cell(&self, _: Python<'_>, _: usize, _: usize, _: ColType) -> PyResult<Py<PyAny>> {
+    fn cell(&self, _: Python<'_>, _: usize, _: usize, _: ValueType) -> PyResult<Py<PyAny>> {
         Err(db_err(db::DbError::other("no rows")))
     }
-    fn value(&self, _: usize, _: usize, _: ColType) -> DbResult<sea_query::Value> {
+    fn value(&self, _: usize, _: usize, _: ValueType) -> DbResult<sea_query::Value> {
         Err(db::DbError::other("no rows"))
     }
     fn get_i64(&self, _: usize, _: usize) -> DbResult<i64> {
@@ -569,7 +569,7 @@ async fn count_or_rows(
     conn: &dyn Executor,
     sql: String,
     args: Vec<sea_query::Value>,
-    returning: Option<(usize, Vec<ColType>)>,
+    returning: Option<(usize, Vec<ValueType>)>,
     classes: &Classes,
     db: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {

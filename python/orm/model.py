@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import enum
 import json
 import types
 from os import PathLike
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from . import _native
 from .errors import DoesNotExist, MultipleObjectsReturned
 from .expr import ColumnRef
-from .fields import BY_TYPE, BelongsTo, Field, HasMany, Relation, String
+from .fields import BY_TYPE, Array, BelongsTo, Enum, Field, HasMany, HasOne, ManyToMany, Relation, String
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -73,6 +74,9 @@ class Registry:
 
     def __init__(self) -> None:
         self._models: dict[str, type[Model]] = {}
+        # Schema enums: their Python classes and IR, by name.
+        self._enums: dict[str, type[enum.Enum]] = {}
+        self._enum_ir: dict[str, dict[str, Any]] = {}
         # Schema-level IR (extensions, functions, extension catalog) from define().
         self._schema_extra: dict[str, list[Any]] = {}
         self._native: _native.Schema | None = None
@@ -90,17 +94,34 @@ class Registry:
         except KeyError:
             raise LookupError(f"unknown model {name!r}; is its module imported?") from None
 
+    def get_enum(self, name: str) -> type[enum.Enum]:
+        try:
+            return self._enums[name]
+        except KeyError:
+            raise LookupError(f"unknown enum {name!r}; is its module imported?") from None
+
+    def register_enum(self, ir: dict[str, Any], cls: type[enum.Enum]) -> None:
+        name = ir["name"]
+        if name in self._enum_ir and self._enum_ir[name] != ir:
+            raise TypeError(f"an enum named {name} is already registered")
+        self._enums[name] = cls
+        self._enum_ir[name] = ir
+        self._native = None
+
     def __iter__(self) -> Any:
         return iter(self._models.values())
 
     def ir(self) -> dict[str, Any]:
         out: dict[str, Any] = {"models": [m._meta.ir() for m in self._models.values()]}
+        if self._enum_ir:
+            out["enums"] = list(self._enum_ir.values())
         out.update(self._schema_extra)
         return out
 
     def native(self) -> _native.Schema:
         if self._native is None:
-            self._native = _native.Schema(json.dumps(self.ir()), dict(self._models))
+            classes: dict[str, type] = {**self._models, **self._enums}
+            self._native = _native.Schema(json.dumps(self.ir()), classes)
         return self._native
 
 
@@ -112,7 +133,6 @@ def _default_registry() -> Registry:
 
 
 def _field(ir: dict[str, Any]) -> Field[Any]:
-    cls = BY_TYPE[ir["type"]]
     kwargs: dict[str, Any] = {
         "primary_key": ir.get("primary_key", False),
         "auto_increment": ir.get("auto_increment", False),
@@ -125,29 +145,55 @@ def _field(ir: dict[str, Any]) -> Field[Any]:
     }
     if "default" in ir:
         kwargs["default"] = ir["default"]
+    if ir.get("array"):
+        return Array(ir["type"], enum=ir.get("enum"), **kwargs)
+    if "enum" in ir:
+        return Enum(ir["enum"], stored=ir["type"], **kwargs)
+    cls = BY_TYPE[ir["type"]]
     if cls is String:
         return String(ir.get("max_length"), **kwargs)
     return cls(**kwargs)
 
 
 def _relation(ir: dict[str, Any]) -> Relation[Any, Any]:
-    if ir["kind"] == "one":
+    if ir["kind"] == "one" and ir.get("foreign_key"):
         return BelongsTo(ir["target"], via=ir["from"], to=ir["to"], on_delete=ir.get("on_delete", "no_action"))
+    if ir["kind"] == "one":
+        return HasOne(ir["target"], via=ir["to"], from_=ir["from"])
+    if "through" in ir:
+        t = ir["through"]
+        return ManyToMany(
+            ir["target"], through=t["model"], source=t["source"], target_field=t["target"], from_=ir["from"], to=ir["to"]
+        )
     return HasMany(ir["target"], via=ir["to"], from_=ir["from"])
+
+
+def _enum(ir: dict[str, Any], module: str | None) -> type[enum.Enum]:
+    """The Python class of a schema enum: an ``IntEnum`` for int storage, otherwise a
+    ``StrEnum`` whose values are the stored labels."""
+    base: type[enum.Enum] = enum.IntEnum if ir.get("storage") == "int" else enum.StrEnum
+    members = [(v["name"], v["value"]) for v in ir["values"]]
+    cls: type[enum.Enum] = cast(Any, base)(ir["name"], members, module=module)
+    return cls
 
 
 def define(
     schema: str | dict[str, Any], *, registry: Registry | None = None, module: str | None = None
-) -> dict[str, type[Model]]:
+) -> dict[str, Any]:
     """Build model classes from a compiled schema (the JSON IR ``orm compile`` and
     :func:`load` produce). Generated ``models.py`` modules call this.
 
-    Returns the classes by model name. They join ``registry`` (the default one unless
-    given); ``module`` sets their ``__module__``.
+    Returns the model classes and the schema's enum classes, by name. They join
+    ``registry`` (the default one unless given); ``module`` sets their ``__module__``.
     """
     ir: dict[str, Any] = json.loads(schema) if isinstance(schema, str) else schema
     reg = registry if registry is not None else _default_registry()
-    out: dict[str, type[Model]] = {}
+    out: dict[str, Any] = {}
+    for e in ir.get("enums", ()):
+        cls_e = reg._enums.get(e["name"]) if reg._enum_ir.get(e["name"]) == e else None
+        cls_e = cls_e or _enum(e, module)
+        reg.register_enum(e, cls_e)
+        out[e["name"]] = cls_e
     for m in ir["models"]:
         ns: dict[str, Any] = {f["name"]: _field(f) for f in m["fields"]}
         ns.update({r["name"]: _relation(r) for r in m.get("relations", ())})
@@ -169,7 +215,7 @@ def define(
 
 def load(
     path: str | PathLike[str], *, registry: Registry | None = None, module: str | None = None
-) -> dict[str, type[Model]]:
+) -> dict[str, Any]:
     """Compile a schema file (``schema.prisma``) and build its models: no generated code
     needed (generate ``models.py`` / ``.pyi`` for editor and type-checker support)."""
     return define(_native.compile_schema_file(str(path)), registry=registry, module=module)
@@ -273,7 +319,7 @@ class Model:
 
 def loads(
     source: str, *, registry: Registry | None = None, module: str | None = None
-) -> dict[str, type[Model]]:
+) -> dict[str, Any]:
     """Like :func:`load`, for schema source text (``import`` paths resolve against the
     current directory)."""
     return define(_native.compile_schema(source), registry=registry, module=module)

@@ -74,7 +74,7 @@ pub fn create_all(schema: &Schema) -> Result<Vec<String>> {
     Ok(ops.iter().map(|op| pg::render(op, true)).collect())
 }
 
-/// Drops every table and generated function of the schema (`IF EXISTS ... CASCADE`);
+/// Drops every table, enum type and generated function of the schema (`IF EXISTS ... CASCADE`);
 /// extensions stay.
 pub fn drop_all(schema: &Schema) -> Result<Vec<String>> {
     let current = snapshot(schema)?;
@@ -87,6 +87,7 @@ pub fn drop_all(schema: &Schema) -> Result<Vec<String>> {
     out.extend(
         current.functions.iter().map(|f| format!("DROP FUNCTION IF EXISTS {}({}) CASCADE", pg::ident(&f.name), f.args)),
     );
+    out.extend(current.enums.iter().map(|e| format!("DROP TYPE IF EXISTS {} CASCADE", e.sql())));
     Ok(out)
 }
 

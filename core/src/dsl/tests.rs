@@ -18,10 +18,11 @@ fn blog_schema_compiles_to_the_ir_the_engine_expects() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/blog/schema.prisma");
     let (ir, _) = check(compile_file(&path).unwrap()).unwrap();
     let v = serde_json::to_value(&ir).unwrap();
-    let user = &v["models"][0];
+    let model = |name: &str| v["models"].as_array().unwrap().iter().find(|m| m["name"] == name).unwrap().clone();
+    let user = &model("User");
     assert_eq!(user["fields"][1], json!({"name": "email", "column": "email", "type": "string", "unique": true, "max_length": 254}));
     assert_eq!(user["relations"][0], json!({"name": "posts", "kind": "many", "target": "Post", "from": "id", "to": "author_id"}));
-    let post = &v["models"][1];
+    let post = &model("Post");
     assert_eq!(post["table"], "posts");
     assert_eq!(
         post["fields"][0],
@@ -42,7 +43,10 @@ fn blog_schema_compiles_to_the_ir_the_engine_expects() {
     );
     assert_eq!(post["indexes"][1], json!({"columns": [{"field": "title", "opclass": "gin_trgm_ops"}], "method": "gin"}));
     assert_eq!(post["constraints"][0], json!({"kind": "check", "name": "posts_views_not_negative", "expr": "views >= 0"}));
-    assert_eq!(v["models"][2]["relations"][1]["on_delete"], "set_null");
+    assert_eq!(model("Comment")["relations"][1]["on_delete"], "set_null");
+    assert_eq!(model("User")["relations"][2], json!({"name": "profile", "kind": "one", "target": "Profile", "from": "id", "to": "user_id"}));
+    assert_eq!(post["relations"][2]["through"], json!({"model": "PostTag", "source": "post_id", "target": "tag_id"}));
+    assert_eq!(v["enums"][1]["storage"], "int");
 }
 
 #[test]
@@ -119,8 +123,7 @@ model Booking {
     assert_eq!(room["fields"][6]["renamed_from"], "caption");
     assert_eq!(
         room["fields"][7],
-        json!({"name": "price", "column": "price", "type": "string", "db_type": "numeric(10, 2)",
-               "read_sql": "CAST({} AS text)", "write_sql": "CAST({} AS numeric(10, 2))"})
+        json!({"name": "price", "column": "price", "type": "decimal", "db_type": "numeric(10, 2)"})
     );
     assert_eq!(room["fields"][8]["type"], "date");
     assert_eq!(room["fields"][9]["db_type"], "smallint");
@@ -232,7 +235,31 @@ fn errors_point_at_the_problem() {
         ("model A {\n  id BigInt @id\n  j Json @default(\"{oops\")\n}".into(), "JSON text"),
         (format!("{b}\n{b}"), "declared twice"),
         ("datasource db {\n  provider = \"mysql\"\n}".into(), "provider must be \"postgresql\""),
-        ("enum Role {\n  A\n}".into(), "`enum` blocks aren't supported yet"),
+        ("enum Role {\n  A\n  A\n}".into(), "A is declared twice"),
+        ("enum Role {\n  A @value(1)\n}".into(), "@value(n) is for @@storage(int)"),
+        ("enum Role {\n  A\n  @@storage(int)\n}".into(), "need @value(n)"),
+        ("enum Role {\n  A\n  @@storage(blob)\n}".into(), "native, text or int"),
+        ("model A {\n  id BigInt @id\n  r Role @default(B)\n}\nenum Role {\n  A\n}".into(), "Role has no value B"),
+        ("model A {\n  id BigInt @id\n  r Role @db.Text\n}\nenum Role {\n  A\n}".into(), "comes from the enum"),
+        ("type T {\n  a Int\n}".into(), "`type` blocks aren't supported yet"),
+        ("model A {\n  id BigInt[] @id\n}".into(), "an array can't be a primary key"),
+        (
+            format!("model A {{\n  id BigInt @id\n  b B?\n}}\nmodel B {{\n  id BigInt @id\n  a_id BigInt\n  a A @relation(fields: [a_id], references: [id])\n}}"),
+            "B.a_id must be unique for a one-to-one relation",
+        ),
+        (
+            format!("model A {{\n  id BigInt @id\n  b B\n}}\nmodel B {{\n  id BigInt @id\n  a_id BigInt @unique\n  a A @relation(fields: [a_id], references: [id])\n}}"),
+            "a one-to-one back relation is optional: B?",
+        ),
+        (format!("model A {{\n  id BigInt @id\n  bs B[] @relation(through: J)\n}}\n{b}"), "through: J is not a model"),
+        (
+            format!("model A {{\n  id BigInt @id\n  bs B[] @relation(through: J)\n}}\n{b}\nmodel J {{\n  id BigInt @id\n  a_id BigInt\n  a A @relation(fields: [a_id], references: [id])\n}}"),
+            "J has no relation with fields: to B",
+        ),
+        (
+            format!("model A {{\n  id BigInt @id\n  as A[] @relation(through: J)\n}}\nmodel J {{\n  id BigInt @id\n  x BigInt\n  y BigInt\n  a A @relation(\"x\", fields: [x], references: [id])\n  b A @relation(\"y\", fields: [y], references: [id])\n}}"),
+            "needs through_fields",
+        ),
         ("import \"missing.toml\"".into(), "import \"missing.toml\""),
         ("model A {\n  id BigInt @id\n  @@trigger(t, after: [insert],\n    function: f)\n}".into(), "<schema>:3:3: model A: an attribute must be on one line"),
         (
@@ -271,4 +298,147 @@ fn documented_schemas_parse() {
         }
     }
     assert!(blog_documented, "docs/prisma-syntax.md: update the blog example");
+}
+
+#[test]
+fn enums_arrays_decimals() {
+    let ir = ok(r#"
+enum Role {
+  member
+  admin  @map("ADMIN")
+  @@map("user_role")
+}
+
+enum Priority {
+  low  @value(1)
+  high @value(10)
+  @@storage(int)
+}
+
+enum Color {
+  red
+  green
+  @@storage(text)
+}
+
+model Item {
+  id       BigInt     @id
+  role     Role       @default(member)
+  roles    Role[]     @default([member, admin])
+  priority Priority?
+  color    Color      @default(green)
+  tags     String[]   @default([])
+  scores   Int[]
+  price    Decimal    @default(0) @db.Decimal(12, 2)
+  ratio    Decimal?
+}
+"#);
+    let v = serde_json::to_value(&ir).unwrap();
+    assert_eq!(
+        v["enums"][0],
+        json!({"name": "Role", "db_name": "user_role", "storage": "native",
+               "values": [{"name": "member", "value": "member"}, {"name": "admin", "value": "ADMIN"}]})
+    );
+    assert_eq!(v["enums"][1]["values"][1], json!({"name": "high", "value": 10}));
+    let f = &v["models"][0]["fields"];
+    assert_eq!(
+        f[1],
+        json!({"name": "role", "column": "role", "type": "string", "enum": "Role", "db_type": "\"user_role\"",
+               "write_sql": "CAST({} AS \"user_role\")", "default": "member"})
+    );
+    assert_eq!(f[2]["array"], true);
+    assert_eq!(f[2]["write_sql"], "CAST({} AS \"user_role\"[])");
+    assert_eq!(f[2]["default"], json!(["member", "ADMIN"]));
+    assert_eq!(f[3]["type"], "int");
+    assert_eq!(f[4]["type"], "text");
+    assert_eq!(f[5], json!({"name": "tags", "column": "tags", "type": "string", "array": true, "default": []}));
+    assert_eq!(f[7]["type"], "decimal");
+
+    let (_, schema) = check(ir).unwrap();
+    let snap = crate::migrate::snapshot(&schema).unwrap();
+    assert_eq!(snap.enums.len(), 1);
+    assert_eq!(snap.enums[0].values, ["member", "ADMIN"]);
+    let t = &snap.tables[0];
+    let ty = |c: &str| t.column(c).unwrap().ty.clone();
+    assert_eq!(ty("role"), "\"user_role\"");
+    assert_eq!(ty("roles"), "\"user_role\"[]");
+    assert_eq!(ty("priority"), "integer");
+    assert_eq!(ty("tags"), "text[]");
+    assert_eq!(ty("scores"), "integer[]");
+    assert_eq!(ty("price"), "numeric(12, 2)");
+    assert_eq!(ty("ratio"), "numeric");
+    assert_eq!(t.column("roles").unwrap().default.as_deref(), Some("ARRAY['member', 'ADMIN']::\"user_role\"[]"));
+    assert_eq!(t.column("tags").unwrap().default.as_deref(), Some("'{}'::text[]"));
+    let checks: Vec<(&str, &str)> = t.checks.iter().map(|c| (c.name.as_str(), c.expr.as_str())).collect();
+    assert_eq!(
+        checks,
+        [("item_priority_enum_check", "\"priority\" IN (1, 10)"), ("item_color_enum_check", "\"color\" IN ('red', 'green')")]
+    );
+}
+
+#[test]
+fn has_one_and_many_to_many() {
+    let ir = ok(r#"
+model User {
+  id      BigInt   @id
+  profile Profile?
+}
+
+model Profile {
+  id      BigInt @id
+  user_id BigInt @unique
+  user    User   @relation(fields: [user_id], references: [id])
+}
+
+model Post {
+  id        BigInt    @id
+  tags      Tag[]     @relation(through: PostTag)
+  post_tags PostTag[]
+}
+
+model Tag {
+  id    BigInt @id
+  posts Post[] @relation(through: PostTag)
+}
+
+model PostTag {
+  id      BigInt @id
+  post_id BigInt
+  tag_id  BigInt
+  post    Post   @relation(fields: [post_id], references: [id])
+  tag     Tag    @relation(fields: [tag_id], references: [id])
+
+  @@unique([post_id, tag_id])
+}
+
+model Person {
+  id        BigInt   @id
+  following Person[] @relation(through: Follow, through_fields: [follower, followee])
+  followers Person[] @relation(through: Follow, through_fields: [followee, follower])
+}
+
+model Follow {
+  id          BigInt @id
+  follower_id BigInt
+  followee_id BigInt
+  follower    Person @relation("a", fields: [follower_id], references: [id])
+  followee    Person @relation("b", fields: [followee_id], references: [id])
+}
+"#);
+    let v = serde_json::to_value(&ir).unwrap();
+    assert_eq!(
+        v["models"][0]["relations"][0],
+        json!({"name": "profile", "kind": "one", "target": "Profile", "from": "id", "to": "user_id"})
+    );
+    assert_eq!(
+        v["models"][2]["relations"][0],
+        json!({"name": "tags", "kind": "many", "target": "Tag", "from": "id", "to": "id",
+               "through": {"model": "PostTag", "source": "post_id", "target": "tag_id"}})
+    );
+    assert_eq!(v["models"][3]["relations"][0]["through"], json!({"model": "PostTag", "source": "tag_id", "target": "post_id"}));
+    assert_eq!(v["models"][5]["relations"][1]["through"], json!({"model": "Follow", "source": "followee_id", "target": "follower_id"}));
+    let (_, schema) = check(ir).unwrap();
+    // neither side of a has-one or many-to-many adds a foreign key of its own
+    let snap = crate::migrate::snapshot(&schema).unwrap();
+    assert_eq!(snap.tables.iter().map(|t| t.foreign_keys.len()).sum::<usize>(), 5);
 }

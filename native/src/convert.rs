@@ -1,25 +1,66 @@
 //! Python <-> database value conversion, directed by the schema's column types.
 
 use chrono::{DateTime, FixedOffset};
+use std::str::FromStr;
+
+use bigdecimal::BigDecimal;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
-use sea_query::Value;
+use sea_query::{ArrayType, Value};
 
-use orm_core::ir::ColType;
+use orm_core::ir::{ColType, ValueType};
 
-pub fn null_of(ty: Option<ColType>) -> Value {
+static DECIMAL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// Python's `decimal.Decimal`.
+pub fn decimal_class(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    Ok(DECIMAL.get_or_try_init(py, || py.import("decimal")?.getattr("Decimal").map(Bound::unbind))?.bind(py))
+}
+
+/// A `decimal.Decimal` from decimal text.
+pub fn decimal_to_py(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
+    Ok(decimal_class(py)?.call1((text,))?.unbind())
+}
+
+fn scalar_null(ty: ColType) -> Value {
     match ty {
-        Some(ColType::BigInt) => Value::BigInt(None),
-        Some(ColType::Int) => Value::Int(None),
-        Some(ColType::Float) => Value::Double(None),
-        Some(ColType::Bool) => Value::Bool(None),
-        Some(ColType::String | ColType::Text) | None => Value::String(None),
-        Some(ColType::DateTime) => Value::ChronoDateTimeWithTimeZone(None),
-        Some(ColType::Date) => Value::ChronoDate(None),
-        Some(ColType::Uuid) => Value::Uuid(None),
-        Some(ColType::Json) => Value::Json(None),
+        ColType::BigInt => Value::BigInt(None),
+        ColType::Int => Value::Int(None),
+        ColType::Float => Value::Double(None),
+        ColType::Bool => Value::Bool(None),
+        ColType::String | ColType::Text => Value::String(None),
+        ColType::DateTime => Value::ChronoDateTimeWithTimeZone(None),
+        ColType::Date => Value::ChronoDate(None),
+        ColType::Uuid => Value::Uuid(None),
+        ColType::Json => Value::Json(None),
+        ColType::Decimal => Value::BigDecimal(None),
+    }
+}
+
+/// The element type of an array parameter.
+pub fn array_type(ty: ColType) -> ArrayType {
+    match ty {
+        ColType::BigInt => ArrayType::BigInt,
+        ColType::Int => ArrayType::Int,
+        ColType::Float => ArrayType::Double,
+        ColType::Bool => ArrayType::Bool,
+        ColType::String | ColType::Text => ArrayType::String,
+        ColType::DateTime => ArrayType::ChronoDateTimeWithTimeZone,
+        ColType::Date => ArrayType::ChronoDate,
+        ColType::Uuid => ArrayType::Uuid,
+        ColType::Json => ArrayType::Json,
+        ColType::Decimal => ArrayType::BigDecimal,
+    }
+}
+
+pub fn null_of(ty: Option<ValueType>) -> Value {
+    match ty {
+        Some(t) if t.array => Value::Array(array_type(t.ty), None),
+        Some(t) => scalar_null(t.ty),
+        None => Value::String(None),
     }
 }
 
@@ -104,13 +145,33 @@ fn extract_datetime(obj: &Bound<'_, PyAny>) -> PyResult<DateTime<FixedOffset>> {
     })
 }
 
+/// A decimal parameter from a `Decimal`, an int, a float or decimal text.
+fn extract_decimal(obj: &Bound<'_, PyAny>) -> PyResult<BigDecimal> {
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err("expected a decimal, got a bool"));
+    }
+    let text = if obj.is_instance_of::<PyString>() { obj.extract::<String>()? } else { obj.str()?.extract::<String>()? };
+    BigDecimal::from_str(text.trim())
+        .map_err(|_| PyTypeError::new_err(format!("expected a finite decimal, got {}", obj.repr().map(|r| r.to_string()).unwrap_or_default())))
+}
+
 /// Converts a Python value into a bind parameter. `ty` is the type of the column the
 /// value is compared with or assigned to, when the planner knows it.
-pub fn py_to_value(obj: &Bound<'_, PyAny>, ty: Option<ColType>) -> PyResult<Value> {
+pub fn py_to_value(obj: &Bound<'_, PyAny>, ty: Option<ValueType>) -> PyResult<Value> {
     if obj.is_none() {
         return Ok(null_of(ty));
     }
-    Ok(match ty {
+    if let Some(t) = ty.filter(|t| t.array) {
+        if obj.is_instance_of::<PyString>() || !(obj.is_instance_of::<PyList>() || obj.is_instance_of::<PyTuple>()) {
+            return Err(PyTypeError::new_err(format!(
+                "expected a list, got {}",
+                obj.get_type().name()?
+            )));
+        }
+        let items = obj.try_iter()?.map(|v| py_to_value(&v?, Some(t.element()))).collect::<PyResult<Vec<_>>>()?;
+        return Ok(Value::Array(array_type(t.ty), Some(Box::new(items))));
+    }
+    Ok(match ty.map(|t| t.ty) {
         Some(ColType::BigInt) => Value::BigInt(Some(obj.extract()?)),
         Some(ColType::Int) => Value::Int(Some(obj.extract()?)),
         Some(ColType::Float) => Value::Double(Some(obj.extract()?)),
@@ -120,6 +181,7 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>, ty: Option<ColType>) -> PyResult<Valu
         Some(ColType::Date) => Value::ChronoDate(Some(obj.extract()?)),
         Some(ColType::Uuid) => Value::Uuid(Some(extract_uuid(obj)?)),
         Some(ColType::Json) => Value::Json(Some(Box::new(py_to_json(obj)?))),
+        Some(ColType::Decimal) => Value::BigDecimal(Some(Box::new(extract_decimal(obj)?))),
         None => {
             if obj.is_instance_of::<PyBool>() {
                 Value::Bool(Some(obj.extract()?))
@@ -133,6 +195,8 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>, ty: Option<ColType>) -> PyResult<Valu
                 Value::ChronoDateTimeWithTimeZone(Some(extract_datetime(obj)?))
             } else if obj.is_instance_of::<PyDate>() {
                 Value::ChronoDate(Some(obj.extract()?))
+            } else if obj.is_instance(decimal_class(obj.py())?)? {
+                Value::BigDecimal(Some(Box::new(extract_decimal(obj)?)))
             } else if let Ok(u) = obj.extract::<uuid::Uuid>() {
                 Value::Uuid(Some(u))
             } else if obj.is_instance_of::<PyDict>() || obj.is_instance_of::<PyList>() {

@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use crate::ir::{ColType, FieldIr, RelKind, SchemaIr};
+use crate::ir::{ColType, EnumStorage, FieldIr, RelKind, SchemaIr};
 use crate::schema::Schema;
 
 pub struct Generated {
@@ -25,6 +25,12 @@ fn section(name: &str) -> String {
 }
 
 fn field_class(f: &FieldIr) -> &'static str {
+    if f.array {
+        return "Array";
+    }
+    if f.enum_name.is_some() {
+        return "Enum";
+    }
     if f.db_type.is_some() && !f.hints.is_empty() {
         return "Field";
     }
@@ -39,12 +45,25 @@ fn field_class(f: &FieldIr) -> &'static str {
         ColType::Date => "Date",
         ColType::Uuid => "Uuid",
         ColType::Json => "Json",
+        ColType::Decimal => "Decimal",
     }
 }
 
 fn base_type(f: &FieldIr) -> String {
+    let t = element_type(f);
+    if f.array {
+        format!("list[{t}]")
+    } else {
+        t
+    }
+}
+
+fn element_type(f: &FieldIr) -> String {
     if let Some(h) = f.hints.get("python") {
         return h.clone();
+    }
+    if let Some(e) = &f.enum_name {
+        return e.clone();
     }
     match f.ty {
         ColType::BigInt | ColType::Int => "int",
@@ -55,6 +74,7 @@ fn base_type(f: &FieldIr) -> String {
         ColType::Date => "date",
         ColType::Uuid => "UUID",
         ColType::Json => "Any",
+        ColType::Decimal => "Decimal",
     }
     .to_owned()
 }
@@ -80,7 +100,9 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         return Err("schema text contains \"\"\" which can't be embedded in the generated module".into());
     }
     let names: Vec<&str> = schema.models.iter().map(|m| m.ir.name.as_str()).collect();
-    let mut exported: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    let enums: Vec<&str> = schema.enums.iter().map(|e| e.name.as_str()).collect();
+    let mut exported: Vec<String> = enums.iter().map(|n| n.to_string()).collect();
+    exported.extend(names.iter().map(|n| n.to_string()));
     exported.extend(names.iter().flat_map(|n| [format!("{n}Insert"), format!("{n}Update"), format!("{n}UpdateRow")]));
     exported.extend(names.iter().map(|n| format!("{n}QuerySet")));
     let all = exported.iter().map(|n| format!("    \"{n}\",\n")).collect::<String>();
@@ -97,7 +119,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     );
     writeln!(py, "_SCHEMA = r\"\"\"\n{ir_json}\n\"\"\"\n").unwrap();
     writeln!(py, "_models = define(_SCHEMA, module=__name__)").unwrap();
-    for n in &names {
+    for n in enums.iter().chain(&names) {
         writeln!(py, "{n} = _models[\"{n}\"]").unwrap();
     }
     py.push_str("\n# Typed per model in models.pyi; plain aliases at runtime so the names can be imported.\n");
@@ -113,7 +135,9 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     for m in &schema.models {
         for f in m.fields() {
             let t = base_type(f);
-            for (word, import) in [("datetime", "datetime"), ("date", "date"), ("UUID", "UUID"), ("Any", "Any")] {
+            for (word, import) in
+                [("datetime", "datetime"), ("date", "date"), ("UUID", "UUID"), ("Any", "Any"), ("Decimal", "Decimal")]
+            {
                 if t.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == word) {
                     used.insert(import);
                 }
@@ -121,6 +145,16 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         }
     }
     let mut body = String::new();
+    for e in &schema.enums {
+        writeln!(body, "{}\n", section(&e.name)).unwrap();
+        let base = if e.storage == EnumStorage::Int { "IntEnum" } else { "StrEnum" };
+        used.insert(if e.storage == EnumStorage::Int { "IntEnum" } else { "StrEnum" });
+        writeln!(body, "class {}({base}):", e.name).unwrap();
+        for v in &e.values {
+            writeln!(body, "    {} = {}", v.name, v.value).unwrap();
+        }
+        body.push('\n');
+    }
     for m in &schema.models {
         let name = &m.ir.name;
         writeln!(body, "{}\n", section(name)).unwrap();
@@ -133,7 +167,13 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         }
         for r in &m.ir.relations {
             match r.kind {
+                RelKind::Many if r.through.is_some() => {
+                    writeln!(body, "    {}: f.ManyToMany[{}, _{}Path]", r.name, r.target, r.target).unwrap()
+                }
                 RelKind::Many => writeln!(body, "    {}: f.HasMany[{}, _{}Path]", r.name, r.target, r.target).unwrap(),
+                RelKind::One if !r.foreign_key => {
+                    writeln!(body, "    {}: f.HasOne[{} | None, _{}Path]", r.name, r.target, r.target).unwrap()
+                }
                 RelKind::One => {
                     let nullable = m.field(&r.from)?.nullable;
                     let t = if nullable { format!("{} | None", r.target) } else { r.target.clone() };
@@ -158,7 +198,8 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         body.push('\n');
 
         // insert / update shapes; a to-one relation can be given instead of its key
-        let belongs = |field: &str| m.ir.relations.iter().find(|r| r.kind == RelKind::One && r.from == field);
+        let belongs =
+            |field: &str| m.ir.relations.iter().find(|r| r.kind == RelKind::One && r.foreign_key && r.from == field);
         writeln!(body, "class {name}Insert(TypedDict):").unwrap();
         for f in m.fields() {
             let t = value_type(f);
@@ -241,6 +282,13 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     if !dt.is_empty() {
         writeln!(pyi, "from datetime import {}", dt.join(", ")).unwrap();
     }
+    if used.contains("Decimal") {
+        pyi.push_str("from decimal import Decimal\n");
+    }
+    let en: Vec<&str> = ["IntEnum", "StrEnum"].into_iter().filter(|d| used.contains(d)).collect();
+    if !en.is_empty() {
+        writeln!(pyi, "from enum import {}", en.join(", ")).unwrap();
+    }
     let typing = if used.contains("Any") {
         "Any, ClassVar, NotRequired, Required, TypedDict"
     } else {
@@ -250,6 +298,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     if used.contains("UUID") {
         pyi.push_str("from uuid import UUID\n");
     }
+
     pyi.push_str(
         "\nfrom typing_extensions import Unpack\n\n\
          from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update, UpdateMany\n\

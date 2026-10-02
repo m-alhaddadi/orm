@@ -19,7 +19,7 @@ pub(crate) fn yes() -> bool {
     true
 }
 
-#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ColType {
     BigInt,
@@ -33,11 +33,74 @@ pub enum ColType {
     Uuid,
     /// `jsonb`; values are JSON-compatible Python objects.
     Json,
+    /// `numeric`; exact decimal values (Python `decimal.Decimal`), any precision.
+    Decimal,
+}
+
+/// How a column's values travel: the scalar type, whether the column is an array of
+/// it, and the enum (index into the schema's enums) its values belong to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ValueType {
+    pub ty: ColType,
+    pub array: bool,
+    pub enum_idx: Option<u32>,
+}
+
+impl ValueType {
+    pub const fn scalar(ty: ColType) -> Self {
+        ValueType { ty, array: false, enum_idx: None }
+    }
+
+    /// The type of one element of an array.
+    pub const fn element(self) -> Self {
+        ValueType { array: false, ..self }
+    }
+}
+
+impl From<ColType> for ValueType {
+    fn from(ty: ColType) -> Self {
+        ValueType::scalar(ty)
+    }
+}
+
+/// How an enum is stored.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EnumStorage {
+    /// A database enum type (`CREATE TYPE ... AS ENUM`), where the dialect has one.
+    #[default]
+    Native,
+    /// A text column limited to the labels by a `CHECK` constraint.
+    Text,
+    /// An integer column limited to the values by a `CHECK` constraint.
+    Int,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct EnumValueIr {
+    /// The name in the schema (and of the language-side member).
+    pub name: String,
+    /// What the database stores: the label (`native`, `text`) or an integer (`int`).
+    pub value: serde_json::Value,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct EnumIr {
+    pub name: String,
+    /// The database type name (`native` storage).
+    pub db_name: String,
+    #[serde(default)]
+    pub storage: EnumStorage,
+    pub values: Vec<EnumValueIr>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub comment: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Default)]
 pub struct SchemaIr {
     pub models: Vec<ModelIr>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub enums: Vec<EnumIr>,
     /// Database extensions the schema needs (`CREATE EXTENSION`), on top of the ones
     /// required implicitly by column types, index methods and operator classes.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -81,6 +144,15 @@ pub struct FieldIr {
     pub ty: ColType,
     #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub nullable: bool,
+    /// An array of `type` (`text[]`, `integer[]`, ...).
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
+    pub array: bool,
+    /// The schema enum the values belong to; `type` is how they are stored.
+    #[serde(rename = "enum", skip_serializing_if = "Option::is_none", default)]
+    pub enum_name: Option<String>,
+    /// Index of `enum_name` in the schema's enums, set when the schema is validated.
+    #[serde(skip)]
+    pub enum_idx: Option<u32>,
     #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub primary_key: bool,
     #[serde(skip_serializing_if = "crate::ir::is_false", default)]
@@ -128,6 +200,10 @@ pub struct FieldIr {
 }
 
 impl FieldIr {
+    pub fn value_type(&self) -> ValueType {
+        ValueType { ty: self.ty, array: self.array, enum_idx: self.enum_idx }
+    }
+
     /// A plain column: no key, default or SQL templates.
     pub fn plain(name: &str, ty: ColType) -> FieldIr {
         FieldIr {
@@ -135,6 +211,9 @@ impl FieldIr {
             column: name.to_owned(),
             ty,
             nullable: true,
+            array: false,
+            enum_name: None,
+            enum_idx: None,
             primary_key: false,
             auto_increment: false,
             unique: false,
@@ -160,8 +239,19 @@ impl FieldIr {
 pub enum RelKind {
     /// At most one target row per source row (belongs-to / has-one).
     One,
-    /// Any number of target rows per source row (has-many).
+    /// Any number of target rows per source row (has-many, many-to-many).
     Many,
+}
+
+/// The join model of a many-to-many relation: `source.from == join.source` and
+/// `join.target == target.to`.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ThroughIr {
+    pub model: String,
+    /// Field of the join model holding the source row's key.
+    pub source: String,
+    /// Field of the join model holding the target row's key.
+    pub target: String,
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,7 +264,8 @@ pub enum OnDelete {
     NoAction,
 }
 
-/// `source.from == target.to` links a source row to its related target rows.
+/// `source.from == target.to` links a source row to its related target rows, or, with
+/// `through`, a row of the join model links them.
 #[derive(Deserialize, Serialize, Debug)]
 pub struct RelationIr {
     pub name: String,
@@ -191,6 +282,9 @@ pub struct RelationIr {
     pub on_update: Option<OnDelete>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub deferrable: Option<Deferrable>,
+    /// Many-to-many through a join model.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub through: Option<ThroughIr>,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -400,6 +494,12 @@ pub enum CmpOp {
     Le,
     Gt,
     Ge,
+    /// Arrays: `l @> r` (every element of `r` is in `l`).
+    Contains,
+    /// Arrays: `l <@ r`.
+    ContainedBy,
+    /// Arrays: `l && r` (an element in common).
+    Overlaps,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug)]

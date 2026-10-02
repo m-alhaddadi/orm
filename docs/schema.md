@@ -112,8 +112,8 @@ END;
   `args` (the SQL argument list, e.g. `"a integer, b text"`), `language` (default
   `plpgsql`), `volatility` (`immutable` / `stable` / `volatile`), `security_definer`,
   `body`. The formatter removes the indentation inside it, which SQL doesn't mind.
-* `generator` blocks (Prisma Client's) are read and ignored. `enum`, `type` and `view`
-  aren't supported yet.
+* `generator` blocks (Prisma Client's) are read and ignored. `type` and `view`
+  aren't supported yet; `enum` is below.
 
 A model's table is the model name in lower case, or `@@map("name")`.
 `@@comment("...")` and `@@renamed_from("old_table")` set its comment and previous name.
@@ -132,12 +132,73 @@ A model's table is the model name in lower case, or `@@map("name")`.
 | `String @db.Uuid` | `uuid` | `uuid.UUID` (strings accepted) |
 | `DateTime`, `DateTime @db.Date` | `timestamp with time zone`, `date` | `datetime` (aware), `date` |
 | `Json` | `jsonb` | dicts, lists, scalars |
-| `Decimal`, `Decimal @db.Decimal(p, s)` | `numeric`, `numeric(p, s)` | `str` (no precision lost) |
+| `Decimal`, `Decimal @db.Decimal(p, s)` | `numeric`, `numeric(p, s)` | `decimal.Decimal` (exact; `int`, `float`, `"12.50"` accepted) |
+| an enum (below) | a Postgres enum type, `text` or `integer` | members of a generated `StrEnum` / `IntEnum` |
+| `Type[]`, e.g. `String[]`, `Int[]`, `Role[]` | `text[]`, `integer[]`, `"role"[]`, ... | `list` of the element type |
 | `String @db.Citext` | `citext` (the extension type) | `str` |
 | `Unsupported("vector(384)")`, `Unsupported("geography(Point, 4326)")` | an extension type, from its extension file | from the file's `value` |
 
 Prisma's other `@db.*` types (`@db.SmallInt`, `@db.Timestamp(3)`, `@db.Char(2)`,
 `@db.Inet`, ...) set the column's SQL type; values convert as the field type's.
+
+Decimals travel in Postgres' binary `numeric` format, digit for digit, so money never
+goes through a float: `SUM` of a decimal column is a `Decimal`, and so is `AVG` (other
+averages are floats).
+
+Arrays (`Type[]`) work for every scalar type and enum, but not for extension types or
+primary keys. `@default([])` / `@default(["a", "b"])` give list defaults (`[member]`
+for enum arrays). `String[]` is `text[]`; `String[] @db.VarChar(20)` is
+`varchar(20)[]`, and values are cast to it. `Type[]?` makes the array itself nullable;
+elements can always be `NULL` (`None`).
+
+### Enums
+
+```prisma
+enum Role {            // a Postgres enum type: CREATE TYPE "role" AS ENUM (...)
+  member
+  editor
+  admin  @map("ADMIN") // stored as 'ADMIN'
+  @@map("user_role")   // the type's name (default: the enum name in lower case)
+}
+
+enum Color {           // a text column with CHECK ("color" IN ('red', 'green'))
+  red
+  green
+  @@storage(text)
+}
+
+enum Priority {        // an integer column with CHECK ("priority" IN (1, 2, 3))
+  low    @value(1)
+  normal @value(2)
+  high   @value(3)
+  @@storage(int)
+}
+
+model Tag {
+  id       BigInt   @id
+  role     Role     @default(member)
+  priority Priority @default(normal)
+  colors   Color[]  @default([red])
+}
+```
+
+`@@storage` picks how values are stored: `native` (the default, Prisma's behaviour)
+uses the database's enum type where the dialect has one; `text` and `int` work on any
+database and are kept to the enum's values by a `CHECK` constraint named
+`<table>_<column>_enum_check`. Integer enums give each value with `@value(n)` (there is
+no implicit numbering, so reordering the schema never changes stored data).
+
+In Python each enum is a class of the generated module: a `StrEnum` whose values are the
+stored labels, or an `IntEnum`. Columns read back as members (`profile.role is
+Role.member`); writes and filters take members or the stored values (`"admin"`, `3`).
+
+Migrations create the type before the tables using it and drop it after them. Values
+added to a native enum become `ALTER TYPE ... ADD VALUE ... [BEFORE ...]`, which keeps
+their place; Postgres can't use a new value in the transaction that added it, so the
+step carries a warning. A removed or reordered value recreates the type: the old one is
+renamed, the new one created, every column using it converted through text (defaults
+dropped and restored), and the old type dropped. That fails if rows still hold a removed
+value, and says so in a warning.
 
 | Attribute | Meaning |
 |---|---|
@@ -169,8 +230,26 @@ database's, no action) and `deferrable: immediate | deferred`. The relation is
 optional (`User?`) exactly when the key field is nullable; the compiler checks this.
 A to-many relation (`Post[]`) is paired with the to-one relation on the other model.
 When two models have more than one relation between them, name both sides:
-`@relation("author", fields: ...)` and `@relation("author")`. One-to-one back
-relations (`Profile?` without `fields:`) and composite keys aren't supported yet.
+`@relation("author", fields: ...)` and `@relation("author")`. Composite keys aren't
+supported yet.
+
+```
+profile  Profile?                                   // one-to-one: Profile.user_id is @unique
+tags     Tag[]    @relation(through: PostTag)       // many-to-many through a join model
+followers User[]  @relation(through: Follow, through_fields: [followee, follower])
+```
+
+* **One-to-one** is a to-one relation (`user User @relation(fields: [user_id], ...)`)
+  whose key is unique (`@unique`, `@id` or a one-field `@@unique`), and its other side
+  without `fields:`, which must be optional (`Profile?`): a user may have no profile.
+* **Many-to-many** goes through an explicit join model with a to-one relation to each
+  side (`PostTag.post`, `PostTag.tag`). `through:` names it; the relations are found by
+  their targets, or named with `through_fields: [<to this model>, <to the target>]`
+  (needed when both point at the same model, as in followers). The join model is an
+  ordinary model: give it a `@@unique([post_id, tag_id])` and any extra columns, and
+  query it directly too. Filters, aggregates and `prefetch_related` go through it in one
+  hop (see [`python-api.md`](python-api.md)). Prisma's implicit many-to-many (no join
+  model) isn't supported.
 
 ### Model attributes (`@@`)
 
@@ -354,5 +433,7 @@ dependency) is the natural base. `sea-schema` introspection fits drift detection
 * TypeScript generation and the JS binding.
 * Introspection of a live database (drift detection, adopting an existing schema).
 * `CREATE INDEX CONCURRENTLY` / non-transactional migrations.
-* Array columns, generated columns, views, enums and domains, row-level security,
-  partitioning, multiple database schemas, composite foreign keys.
+* Generated columns, views, domains, row-level security, partitioning, multiple
+  database schemas, composite keys (primary and foreign).
+* Renaming a native enum value in place (`ALTER TYPE ... RENAME VALUE`): a renamed
+  value is a removal plus an addition today.

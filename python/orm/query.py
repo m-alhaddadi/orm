@@ -22,7 +22,7 @@ from .expr import (
     as_condition,
     not_,
 )
-from .fields import HasMany
+from .fields import HasMany, ManyToMany
 from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, prepare_rows, assignments
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ T4 = TypeVar("T4")
 T5 = TypeVar("T5")
 T6 = TypeVar("T6")
 
-__all__ = ["QuerySet", "RelatedSet", "Prefetch"]
+__all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prefetch"]
 
 # Ids per query in in_bulk(), well below Postgres' 65535 parameters.
 IN_BULK_CHUNK = 10_000
@@ -692,3 +692,130 @@ class RelatedSet(QuerySet[M]):
 
     def _link(self) -> dict[str, Any]:
         return {self._relation.via: self._instance.__dict__[self._relation.from_]}
+
+
+class ManyRelatedSet(QuerySet[M]):
+    """``post.tags``: the rows a many-to-many relation links to one instance.
+
+    A query set over the related model (filtered through the join model), which also
+    reads rows loaded by ``prefetch_related`` (``.cached``, or awaiting it unchanged),
+    and changes the links: ``add()``, ``remove()``, ``set()``, ``clear()`` and
+    ``insert()`` write rows of the join model.
+    """
+
+    __slots__ = ("_relation", "_instance")
+
+    def __init__(self, relation: ManyToMany[M, Any], instance: Model) -> None:
+        from .expr import exists, outer
+
+        super().__init__(relation.target)
+        self._relation = relation
+        self._instance = instance
+        join = relation.through
+        fields = join._meta.fields
+        source: ColumnRef[Any] = ColumnRef(join, (), fields[relation.source])
+        target: ColumnRef[Any] = ColumnRef(join, (), fields[relation.target_field])
+        to: ColumnRef[Any] = ColumnRef(relation.target, (), relation.target._meta.fields[relation.to])
+        self._filters = (exists(join.objects.filter(source == self._key, target == outer(to))),)
+
+    @property
+    def _key(self) -> Any:
+        return self._instance.__dict__.get(self._relation.from_)
+
+    @property
+    def cached(self) -> list[M]:
+        """Rows loaded with ``prefetch_related``; raises ``NotLoaded`` otherwise."""
+        from .errors import NotLoaded
+
+        rows = self._instance.__dict__.get(self._relation.name)
+        if rows is None:
+            raise NotLoaded(f"{self._relation.model.__name__}.{self._relation.name} was not prefetched")
+        return list(rows)
+
+    async def _fetch(self) -> list[M]:
+        rows = self._instance.__dict__.get(self._relation.name)
+        pristine = len(self._filters) == 1 and not self._order and self._limit is None and self._offset is None
+        if rows is not None and pristine and not self._prefetch and not self._related:
+            return list(rows)
+        return await super()._fetch()
+
+    # -- links ------------------------------------------------------------------------------
+
+    def _links(self) -> QuerySet[Any]:
+        """The join rows of this instance."""
+        join = self._relation.through
+        source: ColumnRef[Any] = ColumnRef(join, (), join._meta.fields[self._relation.source])
+        db = self._db if self._db is not None else self._instance.__dict__.get("_db")
+        return join.objects.using(db).filter(source == self._key)
+
+    def _target_keys(self, objs: Iterable[Any]) -> list[Any]:
+        """Keys of related instances (or the keys themselves)."""
+        to = self._relation.to
+        target = self._relation.target
+        keys = []
+        for o in objs:
+            if isinstance(o, target):
+                keys.append(o.__dict__[to])
+            elif hasattr(o, "_meta"):
+                raise TypeError(f"{self._relation.model.__name__}.{self._relation.name} links {target.__name__}, not {o!r}")
+            else:
+                keys.append(o)
+        return list(dict.fromkeys(keys))
+
+    def _target_col(self) -> ColumnRef[Any]:
+        join = self._relation.through
+        return ColumnRef(join, (), join._meta.fields[self._relation.target_field])
+
+    def _forget(self) -> None:
+        # prefetched rows no longer match the links
+        self._instance.__dict__.pop(self._relation.name, None)
+
+    async def add(self, *objs: Any) -> None:
+        """Link the given instances (or keys); links that exist are left alone."""
+        keys = self._target_keys(objs)
+        if not keys:
+            return
+        col = self._target_col()
+        have = set(await self._links().filter(col.in_(keys)).select(col).scalars())
+        rows = [{self._relation.source: self._key, self._relation.target_field: k} for k in keys if k not in have]
+        if rows:
+            await self._links().insert_many(rows)
+        self._forget()
+
+    async def remove(self, *objs: Any) -> int:
+        """Unlink the given instances (or keys); returns the number of links removed."""
+        keys = self._target_keys(objs)
+        if not keys:
+            return 0
+        n = await self._links().filter(self._target_col().in_(keys)).delete()
+        self._forget()
+        return n
+
+    async def clear(self) -> int:
+        """Remove every link of this instance; returns how many there were."""
+        n = await self._links().delete()
+        self._forget()
+        return n
+
+    async def set(self, objs: Iterable[Any]) -> None:
+        """Make the given instances (or keys) exactly the linked ones."""
+        keys = self._target_keys(objs)
+        col = self._target_col()
+        await self._links().filter(col.not_in(keys)).delete()
+        await self.add(*keys)
+
+    async def insert(self, **values: Any) -> M:  # type: ignore[override]
+        """Insert a related row and link it, in one transaction."""
+        from .db import resolve
+
+        db = self._db if self._db is not None else self._instance.__dict__.get("_db")
+        async with resolve(db).transaction():
+            obj: M = await QuerySet(self._model).using(db).insert(**values)
+            await self.add(obj)
+        return obj
+
+    def insert_many(self, rows: Iterable[Mapping[str, Any]]) -> InsertMany[M]:
+        raise TypeError(
+            f"{self._relation.model.__name__}.{self._relation.name}.insert_many() isn't supported; "
+            f"insert the rows, then link them with add()"
+        )

@@ -9,7 +9,10 @@
 //!   "no post with more than 10 views". This matches Django's multi-valued relationship
 //!   semantics without its duplicate rows (no JOIN fan-out, no DISTINCT needed).
 //! * `select_related` and `order_by` follow to-one relations only, with `LEFT JOIN`s.
-//! * `prefetch` loads to-many relations with one extra `WHERE fk IN (...)` query each.
+//! * `prefetch` loads relations with one extra `WHERE fk IN (...)` query each.
+//! * A many-to-many relation is one hop through its join table: `EXISTS (SELECT 1
+//!   FROM tags t2 JOIN post_tags t3 ON t3.tag_id = t2.id WHERE t3.post_id = posts.id
+//!   AND ...)`, and its prefetch selects the join row's key next to each tag.
 
 use pyo3::prelude::*;
 use pyo3::types::PyList;
@@ -23,7 +26,7 @@ use crate::convert::py_to_value;
 use crate::errors::query_err;
 use orm_core::ir::{
     ArithOp, Assignment, CmpOp, ColType, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Operation, Order,
-    Prefetch, RelKind, Select, SelectItem, Update,
+    Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType,
 };
 use orm_core::dialect::{Capabilities, Target};
 use orm_core::schema::{Model, Schema};
@@ -55,7 +58,7 @@ pub struct PrefetchPlan {
     pub many: bool,
     /// Position and type of the relation's `from` field in the parent rows.
     pub key_pos: usize,
-    pub key_type: ColType,
+    pub key_type: ValueType,
     /// Position of the relation's `to` field in the related rows.
     pub child_key_pos: usize,
     /// The related model's to-one relation back to the parent, filled in too.
@@ -65,7 +68,7 @@ pub struct PrefetchPlan {
     key_field: FieldIr,
     /// A slice per parent: (offset, limit) over the `_rn` column `stmt` computes.
     slice: Option<(u64, Option<u64>)>,
-    pub types: Vec<ColType>,
+    pub types: Vec<ValueType>,
     pub output: Output,
     pub children: Vec<PrefetchPlan>,
 }
@@ -91,7 +94,7 @@ impl PrefetchPlan {
 
 pub struct SelectPlan {
     pub stmt: SelectStatement,
-    pub types: Vec<ColType>,
+    pub types: Vec<ValueType>,
     pub output: Output,
     pub prefetch: Vec<PrefetchPlan>,
 }
@@ -101,22 +104,22 @@ pub enum Plan {
     Count(SelectStatement),
     Exists(SelectStatement),
     /// The model and column types of the returned rows when the update has `RETURNING`.
-    Update(UpdateStatement, Option<(usize, Vec<ColType>)>),
+    Update(UpdateStatement, Option<(usize, Vec<ValueType>)>),
     /// The model and column types of the returned rows when the delete has `RETURNING`.
-    Delete(DeleteStatement, Option<(usize, Vec<ColType>)>),
+    Delete(DeleteStatement, Option<(usize, Vec<ValueType>)>),
 }
 
 /// What a bound value is compared with or assigned to: its type drives the conversion
 /// and its field the `write_sql` template.
 #[derive(Clone, Copy, Default)]
 struct Hint<'s> {
-    ty: Option<ColType>,
+    ty: Option<ValueType>,
     field: Option<&'s FieldIr>,
 }
 
 impl<'s> Hint<'s> {
     fn ty(ty: ColType) -> Self {
-        Hint { ty: Some(ty), field: None }
+        Hint { ty: Some(ValueType::scalar(ty)), field: None }
     }
 
     fn or(self, other: Hint<'s>) -> Self {
@@ -172,7 +175,7 @@ fn fold(items: Vec<SExpr>, and: bool) -> SExpr {
 }
 
 const AGGREGATES: [&str; 5] = ["count", "sum", "avg", "min", "max"];
-const SCALAR_FUNCS: [&str; 6] = ["lower", "upper", "length", "abs", "coalesce", "now"];
+const SCALAR_FUNCS: [&str; 7] = ["lower", "upper", "length", "abs", "coalesce", "now", "cardinality"];
 /// Functions that only exist with `OVER (...)`.
 const WINDOW_FUNCS: [&str; 11] = [
     "row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead", "first_value",
@@ -327,7 +330,10 @@ pub fn derive_ctes(schema: &Schema, target: Target, ctes: &[Cte], params: &[Boun
                         SelectItem::Model => model_fields(&mut fields),
                         SelectItem::Expr { expr, name } => {
                             let name = name.as_deref().ok_or_else(|| query_err("CTE columns need names".into()))?;
-                            fields.push(FieldIr::plain(name, p.expr_type(expr)?));
+                            let vt = p.expr_type(expr)?;
+                            let mut f = FieldIr::plain(name, vt.ty);
+                            (f.array, f.enum_idx) = (vt.array, vt.enum_idx);
+                            fields.push(f);
                         }
                     }
                 }
@@ -518,7 +524,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             if idx < self.schema.models.len() {
                 return Err(query_err(format!("join() takes a CTE, {:?} is a model", j.cte)));
             }
-            if j.cte == self.source || self.joined.contains(&j.cte) {
+            if j.cte == self.source || <[String]>::contains(&self.joined, &j.cte) {
                 return Err(query_err(format!("CTE {:?} is read twice by one query", j.cte)));
             }
             self.joined.push(j.cte.clone());
@@ -731,7 +737,53 @@ impl<'s, 'py> Planner<'s, 'py> {
             .map(|p| p[base.len()].as_str())
     }
 
-    /// `EXISTS (SELECT 1 FROM <target> AS tN WHERE tN.to = <scope>.from AND <body>)`.
+    /// Adds the target rows of `rel`, linked to the source rows `src` (alias, model), to
+    /// `stmt`: as its `FROM` (linked in `WHERE`) when `first`, otherwise as inner joins.
+    /// A many-to-many relation goes through its join model. Returns the target's alias.
+    fn add_hop(
+        &mut self,
+        stmt: &mut SelectStatement,
+        first: bool,
+        src: (&str, usize),
+        rel: &RelationIr,
+        target: usize,
+        prefix: &str,
+    ) -> PyResult<String> {
+        let from_col = &self.model(src.1).field(&rel.from).map_err(query_err)?.column;
+        let tm = self.model(target);
+        let to_col = &tm.field(&rel.to).map_err(query_err)?.column;
+        let table = Alias::new(tm.table());
+        let alias = self.alias(prefix);
+        match &rel.through {
+            None => {
+                let link = col(&alias, to_col).eq(col(src.0, from_col));
+                if first {
+                    stmt.from_as(table, Alias::new(&alias)).and_where(link);
+                } else {
+                    stmt.join_as(JoinType::InnerJoin, table, Alias::new(&alias), link);
+                }
+            }
+            Some(th) => {
+                let jm = self.model(self.model_idx(&th.model)?);
+                let jalias = self.alias(prefix);
+                let jtable = Alias::new(jm.table());
+                let to_target = col(&jalias, &jm.field(&th.target).map_err(query_err)?.column).eq(col(&alias, to_col));
+                let to_source = col(&jalias, &jm.field(&th.source).map_err(query_err)?.column).eq(col(src.0, from_col));
+                if first {
+                    stmt.from_as(table, Alias::new(&alias))
+                        .join_as(JoinType::InnerJoin, jtable, Alias::new(&jalias), to_target)
+                        .and_where(to_source);
+                } else {
+                    stmt.join_as(JoinType::InnerJoin, jtable, Alias::new(&jalias), to_source)
+                        .join_as(JoinType::InnerJoin, table, Alias::new(&alias), to_target);
+                }
+            }
+        }
+        Ok(alias)
+    }
+
+    /// `EXISTS (SELECT 1 FROM <target> AS tN WHERE tN.to = <scope>.from AND <body>)`
+    /// (through the join table for a many-to-many relation).
     fn exists_via(
         &mut self,
         hop: &str,
@@ -740,24 +792,18 @@ impl<'s, 'py> Planner<'s, 'py> {
         let cur = self.scope();
         let cur_model = self.model(cur.model);
         let (rel, target) = cur_model.relation(hop).map_err(query_err)?;
-        let from_col = &cur_model.field(&rel.from).map_err(query_err)?.column;
-        let target_model = self.model(target);
-        let to_col = &target_model.field(&rel.to).map_err(query_err)?.column;
         let mut path = cur.path.clone();
         path.push(hop.to_owned());
         let outer_alias = cur.alias.clone();
-        let alias = self.alias("t");
-        let link = col(&alias, to_col).eq(col(&outer_alias, from_col));
-
-        self.scopes.push(Scope { path, model: target, alias: alias.clone() });
-        let body = body(self);
-        self.scopes.pop();
+        let cur_model_idx = cur.model;
 
         let mut sub = Query::select();
-        sub.expr(SExpr::val(1))
-            .from_as(Alias::new(target_model.table()), Alias::new(&alias))
-            .and_where(link)
-            .and_where(body?);
+        sub.expr(SExpr::val(1));
+        let alias = self.add_hop(&mut sub, true, (&outer_alias, cur_model_idx), rel, target, "t")?;
+        self.scopes.push(Scope { path, model: target, alias });
+        let body = body(self);
+        self.scopes.pop();
+        sub.and_where(body?);
         Ok(SExpr::exists(sub))
     }
 
@@ -807,6 +853,9 @@ impl<'s, 'py> Planner<'s, 'py> {
                     CmpOp::Le => l.lte(r),
                     CmpOp::Gt => l.gt(r),
                     CmpOp::Ge => l.gte(r),
+                    CmpOp::Contains => SExpr::cust_with_exprs("$1 @> $2", [l, r]),
+                    CmpOp::ContainedBy => SExpr::cust_with_exprs("$1 <@ $2", [l, r]),
+                    CmpOp::Overlaps => SExpr::cust_with_exprs("$1 && $2", [l, r]),
                 }
             }
             Expr::In { item, values, neg } => {
@@ -880,19 +929,19 @@ impl<'s, 'py> Planner<'s, 'py> {
         match e {
             Expr::Col { path, name } => {
                 let field = self.walk(self.root, path).ok().and_then(|m| self.model(m).field(name).ok());
-                Hint { ty: field.map(|f| f.ty), field }
+                Hint { ty: field.map(|f| f.value_type()), field }
             }
             Expr::Excluded { name } => {
                 let field = self.model(self.root).field(name).ok();
-                Hint { ty: field.map(|f| f.ty), field }
+                Hint { ty: field.map(|f| f.value_type()), field }
             }
             Expr::Outer { depth, name } => {
                 let field = self.outer_field(*depth, name).ok().map(|(_, f)| f);
-                Hint { ty: field.map(|f| f.ty), field }
+                Hint { ty: field.map(|f| f.value_type()), field }
             }
             Expr::CteCol { cte, name } => {
                 let field = self.model_idx(cte).ok().and_then(|m| self.model(m).field(name).ok());
-                Hint { ty: field.map(|f| f.ty), field }
+                Hint { ty: field.map(|f| f.value_type()), field }
             }
             // Arithmetic results are plain values: no write_sql cast.
             Expr::Arith { l, r, .. } => Hint { ty: self.hint_of(l).or(self.hint_of(r)).ty, field: None },
@@ -957,15 +1006,18 @@ impl<'s, 'py> Planner<'s, 'py> {
     // -- functions ----------------------------------------------------------------------
 
     /// The column type of an expression's result, which decodes it.
-    fn expr_type(&self, e: &Expr) -> PyResult<ColType> {
+    fn expr_type(&self, e: &Expr) -> PyResult<ValueType> {
+        let scalar = ValueType::scalar;
         Ok(match e {
             Expr::Col { path, name } => {
                 let m = self.walk(self.root, path)?;
-                self.model(m).field(name).map_err(query_err)?.ty
+                self.model(m).field(name).map_err(query_err)?.value_type()
             }
-            Expr::Outer { depth, name } => self.outer_field(*depth, name)?.1.ty,
-            Expr::CteCol { cte, name } => self.model(self.model_idx(cte)?).field(name).map_err(query_err)?.ty,
-            Expr::Int { .. } => ColType::BigInt,
+            Expr::Outer { depth, name } => self.outer_field(*depth, name)?.1.value_type(),
+            Expr::CteCol { cte, name } => {
+                self.model(self.model_idx(cte)?).field(name).map_err(query_err)?.value_type()
+            }
+            Expr::Int { .. } => scalar(ColType::BigInt),
             Expr::Subquery { select } => self.child(select)?.expr_type(Self::one_column(select, "as_scalar()")?)?,
             Expr::Window { func, .. } => self.expr_type(func)?,
             Expr::Arith { l, r, .. } => match self.expr_type(l) {
@@ -978,14 +1030,19 @@ impl<'s, 'py> Planner<'s, 'py> {
                     None => Err(query_err(format!("{name}() needs an argument"))),
                 };
                 match name.as_str() {
-                    "count" | "row_number" | "rank" | "dense_rank" => ColType::BigInt,
-                    "avg" | "percent_rank" | "cume_dist" => ColType::Float,
-                    "length" | "ntile" => ColType::Int,
-                    "lower" | "upper" => ColType::Text,
-                    "now" => ColType::DateTime,
+                    "count" | "row_number" | "rank" | "dense_rank" => scalar(ColType::BigInt),
+                    "percent_rank" | "cume_dist" => scalar(ColType::Float),
+                    // AVG of decimals stays exact; of anything else it is a float
+                    "avg" => match first()?.ty {
+                        ColType::Decimal => scalar(ColType::Decimal),
+                        _ => scalar(ColType::Float),
+                    },
+                    "length" | "ntile" | "cardinality" => scalar(ColType::Int),
+                    "lower" | "upper" => scalar(ColType::Text),
+                    "now" => scalar(ColType::DateTime),
                     // SUM of integers is cast to bigint (see `func`).
                     "sum" => match first()? {
-                        ColType::Int | ColType::BigInt => ColType::BigInt,
+                        t if matches!(t.ty, ColType::Int | ColType::BigInt) => scalar(ColType::BigInt),
                         t => t,
                     },
                     _ => first()?,
@@ -1000,7 +1057,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             | Expr::Like { .. }
             | Expr::Const { .. }
             | Expr::InSelect { .. }
-            | Expr::Exists { .. } => ColType::Bool,
+            | Expr::Exists { .. } => scalar(ColType::Bool),
             Expr::Param { .. } => {
                 return Err(query_err("select() takes columns and expressions, not plain values".into()))
             }
@@ -1147,13 +1204,16 @@ impl<'s, 'py> Planner<'s, 'py> {
             "count" => one(&format!("COUNT({d}$1)"), planned)?,
             "sum" => {
                 let ty = args.first().map(|a| self.expr_type(a)).transpose()?;
-                if matches!(ty, Some(ColType::Int | ColType::BigInt)) {
+                if matches!(ty.map(|t| t.ty), Some(ColType::Int | ColType::BigInt)) {
                     cast = Some("BIGINT");
                 }
                 one(&format!("SUM({d}$1)"), planned)?
             }
             "avg" => {
-                cast = Some("DOUBLE PRECISION");
+                let ty = args.first().map(|a| self.expr_type(a)).transpose()?;
+                if ty.map(|t| t.ty) != Some(ColType::Decimal) {
+                    cast = Some("DOUBLE PRECISION");
+                }
                 one(&format!("AVG({d}$1)"), planned)?
             }
             "min" => one("MIN($1)", planned)?,
@@ -1161,6 +1221,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             "lower" => one("LOWER($1)", planned)?,
             "upper" => one("UPPER($1)", planned)?,
             "length" => one("LENGTH($1)", planned)?,
+            "cardinality" => one("CARDINALITY($1)", planned)?,
             "abs" => one("ABS($1)", planned)?,
             "now" if planned.is_empty() => SExpr::cust("CURRENT_TIMESTAMP"),
             "coalesce" if !planned.is_empty() => call("COALESCE", planned)?,
@@ -1190,18 +1251,8 @@ impl<'s, 'py> Planner<'s, 'py> {
         let mut outer = (self.scope().alias.clone(), self.scope().model);
         let pushed = self.scopes.len();
         for (k, hop) in hops.iter().enumerate() {
-            let m = self.model(outer.1);
-            let (rel, target) = m.relation(hop).map_err(query_err)?;
-            let from_col = &m.field(&rel.from).map_err(query_err)?.column;
-            let tm = self.model(target);
-            let to_col = &tm.field(&rel.to).map_err(query_err)?.column;
-            let alias = self.alias("a");
-            let link = col(&alias, to_col).eq(col(&outer.0, from_col));
-            if k == 0 {
-                sub.from_as(Alias::new(tm.table()), Alias::new(&alias)).and_where(link);
-            } else {
-                sub.join_as(JoinType::InnerJoin, Alias::new(tm.table()), Alias::new(&alias), link);
-            }
+            let (rel, target) = self.model(outer.1).relation(hop).map_err(query_err)?;
+            let alias = self.add_hop(&mut sub, k == 0, (&outer.0, outer.1), rel, target, "a")?;
             self.scopes.push(Scope { path: path[..base.len() + k + 1].to_vec(), model: target, alias: alias.clone() });
             outer = (alias, target);
         }
@@ -1242,7 +1293,7 @@ impl<'s, 'py> Planner<'s, 'py> {
                         } else {
                             stmt.expr(read_col(&alias, f));
                         }
-                        types.push(f.ty);
+                        types.push(f.value_type());
                     }
                     shape.push(Some(root.fields().len()));
                 }
@@ -1423,7 +1474,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             stmt.offset(n);
         }
         if let Some((name, true)) = &self.recursive {
-            if !self.joined.contains(name) {
+            if !<[String]>::contains(&self.joined, name) {
                 stmt.from(Alias::new(name));
             }
         }
@@ -1468,7 +1519,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         let mut types = vec![];
         for f in root.fields() {
             stmt.expr(read_col(&alias, f));
-            types.push(f.ty);
+            types.push(f.value_type());
         }
         let mut joins: Vec<JoinShape> = vec![];
         for path in &q.select_related {
@@ -1493,7 +1544,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             });
             for f in m.fields() {
                 stmt.expr(read_col(&alias, f));
-                types.push(f.ty);
+                types.push(f.value_type());
             }
         }
         self.base_select(q, &mut stmt, true)?;
@@ -1547,7 +1598,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(stmt)
     }
 
-    pub fn update(&mut self, q: &Update) -> PyResult<(UpdateStatement, Option<Vec<ColType>>)> {
+    pub fn update(&mut self, q: &Update) -> PyResult<(UpdateStatement, Option<Vec<ValueType>>)> {
         let root = self.model(self.root);
         let mut stmt = Query::update();
         stmt.table(Alias::new(root.table()));
@@ -1556,7 +1607,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
         for a in &q.set {
             let f = root.field(&a.field).map_err(query_err)?;
-            let v = self.value(&a.value, Hint { ty: Some(f.ty), field: Some(f) })?;
+            let v = self.value(&a.value, Hint { ty: Some(f.value_type()), field: Some(f) })?;
             stmt.value(Alias::new(&f.column), v);
         }
         for w in self.apply_filters(&q.filters)? {
@@ -1567,10 +1618,10 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
         self.require(self.caps.returning, "update().returning()")?;
         stmt.returning(Query::returning().exprs(root.fields().iter().map(returning_col)));
-        Ok((stmt, Some(root.fields().iter().map(|f| f.ty).collect())))
+        Ok((stmt, Some(root.fields().iter().map(|f| f.value_type()).collect())))
     }
 
-    pub fn delete(&mut self, q: &Delete) -> PyResult<(DeleteStatement, Option<Vec<ColType>>)> {
+    pub fn delete(&mut self, q: &Delete) -> PyResult<(DeleteStatement, Option<Vec<ValueType>>)> {
         let root = self.model(self.root);
         let mut stmt = Query::delete();
         stmt.from_table(Alias::new(root.table()));
@@ -1582,7 +1633,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
         self.require(self.caps.returning, "delete().returning()")?;
         stmt.returning(Query::returning().exprs(root.fields().iter().map(returning_col)));
-        Ok((stmt, Some(root.fields().iter().map(|f| f.ty).collect())))
+        Ok((stmt, Some(root.fields().iter().map(|f| f.value_type()).collect())))
     }
 }
 
@@ -1595,13 +1646,6 @@ pub fn plan_select<'py>(schema: &Schema, target: Target, q: &Select, params: &[B
         plan.stmt.with_cte(w);
     }
     Ok(plan)
-}
-
-fn rn_orders(e: &Expr) -> Vec<&Expr> {
-    match e {
-        Expr::Window { order_by, .. } => order_by.iter().map(|o| &o.expr).collect(),
-        _ => vec![],
-    }
 }
 
 /// The query loading `node` (a relation of `parent`) for a set of parent keys. A slice
@@ -1642,23 +1686,40 @@ fn plan_prefetch<'py>(
     let virt = derive_ctes(schema, target, &q.with, params)?;
     let mut p = Planner::new(schema, &virt, target, &q.model, q.from.as_deref(), params, vec![], 0)?;
     let mut plan = p.build_select(&q)?;
-    let key_field = cm.field(&rel.to).map_err(query_err)?;
-    let key = col(p.root_alias(), &key_field.column);
-    if sliced {
-        let rn = Expr::Window {
-            func: Box::new(Expr::Func { name: "row_number".into(), args: vec![], rel: None, distinct: false }),
-            base: None,
-            partition_by: vec![Expr::Col { path: vec![], name: rel.to.clone() }],
-            order_by: window_order,
-            frame: None,
-        };
-        // The window's ORDER BY may follow to-one relations not joined yet.
-        let joined = p.joins.len();
-        for o in rn_orders(&rn) {
-            p.join_paths(o, "a prefetch's order_by()")?;
+    // the parent key each row belongs to: the row's own `to` field, or (many-to-many)
+    // the join row's source field, selected as an extra `_key` column
+    let (key_field, key, child_key_pos) = match &rel.through {
+        None => {
+            let f = cm.field(&rel.to).map_err(query_err)?;
+            (f, col(p.root_alias(), &f.column), cm.field_pos(&rel.to).map_err(query_err)?)
         }
-        p.allow_window = true;
-        let e = p.value(&rn, Hint::default())?;
+        Some(th) => {
+            let jm = schema.model(schema.model_idx(&th.model).map_err(query_err)?);
+            let (src, dst) = (jm.field(&th.source).map_err(query_err)?, jm.field(&th.target).map_err(query_err)?);
+            let jalias = p.alias("m");
+            let on = col(&jalias, &dst.column).eq(col(p.root_alias(), &cm.field(&rel.to).map_err(query_err)?.column));
+            plan.stmt.join_as(JoinType::InnerJoin, Alias::new(jm.table()), Alias::new(&jalias), on);
+            let key = col(&jalias, &src.column);
+            plan.stmt.expr_as(key.clone(), Alias::new("_key"));
+            plan.types.push(src.value_type());
+            (src, key, plan.types.len() - 1)
+        }
+    };
+    if sliced {
+        // ROW_NUMBER() OVER (PARTITION BY <key> ORDER BY ...); the ORDER BY may follow
+        // to-one relations not joined yet
+        let joined = p.joins.len();
+        let mut exprs = vec![key.clone()];
+        let mut slots = vec![];
+        for o in &window_order {
+            p.join_paths(&o.expr, "a prefetch's order_by()")?;
+            p.allow_window = true;
+            let e = p.value(&o.expr, Hint::default());
+            p.allow_window = false;
+            exprs.push(e?);
+            slots.push(format!("${}{}", exprs.len(), if o.desc { " DESC" } else { "" }));
+        }
+        let e = SExpr::cust_with_exprs(format!("ROW_NUMBER() OVER (PARTITION BY $1 ORDER BY {})", slots.join(", ")), exprs);
         for (s, on) in &p.joins[joined..] {
             plan.stmt.join_as(JoinType::LeftJoin, Alias::new(p.model(s.model).table()), Alias::new(&s.alias), on.clone());
         }
@@ -1667,10 +1728,12 @@ fn plan_prefetch<'py>(
     if let Some(w) = p.with_clause(&q.with)? {
         plan.stmt.with_cte(w);
     }
-    let back = many
+    // has-many / has-one: the child's to-one relation back to the parent is set too
+    let back = (!rel.foreign_key && rel.through.is_none())
         .then(|| {
             cm.ir.relations.iter().find(|r| {
                 r.kind == RelKind::One
+                    && r.foreign_key
                     && r.from == rel.to
                     && r.to == rel.from
                     && cm.relation(&r.name).map(|(_, t)| t) == Ok(parent)
@@ -1682,8 +1745,8 @@ fn plan_prefetch<'py>(
         attr: node.attr.clone().unwrap_or_else(|| node.relation.clone()),
         many,
         key_pos: pm.field_pos(&rel.from).map_err(query_err)?,
-        key_type: pm.field(&rel.from).map_err(query_err)?.ty,
-        child_key_pos: cm.field_pos(&rel.to).map_err(query_err)?,
+        key_type: pm.field(&rel.from).map_err(query_err)?.value_type(),
+        child_key_pos,
         back,
         stmt: plan.stmt,
         key,
@@ -1737,7 +1800,7 @@ pub fn plan_insert<'py>(
     rows: &Bound<'py, PyList>,
     on_conflict: Option<OnConflict>,
     params: &[Bound<'py, PyAny>],
-) -> PyResult<(InsertStatement, Vec<ColType>)> {
+) -> PyResult<(InsertStatement, Vec<ValueType>)> {
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
     let cols = fields.iter().map(|f| m.field(f)).collect::<Result<Vec<_>, _>>().map_err(query_err)?;
     let mut stmt = Query::insert();
@@ -1756,7 +1819,7 @@ pub fn plan_insert<'py>(
                 values.push(if item.is_instance_of::<crate::DefaultMarker>() {
                     SExpr::cust("DEFAULT")
                 } else {
-                    bind(py_to_value(&item, Some(c.ty))?, Some(c))
+                    bind(py_to_value(&item, Some(c.value_type()))?, Some(c))
                 });
             }
             if values.len() != cols.len() {
@@ -1789,7 +1852,7 @@ pub fn plan_insert<'py>(
                 planner.allow_excluded = true;
                 for a in &set {
                     let f = m.field(&a.field).map_err(query_err)?;
-                    let v = planner.value(&a.value, Hint { ty: Some(f.ty), field: Some(f) })?;
+                    let v = planner.value(&a.value, Hint { ty: Some(f.value_type()), field: Some(f) })?;
                     clause.value(Alias::new(&f.column), v);
                 }
                 clause.to_owned()
@@ -1798,7 +1861,7 @@ pub fn plan_insert<'py>(
         stmt.on_conflict(clause);
     }
     stmt.returning(Query::returning().exprs(m.fields().iter().map(returning_col)));
-    Ok((stmt, m.fields().iter().map(|f| f.ty).collect()))
+    Ok((stmt, m.fields().iter().map(|f| f.value_type()).collect()))
 }
 
 /// `UPDATE ... SET` each row to its own values, matched by primary key, as one
@@ -1825,7 +1888,7 @@ pub fn plan_update_many<'py>(
     filters: &[Expr],
     params: &[Bound<'py, PyAny>],
     returning: bool,
-) -> PyResult<(Vec<UpdateStatement>, Option<Vec<ColType>>)> {
+) -> PyResult<(Vec<UpdateStatement>, Option<Vec<ValueType>>)> {
     let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
     let m = schema.model(planner.root);
     let table = m.table().to_owned();
@@ -1869,7 +1932,7 @@ pub fn plan_update_many<'py>(
         }
         stmts.push(stmt);
     }
-    Ok((stmts, returning.then(|| m.fields().iter().map(|f| f.ty).collect())))
+    Ok((stmts, returning.then(|| m.fields().iter().map(|f| f.value_type()).collect())))
 }
 
 /// An expression assigned to field `f`: through its `write_sql` template, if any.

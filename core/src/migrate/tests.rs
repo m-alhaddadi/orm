@@ -240,3 +240,64 @@ fn snapshots_round_trip() {
     assert_eq!(parse_snapshot(&json).unwrap(), snap);
     assert!(parse_snapshot(r#"{"version": 99}"#).is_err());
 }
+
+fn with_enum(values: &[&str]) -> Schema {
+    let vals: Vec<Value> = values.iter().map(|v| json!({"name": v, "value": v})).collect();
+    schema(json!({
+        "enums": [{"name": "Status", "db_name": "status", "values": vals}],
+        "models": [{"name": "Post", "table": "posts", "fields": [
+            id(),
+            {"name": "status", "column": "status", "type": "string", "enum": "Status", "db_type": "\"status\"",
+             "default": values[0]},
+            {"name": "history", "column": "history", "type": "string", "enum": "Status", "db_type": "\"status\"",
+             "array": true, "nullable": true},
+        ]}],
+    }))
+}
+
+#[test]
+fn enum_types_are_created_altered_and_dropped() {
+    let v1 = with_enum(&["draft", "published"]);
+    let p1 = super::plan(&v1, &DbSchema::default()).unwrap();
+    let up = sql(&p1.up);
+    assert_eq!(up[0], "CREATE TYPE \"status\" AS ENUM ('draft', 'published')");
+    assert!(up[1].contains("\"status\" \"status\" DEFAULT 'draft' NOT NULL"), "{}", up[1]);
+    assert!(up[1].contains("\"history\" \"status\"[]"), "{}", up[1]);
+    assert_eq!(sql(&p1.down), vec!["DROP TABLE \"posts\"", "DROP TYPE \"status\""]);
+    settled(&v1, &p1);
+
+    // added values keep their place
+    let v2 = with_enum(&["draft", "review", "published", "archived"]);
+    let p2 = super::plan(&v2, &p1.snapshot).unwrap();
+    assert_eq!(
+        sql(&p2.up),
+        vec![
+            "ALTER TYPE \"status\" ADD VALUE 'review' BEFORE 'published'",
+            "ALTER TYPE \"status\" ADD VALUE 'archived'",
+        ]
+    );
+    assert!(p2.up[0].warning.as_deref().unwrap().contains("same transaction"));
+    settled(&v2, &p2);
+
+    // a removed value recreates the type and converts its columns
+    let p3 = super::plan(&v1, &p2.snapshot).unwrap();
+    assert_eq!(
+        sql(&p3.up),
+        vec![
+            "ALTER TYPE \"status\" RENAME TO \"status_old\";\n\
+             CREATE TYPE \"status\" AS ENUM ('draft', 'published');\n\
+             ALTER TABLE \"posts\" ALTER COLUMN \"status\" DROP DEFAULT;\n\
+             ALTER TABLE \"posts\" ALTER COLUMN \"status\" TYPE \"status\" USING \"status\"::text::\"status\";\n\
+             ALTER TABLE \"posts\" ALTER COLUMN \"status\" SET DEFAULT 'draft';\n\
+             ALTER TABLE \"posts\" ALTER COLUMN \"history\" TYPE \"status\"[] USING \"history\"::text[]::\"status\"[];\n\
+             DROP TYPE \"status_old\""
+        ]
+    );
+    assert!(p3.up[0].warning.as_deref().unwrap().contains("removes review, archived"));
+    settled(&v1, &p3);
+
+    // idempotent DDL wraps CREATE TYPE, drop_all drops it
+    let all = create_all(&v1).unwrap();
+    assert!(all[0].starts_with("DO $orm$\nBEGIN\n    CREATE TYPE \"status\""), "{}", all[0]);
+    assert_eq!(drop_all(&v1).unwrap().last().unwrap(), "DROP TYPE IF EXISTS \"status\" CASCADE");
+}

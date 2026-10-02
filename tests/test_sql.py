@@ -309,3 +309,22 @@ def test_recursive_cte_joins_itself():
     assert sql.startswith('WITH RECURSIVE "chain"')
     assert 'FROM "users", "chain" WHERE "users"."id" = "chain"."id" + 1' in sql
     assert sql.endswith('FROM "chain"')
+
+
+def test_many_to_many_filter_is_one_exists_through_the_join_table():
+    from blog.models import Tag
+
+    w = where(Post.objects.filter(Post.tags.name == "x"))
+    assert w == (
+        'EXISTS(SELECT 1 FROM "tags" AS "t1" INNER JOIN "post_tags" AS "t2" ON "t2"."tag_id" = "t1"."id" '
+        "WHERE \"t2\".\"post_id\" = \"posts\".\"id\" AND \"t1\".\"name\" = 'x')"
+    )
+    sql = Post.objects.select(func.count(Post.tags)).sql()
+    assert '(SELECT COUNT(*) FROM "tags" AS "a1" INNER JOIN "post_tags" AS "a2" ON "a2"."tag_id" = "a1"."id" ' \
+           'WHERE "a2"."post_id" = "posts"."id")' in sql
+    assert Tag.objects.filter(Tag.posts.author.name == "A").sql().count("EXISTS") == 2
+
+
+def test_has_one_joins_on_the_other_side():
+    sql = User.objects.select_related(User.profile).sql()
+    assert 'LEFT JOIN "profiles" AS "j1" ON "j1"."user_id" = "users"."id"' in sql

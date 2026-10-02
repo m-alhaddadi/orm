@@ -13,7 +13,7 @@ use pyo3::types::{PyDict, PyList, PyString, PyTuple, PyType};
 
 use crate::db::RowSet;
 use crate::plan::{JoinShape, Output, PrefetchPlan};
-use orm_core::ir::ColType;
+use orm_core::ir::ValueType;
 use orm_core::schema::Schema;
 
 struct ModelClass {
@@ -22,16 +22,35 @@ struct ModelClass {
     names: Vec<Py<PyString>>,
 }
 
-/// The Python class of each model, by schema model index.
-pub struct Classes(Vec<Option<ModelClass>>);
+/// The Python class of each model, by schema model index, and the members of each
+/// enum by stored value.
+pub struct Classes {
+    models: Vec<Option<ModelClass>>,
+    enums: Vec<Option<Py<PyDict>>>,
+}
 
 impl Classes {
     pub fn empty() -> Self {
-        Classes(vec![])
+        Classes { models: vec![], enums: vec![] }
     }
 
-    /// `classes` maps model names to their classes.
+    /// `classes` maps model names to their classes, and enum names to their enum
+    /// classes (iterating one gives its members, `member.value` is what is stored).
     pub fn new(py: Python<'_>, schema: &Schema, classes: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let mut enums = Vec::with_capacity(schema.enums.len());
+        for e in &schema.enums {
+            enums.push(match classes.get_item(&e.name)? {
+                None => None,
+                Some(cls) => {
+                    let members = PyDict::new(py);
+                    for m in cls.try_iter()? {
+                        let m = m?;
+                        members.set_item(m.getattr(pyo3::intern!(py, "value"))?, m)?;
+                    }
+                    Some(members.unbind())
+                }
+            });
+        }
         let mut out = Vec::with_capacity(schema.models.len());
         for m in &schema.models {
             out.push(match classes.get_item(&m.ir.name)? {
@@ -42,11 +61,11 @@ impl Classes {
                 }),
             });
         }
-        Ok(Classes(out))
+        Ok(Classes { models: out, enums })
     }
 
     fn get(&self, model: usize) -> PyResult<&ModelClass> {
-        self.0
+        self.models
             .get(model)
             .and_then(Option::as_ref)
             .ok_or_else(|| PyTypeError::new_err("the schema was compiled without model classes"))
@@ -96,18 +115,40 @@ impl<'a, 'py> Builder<'a, 'py> {
         }
     }
 
+    /// One cell, enum values as their members (values the enum doesn't know stay as
+    /// they are).
+    fn cell(&self, rows: &dyn RowSet, r: usize, c: usize, ty: ValueType) -> PyResult<Py<PyAny>> {
+        let v = rows.cell(self.py, r, c, ty)?;
+        let Some(members) = ty.enum_idx.and_then(|i| self.classes.enums.get(i as usize)).and_then(Option::as_ref) else {
+            return Ok(v);
+        };
+        let members = members.bind(self.py);
+        let member = |v: Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+            Ok(members.get_item(&v)?.unwrap_or(v))
+        };
+        let v = v.into_bound(self.py);
+        if ty.array && !v.is_none() {
+            let out = PyList::empty(self.py);
+            for item in v.try_iter()? {
+                out.append(member(item?)?)?;
+            }
+            return Ok(out.into_any().unbind());
+        }
+        Ok(member(v)?.unbind())
+    }
+
     /// An instance of `model` from row `r`, its fields in columns `start..`.
-    fn instance(&self, model: usize, rows: &dyn RowSet, r: usize, start: usize, types: &[ColType]) -> PyResult<Instance<'py>> {
+    fn instance(&self, model: usize, rows: &dyn RowSet, r: usize, start: usize, types: &[ValueType]) -> PyResult<Instance<'py>> {
         let mc = self.classes.get(model)?;
         let inst = self.blank(mc)?;
         for (i, name) in mc.names.iter().enumerate() {
-            inst.dict.set_item(name.bind(self.py), rows.cell(self.py, r, start + i, types[start + i])?)?;
+            inst.dict.set_item(name.bind(self.py), self.cell(rows, r, start + i, types[start + i])?)?;
         }
         Ok(inst)
     }
 
     /// One instance per row, `select_related` objects attached.
-    fn instances(&self, model: usize, joins: &[JoinShape], rows: &dyn RowSet, types: &[ColType]) -> PyResult<Vec<Instance<'py>>> {
+    fn instances(&self, model: usize, joins: &[JoinShape], rows: &dyn RowSet, types: &[ValueType]) -> PyResult<Vec<Instance<'py>>> {
         let mut out = Vec::with_capacity(rows.len());
         let mut related: Vec<Option<Instance<'py>>> = Vec::with_capacity(joins.len());
         for r in 0..rows.len() {
@@ -137,7 +178,7 @@ impl<'a, 'py> Builder<'a, 'py> {
         &self,
         output: &Output,
         rows: &dyn RowSet,
-        types: &[ColType],
+        types: &[ValueType],
         prefetched: &[Fetched],
         row_cls: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyList>> {
@@ -162,7 +203,7 @@ impl<'a, 'py> Builder<'a, 'py> {
                                 pos += width;
                             }
                             None => {
-                                values.push(rows.cell(self.py, r, pos, types[pos])?);
+                                values.push(self.cell(rows, r, pos, types[pos])?);
                                 pos += 1;
                             }
                         }
@@ -179,7 +220,7 @@ impl<'a, 'py> Builder<'a, 'py> {
     }
 
     /// Instances of `model` for rows returned by a write (`RETURNING`).
-    pub fn model_rows(&self, model: usize, rows: &dyn RowSet, types: &[ColType]) -> PyResult<Bound<'py, PyList>> {
+    pub fn model_rows(&self, model: usize, rows: &dyn RowSet, types: &[ValueType]) -> PyResult<Bound<'py, PyList>> {
         PyList::new(self.py, self.instances(model, &[], rows, types)?.into_iter().map(|i| i.obj))
     }
 
@@ -212,6 +253,14 @@ impl<'a, 'py> Builder<'a, 'py> {
             let key = parent_rows.cell(py, i, p.key_pos, p.key_type)?;
             let found = if key.is_none(py) { None } else { groups.get_item(&key)? };
             if !p.many {
+                if let (Some(back), Some(child)) = (&p.back, &found) {
+                    // SAFETY: as in `blank`.
+                    let d = unsafe {
+                        Bound::from_owned_ptr_or_err(py, ffi::PyObject_GenericGetDict(child.as_ptr(), std::ptr::null_mut()))?
+                            .cast_into_unchecked::<PyDict>()
+                    };
+                    d.set_item(back, &parent.obj)?;
+                }
                 parent.dict.set_item(&attr, found)?;
                 continue;
             }

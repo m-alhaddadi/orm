@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{ExtensionIr, FieldIr, FunctionIr, ModelIr, RelationIr, SchemaIr};
+use crate::ir::{ColType, EnumIr, EnumStorage, ExtensionIr, FieldIr, FunctionIr, ModelIr, RelKind, RelationIr, SchemaIr};
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -75,6 +75,7 @@ impl Model {
 
 pub struct Schema {
     pub models: Vec<Model>,
+    pub enums: Vec<EnumIr>,
     pub extensions: Vec<ExtensionIr>,
     pub functions: Vec<FunctionIr>,
     pub catalog: Vec<ExtensionIr>,
@@ -92,8 +93,24 @@ impl Schema {
         if model_index.len() != ir.models.len() {
             return Err("duplicate model name in schema".into());
         }
+        let enums = ir.enums;
         let mut models = Vec::with_capacity(ir.models.len());
-        for m in ir.models {
+        for mut m in ir.models {
+            for f in &mut m.fields {
+                let Some(name) = &f.enum_name else { continue };
+                let i = enums
+                    .iter()
+                    .position(|e| e.name == *name)
+                    .ok_or_else(|| format!("{}.{}: unknown enum {name}", m.name, f.name))?;
+                let ok = match enums[i].storage {
+                    EnumStorage::Native | EnumStorage::Text => matches!(f.ty, ColType::String | ColType::Text),
+                    EnumStorage::Int => matches!(f.ty, ColType::Int | ColType::BigInt),
+                };
+                if !ok {
+                    return Err(format!("{}.{}: enum {name} can't be stored as {:?}", m.name, f.name, f.ty));
+                }
+                f.enum_idx = Some(i as u32);
+            }
             let field_index: HashMap<String, usize> =
                 m.fields.iter().enumerate().map(|(i, f)| (f.name.clone(), i)).collect();
             let pks: Vec<usize> = m
@@ -126,10 +143,26 @@ impl Schema {
         for m in &models {
             for r in &m.ir.relations {
                 let (_, t) = m.relation(&r.name)?;
-                models[t].field(&r.to).map_err(|e| format!("relation {}.{}: {e}", m.ir.name, r.name))?;
+                let what = |e: String| format!("relation {}.{}: {e}", m.ir.name, r.name);
+                models[t].field(&r.to).map_err(what)?;
+                if let Some(th) = &r.through {
+                    if r.kind != RelKind::Many {
+                        return Err(what("a relation through a join model is to-many".into()));
+                    }
+                    let j = *model_index.get(&th.model).ok_or_else(|| what(format!("unknown join model {}", th.model)))?;
+                    models[j].field(&th.source).map_err(what)?;
+                    models[j].field(&th.target).map_err(what)?;
+                }
             }
         }
-        Ok(Schema { models, extensions: ir.extensions, functions: ir.functions, catalog: ir.catalog, model_index })
+        Ok(Schema {
+            models,
+            enums,
+            extensions: ir.extensions,
+            functions: ir.functions,
+            catalog: ir.catalog,
+            model_index,
+        })
     }
 
     pub fn model_idx(&self, name: &str) -> Result<usize> {

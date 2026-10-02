@@ -2,12 +2,14 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::syntax::{err, Args, Attr, Item, Member, ModelDecl, Pos, Props, Result, TypeRef, Value};
+use super::syntax::{err, Args, Attr, EnumDecl, Item, Member, ModelDecl, Pos, Props, Result, TypeRef, Value};
 use crate::ext::{ExtensionDef, TypeDef};
 use crate::ir::{
-    ColType, ConstraintIr, Deferrable, ExcludeElementIr, ExtensionIr, FieldIr, ForEach, FunctionIr, IndexColumnIr,
-    IndexIr, ModelIr, Nulls, OnDelete, RelKind, RelationIr, SchemaIr, TriggerEvent, TriggerIr, TriggerTiming,
+    ColType, ConstraintIr, Deferrable, EnumIr, EnumStorage, EnumValueIr, ExcludeElementIr, ExtensionIr, FieldIr,
+    ForEach, FunctionIr, IndexColumnIr, IndexIr, ModelIr, Nulls, OnDelete, RelKind, RelationIr, SchemaIr,
+    ThroughIr, TriggerEvent, TriggerIr, TriggerTiming,
 };
+use crate::migrate::pg::ident;
 
 /// Reads the named arguments of one attribute, rejecting unknown or repeated ones.
 struct Named<'a> {
@@ -175,8 +177,7 @@ fn builtin_type(name: &str) -> Option<ColType> {
         "String" => ColType::String,
         "DateTime" => ColType::DateTime,
         "Json" => ColType::Json,
-        // numeric; values travel as strings so no precision is lost
-        "Decimal" => ColType::String,
+        "Decimal" => ColType::Decimal,
         _ => return None,
     })
 }
@@ -220,6 +221,7 @@ fn native_type(name: &str, ty: ColType) -> Option<(&'static str, bool)> {
             | ("Boolean", ColType::Bool)
             | ("Timestamptz", ColType::DateTime)
             | ("JsonB", ColType::Json)
+            | ("Decimal", ColType::Decimal)
     );
     Some((sql, same))
 }
@@ -233,12 +235,13 @@ pub struct Lowering<'l> {
 
 struct Ctx {
     types: HashMap<String, (String, TypeDef)>,
+    enums: HashMap<String, EnumIr>,
 }
 
 impl Lowering<'_> {
     pub fn lower(&self, items: Vec<Item>) -> Result<SchemaIr> {
         let mut ir = SchemaIr::default();
-        let mut ctx = Ctx { types: HashMap::new() };
+        let mut ctx = Ctx { types: HashMap::new(), enums: HashMap::new() };
         for def in ExtensionDef::builtin() {
             for (name, t) in &def.types {
                 ctx.types.insert(name.clone(), (def.name.clone(), t.clone()));
@@ -264,6 +267,23 @@ impl Lowering<'_> {
             return err(dup.pos, format!("model {} is declared twice", dup.name));
         }
 
+        for item in &items {
+            if let Item::Enum(e) = item {
+                if model_names.contains_key(e.name.as_str()) || ctx.enums.contains_key(&e.name) {
+                    return err(e.pos, format!("{} is declared twice", e.name));
+                }
+                let lowered = enum_block(e)?;
+                ctx.enums.insert(e.name.clone(), lowered.clone());
+                ir.enums.push(lowered);
+            }
+        }
+        let mut db_names = HashSet::new();
+        for e in ir.enums.iter().filter(|e| e.storage == EnumStorage::Native) {
+            if !db_names.insert(e.db_name.as_str()) {
+                return err(Pos::default(), format!("two enums use the database type {:?}", e.db_name));
+            }
+        }
+
         let mut datasource = false;
         for item in &items {
             match item {
@@ -274,7 +294,7 @@ impl Lowering<'_> {
                     datasource_block(&mut ir, *pos, props)?;
                 }
                 Item::Function { pos, name, props } => ir.functions.push(function(*pos, name, props)?),
-                Item::Model(_) | Item::Import { .. } => {}
+                Item::Model(_) | Item::Enum(_) | Item::Import { .. } => {}
             }
         }
 
@@ -302,6 +322,92 @@ impl Lowering<'_> {
         ir.models = lowered;
         Ok(ir)
     }
+}
+
+/// `enum Name { a b @map("B") ... @@map("db_name") @@storage(text) }`
+fn enum_block(e: &EnumDecl) -> Result<EnumIr> {
+    let what = format!("enum {}", e.name);
+    let mut out = EnumIr {
+        name: e.name.clone(),
+        db_name: e.name.to_lowercase(),
+        storage: EnumStorage::Native,
+        values: vec![],
+        comment: None,
+    };
+    for a in &e.blocks {
+        let one = || -> Result<&Value> {
+            match a.args.positional.as_slice() {
+                [(_, v)] if a.args.named.is_empty() => Ok(v),
+                _ => err(a.pos, format!("{what}: @@{} takes one argument", a.name)),
+            }
+        };
+        match (a.name.as_str(), one()?) {
+            ("map", Value::Str(s)) => out.db_name = s.clone(),
+            ("comment", Value::Str(s)) => out.comment = Some(s.clone()),
+            ("storage", v) => {
+                out.storage = match name_of(a.pos, v, &what)?.as_str() {
+                    "native" => EnumStorage::Native,
+                    "text" => EnumStorage::Text,
+                    "int" => EnumStorage::Int,
+                    o => return err(a.pos, format!("{what}: @@storage is native, text or int, not {o}")),
+                }
+            }
+            ("map" | "comment", _) => return err(a.pos, format!("{what}: @@{}(\"...\") takes a string", a.name)),
+            (o, _) => return err(a.pos, format!("{what}: unknown attribute @@{o}; use @@map, @@storage or @@comment")),
+        }
+    }
+    if e.values.is_empty() {
+        return err(e.pos, format!("{what} has no values"));
+    }
+    let mut seen_names = HashSet::new();
+    let mut seen_values = HashSet::new();
+    for (pos, name, attrs) in &e.values {
+        if !seen_names.insert(name.as_str()) {
+            return err(*pos, format!("{what}: {name} is declared twice"));
+        }
+        let mut label: Option<String> = None;
+        let mut number: Option<i64> = None;
+        for a in attrs {
+            let v = match a.args.positional.as_slice() {
+                [(_, v)] if a.args.named.is_empty() => v,
+                _ => return err(a.pos, format!("{what}.{name}: @{} takes one argument", a.name)),
+            };
+            match (a.name.as_str(), v) {
+                ("map", Value::Str(s)) => label = Some(s.clone()),
+                ("value", Value::Num(n)) => {
+                    number = Some(n.parse().map_err(|_| super::syntax::Error {
+                        pos: a.pos,
+                        msg: format!("{what}.{name}: @value takes an integer"),
+                    })?)
+                }
+                ("map", _) => return err(a.pos, format!("{what}.{name}: @map takes a string")),
+                ("value", _) => return err(a.pos, format!("{what}.{name}: @value takes an integer")),
+                (o, _) => return err(a.pos, format!("{what}.{name}: unknown attribute @{o}; use @map or @value")),
+            }
+        }
+        let value = match out.storage {
+            EnumStorage::Int => {
+                if label.is_some() {
+                    return err(*pos, format!("{what}.{name}: an int enum stores @value(n), not @map"));
+                }
+                match number {
+                    Some(n) => serde_json::Value::from(n),
+                    None => return err(*pos, format!("{what}.{name}: values of an int enum need @value(n)")),
+                }
+            }
+            _ => {
+                if number.is_some() {
+                    return err(*pos, format!("{what}.{name}: @value(n) is for @@storage(int); use @map(\"...\")"));
+                }
+                serde_json::Value::String(label.unwrap_or_else(|| name.clone()))
+            }
+        };
+        if !seen_values.insert(value.to_string()) {
+            return err(*pos, format!("{what}: two values are stored as {value}"));
+        }
+        out.values.push(EnumValueIr { name: name.clone(), value });
+    }
+    Ok(out)
 }
 
 /// `datasource db { provider = "postgresql" extensions = [...] }`
@@ -403,14 +509,14 @@ fn model_fields(m: &ModelDecl, models: &HashMap<&str, &ModelDecl>, ctx: &Ctx) ->
 fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
     let TypeRef { pos, name, args, list, optional } = &member.ty;
     let what = format!("{}.{}", m.name, member.name);
-    if *list {
-        return err(*pos, format!("{what}: `[]` is only for relations to models; array columns aren't supported yet"));
-    }
     let mut f = FieldIr {
         name: member.name.clone(),
         column: member.name.clone(),
         ty: ColType::Text,
         nullable: *optional,
+        array: *list,
+        enum_name: None,
+        enum_idx: None,
         primary_key: false,
         auto_increment: false,
         unique: false,
@@ -442,7 +548,26 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
         Ok(())
     };
     let decimal = name == "Decimal";
-    if name == "Unsupported" {
+    let enum_ir = ctx.enums.get(name.as_str());
+    if let Some(e) = enum_ir {
+        if !args.positional.is_empty() || !args.named.is_empty() {
+            return err(args.pos, format!("{what}: {name} takes no arguments"));
+        }
+        f.enum_name = Some(e.name.clone());
+        match e.storage {
+            EnumStorage::Native => {
+                f.ty = ColType::String;
+                let t = ident(&e.db_name);
+                f.write_sql = Some(format!("CAST({{}} AS {t}{})", if *list { "[]" } else { "" }));
+                f.db_type = Some(t);
+            }
+            EnumStorage::Text => f.ty = ColType::Text,
+            EnumStorage::Int => f.ty = ColType::Int,
+        }
+    } else if name == "Unsupported" {
+        if *list {
+            return err(*pos, format!("{what}: arrays of extension types aren't supported"));
+        }
         // Unsupported("vector(384)"): a type from the extension catalog
         let sql = match args.positional.as_slice() {
             [(_, Value::Str(s))] if args.named.is_empty() => s.trim(),
@@ -471,7 +596,7 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
             *pos,
             format!(
                 "{what}: unknown type {name}; expected a model or BigInt, Int, Float, Boolean, String, DateTime, \
-                 Json, Decimal or Unsupported(\"<extension type>\")"
+                 Json, Decimal, an enum or Unsupported(\"<extension type>\")"
             ),
         );
     }
@@ -504,6 +629,9 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
             if name == "Unsupported" {
                 return err(a.pos, format!("{what}: Unsupported(...) already names the SQL type"));
             }
+            if enum_ir.is_some() {
+                return err(a.pos, format!("{what}: an enum field's type comes from the enum (@@storage)"));
+            }
             if !a.args.named.is_empty() {
                 return err(a.pos, format!("{what}: @db.{db} takes positional arguments"));
             }
@@ -515,7 +643,7 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
                 (ColType::String, "VarChar", []) if !decimal => {}
                 (ColType::String, "Text", []) if !decimal => f.ty = ColType::Text,
                 (ColType::String, "Uuid", []) if !decimal => f.ty = ColType::Uuid,
-                (ColType::String, "Citext", []) if !decimal => resolve(&mut f, "citext", &[])?,
+                (ColType::String, "Citext", []) if !decimal && !*list => resolve(&mut f, "citext", &[])?,
                 (ColType::DateTime, "Date", []) => f.ty = ColType::Date,
                 (ty, _, _) => {
                     let Some((sql, same)) = native_type(db, ty) else {
@@ -544,6 +672,26 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
                     }
                     Value::Path(p, Some(args)) if p.len() == 1 && p[0] == "now" && args.positional.is_empty() && args.named.is_empty() => {
                         f.default_now = true
+                    }
+                    // an enum value: `@default(draft)`
+                    Value::Path(p, None) if p.len() == 1 && enum_ir.is_some() => {
+                        let e = enum_ir.unwrap();
+                        match e.values.iter().find(|x| x.name == p[0]) {
+                            Some(x) => f.default = Some(x.value.clone()),
+                            None => return err(a.pos, format!("{what}: {} has no value {}", e.name, p[0])),
+                        }
+                    }
+                    Value::List(items) if *list && enum_ir.is_some() => {
+                        let e = enum_ir.unwrap();
+                        let mut out = vec![];
+                        for (p, v) in items {
+                            let n = name_of(*p, v, &what)?;
+                            match e.values.iter().find(|x| x.name == n) {
+                                Some(x) => out.push(x.value.clone()),
+                                None => return err(*p, format!("{what}: {} has no value {n}", e.name)),
+                            }
+                        }
+                        f.default = Some(serde_json::Value::Array(out));
                     }
                     _ => match call_str(v, "dbgenerated") {
                         Some(Ok(s)) => f.default_sql = Some(s.to_owned()),
@@ -574,9 +722,12 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
             other => return err(a.pos, format!("{what}: unknown attribute @{other}; use {FIELD_ATTRS}")),
         }
     }
-    if let Some(t) = f.db_type.as_deref().filter(|_| decimal) {
-        f.read_sql = Some("CAST({} AS text)".into());
-        f.write_sql = Some(format!("CAST({{}} AS {t})"));
+    // parameters of other array types are cast to the column's (`varchar(20)[]`, ...)
+    if f.array && f.write_sql.is_none() && (f.db_type.is_some() || f.max_length.is_some()) {
+        f.write_sql = Some(format!("CAST({{}} AS {})", crate::migrate::model::sql_type(&f)));
+    }
+    if f.array && (f.primary_key || f.auto_increment) {
+        return err(member.pos, format!("{what}: an array can't be a primary key"));
     }
     if f.primary_key && f.nullable {
         return err(member.pos, format!("{what}: a primary key can't be optional"));
@@ -634,6 +785,12 @@ fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap
             Some((p, _)) => err(p, format!("{what}: {key}: takes a list, e.g. [author_id]")),
         }
     };
+    if let Some((tp, v)) = n.get("through") {
+        let join = name_of(tp, v, &what)?;
+        let through_fields = n.names("through_fields")?;
+        n.finish()?;
+        return many_to_many(m, member, &what, tp, &join, &through_fields, models);
+    }
     let from = field_list(&mut n, "fields")?;
     let to = field_list(&mut n, "references")?;
 
@@ -664,18 +821,30 @@ fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap
             }
             _ => return err(member.pos, format!("{what}: {target} has several relations to {}; name them: @relation(\"name\", ...) on both sides", m.name)),
         };
-        if !member.ty.list {
-            return err(member.ty.pos, format!("{what}: one-to-one back relations aren't supported yet; declare {target}[] or only the side with fields:"));
-        }
-        if member.ty.optional {
-            return err(member.ty.pos, format!("{what}: a to-many relation can't be optional"));
-        }
         let (Some(from), Some(to)) = (back.references.first(), back.fields.first()) else {
             return err(member.pos, format!("{what}: the relation on {target} needs references:"));
         };
+        let kind = if member.ty.list {
+            if member.ty.optional {
+                return err(member.ty.pos, format!("{what}: a to-many relation can't be optional"));
+            }
+            RelKind::Many
+        } else {
+            // has-one: the key on the other side must be unique
+            if !member.ty.optional {
+                return err(member.ty.pos, format!("{what}: a one-to-one back relation is optional: {target}?"));
+            }
+            if !is_unique(target_decl, to) {
+                return err(
+                    member.pos,
+                    format!("{what}: {target}.{to} must be unique for a one-to-one relation (@unique, or {target}[] for to-many)"),
+                );
+            }
+            RelKind::One
+        };
         return Ok(RelationIr {
             name: member.name.clone(),
-            kind: RelKind::Many,
+            kind,
             target: target.clone(),
             from: from.clone(),
             to: to.clone(),
@@ -683,6 +852,7 @@ fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap
             on_delete: None,
             on_update: None,
             deferrable: None,
+            through: None,
         });
     };
     if member.ty.list {
@@ -719,6 +889,91 @@ fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap
         on_delete,
         on_update,
         deferrable,
+        through: None,
+    })
+}
+
+/// Whether `field` of `model` holds unique values: `@id`, `@unique` or a one-field
+/// `@@unique([field])`.
+fn is_unique(model: &ModelDecl, field: &str) -> bool {
+    let own = model
+        .members
+        .iter()
+        .any(|mm| mm.name == field && mm.attrs.iter().any(|a| a.name == "unique" || a.name == "id"));
+    own || model.blocks.iter().any(|b| {
+        b.name == "unique"
+            && matches!(b.args.positional.first(), Some((_, Value::List(items)))
+                if items.len() == 1 && matches!(&items[0].1, Value::Path(p, None) if p.len() == 1 && p[0] == field))
+    })
+}
+
+/// `tags Tag[] @relation(through: PostTag)`: a many-to-many relation through the
+/// to-one relations of a join model, one to each side (`through_fields: [post, tag]`
+/// names them when the join model has several).
+fn many_to_many(
+    m: &ModelDecl,
+    member: &Member,
+    what: &str,
+    pos: Pos,
+    join: &str,
+    through_fields: &[String],
+    models: &HashMap<&str, &ModelDecl>,
+) -> Result<RelationIr> {
+    let target = &member.ty.name;
+    if !member.ty.list || member.ty.optional {
+        return err(member.ty.pos, format!("{what}: a many-to-many relation is a list: {target}[]"));
+    }
+    let Some(join_decl) = models.get(join) else {
+        return err(pos, format!("{what}: through: {join} is not a model"));
+    };
+    // the join model's to-one relations: (relation name, target, fields, references)
+    let links: Vec<(&str, &str, RelArgs)> = join_decl
+        .members
+        .iter()
+        .filter(|o| models.contains_key(o.ty.name.as_str()) && !o.ty.list)
+        .filter_map(|o| o.attrs.iter().find(|a| a.name == "relation").map(|a| (o.name.as_str(), o.ty.name.as_str(), rel_args(a))))
+        .filter(|(_, _, r)| !r.fields.is_empty())
+        .collect();
+    let pick = |rel: Option<&String>, to: &str, side: &str| -> Result<&RelArgs> {
+        let found: Vec<&(&str, &str, RelArgs)> = match rel {
+            Some(r) => links.iter().filter(|(n, _, _)| n == r).collect(),
+            None => links.iter().filter(|(_, t, _)| *t == to).collect(),
+        };
+        match found.as_slice() {
+            [(_, t, r)] if *t == to => Ok(r),
+            [(n, t, _)] => err(pos, format!("{what}: {join}.{n} points at {t}, not {to}")),
+            [] => err(pos, format!("{what}: {join} has no relation with fields: {} for the {side} side", match rel {
+                Some(r) => format!("named {r}"),
+                None => format!("to {to}"),
+            })),
+            _ => err(pos, format!("{what}: {join} has several relations to {to}; say which with through_fields: [<{side} side>, ...]")),
+        }
+    };
+    let (source, target_link) = match through_fields {
+        [] if m.name == *target => {
+            return err(pos, format!("{what}: a many-to-many relation of {target} to itself needs through_fields: [<from>, <to>]"))
+        }
+        [] => (pick(None, &m.name, "source")?, pick(None, target, "target")?),
+        [a, b] => (pick(Some(a), &m.name, "source")?, pick(Some(b), target, "target")?),
+        _ => return err(pos, format!("{what}: through_fields takes two relations of {join}, e.g. [post, tag]")),
+    };
+    let (Some(from), Some(src)) = (source.references.first(), source.fields.first()) else {
+        return err(pos, format!("{what}: the relation of {join} to {} needs fields: and references:", m.name));
+    };
+    let (Some(to), Some(dst)) = (target_link.references.first(), target_link.fields.first()) else {
+        return err(pos, format!("{what}: the relation of {join} to {target} needs fields: and references:"));
+    };
+    Ok(RelationIr {
+        name: member.name.clone(),
+        kind: RelKind::Many,
+        target: target.clone(),
+        from: from.clone(),
+        to: to.clone(),
+        foreign_key: false,
+        on_delete: None,
+        on_update: None,
+        deferrable: None,
+        through: Some(ThroughIr { model: join.to_owned(), source: src.clone(), target: dst.clone() }),
     })
 }
 

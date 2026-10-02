@@ -128,8 +128,9 @@ already does.
 ## The blog example
 
 [`examples/blog/schema.prisma`](../examples/blog/schema.prisma), as the formatter
-leaves it. The only IDE error is the `@@check` line. Its IR, generated models and
-migrations are the same as those of the `.orm` file it replaced. It doesn't list
+leaves it. The IDE errors are the `@@check` line, the `through:` arguments of the
+many-to-many relations (with Prisma's complaint that they have no opposite side), and
+the `@value` / `@@storage` lines of the `Priority` enum. It doesn't list
 `extensions = [pg_trgm]`: the trigram index pulls the extension in, and listing it
 would add an explicit pin to the IR.
 
@@ -145,8 +146,28 @@ model User {
   created_at DateTime  @default(now())
   posts      Post[]
   comments   Comment[]
+  profile    Profile?
 
   @@map("users")
+}
+
+// One-to-one: the key is on Profile (unique), User.profile is the other side.
+model Profile {
+  id         BigInt   @id @default(autoincrement())
+  user_id    BigInt   @unique
+  role       Role     @default(member)
+  balance    Decimal  @default(0) @db.Decimal(12, 2)
+  links      String[] @default([])
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+}
+
+// A Postgres enum type (the default storage).
+enum Role {
+  member
+  editor
+  admin
 }
 
 model Post {
@@ -159,6 +180,8 @@ model Post {
   created_at DateTime  @default(now())
   author     User      @relation(fields: [author_id], references: [id], onDelete: Cascade)
   comments   Comment[]
+  tags       Tag[]     @relation(through: PostTag)
+  post_tags  PostTag[]
 
   @@index([author_id])
   @@index([author_id, created_at(sort: Desc)], where: raw("published"))
@@ -179,6 +202,38 @@ model Comment {
   @@index([post_id])
   @@index([author_id])
   @@map("comments")
+}
+
+// Many-to-many: Post.tags and Tag.posts go through the PostTag join model.
+model Tag {
+  id        BigInt    @id @default(autoincrement())
+  name      String    @unique @db.VarChar(50)
+  priority  Priority  @default(normal)
+  posts     Post[]    @relation(through: PostTag)
+  post_tags PostTag[]
+
+  @@map("tags")
+}
+
+model PostTag {
+  id      BigInt @id @default(autoincrement())
+  post_id BigInt
+  tag_id  BigInt
+  post    Post   @relation(fields: [post_id], references: [id], onDelete: Cascade)
+  tag     Tag    @relation(fields: [tag_id], references: [id], onDelete: Cascade)
+
+  @@unique([post_id, tag_id])
+  @@index([tag_id])
+  @@map("post_tags")
+}
+
+// An enum stored as integers, limited to these values by a CHECK constraint.
+enum Priority {
+  low    @value(1)
+  normal @value(2)
+  high   @value(3)
+
+  @@storage(int)
 }
 ```
 
@@ -244,11 +299,24 @@ Where the mapping above leaves something open:
   database name of an index or unique constraint.
 * Extension types are written `Unsupported("...")` (or `String @db.Citext`), never as
   bare type names, so Prisma's editor reads every field type.
-* `Decimal` is `numeric`; values travel as strings so no precision is lost.
+* `Decimal` is `numeric`; values travel in Postgres' binary `numeric` format and become
+  Python `Decimal`s, so no precision is lost.
+* `enum` blocks are Prisma's, and by default a Postgres enum type as in Prisma.
+  `@@storage(text)` / `@@storage(int)` (ours) store them in a text or integer column
+  with a `CHECK` instead; integer values are given with `@value(n)` (ours), labels with
+  Prisma's `@map("...")`.
+* `Type[]` on a scalar type is an array column (Prisma's scalar lists), `text[]` for
+  `String[]`. Unlike Prisma, `Type[]?` (a nullable array) is allowed.
+* A one-to-one back relation is `Profile?` without `fields:`, as in Prisma; the key on
+  the other side must be unique.
+* Many-to-many relations go through an explicit join model:
+  `tags Tag[] @relation(through: PostTag)` (ours), with
+  `through_fields: [post, tag]` when the join model has several relations to a side.
+  Prisma's implicit many-to-many (`Tag[]` on both sides, no join model) isn't
+  supported: name the join model.
 * Prisma's other `@db.*` types set the column's SQL type, like `@db_type` did.
 * A to-many relation finds its key through the to-one relation on the other model;
-  relations without `fields:` on the to-one side (one-to-one back relations) and
-  composite keys aren't supported, as before.
+  composite keys aren't supported.
 * `datasource` is optional and its `url` is ignored (the URL comes from
   `ORM_DATABASE_URL`). `generator` blocks are read and ignored, so a file can also
   drive Prisma Client.

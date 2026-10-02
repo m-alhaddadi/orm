@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, Unpack, overload
 
 if TYPE_CHECKING:
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from .select import Select
 
 T = TypeVar("T")
+E = TypeVar("E")
 M = TypeVar("M", bound="Model")
 
 IR = dict[str, Any]
@@ -222,6 +224,24 @@ class Expression(Node, Generic[T]):
 
     def endswith(self: Expression[str] | Expression[str | None], text: str) -> Condition:
         return Like(self, f"%{_escape_like(text)}", ci=False)
+
+    # Arrays ---------------------------------------------------------------------------------
+
+    def has(self: Expression[list[E]] | Expression[list[E] | None], value: E) -> Condition:
+        """Array columns: ``value`` is one of the elements (``col @> ARRAY[value]``)."""
+        return Comparison("contains", self, Literal([value]))
+
+    def has_all(self: Expression[list[E]] | Expression[list[E] | None], values: Iterable[E]) -> Condition:
+        """Array columns: every one of ``values`` is an element (``col @> values``)."""
+        return Comparison("contains", self, Literal(list(values)))
+
+    def has_any(self: Expression[list[E]] | Expression[list[E] | None], values: Iterable[E]) -> Condition:
+        """Array columns: at least one of ``values`` is an element (``col && values``)."""
+        return Comparison("overlaps", self, Literal(list(values)))
+
+    def contained_by(self: Expression[list[E]] | Expression[list[E] | None], values: Iterable[E]) -> Condition:
+        """Array columns: every element is one of ``values`` (``col <@ values``)."""
+        return Comparison("contained_by", self, Literal(list(values)))
 
     # Arithmetic ----------------------------------------------------------------------------
 
@@ -573,7 +593,7 @@ class ScalarSubquery(Expression[T]):
         return f"({self._select!r}).as_scalar()"
 
 
-N = TypeVar("N", int, float)
+N = TypeVar("N", int, float, Decimal)
 
 
 class _Functions:
@@ -602,7 +622,16 @@ class _Functions:
         """``SUM``; integer sums come back as ``int`` (cast to bigint)."""
         return Func("sum", (expr,), distinct=distinct)
 
-    def avg(self, expr: Expression[Any], *, distinct: bool = False) -> Func[float | None]:
+    @overload
+    def avg(  # type: ignore[overload-overlap]  # pyright: ignore[reportOverlappingOverload]
+        self, expr: Expression[Decimal] | Expression[Decimal | None], *, distinct: bool = False
+    ) -> Func[Decimal | None]: ...
+    @overload
+    def avg(
+        self, expr: Expression[int] | Expression[int | None] | Expression[float] | Expression[float | None], *, distinct: bool = False
+    ) -> Func[float | None]: ...
+    def avg(self, expr: Expression[Any], *, distinct: bool = False) -> Func[Any]:
+        """``AVG``: a ``float``, or a ``Decimal`` for decimal columns (exact)."""
         return Func("avg", (expr,), distinct=distinct)
 
     def min(self, expr: Expression[T]) -> Func[T | None]:
@@ -619,6 +648,10 @@ class _Functions:
 
     def length(self, expr: Expression[str] | Expression[str | None]) -> Func[int]:
         return Func("length", (expr,))
+
+    def cardinality(self, expr: Expression[list[Any]] | Expression[list[Any] | None]) -> Func[int]:
+        """The number of elements of an array."""
+        return Func("cardinality", (expr,))
 
     def abs(self, expr: Expression[T]) -> Func[T]:
         return Func("abs", (expr,))
