@@ -186,7 +186,7 @@ once you count FFI and Python object materialization?
 - Also measure the "bad" pattern: N separate single-row calls across the FFI boundary.
 - Deliverable: `bench/RESULTS.md`.
 - Outcome: one Rust core now runs from Python (PyO3), Node and Bun (napi-rs) and Go (cgo).
-  It is 2–4.5× faster than Django / SQLAlchemy, 1.2–4.8× faster than Drizzle except
+  It is 2–4.5× faster than Django / SQLAlchemy, up to 4.8× faster than Drizzle (biggest on writes) except
   even on large reads, and level with GORM (pgx is faster). sqlx's missing `TCP_NODELAY`
   is fixed with a vendored patch. Sync calls skip the event-loop hand-off (Python ~115 µs,
   JS ~40 µs per call), so ship async as the primary API plus a sync API.
