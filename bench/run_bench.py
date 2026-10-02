@@ -397,7 +397,7 @@ def main():
     ap.add_argument("--transport", choices=("unix", "tcp"), default="unix")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
-    out = Path(args.out or HERE / f"results-{args.transport}.json")
+    out = Path(args.out or HERE / f"results-python-{args.transport}.json")
     u = urls(args.transport)
     setup_django(u["django_host"])
 

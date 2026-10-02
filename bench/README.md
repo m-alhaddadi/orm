@@ -16,7 +16,7 @@ FFI and Python object materialization are counted? Results: [`RESULTS.md`](RESUL
 | `js/` | Node / Bun harness: Drizzle ORM (`pg`) vs the napi addon |
 | `go/` | Go harness: GORM and raw pgx vs the cgo binding |
 | `sa_models.py` | SQLAlchemy 2.0 mapping of the same tables |
-| `run_bench.py` | Benchmark harness, writes `results-<transport>.json` |
+| `run_bench.py` | Benchmark harness, writes `results-python-<transport>.json` |
 | `report.py` | Renders result JSON as markdown tables |
 
 ## Reproduce
