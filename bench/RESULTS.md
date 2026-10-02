@@ -9,6 +9,28 @@ async** at every size tested (1, 50 and 1000 rows), over both the Unix socket an
 The sync variant (`ormcore-sync`) is faster again on small queries. Building the Python
 objects costs about **0.6–0.8 µs per row**, compared with **~8–9 µs per row** for Django.
 
+## Summary
+
+| question | answer |
+|---|---|
+| Is PyO3 + SeaORM faster than Django / SQLAlchemy? | **Yes, 2–4.5×** for reads and bulk writes, at 1, 50 and 1000 rows. |
+| Sync or async: which is faster? | **Sync, by ~0.1–0.2 ms per call** (no asyncio ↔ Tokio hand-off). **Async handles more traffic** under concurrent load. Ship both, with async as the primary API. |
+| Unix socket or TCP? | **About the same for everyone** (TCP ≤ ~0.3 ms slower per call), once sqlx's missing `TCP_NODELAY` is patched. Before the patch, large SeaORM writes over TCP were ~4× slower. |
+
+Read 1 post, median ms per call:
+
+| | Django sync | Django async | ormcore sync | ormcore async |
+|---|---:|---:|---:|---:|
+| Unix socket | 0.44 | 0.78 | **0.19** | 0.32 |
+| TCP | 0.58 | 0.79 | **0.22** | 0.33 |
+
+Read 1000 posts, median ms per call:
+
+| | Django sync | Django async | ormcore sync | ormcore async |
+|---|---:|---:|---:|---:|
+| Unix socket | 9.25 | 10.44 | **2.12** | 2.32 |
+| TCP | 9.96 | 10.71 | **2.42** | 2.55 |
+
 ## Headline numbers (median ms per call, lower is better)
 
 Unix socket:
