@@ -14,900 +14,1020 @@
       "op": "read",
       "n": 1,
       "iters": 1000,
-      "median_us": 1006.9015,
-      "p95_us": 1360.735,
-      "mean_us": 991.70442,
-      "us_per_row": 1006.9015
+      "median_us": 788.3235,
+      "p95_us": 1193.18,
+      "mean_us": 848.564687,
+      "us_per_row": 788.3235
     },
     {
       "contender": "django-async",
       "op": "read",
       "n": 50,
       "iters": 300,
-      "median_us": 1452.794,
-      "p95_us": 1764.559,
-      "mean_us": 1493.7725066666667,
-      "us_per_row": 29.055880000000002
+      "median_us": 1530.657,
+      "p95_us": 2112.436,
+      "mean_us": 1608.4412666666667,
+      "us_per_row": 30.613139999999998
     },
     {
       "contender": "django-async",
       "op": "read",
       "n": 1000,
       "iters": 50,
-      "median_us": 10381.4515,
-      "p95_us": 16219.801,
-      "mean_us": 11674.26252,
-      "us_per_row": 10.381451499999999
+      "median_us": 10710.46,
+      "p95_us": 16601.144,
+      "mean_us": 12007.26418,
+      "us_per_row": 10.71046
     },
     {
       "contender": "django-async",
       "op": "read_join",
       "n": 1,
       "iters": 1000,
-      "median_us": 1352.343,
-      "p95_us": 1704.683,
-      "mean_us": 1390.7290970000001,
-      "us_per_row": 1352.343
+      "median_us": 1399.51,
+      "p95_us": 1816.653,
+      "mean_us": 1462.508574,
+      "us_per_row": 1399.51
     },
     {
       "contender": "django-async",
       "op": "read_join",
       "n": 50,
       "iters": 300,
-      "median_us": 2269.681,
-      "p95_us": 3018.082,
-      "mean_us": 2382.3770600000003,
-      "us_per_row": 45.39362
+      "median_us": 2283.1425,
+      "p95_us": 2942.923,
+      "mean_us": 2383.4847133333333,
+      "us_per_row": 45.66285
     },
     {
       "contender": "django-async",
       "op": "read_join",
       "n": 1000,
       "iters": 50,
-      "median_us": 18065.8125,
-      "p95_us": 45939.263,
-      "mean_us": 20255.969,
-      "us_per_row": 18.0658125
+      "median_us": 18879.0525,
+      "p95_us": 46564.571,
+      "mean_us": 21753.377579999997,
+      "us_per_row": 18.8790525
     },
     {
       "contender": "django-async",
       "op": "write_bulk",
       "n": 1,
       "iters": 500,
-      "median_us": 1609.4565,
-      "p95_us": 2227.975,
-      "mean_us": 1692.9622180000001,
-      "us_per_row": 1609.4565
+      "median_us": 1553.2885,
+      "p95_us": 2119.029,
+      "mean_us": 1627.770992,
+      "us_per_row": 1553.2885
     },
     {
       "contender": "django-async",
       "op": "write_bulk",
       "n": 50,
       "iters": 200,
-      "median_us": 4208.476,
-      "p95_us": 5118.321,
-      "mean_us": 4381.63135,
-      "us_per_row": 84.16951999999999
+      "median_us": 4452.901,
+      "p95_us": 6062.279,
+      "mean_us": 4583.983625,
+      "us_per_row": 89.05802
     },
     {
       "contender": "django-async",
       "op": "write_bulk",
       "n": 1000,
       "iters": 30,
-      "median_us": 42676.1945,
-      "p95_us": 73249.058,
-      "mean_us": 47969.120200000005,
-      "us_per_row": 42.6761945
+      "median_us": 48279.5775,
+      "p95_us": 78689.294,
+      "mean_us": 50575.061233333334,
+      "us_per_row": 48.2795775
     },
     {
       "contender": "django-async",
       "op": "write_loop",
       "n": 1,
       "iters": 500,
-      "median_us": 1440.432,
-      "p95_us": 1836.084,
-      "mean_us": 1482.807716,
-      "us_per_row": 1440.432
+      "median_us": 1424.647,
+      "p95_us": 2258.837,
+      "mean_us": 1517.719114,
+      "us_per_row": 1424.647
     },
     {
       "contender": "django-async",
       "op": "write_loop",
       "n": 50,
       "iters": 20,
-      "median_us": 67136.1205,
-      "p95_us": 87145.134,
-      "mean_us": 69222.73905,
-      "us_per_row": 1342.72241
+      "median_us": 69765.705,
+      "p95_us": 80281.69,
+      "mean_us": 69838.62195,
+      "us_per_row": 1395.3141
     },
     {
       "contender": "django-async",
       "op": "write_loop",
       "n": 1000,
       "iters": 3,
-      "median_us": 1358707.498,
-      "p95_us": 1418952.194,
-      "mean_us": 1372740.1943333333,
-      "us_per_row": 1358.707498
+      "median_us": 1305450.268,
+      "p95_us": 1411360.984,
+      "mean_us": 1334585.9943333333,
+      "us_per_row": 1305.4502679999998
     },
     {
       "contender": "django-async-dict",
       "op": "read",
       "n": 1,
       "iters": 1000,
-      "median_us": 1148.505,
-      "p95_us": 1445.472,
-      "mean_us": 1190.0327109999998,
-      "us_per_row": 1148.505
+      "median_us": 1137.411,
+      "p95_us": 1637.172,
+      "mean_us": 1199.014909,
+      "us_per_row": 1137.411
     },
     {
       "contender": "django-async-dict",
       "op": "read",
       "n": 50,
       "iters": 300,
-      "median_us": 1482.1275,
-      "p95_us": 2119.285,
-      "mean_us": 1575.5545266666666,
-      "us_per_row": 29.64255
+      "median_us": 1466.2965,
+      "p95_us": 1935.18,
+      "mean_us": 1568.7603266666667,
+      "us_per_row": 29.32593
     },
     {
       "contender": "django-async-dict",
       "op": "read",
       "n": 1000,
       "iters": 50,
-      "median_us": 7112.4175,
-      "p95_us": 9349.535,
-      "mean_us": 7414.49172,
-      "us_per_row": 7.112417499999999
+      "median_us": 7151.979,
+      "p95_us": 9181.948,
+      "mean_us": 7361.9406,
+      "us_per_row": 7.151979
     },
     {
       "contender": "django-async-dict",
       "op": "read_join",
       "n": 1,
       "iters": 1000,
-      "median_us": 1437.81,
-      "p95_us": 1909.393,
-      "mean_us": 1487.24075,
-      "us_per_row": 1437.81
+      "median_us": 1467.1325,
+      "p95_us": 1908.477,
+      "mean_us": 1529.179138,
+      "us_per_row": 1467.1325
     },
     {
       "contender": "django-async-dict",
       "op": "read_join",
       "n": 50,
       "iters": 300,
-      "median_us": 2069.082,
-      "p95_us": 2700.303,
-      "mean_us": 2161.197,
-      "us_per_row": 41.38164
+      "median_us": 2002.452,
+      "p95_us": 2292.858,
+      "mean_us": 2041.99796,
+      "us_per_row": 40.04904
     },
     {
       "contender": "django-async-dict",
       "op": "read_join",
       "n": 1000,
       "iters": 50,
-      "median_us": 12674.892,
-      "p95_us": 16048.472,
-      "mean_us": 12889.29342,
-      "us_per_row": 12.674892
+      "median_us": 12330.647,
+      "p95_us": 16682.267,
+      "mean_us": 12745.76772,
+      "us_per_row": 12.330647
     },
     {
       "contender": "sqla-asyncpg",
       "op": "read",
       "n": 1,
       "iters": 1000,
-      "median_us": 1102.976,
-      "p95_us": 1754.381,
-      "mean_us": 1202.325544,
-      "us_per_row": 1102.976
+      "median_us": 1129.8,
+      "p95_us": 1619.876,
+      "mean_us": 1215.032385,
+      "us_per_row": 1129.8
     },
     {
       "contender": "sqla-asyncpg",
       "op": "read",
       "n": 50,
       "iters": 300,
-      "median_us": 1431.5465,
-      "p95_us": 1974.466,
-      "mean_us": 1528.6314766666665,
-      "us_per_row": 28.63093
+      "median_us": 1432.0365,
+      "p95_us": 1877.709,
+      "mean_us": 1510.33085,
+      "us_per_row": 28.640729999999998
     },
     {
       "contender": "sqla-asyncpg",
       "op": "read",
       "n": 1000,
       "iters": 50,
-      "median_us": 8154.49,
-      "p95_us": 41767.031,
-      "mean_us": 11128.79592,
-      "us_per_row": 8.15449
+      "median_us": 7992.638,
+      "p95_us": 38503.434,
+      "mean_us": 10824.90418,
+      "us_per_row": 7.992638
     },
     {
       "contender": "sqla-asyncpg",
       "op": "read_join",
       "n": 1,
       "iters": 1000,
-      "median_us": 1356.3175,
-      "p95_us": 1838.245,
-      "mean_us": 1419.7842549999998,
-      "us_per_row": 1356.3175
+      "median_us": 1414.0265,
+      "p95_us": 1995.438,
+      "mean_us": 1496.6183819999999,
+      "us_per_row": 1414.0265
     },
     {
       "contender": "sqla-asyncpg",
       "op": "read_join",
       "n": 50,
       "iters": 300,
-      "median_us": 2044.9095,
-      "p95_us": 2584.495,
-      "mean_us": 2125.3399233333334,
-      "us_per_row": 40.89819
+      "median_us": 2220.988,
+      "p95_us": 2861.063,
+      "mean_us": 2288.2766666666666,
+      "us_per_row": 44.41976
     },
     {
       "contender": "sqla-asyncpg",
       "op": "read_join",
       "n": 1000,
       "iters": 50,
-      "median_us": 11722.0,
-      "p95_us": 45850.24,
-      "mean_us": 14972.41016,
-      "us_per_row": 11.722
+      "median_us": 11570.0365,
+      "p95_us": 40387.805,
+      "mean_us": 14318.4466,
+      "us_per_row": 11.5700365
     },
     {
       "contender": "sqla-asyncpg",
       "op": "write_bulk",
       "n": 1,
       "iters": 500,
-      "median_us": 1932.7075,
-      "p95_us": 2685.643,
-      "mean_us": 2029.988364,
-      "us_per_row": 1932.7075
+      "median_us": 1895.8095,
+      "p95_us": 2584.884,
+      "mean_us": 1945.21921,
+      "us_per_row": 1895.8095
     },
     {
       "contender": "sqla-asyncpg",
       "op": "write_bulk",
       "n": 50,
       "iters": 200,
-      "median_us": 4726.9165,
-      "p95_us": 6532.702,
-      "mean_us": 4867.741315,
-      "us_per_row": 94.53833
+      "median_us": 4757.123,
+      "p95_us": 6944.604,
+      "mean_us": 5034.93455,
+      "us_per_row": 95.14245999999999
     },
     {
       "contender": "sqla-asyncpg",
       "op": "write_bulk",
       "n": 1000,
       "iters": 30,
-      "median_us": 50993.2065,
-      "p95_us": 90478.159,
-      "mean_us": 56474.77806666667,
-      "us_per_row": 50.9932065
+      "median_us": 53178.8505,
+      "p95_us": 93297.346,
+      "mean_us": 59947.20913333333,
+      "us_per_row": 53.1788505
     },
     {
       "contender": "sqla-asyncpg",
       "op": "write_loop",
       "n": 1,
       "iters": 500,
-      "median_us": 1723.453,
-      "p95_us": 2460.838,
-      "mean_us": 1823.3498,
-      "us_per_row": 1723.453
+      "median_us": 1859.281,
+      "p95_us": 2673.774,
+      "mean_us": 1939.375476,
+      "us_per_row": 1859.281
     },
     {
       "contender": "sqla-asyncpg",
       "op": "write_loop",
       "n": 50,
       "iters": 20,
-      "median_us": 78873.0405,
-      "p95_us": 101536.544,
-      "mean_us": 80892.7384,
-      "us_per_row": 1577.46081
+      "median_us": 94796.874,
+      "p95_us": 114249.58,
+      "mean_us": 94384.86965000001,
+      "us_per_row": 1895.9374799999998
     },
     {
       "contender": "sqla-asyncpg",
       "op": "write_loop",
       "n": 1000,
       "iters": 3,
-      "median_us": 1739832.277,
-      "p95_us": 1754256.54,
-      "mean_us": 1706902.917,
-      "us_per_row": 1739.832277
+      "median_us": 1736028.357,
+      "p95_us": 1813178.753,
+      "mean_us": 1743579.9593333332,
+      "us_per_row": 1736.0283570000001
     },
     {
       "contender": "sqla-psycopg",
       "op": "read",
       "n": 1,
       "iters": 1000,
-      "median_us": 1100.832,
-      "p95_us": 1460.203,
-      "mean_us": 1151.4295749999999,
-      "us_per_row": 1100.832
+      "median_us": 1249.52,
+      "p95_us": 1885.52,
+      "mean_us": 1351.195066,
+      "us_per_row": 1249.52
     },
     {
       "contender": "sqla-psycopg",
       "op": "read",
       "n": 50,
       "iters": 300,
-      "median_us": 1571.109,
-      "p95_us": 2320.459,
-      "mean_us": 1687.7875933333332,
-      "us_per_row": 31.422179999999997
+      "median_us": 1670.6505,
+      "p95_us": 2381.517,
+      "mean_us": 1781.4059733333333,
+      "us_per_row": 33.41301
     },
     {
       "contender": "sqla-psycopg",
       "op": "read",
       "n": 1000,
       "iters": 50,
-      "median_us": 8672.252,
-      "p95_us": 37051.811,
-      "mean_us": 11138.42382,
-      "us_per_row": 8.672252
+      "median_us": 8555.4105,
+      "p95_us": 38032.913,
+      "mean_us": 11412.2459,
+      "us_per_row": 8.5554105
     },
     {
       "contender": "sqla-psycopg",
       "op": "read_join",
       "n": 1,
       "iters": 1000,
-      "median_us": 1469.5705,
-      "p95_us": 1943.041,
-      "mean_us": 1529.018909,
-      "us_per_row": 1469.5705
+      "median_us": 1640.447,
+      "p95_us": 2222.513,
+      "mean_us": 1710.299014,
+      "us_per_row": 1640.447
     },
     {
       "contender": "sqla-psycopg",
       "op": "read_join",
       "n": 50,
       "iters": 300,
-      "median_us": 2294.162,
-      "p95_us": 2765.114,
-      "mean_us": 2344.5190566666665,
-      "us_per_row": 45.883239999999994
+      "median_us": 2491.39,
+      "p95_us": 3469.008,
+      "mean_us": 2597.09138,
+      "us_per_row": 49.827799999999996
     },
     {
       "contender": "sqla-psycopg",
       "op": "read_join",
       "n": 1000,
       "iters": 50,
-      "median_us": 12532.497,
-      "p95_us": 42481.069,
-      "mean_us": 15367.81198,
-      "us_per_row": 12.532497
+      "median_us": 12811.3445,
+      "p95_us": 40854.776,
+      "mean_us": 15736.04972,
+      "us_per_row": 12.811344499999999
     },
     {
       "contender": "sqla-psycopg",
       "op": "write_bulk",
       "n": 1,
       "iters": 500,
-      "median_us": 1785.85,
-      "p95_us": 2667.738,
-      "mean_us": 1895.2682,
-      "us_per_row": 1785.85
+      "median_us": 1848.9305,
+      "p95_us": 2637.964,
+      "mean_us": 1924.136652,
+      "us_per_row": 1848.9305
     },
     {
       "contender": "sqla-psycopg",
       "op": "write_bulk",
       "n": 50,
       "iters": 200,
-      "median_us": 5180.905,
-      "p95_us": 6973.663,
-      "mean_us": 5341.09739,
-      "us_per_row": 103.6181
+      "median_us": 5299.9525,
+      "p95_us": 6387.794,
+      "mean_us": 5446.37655,
+      "us_per_row": 105.99905000000001
     },
     {
       "contender": "sqla-psycopg",
       "op": "write_bulk",
       "n": 1000,
       "iters": 30,
-      "median_us": 67170.6355,
-      "p95_us": 116581.247,
-      "mean_us": 78774.2297,
-      "us_per_row": 67.1706355
+      "median_us": 72641.1015,
+      "p95_us": 116909.704,
+      "mean_us": 81236.15509999999,
+      "us_per_row": 72.6411015
     },
     {
       "contender": "sqla-psycopg",
       "op": "write_loop",
       "n": 1,
       "iters": 500,
-      "median_us": 1782.599,
-      "p95_us": 2353.076,
-      "mean_us": 1843.99264,
-      "us_per_row": 1782.599
+      "median_us": 1822.582,
+      "p95_us": 2376.069,
+      "mean_us": 1893.083206,
+      "us_per_row": 1822.582
     },
     {
       "contender": "sqla-psycopg",
       "op": "write_loop",
       "n": 50,
       "iters": 20,
-      "median_us": 88070.8435,
-      "p95_us": 97794.195,
-      "mean_us": 87837.7353,
-      "us_per_row": 1761.41687
+      "median_us": 89358.6685,
+      "p95_us": 110884.054,
+      "mean_us": 92032.6351,
+      "us_per_row": 1787.17337
     },
     {
       "contender": "sqla-psycopg",
       "op": "write_loop",
       "n": 1000,
       "iters": 3,
-      "median_us": 1748516.056,
-      "p95_us": 1876373.744,
-      "mean_us": 1776711.3566666667,
-      "us_per_row": 1748.5160560000002
+      "median_us": 1824515.913,
+      "p95_us": 1868809.179,
+      "mean_us": 1770396.2396666668,
+      "us_per_row": 1824.515913
     },
     {
       "contender": "ormcore-obj",
       "op": "read",
       "n": 1,
       "iters": 1000,
-      "median_us": 309.594,
-      "p95_us": 450.381,
-      "mean_us": 322.634483,
-      "us_per_row": 309.594
+      "median_us": 333.55,
+      "p95_us": 564.024,
+      "mean_us": 391.81048,
+      "us_per_row": 333.55
     },
     {
       "contender": "ormcore-obj",
       "op": "read",
       "n": 50,
       "iters": 300,
-      "median_us": 385.361,
-      "p95_us": 557.38,
-      "mean_us": 412.4909266666667,
-      "us_per_row": 7.7072199999999995
+      "median_us": 539.5285,
+      "p95_us": 1014.432,
+      "mean_us": 637.4895233333333,
+      "us_per_row": 10.79057
     },
     {
       "contender": "ormcore-obj",
       "op": "read",
       "n": 1000,
       "iters": 50,
-      "median_us": 2479.44,
-      "p95_us": 3017.535,
-      "mean_us": 2590.14798,
-      "us_per_row": 2.47944
+      "median_us": 2550.568,
+      "p95_us": 4082.19,
+      "mean_us": 3016.54558,
+      "us_per_row": 2.550568
     },
     {
       "contender": "ormcore-obj",
       "op": "read_join",
       "n": 1,
       "iters": 1000,
-      "median_us": 426.28,
-      "p95_us": 685.553,
-      "mean_us": 457.767782,
-      "us_per_row": 426.28
+      "median_us": 472.541,
+      "p95_us": 930.91,
+      "mean_us": 552.836398,
+      "us_per_row": 472.541
     },
     {
       "contender": "ormcore-obj",
       "op": "read_join",
       "n": 50,
       "iters": 300,
-      "median_us": 785.608,
-      "p95_us": 2487.875,
-      "mean_us": 1089.2475333333334,
-      "us_per_row": 15.712159999999999
+      "median_us": 924.108,
+      "p95_us": 1479.264,
+      "mean_us": 989.86603,
+      "us_per_row": 18.48216
     },
     {
       "contender": "ormcore-obj",
       "op": "read_join",
       "n": 1000,
       "iters": 50,
-      "median_us": 4687.827,
-      "p95_us": 6049.532,
-      "mean_us": 4950.218,
-      "us_per_row": 4.687827
+      "median_us": 4717.9455,
+      "p95_us": 5827.112,
+      "mean_us": 4851.71912,
+      "us_per_row": 4.7179455
     },
     {
       "contender": "ormcore-obj",
       "op": "write_bulk",
       "n": 1,
       "iters": 500,
-      "median_us": 741.0535,
-      "p95_us": 1171.816,
-      "mean_us": 798.362502,
-      "us_per_row": 741.0535
+      "median_us": 782.1535,
+      "p95_us": 1298.351,
+      "mean_us": 853.6945280000001,
+      "us_per_row": 782.1535
     },
     {
       "contender": "ormcore-obj",
       "op": "write_bulk",
       "n": 50,
       "iters": 200,
-      "median_us": 1506.9045,
-      "p95_us": 1883.673,
-      "mean_us": 1525.30829,
-      "us_per_row": 30.138090000000002
+      "median_us": 1612.3395,
+      "p95_us": 2400.594,
+      "mean_us": 1734.728545,
+      "us_per_row": 32.246790000000004
     },
     {
       "contender": "ormcore-obj",
       "op": "write_bulk",
       "n": 1000,
       "iters": 30,
-      "median_us": 54533.2555,
-      "p95_us": 58382.11,
-      "mean_us": 50903.70443333333,
-      "us_per_row": 54.5332555
+      "median_us": 13182.932,
+      "p95_us": 16988.164,
+      "mean_us": 13976.495133333332,
+      "us_per_row": 13.182932000000001
     },
     {
       "contender": "ormcore-obj",
       "op": "write_loop",
       "n": 1,
       "iters": 500,
-      "median_us": 763.3405,
-      "p95_us": 1123.78,
-      "mean_us": 825.507096,
-      "us_per_row": 763.3405
+      "median_us": 746.553,
+      "p95_us": 1261.369,
+      "mean_us": 831.01277,
+      "us_per_row": 746.553
     },
     {
       "contender": "ormcore-obj",
       "op": "write_loop",
       "n": 50,
       "iters": 20,
-      "median_us": 34745.053,
-      "p95_us": 68533.357,
-      "mean_us": 37696.73775,
-      "us_per_row": 694.90106
+      "median_us": 35769.8755,
+      "p95_us": 42517.145,
+      "mean_us": 35982.17485,
+      "us_per_row": 715.39751
     },
     {
       "contender": "ormcore-obj",
       "op": "write_loop",
       "n": 1000,
       "iters": 3,
-      "median_us": 716282.072,
-      "p95_us": 762895.191,
-      "mean_us": 716944.1523333334,
-      "us_per_row": 716.2820720000001
+      "median_us": 715719.354,
+      "p95_us": 745877.82,
+      "mean_us": 723761.938,
+      "us_per_row": 715.7193540000001
     },
     {
       "contender": "ormcore-dict",
       "op": "read",
       "n": 1,
       "iters": 1000,
-      "median_us": 323.3985,
-      "p95_us": 603.76,
-      "mean_us": 388.80727399999995,
-      "us_per_row": 323.3985
+      "median_us": 323.8175,
+      "p95_us": 534.476,
+      "mean_us": 368.387913,
+      "us_per_row": 323.8175
     },
     {
       "contender": "ormcore-dict",
       "op": "read",
       "n": 50,
       "iters": 300,
-      "median_us": 484.922,
-      "p95_us": 686.453,
-      "mean_us": 504.89501666666666,
-      "us_per_row": 9.69844
+      "median_us": 568.5555,
+      "p95_us": 744.556,
+      "mean_us": 578.7483000000001,
+      "us_per_row": 11.371110000000002
     },
     {
       "contender": "ormcore-dict",
       "op": "read",
       "n": 1000,
       "iters": 50,
-      "median_us": 2595.527,
-      "p95_us": 3237.17,
-      "mean_us": 2727.43632,
-      "us_per_row": 2.595527
+      "median_us": 2644.245,
+      "p95_us": 4676.496,
+      "mean_us": 2893.17196,
+      "us_per_row": 2.6442449999999997
     },
     {
       "contender": "ormcore-dict",
       "op": "read_join",
       "n": 1,
       "iters": 1000,
-      "median_us": 439.0625,
-      "p95_us": 749.662,
-      "mean_us": 480.751334,
-      "us_per_row": 439.0625
+      "median_us": 451.9455,
+      "p95_us": 736.389,
+      "mean_us": 501.716422,
+      "us_per_row": 451.9455
     },
     {
       "contender": "ormcore-dict",
       "op": "read_join",
       "n": 50,
       "iters": 300,
-      "median_us": 824.7165,
-      "p95_us": 1390.21,
-      "mean_us": 892.07971,
-      "us_per_row": 16.49433
+      "median_us": 936.396,
+      "p95_us": 1681.08,
+      "mean_us": 1066.3383533333333,
+      "us_per_row": 18.727919999999997
     },
     {
       "contender": "ormcore-dict",
       "op": "read_join",
       "n": 1000,
       "iters": 50,
-      "median_us": 4634.3955,
-      "p95_us": 5671.432,
-      "mean_us": 4757.299940000001,
-      "us_per_row": 4.634395499999999
+      "median_us": 4746.807,
+      "p95_us": 6144.106,
+      "mean_us": 4968.0016,
+      "us_per_row": 4.7468069999999996
     },
     {
       "contender": "ormcore-dict",
       "op": "write_bulk",
       "n": 1,
       "iters": 500,
-      "median_us": 755.4465,
-      "p95_us": 1107.829,
-      "mean_us": 791.9500840000001,
-      "us_per_row": 755.4465
+      "median_us": 753.4395,
+      "p95_us": 1114.499,
+      "mean_us": 801.933988,
+      "us_per_row": 753.4395
     },
     {
       "contender": "ormcore-dict",
       "op": "write_bulk",
       "n": 50,
       "iters": 200,
-      "median_us": 1626.1365,
-      "p95_us": 2116.814,
-      "mean_us": 1698.14691,
-      "us_per_row": 32.52273
+      "median_us": 1542.2635,
+      "p95_us": 1971.307,
+      "mean_us": 1573.3216699999998,
+      "us_per_row": 30.84527
     },
     {
       "contender": "ormcore-dict",
       "op": "write_bulk",
       "n": 1000,
       "iters": 30,
-      "median_us": 54379.3495,
-      "p95_us": 59114.473,
-      "mean_us": 49733.991,
-      "us_per_row": 54.3793495
+      "median_us": 12754.3245,
+      "p95_us": 15853.863,
+      "mean_us": 13181.372633333332,
+      "us_per_row": 12.754324500000001
     },
     {
       "contender": "ormcore-dict",
       "op": "write_loop",
       "n": 1,
       "iters": 500,
-      "median_us": 758.2855,
-      "p95_us": 1106.866,
-      "mean_us": 793.823308,
-      "us_per_row": 758.2855
+      "median_us": 688.78,
+      "p95_us": 1014.508,
+      "mean_us": 722.27954,
+      "us_per_row": 688.78
     },
     {
       "contender": "ormcore-dict",
       "op": "write_loop",
       "n": 50,
       "iters": 20,
-      "median_us": 37700.587,
-      "p95_us": 44026.38,
-      "mean_us": 37524.749299999996,
-      "us_per_row": 754.01174
+      "median_us": 34820.942,
+      "p95_us": 79856.515,
+      "mean_us": 36980.7363,
+      "us_per_row": 696.41884
     },
     {
       "contender": "ormcore-dict",
       "op": "write_loop",
       "n": 1000,
       "iters": 3,
-      "median_us": 727181.264,
-      "p95_us": 732095.351,
-      "mean_us": 709564.435,
-      "us_per_row": 727.1812639999999
+      "median_us": 713973.701,
+      "p95_us": 779710.848,
+      "mean_us": 724127.4706666666,
+      "us_per_row": 713.973701
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 220.57,
+      "p95_us": 480.432,
+      "mean_us": 278.589897,
+      "us_per_row": 220.57
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 256.912,
+      "p95_us": 442.767,
+      "mean_us": 288.87558666666666,
+      "us_per_row": 5.13824
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 2420.0125,
+      "p95_us": 3019.557,
+      "mean_us": 2475.00882,
+      "us_per_row": 2.4200125
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 328.1955,
+      "p95_us": 730.098,
+      "mean_us": 401.065352,
+      "us_per_row": 328.1955
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 522.5565,
+      "p95_us": 986.431,
+      "mean_us": 615.4135966666666,
+      "us_per_row": 10.451130000000001
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 4418.437,
+      "p95_us": 6868.076,
+      "mean_us": 4664.73574,
+      "us_per_row": 4.418437
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 557.7275,
+      "p95_us": 871.417,
+      "mean_us": 605.6682480000001,
+      "us_per_row": 557.7275
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 1368.3615,
+      "p95_us": 2313.643,
+      "mean_us": 1481.23494,
+      "us_per_row": 27.36723
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 12856.177,
+      "p95_us": 18899.87,
+      "mean_us": 13873.561566666667,
+      "us_per_row": 12.856176999999999
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 515.5615,
+      "p95_us": 858.721,
+      "mean_us": 577.3619719999999,
+      "us_per_row": 515.5615
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 23748.2295,
+      "p95_us": 36720.169,
+      "mean_us": 24538.486399999998,
+      "us_per_row": 474.96459000000004
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 542850.437,
+      "p95_us": 590323.824,
+      "mean_us": 558381.898,
+      "us_per_row": 542.850437
     },
     {
       "contender": "rust-only",
       "op": "read",
       "n": 1,
       "iters": 1000,
-      "median_us": 154.3865,
-      "p95_us": 210.103,
-      "mean_us": 172.820627,
-      "us_per_row": 154.3865
+      "median_us": 178.572,
+      "p95_us": 362.435,
+      "mean_us": 216.543541,
+      "us_per_row": 178.572
     },
     {
       "contender": "rust-only",
       "op": "read",
       "n": 50,
       "iters": 300,
-      "median_us": 236.957,
-      "p95_us": 347.249,
-      "mean_us": 260.24034666666665,
-      "us_per_row": 4.73914
+      "median_us": 248.654,
+      "p95_us": 459.537,
+      "mean_us": 279.28822333333335,
+      "us_per_row": 4.9730799999999995
     },
     {
       "contender": "rust-only",
       "op": "read",
       "n": 1000,
       "iters": 50,
-      "median_us": 1604.049,
-      "p95_us": 2318.325,
-      "mean_us": 1708.25226,
-      "us_per_row": 1.604049
+      "median_us": 2071.6045,
+      "p95_us": 2349.865,
+      "mean_us": 2033.97206,
+      "us_per_row": 2.0716045
     },
     {
       "contender": "rust-only",
       "op": "read_join",
       "n": 1,
       "iters": 1000,
-      "median_us": 225.339,
-      "p95_us": 483.132,
-      "mean_us": 277.20056900000003,
-      "us_per_row": 225.339
+      "median_us": 226.1765,
+      "p95_us": 400.011,
+      "mean_us": 255.967193,
+      "us_per_row": 226.1765
     },
     {
       "contender": "rust-only",
       "op": "read_join",
       "n": 50,
       "iters": 300,
-      "median_us": 409.866,
-      "p95_us": 552.587,
-      "mean_us": 442.24969333333337,
-      "us_per_row": 8.19732
+      "median_us": 422.6745,
+      "p95_us": 729.451,
+      "mean_us": 480.89986,
+      "us_per_row": 8.45349
     },
     {
       "contender": "rust-only",
       "op": "read_join",
       "n": 1000,
       "iters": 50,
-      "median_us": 3447.2995,
-      "p95_us": 3797.639,
-      "mean_us": 3521.97282,
-      "us_per_row": 3.4472995
+      "median_us": 3525.3885,
+      "p95_us": 7069.785,
+      "mean_us": 3902.21186,
+      "us_per_row": 3.5253885
     },
     {
       "contender": "rust-only",
       "op": "write_bulk",
       "n": 1,
       "iters": 500,
-      "median_us": 346.34,
-      "p95_us": 545.231,
-      "mean_us": 371.29416200000003,
-      "us_per_row": 346.34
+      "median_us": 505.374,
+      "p95_us": 840.181,
+      "mean_us": 552.646394,
+      "us_per_row": 505.374
     },
     {
       "contender": "rust-only",
       "op": "write_bulk",
       "n": 50,
       "iters": 200,
-      "median_us": 1170.622,
-      "p95_us": 1837.472,
-      "mean_us": 1336.093875,
-      "us_per_row": 23.41244
+      "median_us": 1227.8785,
+      "p95_us": 2542.122,
+      "mean_us": 1370.903695,
+      "us_per_row": 24.557570000000002
     },
     {
       "contender": "rust-only",
       "op": "write_bulk",
       "n": 1000,
       "iters": 30,
-      "median_us": 55923.839,
-      "p95_us": 61592.438,
-      "mean_us": 55071.48729999999,
-      "us_per_row": 55.923839
+      "median_us": 13690.7665,
+      "p95_us": 24038.028,
+      "mean_us": 14830.7801,
+      "us_per_row": 13.6907665
     },
     {
       "contender": "rust-only",
       "op": "write_loop",
       "n": 1,
       "iters": 500,
-      "median_us": 423.032,
-      "p95_us": 750.776,
-      "mean_us": 478.00549800000005,
-      "us_per_row": 423.032
+      "median_us": 445.388,
+      "p95_us": 746.007,
+      "mean_us": 484.84846600000003,
+      "us_per_row": 445.388
     },
     {
       "contender": "rust-only",
       "op": "write_loop",
       "n": 50,
       "iters": 20,
-      "median_us": 23954.7125,
-      "p95_us": 33113.908,
-      "mean_us": 24314.7987,
-      "us_per_row": 479.09425000000005
+      "median_us": 21611.576,
+      "p95_us": 30690.54,
+      "mean_us": 21265.68735,
+      "us_per_row": 432.23152000000005
     },
     {
       "contender": "rust-only",
       "op": "write_loop",
       "n": 1000,
       "iters": 3,
-      "median_us": 407468.908,
-      "p95_us": 468668.11,
-      "mean_us": 398778.0193333333,
-      "us_per_row": 407.468908
+      "median_us": 410966.317,
+      "p95_us": 460257.513,
+      "mean_us": 417312.3613333333,
+      "us_per_row": 410.966317
     },
     {
       "contender": "django-sync",
       "op": "read",
       "n": 1,
       "iters": 1000,
-      "median_us": 489.171,
-      "p95_us": 840.458,
-      "mean_us": 544.582626,
-      "us_per_row": 489.171
+      "median_us": 580.092,
+      "p95_us": 903.19,
+      "mean_us": 633.215729,
+      "us_per_row": 580.092
     },
     {
       "contender": "django-sync",
       "op": "read",
       "n": 50,
       "iters": 300,
-      "median_us": 1093.7255,
-      "p95_us": 1298.122,
-      "mean_us": 1081.6501,
-      "us_per_row": 21.87451
+      "median_us": 1157.3615,
+      "p95_us": 1261.085,
+      "mean_us": 1133.38115,
+      "us_per_row": 23.14723
     },
     {
       "contender": "django-sync",
       "op": "read",
       "n": 1000,
       "iters": 50,
-      "median_us": 9598.0705,
-      "p95_us": 13985.92,
-      "mean_us": 10510.06404,
-      "us_per_row": 9.5980705
+      "median_us": 9963.587,
+      "p95_us": 15071.647,
+      "mean_us": 11581.84674,
+      "us_per_row": 9.963587
     },
     {
       "contender": "django-sync",
       "op": "read_join",
       "n": 1,
       "iters": 1000,
-      "median_us": 955.142,
-      "p95_us": 1292.637,
-      "mean_us": 990.343599,
-      "us_per_row": 955.142
+      "median_us": 1018.873,
+      "p95_us": 1488.947,
+      "mean_us": 1115.045227,
+      "us_per_row": 1018.873
     },
     {
       "contender": "django-sync",
       "op": "read_join",
       "n": 50,
       "iters": 300,
-      "median_us": 1877.9305,
-      "p95_us": 2608.549,
-      "mean_us": 2053.972693333333,
-      "us_per_row": 37.55861
+      "median_us": 1871.061,
+      "p95_us": 2623.152,
+      "mean_us": 2009.7794066666668,
+      "us_per_row": 37.42122
     },
     {
       "contender": "django-sync",
       "op": "read_join",
       "n": 1000,
       "iters": 50,
-      "median_us": 17599.7725,
-      "p95_us": 47861.86,
-      "mean_us": 19689.74628,
-      "us_per_row": 17.5997725
+      "median_us": 18020.267,
+      "p95_us": 48856.873,
+      "mean_us": 20493.32054,
+      "us_per_row": 18.020267
     },
     {
       "contender": "django-sync",
       "op": "write_bulk",
       "n": 1,
       "iters": 500,
-      "median_us": 748.3565,
-      "p95_us": 1354.133,
-      "mean_us": 846.151294,
-      "us_per_row": 748.3565
+      "median_us": 1152.6155,
+      "p95_us": 1963.56,
+      "mean_us": 1221.8700919999999,
+      "us_per_row": 1152.6155
     },
     {
       "contender": "django-sync",
       "op": "write_bulk",
       "n": 50,
       "iters": 200,
-      "median_us": 3981.3,
-      "p95_us": 5400.927,
-      "mean_us": 4115.805435,
-      "us_per_row": 79.626
+      "median_us": 3997.6965,
+      "p95_us": 6184.812,
+      "mean_us": 4288.75561,
+      "us_per_row": 79.95393
     },
     {
       "contender": "django-sync",
       "op": "write_bulk",
       "n": 1000,
       "iters": 30,
-      "median_us": 43103.4145,
-      "p95_us": 72949.991,
-      "mean_us": 46013.14283333334,
-      "us_per_row": 43.1034145
+      "median_us": 44776.977,
+      "p95_us": 76762.312,
+      "mean_us": 46674.082200000004,
+      "us_per_row": 44.776977
     },
     {
       "contender": "django-sync",
       "op": "write_loop",
       "n": 1,
       "iters": 500,
-      "median_us": 873.503,
-      "p95_us": 1174.063,
-      "mean_us": 840.584746,
-      "us_per_row": 873.503
+      "median_us": 843.6795,
+      "p95_us": 1190.623,
+      "mean_us": 921.81266,
+      "us_per_row": 843.6795
     },
     {
       "contender": "django-sync",
       "op": "write_loop",
       "n": 50,
       "iters": 20,
-      "median_us": 35470.976,
-      "p95_us": 44641.23,
-      "mean_us": 36059.8101,
-      "us_per_row": 709.41952
+      "median_us": 46349.8105,
+      "p95_us": 51994.209,
+      "mean_us": 44516.71215,
+      "us_per_row": 926.99621
     },
     {
       "contender": "django-sync",
       "op": "write_loop",
       "n": 1000,
       "iters": 3,
-      "median_us": 800014.421,
-      "p95_us": 838178.999,
-      "mean_us": 808074.1863333334,
-      "us_per_row": 800.014421
+      "median_us": 943810.496,
+      "p95_us": 1031658.396,
+      "mean_us": 945011.298,
+      "us_per_row": 943.8104960000001
     }
   ]
 }

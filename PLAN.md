@@ -185,8 +185,9 @@ once you count FFI and Python object materialization?
 - Also measure the "bad" pattern: N separate single-row calls across the FFI boundary.
 - Deliverable: `bench/RESULTS.md`.
 - Outcome: PyO3 + SeaORM is 2–4.5× faster than Django / SQLAlchemy async for reads and
-  bulk writes. Follow-ups: sqlx's missing `TCP_NODELAY` (≈40 ms stall on large
-  statements over TCP) and the ~115 µs asyncio ↔ Tokio bridge cost per call.
+  bulk writes. sqlx's missing `TCP_NODELAY` (≈40 ms stall on large statements over TCP)
+  is fixed with a vendored one-line patch. A sync API is ~0.1–0.2 ms faster per small
+  query (no asyncio ↔ Tokio hand-off), so ship async as the primary API plus a sync API.
 
 ### Phase 1 — First prototype
 
