@@ -6,7 +6,7 @@ from typing import Any, assert_type
 
 from blog.models import Comment, Post, PostInsert, PostQuerySet, User, UserQuerySet
 
-from orm import ColumnRef, Condition, Prefetch, RelatedSet, Row, Window, excluded, exists, func, outer
+from orm import ColumnRef, Condition, Prefetch, RelatedSet, Row, Window, WindowDef, excluded, exists, func, outer, window
 from orm import get_database as orm_db
 
 
@@ -91,6 +91,12 @@ async def check() -> None:
     ranked = Post.objects.select(Post, rank.label("rank")).cte("ranked")
     assert_type(await Post.objects.from_(ranked).filter(ranked.c.rank <= 3), list[Post])
     await ranked.select(ranked.c.author_id).group_by(ranked.c.author_id)
+    w = window(partition_by=Post.author_id, order_by=Post.created_at)
+    assert_type(w, WindowDef)
+    assert_type(func.sum(Post.views).over(w), Window[int | None])
+    assert_type(func.row_number().over(w, rows=(None, 0)), Window[int])
+    totals = Post.objects.select(Post.author_id, func.count().label("n")).group_by(Post.author_id).cte("totals")
+    assert_type(User.objects.join(totals, totals.c.author_id == User.id, outer=True), UserQuerySet)
     assert_type(
         await User.objects.prefetch_related(User.posts.comments, Prefetch(User.posts, Post.objects.all()[:3])),
         list[User],
@@ -115,3 +121,4 @@ async def errors() -> None:
     u.posts = []  # E: read-only relation
     Prefetch(User.posts, Comment.objects.all())  # E: query set of the wrong model
     func.ntile("2")  # E: buckets are ints
+    func.sum(Post.views).over(window(), rows=(None, "x"))  # E: frame bounds are ints

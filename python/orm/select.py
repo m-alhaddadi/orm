@@ -209,6 +209,7 @@ class Select(Generic[Unpack[Ts]]):
             ir["distinct_on"] = [c._ir(ctx) for c in self._distinct_on]
         elif self._distinct:
             ir["distinct"] = True
+        ctx.add_windows(ir)
         return ir, ctx
 
     def _ir(self, params: list[Any]) -> dict[str, Any]:

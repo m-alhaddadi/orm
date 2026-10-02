@@ -266,6 +266,25 @@ await Post.objects.select(Post.title, func.lag(Post.views, 1, 0).over(order_by=P
 * `.over(partition_by=..., order_by=..., rows=(start, end) | range=(start, end))` on any
   `func` call. Frame bounds: `None` unbounded, `0` the current row, `-n` n preceding,
   `n` n following (SQLAlchemy's convention).
+* **Shared windows**: `w = window(partition_by=..., order_by=..., rows=...)` defines a
+  window once; `.over(w)` uses it, and the query gets `WINDOW w1 AS (...)` with
+  `OVER w1` at each use. `.over(w, order_by=...)` / `.over(w, rows=...)` extend it
+  (`OVER (w1 ROWS ...)`) when it has no ordering / frame of its own; partitioning comes
+  from the window only (Postgres' rules). Each query, subquery or CTE declares the
+  windows it uses.
+
+  ```python
+  w = window(partition_by=Post.author_id, order_by=Post.created_at)
+  await Post.objects.select(Post.title, func.sum(Post.views).over(w), func.avg(Post.views).over(w),
+                            func.sum(Post.views).over(w, rows=(-1, 0)))
+  ```
+
+  For now the planner takes **one shared window per query, in a query without
+  `order_by()`, slicing or `lock()`**, and raises `QueryError` otherwise: sea-query
+  (still on its master) keeps a single `WINDOW` per statement and writes it after `ORDER
+  BY` / `LIMIT`, where Postgres rejects it. Inline `.over(partition_by=...)` has no such
+  limit. The Python API already takes any number of windows, so the limit goes away with
+  the SQL builder fix, without API changes.
 * Window-only functions: `row_number`, `rank`, `dense_rank`, `percent_rank`,
   `cume_dist`, `ntile(n)`, `lag` / `lead(expr, offset=1, default=None)`,
   `first_value`, `last_value`, `nth_value(expr, n)`. Without `.over()` they raise
@@ -293,6 +312,16 @@ chain = User.objects.filter(User.id == 1).cte(                          # WITH R
 await User.objects.from_(chain)
 ```
 
+* **Joins**: `qs.join(cte, on, outer=False)` is `[LEFT] JOIN <cte> ON <on>`, so a CTE's
+  columns come along with each row (django-cte's `cte.join(...)`):
+
+  ```python
+  await (User.objects.join(totals, totals.c.author_id == User.id, outer=True)
+         .select(User, totals.c.views).order_by(totals.c.views.desc()))
+  ```
+
+  A row matching several CTE rows comes back once per match, as in SQL. Writes refuse
+  a query set with joins.
 * **Subqueries in `FROM`**: `Model.objects.from_(cte)` reads the model's rows from a
   CTE with the model's columns (`Post.objects....cte(...)` or a `select(Post, ...)`),
   so filters, relation paths, `select_related`, `prefetch_related`, `count()` and
@@ -301,12 +330,21 @@ await User.objects.from_(chain)
 * `cte.select(...)` queries a CTE with no model: filter, group, order and slice it like
   any `select()`, await it for rows, or use it in `in_()`, `exists()` and
   `as_scalar()`. Columns are named as in `select()` rows (labels, field names).
-* `recursive=lambda cte: query` adds the recursive part, joined with the CTE itself
-  (`FROM users, chain WHERE users.id = chain.id + 1`), `UNION ALL` or (`distinct=True`)
-  `UNION`. It must have as many columns as the first part.
+* `recursive=lambda cte: query` adds the recursive part, `UNION ALL` or
+  (`distinct=True`) `UNION`; it must have as many columns as the first part. It reads
+  the CTE through `join()` (`User.objects.join(c, User.id == c.c.id + 1)`), or just by
+  using `c.c.<col>`, which adds the CTE to `FROM` (`FROM users, chain WHERE ...`).
   `materialized=True / False` adds `[NOT] MATERIALIZED`.
 * CTEs work in `update()` / `delete()` filters too. Each prefetch query declares the
   CTEs it reads. Two different CTEs with one name in a statement raise `ValueError`.
+
+Compared with [django-cte](https://github.com/dimagi/django-cte) (4.0), the model is the
+same (a CTE wraps a query, `cte.c.x` ↔ `cte.col.x`, `join`, recursion through a
+function receiving the CTE, `materialized`), with three differences: a CTE is declared
+by whatever reads it instead of `with_cte(cte, select=...)`, so it can't be forgotten
+or declared twice; the recursive part is given on its own instead of as `base.union(...)`
+inside the function; and `from_(cte)` gives model instances where `cte.queryset()`
+gives Django rows typed by the CTE's query.
 
 ## Writes
 
@@ -512,5 +550,7 @@ TLS on, the TLS cost hides the difference)
 * Caching of compiled plans, chunking very large `IN (...)` prefetches.
 * `outer()` through relation paths (`outer(Post.author.name)`), `SEARCH` / `CYCLE`
   clauses for recursive CTEs, filtering on window functions without a CTE.
+* Several shared windows per query, and shared windows with `ORDER BY` / `LIMIT`: needs
+  a fix in sea-query (or our own SELECT writer); see Window functions.
 * `has_one`, many-to-many, composite keys, decimal / array column types. (UUID and JSON
   are done, see [`schema.md`](schema.md).)

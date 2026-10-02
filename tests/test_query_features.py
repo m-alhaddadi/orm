@@ -7,7 +7,7 @@ import pytest
 from blog.models import Comment, Post, User
 
 import orm
-from orm import Prefetch, QueryError, exists, func, outer
+from orm import Prefetch, QueryError, exists, func, outer, window
 
 NOW = datetime.now(timezone.utc)
 
@@ -176,6 +176,95 @@ async def test_window_function_errors(clean):
             await Post.objects.lock().order_by(rank)
 
 
+async def test_named_windows(clean):
+    await seed()
+    w = window(partition_by=Post.author_id, order_by=Post.created_at)
+    q = Post.objects.select(
+        Post.title,
+        func.sum(Post.views).over(w).label("total"),
+        func.avg(Post.views).over(w).label("avg"),
+        func.row_number().over(w).label("n"),
+    )
+    assert q.sql().count("WINDOW") == 1 and 'OVER w1' in q.sql()
+    rows = sorted(await q)
+    assert [(r.title, r.total, r.n) for r in rows] == [("a1", 5, 1), ("a2", 55, 2), ("a3", 75, 3), ("b1", 100, 1)]
+    assert rows[1].avg == 27.5
+    # Extending a window with a frame: OVER (w1 ROWS ...).
+    last2 = func.sum(Post.views).over(w, rows=(-1, 0))
+    sql = Post.objects.select(Post.title, last2.label("s")).sql()
+    assert "OVER (w1 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)" in sql
+    assert sorted(tuple(r) for r in await Post.objects.select(Post.title, last2.label("s"))) == [
+        ("a1", 5), ("a2", 55), ("a3", 70), ("b1", 100)
+    ]
+    # ... and a window without order_by with one.
+    part = window(partition_by=Post.author_id)
+    rows = await Post.objects.select(Post.title, func.rank().over(part, order_by=Post.views.desc()).label("r"))
+    assert sorted(tuple(r) for r in rows) == [("a1", 3), ("a2", 1), ("a3", 2), ("b1", 1)]
+    # The same window in a subquery is declared there, not in the outer query.
+    ranked = Post.objects.select(Post, func.row_number().over(window(Post.author_id, Post.views.desc())).label("rank")).cte("ranked")
+    assert [p.title for p in await Post.objects.from_(ranked).filter(ranked.c.rank == 1)] in (["a2", "b1"], ["b1", "a2"])
+
+
+async def test_named_window_limits(clean):
+    w = window(partition_by=Post.author_id, order_by=Post.created_at)
+    with pytest.raises(ValueError, match="partition_by"):
+        func.sum(Post.views).over(w, partition_by=Post.id)
+    with pytest.raises(ValueError, match="without its own order_by"):
+        func.sum(Post.views).over(w, order_by=Post.id)
+    with pytest.raises(ValueError, match="without its own frame"):
+        func.sum(Post.views).over(window(rows=(None, 0)), rows=(None, 0))
+    # Limits of the current SQL builder: one WINDOW per query, none with ORDER BY / LIMIT.
+    other = window(order_by=Post.id)
+    with pytest.raises(QueryError, match="only one named window"):
+        await Post.objects.select(func.sum(Post.views).over(w), func.sum(Post.views).over(other))
+    with pytest.raises(QueryError, match="order_by"):
+        await Post.objects.select(func.sum(Post.views).over(w)).order_by(Post.id)
+    with pytest.raises(QueryError, match="slicing"):
+        await Post.objects.select(func.sum(Post.views).over(w))[:3]
+
+
+async def test_join_cte(clean):
+    (alice, bob, carol), _ = await seed()
+    totals = (
+        Post.objects.select(Post.author_id, func.sum(Post.views).label("views"), func.count().label("n"))
+        .group_by(Post.author_id)
+        .cte("totals")
+    )
+    rows = await User.objects.join(totals, totals.c.author_id == User.id).select(User, totals.c.views).order_by(totals.c.views.desc())
+    assert [(u.name, v) for u, v in rows] == [("Bob", 100), ("Alice", 75)]
+    rows = await User.objects.join(totals, totals.c.author_id == User.id, outer=True).select(User.name, totals.c.n).order_by(User.id)
+    assert [tuple(r) for r in rows] == [("Alice", 3), ("Bob", 1), ("Carol", None)]
+    # Filters, instances, count, prefetch.
+    busy = User.objects.join(totals, totals.c.author_id == User.id).filter(totals.c.n > 1)
+    assert [u.name for u in await busy] == ["Alice"] and await busy.count() == 1
+    assert [len(u.posts.cached) for u in await busy.prefetch_related(User.posts)] == [3]
+    # Two CTEs joined.
+    commenters = Comment.objects.select(Comment.author_id, func.count().label("c")).group_by(Comment.author_id).cte("commenters")
+    rows = await (
+        User.objects.join(totals, totals.c.author_id == User.id)
+        .join(commenters, commenters.c.author_id == User.id)
+        .select(User.name, totals.c.views, commenters.c.c)
+        .order_by(User.name)
+    )
+    assert [tuple(r) for r in rows] == [("Alice", 75, 1), ("Bob", 100, 1)]
+    with pytest.raises(QueryError, match="can't run on a query set with from_"):
+        User.objects.join(totals, totals.c.author_id == User.id).update(name="x")
+    with pytest.raises(ValueError, match="already read"):
+        User.objects.join(totals, totals.c.author_id == User.id).join(totals, totals.c.n > 0)
+
+
+async def test_recursive_cte_with_join(clean):
+    users = await User.objects.insert_many([{"email": f"u{i}@x.io", "name": f"u{i}"} for i in range(5)])
+    first = users[0].id
+    walk = User.objects.filter(User.id == first).select(User.id, User.name, func.abs(User.id - User.id).label("depth")).cte(
+        "walk",
+        recursive=lambda w: User.objects.join(w, User.id == w.c.id + 1).filter(w.c.depth < 2).select(User.id, User.name, w.c.depth + 1),
+    )
+    assert "JOIN \"walk\" ON" in walk.select(walk.c.name).sql()
+    rows = await walk.select(walk.c.name, walk.c.depth).order_by(walk.c.depth)
+    assert [tuple(r) for r in rows] == [("u0", 0), ("u1", 1), ("u2", 2)]
+
+
 async def _db():
     return orm.get_database()
 
@@ -251,7 +340,7 @@ async def test_cte_errors(clean):
         totals.c.nope
     with pytest.raises(QueryError, match="only available in queries reading totals"):
         await Post.objects.filter(totals.c.n > 1)
-    with pytest.raises(QueryError, match="can't run on from_"):
+    with pytest.raises(QueryError, match="can't run on a query set with from_"):
         await Post.objects.from_(Post.objects.cte("p")).delete()
     other = Post.objects.select(Post.author_id).cte("totals")
     with pytest.raises(ValueError, match="two different CTEs"):

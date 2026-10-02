@@ -455,9 +455,12 @@ pub enum Expr {
     Exists { select: Box<Select> },
     /// `(<select>)` returning one column and at most one row.
     Subquery { select: Box<Select> },
-    /// `<func> OVER (PARTITION BY ... ORDER BY ... <frame>)`.
+    /// `<func> OVER (PARTITION BY ... ORDER BY ... <frame>)`, or over a named window of
+    /// the query (`base`), which `order_by` / `frame` may extend: `OVER (w1 ROWS ...)`.
     Window {
         func: Box<Expr>,
+        #[serde(default)]
+        base: Option<String>,
         #[serde(default)]
         partition_by: Vec<Expr>,
         #[serde(default)]
@@ -483,6 +486,29 @@ pub struct Frame {
     pub start: Option<i64>,
     #[serde(default)]
     pub end: Option<i64>,
+}
+
+/// `WINDOW <name> AS (...)`: a window definition several window functions share.
+#[derive(Deserialize, Debug, Clone)]
+pub struct NamedWindow {
+    pub name: String,
+    #[serde(default)]
+    pub partition_by: Vec<Expr>,
+    #[serde(default)]
+    pub order_by: Vec<Order>,
+    #[serde(default)]
+    pub frame: Option<Frame>,
+}
+
+/// `[LEFT] JOIN <cte> ON <on>`: a CTE of the statement joined to the root rows, so its
+/// columns (`CteCol`) can be read next to them.
+#[derive(Deserialize, Debug, Clone)]
+pub struct CteJoin {
+    pub cte: String,
+    pub on: Expr,
+    /// `LEFT JOIN` instead of `JOIN`.
+    #[serde(default)]
+    pub outer: bool,
 }
 
 /// `WITH <name> AS (<query> [UNION [ALL] <recursive>])`.
@@ -549,6 +575,12 @@ pub struct Select {
     /// Read the root model's rows from this CTE instead of its table.
     #[serde(default)]
     pub from: Option<String>,
+    /// CTEs joined to the root rows.
+    #[serde(default)]
+    pub joins: Vec<CteJoin>,
+    /// Named windows (`WINDOW ...`) the query's window functions refer to.
+    #[serde(default)]
+    pub windows: Vec<NamedWindow>,
     #[serde(default)]
     pub filters: Vec<Expr>,
     #[serde(default)]

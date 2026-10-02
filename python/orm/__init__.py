@@ -32,6 +32,7 @@ from .expr import (
     RelationPath,
     ScalarSubquery,
     Window,
+    WindowDef,
     and_,
     excluded,
     exists,
@@ -39,6 +40,7 @@ from .expr import (
     not_,
     or_,
     outer,
+    window,
 )
 from .model import Model, Registry, define, load, loads, registry
 from .query import Prefetch, QuerySet, RelatedSet
@@ -86,6 +88,8 @@ __all__ = [
     "func",
     "Func",
     "Window",
+    "WindowDef",
+    "window",
     "ScalarSubquery",
     "ORMError",
     "DatabaseError",

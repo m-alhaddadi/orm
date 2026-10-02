@@ -151,7 +151,7 @@ class QuerySet(Generic[M]):
     ``exclude(User.posts.published == False)`` keeps users with no unpublished post.
     """
 
-    __slots__ = ("_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db", "_from")
+    __slots__ = ("_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db", "_from", "_joins")
 
     def __init__(self, model: type[M]) -> None:
         self._model = model
@@ -164,6 +164,7 @@ class QuerySet(Generic[M]):
         self._lock: dict[str, bool] | None = None
         self._db: Database | None = None
         self._from: Cte | None = None
+        self._joins: tuple[tuple[Cte, Condition, bool], ...] = ()
 
     @property
     def model(self) -> type[M]:
@@ -288,6 +289,25 @@ class QuerySet(Generic[M]):
         from .cte import Cte
 
         return Cte(name, self, recursive=recursive, distinct=distinct, materialized=materialized)
+
+    def join(self, cte: Cte, on: ConditionLike, *, outer: bool = False) -> Self:
+        """``JOIN <cte> ON <on>`` (``LEFT JOIN`` with ``outer``): the CTE's columns
+        (``cte.c.<name>``) come along with each row, for filters, ordering and
+        ``select()``::
+
+            totals = Post.objects.select(Post.author_id, func.sum(Post.views).label("views")) \\
+                .group_by(Post.author_id).cte("totals")
+            await User.objects.join(totals, totals.c.author_id == User.id).select(User, totals.c.views)
+
+        A row matching several CTE rows comes back once per match, as in SQL.
+        """
+        from .cte import Cte
+
+        if not isinstance(cte, Cte):
+            raise TypeError(f"join() takes a CTE, got {cte!r}")
+        if any(c is cte for c, _, _ in self._joins) or cte is self._from:
+            raise ValueError(f"{cte.name} is already read by this query")
+        return self._clone(_joins=(*self._joins, (cte, as_condition(on), outer)))
 
     def from_(self, cte: Cte) -> Self:
         """Read the rows from ``cte`` instead of the model's table: a subquery in
@@ -428,6 +448,12 @@ class QuerySet(Generic[M]):
         ir: dict[str, Any] = {"op": op, "model": self._root_name()}
         if self._from is not None:
             ir["from"] = self._from.name
+        if self._joins:
+            joins = []
+            for cte, on, is_outer in self._joins:
+                ctx.use_cte(cte)
+                joins.append({"cte": cte.name, "on": on._ir(ctx), "outer": is_outer})
+            ir["joins"] = joins
         if self._filters:
             ir["filters"] = [f._ir(ctx) for f in self._filters]
         if self._order:
@@ -445,6 +471,7 @@ class QuerySet(Generic[M]):
             if op != "select":
                 raise QueryError(f"{op}() can't lock rows; lock() applies to reading rows")
             ir["lock"] = self._lock
+        ctx.add_windows(ir)
         return ir, ctx
 
     def _select_ir(self, op: str, params: list[Any]) -> dict[str, Any]:
@@ -464,8 +491,8 @@ class QuerySet(Generic[M]):
             raise QueryError(f"{op}() is not supported on a sliced query set")
         if self._lock is not None:
             raise QueryError(f"{op}() locks the rows it changes; drop lock()")
-        if self._from is not None:
-            raise QueryError(f"{op}() writes the model's table; it can't run on from_({self._from.name})")
+        if self._from is not None or self._joins:
+            raise QueryError(f"{op}() writes the model's table; it can't run on a query set with from_() or join()")
         ctx = IRContext(self._model, params)
         ir = {"op": op, "model": self._model._meta.name, "filters": [f._ir(ctx) for f in self._filters]}
         if values is not None:

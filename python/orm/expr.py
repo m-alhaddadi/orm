@@ -38,6 +38,8 @@ __all__ = [
     "Func",
     "Labeled",
     "Window",
+    "WindowDef",
+    "window",
     "ScalarSubquery",
     "func",
     "outer",
@@ -78,7 +80,7 @@ class IRContext:
     column belongs to the query's root model (or CTE). ``outer`` is the context of the
     enclosing query, for subqueries."""
 
-    __slots__ = ("root", "params", "outer", "ctes", "_owner")
+    __slots__ = ("root", "params", "outer", "ctes", "windows", "_owner")
 
     def __init__(
         self, root: type[Model] | Cte, params: list[Any], outer: IRContext | None = None, ctes: _Ctes | None = None
@@ -88,6 +90,8 @@ class IRContext:
         self.outer = outer
         self._owner = outer is None and ctes is None
         self.ctes: _Ctes = ctes if ctes is not None else (outer.ctes if outer is not None else _Ctes())
+        # Named windows of this query (not of enclosing ones), with their IR.
+        self.windows: list[tuple[WindowDef, IR]] = []
 
     def param(self, value: Any) -> IR:
         self.params.append(value)
@@ -95,6 +99,19 @@ class IRContext:
 
     def use_cte(self, cte: Cte) -> None:
         self.ctes.use(cte, self.params)
+
+    def window_name(self, w: WindowDef) -> str:
+        """The name of ``w`` in this query's ``WINDOW`` clause (declared on first use)."""
+        for i, (known, _) in enumerate(self.windows):
+            if known is w:
+                return f"w{i + 1}"
+        name = f"w{len(self.windows) + 1}"
+        self.windows.append((w, {"name": name, **w._spec_ir(self)}))
+        return name
+
+    def add_windows(self, ir: IR) -> None:
+        if self.windows:
+            ir["windows"] = [w for _, w in self.windows]
 
     def finish(self, ir: IR) -> IR:
         """Declares the CTEs the statement uses (``WITH``), if this context compiles the
@@ -364,33 +381,95 @@ class Func(Expression[T]):
 
     def over(
         self,
-        partition_by: Expression[Any] | Iterable[Expression[Any]] | None = None,
+        window: WindowDef | Expression[Any] | Iterable[Expression[Any]] | None = None,
+        /,
         order_by: Expression[Any] | Ordering | Iterable[Expression[Any] | Ordering] | None = None,
         *,
+        partition_by: Expression[Any] | Iterable[Expression[Any]] | None = None,
         rows: tuple[int | None, int | None] | None = None,
         range: tuple[int | None, int | None] | None = None,
     ) -> Window[T]:
-        """``<function> OVER (PARTITION BY ... ORDER BY ...)``: the function computed over
-        a window of rows related to each row, without grouping them::
+        """``<function> OVER (...)``: the function computed over a window of rows related
+        to each row, without grouping them::
 
             func.row_number().over(partition_by=Post.author_id, order_by=Post.views.desc())
             func.sum(Post.views).over(order_by=Post.created_at, rows=(None, 0))  # running total
 
-        ``rows`` / ``range`` set the frame as ``(start, end)``: ``None`` is unbounded, ``0``
-        the current row, ``-n`` n preceding, ``n`` n following. Window functions can be
-        selected and ordered by; to filter on one, select it in a CTE and filter that.
+            w = window(partition_by=Post.author_id, order_by=Post.created_at)  # shared
+            Post.objects.select(func.sum(Post.views).over(w), func.avg(Post.views).over(w))
+
+        Over a :func:`window`, ``order_by`` and ``rows`` / ``range`` may extend it when it
+        has none of its own (``OVER (w ROWS ...)``); its partitioning is fixed. ``rows`` /
+        ``range`` set the frame as ``(start, end)``: ``None`` is unbounded, ``0`` the
+        current row, ``-n`` n preceding, ``n`` n following. A first positional argument
+        that isn't a window is ``partition_by``.
         """
-        if rows is not None and range is not None:
-            raise ValueError("over() takes rows or range, not both")
-        frame = None
-        for kind, bounds in (("rows", rows), ("range", range)):
-            if bounds is not None:
-                start, end = bounds
-                for b in (start, end):
-                    if b is not None and (isinstance(b, bool) or not isinstance(b, int)):
-                        raise TypeError(f"frame bounds are ints or None, got {b!r}")
-                frame = {"kind": kind, "start": start, "end": end}
-        return Window(self, _many(partition_by), _orderings(order_by), frame)
+        frame = _frame(rows, range)
+        if not isinstance(window, WindowDef):
+            if window is not None:
+                if partition_by is not None:
+                    raise TypeError("over() got partition_by twice")
+                partition_by = window
+            return Window(self, None, _many(partition_by), _orderings(order_by), frame)
+        if partition_by is not None:
+            raise ValueError("over(window) can't add partition_by: the window defines it")
+        if order_by is not None and window._order:
+            raise ValueError("over(window, order_by=...) needs a window without its own order_by")
+        if frame is not None and window._frame is not None:
+            raise ValueError("over(window, rows/range=...) needs a window without its own frame")
+        return Window(self, window, [], _orderings(order_by), frame)
+
+
+def _frame(rows: tuple[int | None, int | None] | None, range_: tuple[int | None, int | None] | None) -> IR | None:
+    if rows is not None and range_ is not None:
+        raise ValueError("over() takes rows or range, not both")
+    frame = None
+    for kind, bounds in (("rows", rows), ("range", range_)):
+        if bounds is not None:
+            start, end = bounds
+            for b in (start, end):
+                if b is not None and (isinstance(b, bool) or not isinstance(b, int)):
+                    raise TypeError(f"frame bounds are ints or None, got {b!r}")
+            frame = {"kind": kind, "start": start, "end": end}
+    return frame
+
+
+class WindowDef:
+    """A window definition shared by several window functions of a query: built by
+    :func:`window`, used with ``func.<name>(...).over(w)``. It becomes the query's
+    ``WINDOW w1 AS (...)`` clause."""
+
+    __slots__ = ("_partition", "_order", "_frame")
+
+    def __init__(self, partition: list[Expression[Any]], order: list[Ordering], frame: IR | None) -> None:
+        self._partition = partition
+        self._order = order
+        self._frame = frame
+
+    def _spec_ir(self, ctx: IRContext) -> IR:
+        ir: IR = {}
+        if self._partition:
+            ir["partition_by"] = [p._ir(ctx) for p in self._partition]
+        if self._order:
+            ir["order_by"] = [o._ir(ctx) for o in self._order]
+        if self._frame is not None:
+            ir["frame"] = self._frame
+        return ir
+
+    def __repr__(self) -> str:
+        return f"window(partition_by={self._partition!r}, order_by={self._order!r})"
+
+
+def window(
+    partition_by: Expression[Any] | Iterable[Expression[Any]] | None = None,
+    order_by: Expression[Any] | Ordering | Iterable[Expression[Any] | Ordering] | None = None,
+    *,
+    rows: tuple[int | None, int | None] | None = None,
+    range: tuple[int | None, int | None] | None = None,
+) -> WindowDef:
+    """A named window (``WINDOW w AS (PARTITION BY ... ORDER BY ...)``) for several
+    window functions to share: ``func.sum(x).over(w)``, ``func.avg(x).over(w)``."""
+    return WindowDef(_many(partition_by), _orderings(order_by), _frame(rows, range))
 
 
 def _many(items: Any) -> list[Any]:
@@ -408,18 +487,26 @@ def _orderings(items: Any) -> list[Ordering]:
 class Window(Expression[T]):
     """``func.<name>(...).over(...)``: a window function call."""
 
-    __slots__ = ("_func", "_partition", "_order", "_frame")
+    __slots__ = ("_func", "_base", "_partition", "_order", "_frame")
 
     def __init__(
-        self, fn: Func[T], partition: list[Expression[Any]], order: list[Ordering], frame: IR | None
+        self,
+        fn: Func[T],
+        base: WindowDef | None,
+        partition: list[Expression[Any]],
+        order: list[Ordering],
+        frame: IR | None,
     ) -> None:
         self._func = fn
+        self._base = base
         self._partition = partition
         self._order = order
         self._frame = frame
 
     def _ir(self, ctx: IRContext) -> IR:
         ir: IR = {"t": "window", "func": self._func._ir(ctx)}
+        if self._base is not None:
+            ir["base"] = ctx.window_name(self._base)
         if self._partition:
             ir["partition_by"] = [p._ir(ctx) for p in self._partition]
         if self._order:

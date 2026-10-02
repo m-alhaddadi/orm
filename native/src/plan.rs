@@ -356,8 +356,12 @@ pub struct Planner<'s, 'py> {
     /// The roots of enclosing queries (alias, model), innermost last: `outer()`.
     outer: Vec<(String, usize)>,
     /// In the recursive part of a CTE: its name, and whether the query read its columns
-    /// (which adds it to `FROM`).
+    /// (which adds it to `FROM`, unless the query joins it).
     recursive: Option<(String, bool)>,
+    /// CTEs joined to the root rows (`joins`), readable through `CteCol`.
+    joined: Vec<String>,
+    /// The query's named windows (`WINDOW`), which window functions can refer to.
+    windows: Vec<String>,
     next_alias: usize,
     /// `EXCLUDED.<field>` is only valid in an upsert's `DO UPDATE SET`.
     allow_excluded: bool,
@@ -389,6 +393,8 @@ impl<'s, 'py> Planner<'s, 'py> {
             joins: vec![],
             outer,
             recursive: None,
+            joined: vec![],
+            windows: vec![],
             next_alias,
             allow_excluded: false,
             allow_window: false,
@@ -504,6 +510,82 @@ impl<'s, 'py> Planner<'s, 'py> {
         &self.scopes[0].alias
     }
 
+    /// Takes note of what `q` declares for its expressions: joined CTEs, named windows.
+    fn enter(&mut self, q: &Select) -> PyResult<()> {
+        self.joined.clear();
+        for j in &q.joins {
+            let idx = self.model_idx(&j.cte)?;
+            if idx < self.schema.models.len() {
+                return Err(query_err(format!("join() takes a CTE, {:?} is a model", j.cte)));
+            }
+            if j.cte == self.source || self.joined.contains(&j.cte) {
+                return Err(query_err(format!("CTE {:?} is read twice by one query", j.cte)));
+            }
+            self.joined.push(j.cte.clone());
+        }
+        self.windows = q.windows.iter().map(|w| w.name.clone()).collect();
+        for w in &self.windows {
+            if w.is_empty() || !w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                return Err(query_err(format!("invalid window name {w:?}")));
+            }
+        }
+        Ok(())
+    }
+
+    /// `WINDOW <name> AS (...)` for the query's named windows. sea-query holds one per
+    /// statement and writes it after `ORDER BY` / `LIMIT` / `FOR ...`, where Postgres
+    /// rejects it, so those combinations raise until the SQL builder changes.
+    fn declare_windows(&mut self, q: &Select, stmt: &mut SelectStatement) -> PyResult<()> {
+        let w = match q.windows.as_slice() {
+            [] => return Ok(()),
+            [w] => w,
+            _ => {
+                return Err(query_err(
+                    "one query can declare only one named window for now; define the others inline \
+                     with .over(partition_by=..., order_by=...)"
+                        .into(),
+                ))
+            }
+        };
+        if !q.order.is_empty() || q.limit.is_some() || q.offset.is_some() || q.lock.is_some() {
+            return Err(query_err(
+                "a named window can't be combined with order_by(), slicing or lock() yet (the SQL builder \
+                 writes WINDOW after them); define the window inline with .over(partition_by=..., order_by=...)"
+                    .into(),
+            ));
+        }
+        let mut spec = sea_query::WindowStatement::new();
+        for p in &w.partition_by {
+            self.join_paths(p, "a window")?;
+            let e = self.value(p, Hint::default())?;
+            sea_query::OverStatement::add_partition_by(&mut spec, e);
+        }
+        for o in &w.order_by {
+            self.join_paths(&o.expr, "a window")?;
+            let e = self.value(&o.expr, Hint::default())?;
+            spec.order_by_expr(e, if o.desc { SOrder::Desc } else { SOrder::Asc });
+        }
+        if let Some(f) = &w.frame {
+            let bound = |b: Option<i64>, start: bool| -> PyResult<sea_query::Frame> {
+                let n = |v: i64| u32::try_from(v.unsigned_abs()).map_err(|_| query_err("frame bound too large".into()));
+                Ok(match b {
+                    None if start => sea_query::Frame::UnboundedPreceding,
+                    None => sea_query::Frame::UnboundedFollowing,
+                    Some(0) => sea_query::Frame::CurrentRow,
+                    Some(v) if v < 0 => sea_query::Frame::Preceding(n(v)?),
+                    Some(v) => sea_query::Frame::Following(n(v)?),
+                })
+            };
+            let kind = match f.kind {
+                FrameKind::Rows => sea_query::FrameType::Rows,
+                FrameKind::Range => sea_query::FrameType::Range,
+            };
+            spec.frame_between(kind, bound(f.start, true)?, bound(f.end, false)?);
+        }
+        stmt.window(Alias::new(&w.name), spec);
+        Ok(())
+    }
+
     // -- subqueries and CTEs ----------------------------------------------------------------
 
     /// A planner for a subquery: it sees this query's root (and the ones enclosing it)
@@ -595,6 +677,9 @@ impl<'s, 'py> Planner<'s, 'py> {
         if cte == self.source {
             return Ok((self.root_alias().to_owned(), f));
         }
+        if self.joined.iter().any(|j| j == cte) {
+            return Ok((cte.to_owned(), f));
+        }
         if let Some((r, used)) = &mut self.recursive {
             if r == cte {
                 *used = true;
@@ -602,7 +687,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             }
         }
         Err(query_err(format!(
-            "{cte}.c.{name} is only available in queries reading {cte} (from_({cte}) or {cte}.select(...))"
+            "{cte}.c.{name} is only available in queries reading {cte} (from_({cte}), join({cte}, ...) or {cte}.select(...))"
         )))
     }
 
@@ -849,7 +934,9 @@ impl<'s, 'py> Planner<'s, 'py> {
                 Self::one_column(select, "as_scalar()")?;
                 SExpr::SubQuery(None, Box::new(self.subselect(select, false)?.into()))
             }
-            Expr::Window { func, partition_by, order_by, frame } => self.window(func, partition_by, order_by, frame)?,
+            Expr::Window { func, base, partition_by, order_by, frame } => {
+                self.window(func, base.as_deref(), partition_by, order_by, frame)?
+            }
             Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
             Expr::Arith { op, l, r } => {
                 let inner = self.hint_of(l).or(self.hint_of(r));
@@ -959,7 +1046,14 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     /// `<func> OVER (PARTITION BY ... ORDER BY ... <frame>)`, over this query's rows.
-    fn window(&mut self, func: &Expr, partition_by: &[Expr], order_by: &[Order], frame: &Option<Frame>) -> PyResult<SExpr> {
+    fn window(
+        &mut self,
+        func: &Expr,
+        base: Option<&str>,
+        partition_by: &[Expr],
+        order_by: &[Order],
+        frame: &Option<Frame>,
+    ) -> PyResult<SExpr> {
         if !self.allow_window {
             return Err(query_err(
                 "window functions can only be used in select() and order_by(), not in filters, \
@@ -976,6 +1070,15 @@ impl<'s, 'py> Planner<'s, 'py> {
         let (call, cast) = self.call_parts(name, args, *distinct)?;
         let mut exprs = vec![call];
         let mut clauses = vec![];
+        if let Some(b) = base {
+            if !self.windows.iter().any(|w| w == b) {
+                return Err(query_err(format!("window {b:?} is not declared by this query")));
+            }
+            if !partition_by.is_empty() {
+                return Err(query_err("over(window) can't add partition_by: it comes from the window".into()));
+            }
+            clauses.push(b.to_owned());
+        }
         if !partition_by.is_empty() {
             let mut slots = vec![];
             for p in partition_by {
@@ -999,7 +1102,10 @@ impl<'s, 'py> Planner<'s, 'py> {
             };
             clauses.push(format!("{kind} BETWEEN {} AND {}", frame_bound(f.start, true), frame_bound(f.end, false)));
         }
-        let sql = format!("$1 OVER ({})", clauses.join(" "));
+        let sql = match (base, clauses.len()) {
+            (Some(b), 1) => format!("$1 OVER {b}"),
+            _ => format!("$1 OVER ({})", clauses.join(" ")),
+        };
         Ok(SExpr::cust_with_exprs(
             match cast {
                 Some(ty) => format!("CAST({sql} AS {ty})"),
@@ -1110,6 +1216,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     /// `select(...)` columns. In a CTE (`cte`), columns are named after the CTE's columns
     /// and the model's are stored as they are (`read_sql` applies when they are read).
     fn select_columns(&mut self, q: &Select, items: &[SelectItem], cte: bool) -> PyResult<SelectPlan> {
+        self.enter(q)?;
         if !q.select_related.is_empty() || !q.prefetch.is_empty() {
             return Err(query_err("select() can't be combined with select_related / prefetch_related".into()));
         }
@@ -1196,6 +1303,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
         windowed |= q.order.iter().any(|o| has_window(&o.expr));
         self.base_select(q, &mut stmt, true)?;
+        self.declare_windows(q, &mut stmt)?;
         self.apply_joins(&mut stmt);
         if let Some(lock) = q.lock {
             if aggregated || windowed || q.distinct || !q.distinct_on.is_empty() {
@@ -1289,6 +1397,11 @@ impl<'s, 'py> Planner<'s, 'py> {
         } else {
             stmt.from_as(Alias::new(&self.source), Alias::new(&alias));
         }
+        for j in &q.joins {
+            let on = self.cond(&j.on)?;
+            let kind = if j.outer { JoinType::LeftJoin } else { JoinType::InnerJoin };
+            stmt.join(kind, Alias::new(&j.cte), on);
+        }
         for w in self.apply_filters(&q.filters)? {
             stmt.and_where(w);
         }
@@ -1310,7 +1423,9 @@ impl<'s, 'py> Planner<'s, 'py> {
             stmt.offset(n);
         }
         if let Some((name, true)) = &self.recursive {
-            stmt.from(Alias::new(name));
+            if !self.joined.contains(name) {
+                stmt.from(Alias::new(name));
+            }
         }
         Ok(())
     }
@@ -1346,6 +1461,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         if self.root >= self.schema.models.len() {
             return Err(query_err("a CTE without a model is read with select(...)".into()));
         }
+        self.enter(q)?;
         let root = self.model(self.root);
         let alias = self.root_alias().to_owned();
         let mut stmt = Query::select();
@@ -1381,6 +1497,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             }
         }
         self.base_select(q, &mut stmt, true)?;
+        self.declare_windows(q, &mut stmt)?;
         self.apply_joins(&mut stmt);
         if q.order.iter().any(|o| has_window(&o.expr)) && q.lock.is_some() {
             return Err(query_err("lock() can't be used with window functions".into()));
@@ -1396,6 +1513,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     fn sliced_inner(&mut self, q: &Select) -> PyResult<SelectStatement> {
+        self.enter(q)?;
         let mut inner = Query::select();
         inner.expr(SExpr::val(1));
         self.base_select(q, &mut inner, true)?;
@@ -1410,6 +1528,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             let inner = self.sliced_inner(q)?;
             stmt.expr(SExpr::cust("COUNT(*)")).from_subquery(inner, Alias::new("sliced"));
         } else {
+            self.enter(q)?;
             stmt.expr(SExpr::cust("COUNT(*)"));
             self.base_select(q, &mut stmt, false)?;
             self.apply_joins(&mut stmt);
@@ -1528,6 +1647,7 @@ fn plan_prefetch<'py>(
     if sliced {
         let rn = Expr::Window {
             func: Box::new(Expr::Func { name: "row_number".into(), args: vec![], rel: None, distinct: false }),
+            base: None,
             partition_by: vec![Expr::Col { path: vec![], name: rel.to.clone() }],
             order_by: window_order,
             frame: None,
