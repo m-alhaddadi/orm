@@ -1,0 +1,10 @@
+[package]
+name = "ormcore-core"
+version = "0.1.0"
+edition = "2021"
+description = "Language-independent ORM core: entities, queries, runtime. No binding code."
+
+[dependencies]
+sea-orm.workspace = true
+tokio.workspace = true
+chrono.workspace = true

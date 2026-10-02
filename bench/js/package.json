@@ -1,0 +1,12 @@
+{
+  "name": "ormcore-js-bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:addon": "cargo build --release -p ormcore-node --manifest-path ../ormcore/Cargo.toml && cp ../ormcore/target/release/libormcore_node.so ormcore.node"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.0",
+    "pg": "^8.13.0"
+  }
+}
