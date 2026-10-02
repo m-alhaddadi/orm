@@ -40,6 +40,9 @@ pub struct Capabilities {
     pub savepoints: bool,
     /// `SELECT DISTINCT ON (...)`.
     pub distinct_on: bool,
+    /// Most bound parameters one statement can take (the wire protocol's limit).
+    /// Statements with more values are split: `update_many` batches, prefetch keys.
+    pub max_params: usize,
 }
 
 impl Dialect {
@@ -63,6 +66,7 @@ impl Dialect {
                 update_from_values: true,
                 savepoints: true,
                 distinct_on: true,
+                max_params: 65_535,
             },
         }
     }
@@ -81,9 +85,15 @@ impl Target {
         Target { dialect, caps: dialect.capabilities() }
     }
 
-    /// The same target with the named capabilities switched off.
+    /// The same target with the named capabilities switched off; `max_params=N` lowers
+    /// the parameter limit (tests run the splitting paths with small inputs this way).
     pub fn without(mut self, features: &[String]) -> Result<Self, String> {
         for f in features {
+            if let Some(n) = f.strip_prefix("max_params=") {
+                let n: usize = n.parse().map_err(|_| format!("invalid {f:?}"))?;
+                self.caps.max_params = n.clamp(2, self.caps.max_params);
+                continue;
+            }
             let flag = match f.as_str() {
                 "returning" => &mut self.caps.returning,
                 "on_conflict" => &mut self.caps.on_conflict,

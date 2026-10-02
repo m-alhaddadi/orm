@@ -40,11 +40,9 @@ fn parse_op(op_json: &str) -> PyResult<Operation> {
     serde_json::from_str(op_json).map_err(|e| query_err(format!("invalid query IR: {e}")))
 }
 
-/// Postgres accepts at most this many parameters in one statement.
-const MAX_PARAMS: usize = 65_535;
-
 /// `update_many`'s statements: `rows` (sequences aligned with `fields`, primary key
-/// first) converted by column type and split so no statement exceeds `MAX_PARAMS`, or
+/// first) converted by column type and split so no statement exceeds the dialect's
+/// parameter limit, or
 /// `batch_size` rows.
 #[allow(clippy::too_many_arguments)]
 fn update_many_plan<'py>(
@@ -76,7 +74,7 @@ fn update_many_plan<'py>(
         serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
     let per_row = if target.caps.update_from_values { fields.len() } else { 2 * fields.len() - 1 };
     // Leave room for the filters' parameters.
-    let mut chunk = MAX_PARAMS.saturating_sub(params.len()) / per_row.max(1);
+    let mut chunk = target.caps.max_params.saturating_sub(params.len()) / per_row.max(1);
     if let Some(n) = batch_size {
         chunk = chunk.min(n);
     }
@@ -184,17 +182,21 @@ struct Selected {
     prefetched: Vec<Fetched>,
 }
 
-async fn run_select(conn: &dyn Executor, dialect: Dialect, mut plan: SelectPlan) -> DbResult<Selected> {
-    let (sql, args) = db::build(dialect, &plan.stmt);
+async fn run_select(conn: &dyn Executor, target: Target, mut plan: SelectPlan) -> DbResult<Selected> {
+    let (sql, args) = db::build(target.dialect, &plan.stmt);
     let rows = conn.query(sql, args).await?;
-    let prefetched = run_prefetch(conn, dialect, rows.as_ref(), std::mem::take(&mut plan.prefetch)).await?;
+    let prefetched = run_prefetch(conn, target, rows.as_ref(), std::mem::take(&mut plan.prefetch)).await?;
     Ok(Selected { rows, plan, prefetched })
 }
 
 /// Runs each prefetch query for the keys in `parent`, then the prefetches nested in it.
+///
+/// Each key is one bound parameter, so keys beyond the dialect's parameter limit (less
+/// what the query binds itself) go to further queries. The chunks split the parents,
+/// never one parent's rows, so ordering and slices per parent hold.
 fn run_prefetch<'a>(
     conn: &'a dyn Executor,
-    dialect: Dialect,
+    target: Target,
     parent: &'a dyn RowSet,
     plans: Vec<plan::PrefetchPlan>,
 ) -> db::BoxFuture<'a, DbResult<Vec<Fetched>>> {
@@ -210,18 +212,77 @@ fn run_prefetch<'a>(
                     keys.push(k);
                 }
             }
-            let rows = if keys.is_empty() {
-                Box::new(EmptyRows) as Box<dyn RowSet>
-            } else {
-                let (sql, args) = db::build(dialect, &p.statement(keys));
-                conn.query(sql, args).await?
+            let rows = match keys.first() {
+                None => Box::new(EmptyRows) as Box<dyn RowSet>,
+                Some(k) => {
+                    let own = db::build(target.dialect, &p.statement(vec![k.clone()])).1.len() - 1;
+                    let chunk = target.caps.max_params.saturating_sub(own).max(1);
+                    let mut parts = Vec::with_capacity(keys.len().div_ceil(chunk));
+                    for keys in keys.chunks(chunk) {
+                        let (sql, args) = db::build(target.dialect, &p.statement(keys.to_vec()));
+                        parts.push(conn.query(sql, args).await?);
+                    }
+                    if parts.len() == 1 {
+                        parts.pop().expect("one part")
+                    } else {
+                        Box::new(ChainedRows::new(parts))
+                    }
+                }
             };
             let nested = std::mem::take(&mut p.children);
-            let children = run_prefetch(conn, dialect, rows.as_ref(), nested).await?;
+            let children = run_prefetch(conn, target, rows.as_ref(), nested).await?;
             out.push(Fetched { plan: p, rows, children });
         }
         Ok(out)
     })
+}
+
+/// The rows of several statements as one set (a prefetch split into several queries).
+struct ChainedRows {
+    parts: Vec<Box<dyn RowSet>>,
+    /// Index of each part's first row.
+    starts: Vec<usize>,
+    len: usize,
+}
+
+impl ChainedRows {
+    fn new(parts: Vec<Box<dyn RowSet>>) -> Self {
+        let mut starts = Vec::with_capacity(parts.len());
+        let mut len = 0;
+        for p in &parts {
+            starts.push(len);
+            len += p.len();
+        }
+        ChainedRows { parts, starts, len }
+    }
+
+    /// The part holding `row`, and the row's index in it.
+    fn locate(&self, row: usize) -> (&dyn RowSet, usize) {
+        let i = self.starts.partition_point(|&s| s <= row) - 1;
+        (self.parts[i].as_ref(), row - self.starts[i])
+    }
+}
+
+impl RowSet for ChainedRows {
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn cell(&self, py: Python<'_>, row: usize, col: usize, ty: ColType) -> PyResult<Py<PyAny>> {
+        let (p, r) = self.locate(row);
+        p.cell(py, r, col, ty)
+    }
+    fn value(&self, row: usize, col: usize, ty: ColType) -> DbResult<sea_query::Value> {
+        let (p, r) = self.locate(row);
+        p.value(r, col, ty)
+    }
+    fn get_i64(&self, row: usize, col: usize) -> DbResult<i64> {
+        let (p, r) = self.locate(row);
+        p.get_i64(r, col)
+    }
+    fn get_bool(&self, row: usize, col: usize) -> DbResult<bool> {
+        let (p, r) = self.locate(row);
+        p.get_bool(r, col)
+    }
 }
 
 /// The result of a prefetch with no keys: no query runs.
@@ -328,6 +389,7 @@ impl Engine {
     ) -> PyResult<Bound<'py, PyAny>> {
         let op = parse_op(op_json)?;
         let d = self.target.dialect;
+        let target = self.target;
         let plan = Planner::plan(&self.schema, self.target, &op, &params)?;
         let conn = self.conn(tx);
         let classes = self.classes.clone();
@@ -337,7 +399,7 @@ impl Engine {
             let conn = conn.as_ref();
             match plan {
                 Plan::Select(p) => {
-                    let s = run_select(conn, d, p).await.map_err(db_err)?;
+                    let s = run_select(conn, target, p).await.map_err(db_err)?;
                     Python::attach(|py| {
                         let db = db.map(|d| d.into_bound(py));
                         let row_cls = row_cls.map(|c| c.into_bound(py));

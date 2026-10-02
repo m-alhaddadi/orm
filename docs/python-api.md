@@ -134,7 +134,11 @@ await User.objects.prefetch_related(
 ```
 
 The main query and its prefetch queries run in the same Rust call, one query per
-relation level (keys deduplicated, `NULL` keys skipped).
+relation level (keys deduplicated, `NULL` keys skipped). Each key is a bound parameter,
+so more keys than a statement takes (65 535 on Postgres, the dialect's `max_params`)
+split into several queries; the split is between parents, so ordering and slices per
+parent are unaffected. (Django doesn't split: on Postgres it inlines the values into the
+SQL text client-side, so the limit doesn't apply to it.)
 
 * A path loads every relation along it: `User.posts.comments` fills `user.posts` and
   each post's `comments`. Paths with a common prefix share its query.
@@ -482,10 +486,11 @@ QuerySet ──(IR json + params list)──▶ Engine.run ──▶ planner (se
 
 Rough numbers (release build, localhost TCP, 1000-row reads): building a query set and its
 IR costs ~15 µs of Python. A 1-row read is ~0.1 ms over a bare `SELECT 1` on the same
-connection. Reading 1000 posts takes ~2.0 ms (Django async was 10.4 ms in Phase 0), and
-1000 posts + author via `select_related` ~3.4 ms (Django 18.1 ms). Building instances in
-Rust took these from ~2.5 / ~4.6 ms (`bench/engine_bench.py`, same machine), below the
-Phase 0 prototype's 2.5 / 4.7 ms.
+connection. Reading 1000 posts takes ~1.9 ms (Django async was 10.4 ms in Phase 0), and
+1000 posts + author via `select_related` ~3.1 ms (Django 18.1 ms). Building instances in
+Rust took these from ~2.3 / ~4.3 ms, below the Phase 0 prototype's 2.5 / 4.7 ms
+(`bench/engine_bench.py`, numbers in
+[`bench/RESULTS.md`](../bench/RESULTS.md#instances-built-in-rust)).
 
 ## Decisions taken in this round (open to change)
 
@@ -547,7 +552,7 @@ TLS on, the TLS cost hides the difference)
 
 * More SQL functions (one line each in the planner), string concatenation.
 * Drivers for MySQL and SQLite; schema checks against a dialect's capabilities.
-* Caching of compiled plans, chunking very large `IN (...)` prefetches.
+* Caching of compiled plans.
 * `outer()` through relation paths (`outer(Post.author.name)`), `SEARCH` / `CYCLE`
   clauses for recursive CTEs, filtering on window functions without a CTE.
 * Several shared windows per query, and shared windows with `ORDER BY` / `LIMIT`: needs

@@ -490,3 +490,35 @@ The machine (4-core VM) has a high floor: a bare `SELECT 1` through the whole st
 takes ~210 µs. With the default `sslmode=prefer` both engines use TLS, which adds ~80 µs
 per query here and hides the difference: in a single TLS run the cases ranged from 9%
 slower to 8% faster, within this machine's noise.
+
+## Instances built in Rust
+
+`afe76ab` moved building result objects (instances, `select_related` objects,
+prefetched lists, `Row`s) from Python into Rust and added subqueries, window functions,
+CTEs and nested / filtered prefetch; `e5f12ce` added shared windows and CTE joins.
+`bench/engine_bench.py` on each commit (release builds side by side, localhost TCP,
+`sslmode=disable`), three interleaved rounds, best of the three medians. Microseconds per
+operation.
+
+| case | `4ca5514` (before) | `afe76ab` | `e5f12ce` | change |
+|---|---:|---:|---:|---:|
+| get by pk | 433 | 450 | 378 | noise |
+| read 50 | 624 | 559 | 560 | −10% |
+| read 1000 | 2273 | 1882 | 1949 | −14% to −17% |
+| read 1000 + select_related | 4266 | 3138 | 3358 | −21% to −26% |
+| 10 users + prefetch 1000 posts | 3545 | 3160 | 3218 | −9% to −11% |
+| count with EXISTS filter | 657 | 628 | 687 | noise |
+| insert 1 | 796 | 758 | 798 | noise |
+| insert_many 50 | 1448 | 1439 | 1524 | noise |
+| update 100 rows | 1377 | 1394 | 1363 | noise |
+| transaction, 2 updates | 2428 | 2330 | 2304 | noise |
+| 10 concurrent gets | 2290 | 2212 | 2231 | noise |
+
+The gain is in reads that build many objects; operations that return a count or one row
+don't change. Between `afe76ab` and `e5f12ce` the table suggests reads got a few percent
+slower, but a focused A/B of those two builds (four alternating rounds) put them level:
+read 1000 at 1806–1894 vs 1794–1909 µs, `select_related` at a median ~3020 vs ~3080 µs,
+inside the spread of either build; building the IR and planning costs ~15 µs in both.
+`count with EXISTS filter` swings between ~450 and ~750 µs on this machine within one
+build.
+
