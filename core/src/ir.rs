@@ -11,7 +11,11 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ColType {
     BigInt,
@@ -27,92 +31,99 @@ pub enum ColType {
     Json,
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize, Serialize, Debug, Default)]
 pub struct SchemaIr {
     pub models: Vec<ModelIr>,
     /// Database extensions the schema needs (`CREATE EXTENSION`), on top of the ones
     /// required implicitly by column types, index methods and operator classes.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub extensions: Vec<ExtensionIr>,
     /// Stand-alone SQL functions (trigger functions declared next to their trigger are
     /// collected from the models instead).
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub functions: Vec<FunctionIr>,
+    /// Extensions the schema knows about (imported extension files) without
+    /// requiring them: they are created only once something they provide is used.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub catalog: Vec<ExtensionIr>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct ModelIr {
     pub name: String,
     pub table: String,
     pub fields: Vec<FieldIr>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub relations: Vec<RelationIr>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub indexes: Vec<IndexIr>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub constraints: Vec<ConstraintIr>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub triggers: Vec<TriggerIr>,
     /// Previous table name, so the migration generator emits a rename instead of a
     /// drop + create.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub renamed_from: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub comment: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct FieldIr {
     pub name: String,
     pub column: String,
     #[serde(rename = "type")]
     pub ty: ColType,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub nullable: bool,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub primary_key: bool,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub auto_increment: bool,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub unique: bool,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub index: bool,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub max_length: Option<u32>,
     /// Literal server-side default (number, bool or string).
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub default: Option<serde_json::Value>,
     /// Server-side `DEFAULT now()`.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub default_now: bool,
     /// Server-side default as a raw SQL expression (`gen_random_uuid()`).
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub default_sql: Option<String>,
     /// SQL type overriding the one derived from `type` (`citext`, `vector(3)`). `type`
     /// then only says how values convert to and from the frontend language.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub db_type: Option<String>,
     /// SQL wrapped around the column when it is read, `{}` standing for the column
     /// (`CAST({} AS text)`), for types the driver can't decode directly.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub read_sql: Option<String>,
     /// SQL wrapped around every bound value written to or compared with the column,
     /// `{}` standing for the parameter (`CAST({} AS citext)`).
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub write_sql: Option<String>,
     /// Column-level `CHECK` expression (raw SQL).
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub check: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub renamed_from: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub comment: Option<String>,
     /// Extensions this column's type needs.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub requires: Vec<String>,
+    /// Per-language type hints for generated code (`{"python": "list[float]"}`).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", default)]
+    pub hints: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RelKind {
     /// At most one target row per source row (belongs-to / has-one).
@@ -132,7 +143,7 @@ pub enum OnDelete {
 }
 
 /// `source.from == target.to` links a source row to its related target rows.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct RelationIr {
     pub name: String,
     pub kind: RelKind,
@@ -140,13 +151,13 @@ pub struct RelationIr {
     pub from: String,
     pub to: String,
     /// True on the side that owns the foreign key constraint (`from` is the FK column).
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub foreign_key: bool,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub on_delete: Option<OnDelete>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub on_update: Option<OnDelete>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub deferrable: Option<Deferrable>,
 }
 
@@ -171,81 +182,81 @@ pub enum Nulls {
 }
 
 /// One key of an index: a field of the model or a raw SQL expression.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct IndexColumnIr {
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub field: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub expr: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub opclass: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub collation: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub desc: bool,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub nulls: Option<Nulls>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct IndexIr {
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
     pub columns: Vec<IndexColumnIr>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub unique: bool,
     /// Access method (`btree` when absent): `gin`, `gist`, `brin`, `hnsw`, ...
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub method: Option<String>,
     /// Partial index predicate (raw SQL).
-    #[serde(default, rename = "where")]
+    #[serde(skip_serializing_if = "Option::is_none", default, rename = "where")]
     pub where_: Option<String>,
     /// Non-key fields stored in the index (`INCLUDE`).
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub include: Vec<String>,
     /// Storage parameters (`WITH (m = 16)`), values rendered as given.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub with: Vec<(String, String)>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub nulls_not_distinct: bool,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub requires: Vec<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConstraintIr {
     Unique {
-        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none", default)]
         name: Option<String>,
         fields: Vec<String>,
-        #[serde(default)]
+        #[serde(skip_serializing_if = "crate::ir::is_false", default)]
         nulls_not_distinct: bool,
-        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none", default)]
         deferrable: Option<Deferrable>,
     },
     Check {
-        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none", default)]
         name: Option<String>,
         expr: String,
     },
     /// `EXCLUDE USING <method> (<element> WITH <operator>, ...)`.
     Exclude {
-        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none", default)]
         name: Option<String>,
-        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none", default)]
         method: Option<String>,
         elements: Vec<ExcludeElementIr>,
-        #[serde(default, rename = "where")]
+        #[serde(skip_serializing_if = "Option::is_none", default, rename = "where")]
         where_: Option<String>,
-        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none", default)]
         deferrable: Option<Deferrable>,
-        #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
         requires: Vec<String>,
     },
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct ExcludeElementIr {
     #[serde(flatten)]
     pub column: IndexColumnIr,
@@ -279,68 +290,68 @@ pub enum ForEach {
 
 /// A trigger runs either a schema-level function (`function`) or its own body
 /// (`body`), from which a function named `<table>_<trigger>` is generated.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct TriggerIr {
     pub name: String,
     pub timing: TriggerTiming,
     pub events: Vec<TriggerEvent>,
     /// `UPDATE OF <fields>`.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub update_of: Vec<String>,
     #[serde(default)]
     pub for_each: ForEach,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub when: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub function: Option<String>,
     /// Literal arguments passed to the function (`TG_ARGV`).
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub args: Vec<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub body: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub language: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct FunctionIr {
     pub name: String,
     /// Argument list as SQL (`a integer, b text`); empty for trigger functions.
     #[serde(default)]
     pub args: String,
     pub returns: String,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub language: Option<String>,
     pub body: String,
     /// `immutable`, `stable` or `volatile`.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub volatility: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
     pub security_definer: bool,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ExtensionIr {
     pub name: String,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub schema: Option<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub version: Option<String>,
     /// What the extension adds, so references to it pull it in automatically. Known
     /// extensions (`pg_trgm`, `vector`, ...) don't need this; see `ext.rs`.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Provides::is_empty", default)]
     pub provides: Provides,
 }
 
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct Provides {
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub types: Vec<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub index_methods: Vec<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub opclasses: Vec<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub functions: Vec<String>,
 }
 
@@ -447,4 +458,10 @@ pub enum Operation {
     Exists(Select),
     Update(Update),
     Delete(Delete),
+}
+
+impl Provides {
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty() && self.index_methods.is_empty() && self.opclasses.is_empty() && self.functions.is_empty()
+    }
 }

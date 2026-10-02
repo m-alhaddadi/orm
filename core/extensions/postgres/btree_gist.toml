@@ -1,0 +1,4 @@
+# Lets scalar columns take part in GiST indexes and exclusion constraints
+# (pulled in automatically by `=` inside a GiST @@exclude).
+name = "btree_gist"
+opclasses = ["gist_int2_ops", "gist_int4_ops", "gist_int8_ops", "gist_text_ops", "gist_uuid_ops", "gist_timestamptz_ops", "gist_date_ops"]

@@ -1,13 +1,14 @@
 """Async Python ORM with a Rust core.
 
-Models come from the schema (generated modules, see ``examples/blog``). Queries are
+Models come from a schema file (``schema.orm``): ``orm.load("schema.orm")``, or a
+module generated from it (``python -m orm generate``, see ``examples/blog``). Queries are
 expressions over model attributes, Django-style managers on top::
 
     yesterday = datetime.now(timezone.utc) - timedelta(days=1)
     users = await User.objects.filter(User.posts.created_at < yesterday)
 """
 
-from . import fields, schema
+from . import fields
 from .db import Database, connect, get_database
 from .errors import (
     DatabaseError,
@@ -18,26 +19,19 @@ from .errors import (
     NotLoaded,
     ORMError,
     QueryError,
+    SchemaError,
 )
 from .expr import ColumnRef, Condition, Expression, Ordering, RelationPath, and_, not_, or_
-from .model import Model, Registry, registry
-from .schema import Check, Exclude, Extension, Function, Index, Key, Sql, Trigger, Unique
+from .model import Model, Registry, define, load, loads, registry
 from .query import QuerySet, RelatedSet
 from .write import InsertMany, InsertOne, OnConflictMany, OnConflictOne
 
 __all__ = [
     "fields",
-    "schema",
     "Registry",
-    "Index",
-    "Key",
-    "Unique",
-    "Check",
-    "Exclude",
-    "Trigger",
-    "Function",
-    "Extension",
-    "Sql",
+    "define",
+    "load",
+    "loads",
     "Database",
     "connect",
     "get_database",
@@ -61,6 +55,7 @@ __all__ = [
     "DatabaseError",
     "IntegrityError",
     "QueryError",
+    "SchemaError",
     "DoesNotExist",
     "MultipleObjectsReturned",
     "NotLoaded",

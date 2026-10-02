@@ -21,8 +21,8 @@ use sea_orm::sea_query::{
 
 use crate::convert::py_to_value;
 use crate::errors::query_err;
-use crate::ir::{ArithOp, CmpOp, ColType, Delete, Expr, FieldIr, Operation, RelKind, Select, Update};
-use crate::schema::Schema;
+use orm_core::ir::{ArithOp, CmpOp, ColType, Delete, Expr, FieldIr, Operation, RelKind, Select, Update};
+use orm_core::schema::Schema;
 
 pub struct PrefetchPlan {
     pub name: String,

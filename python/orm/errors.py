@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from ._native import DatabaseError, IntegrityError, QueryError
+from ._native import DatabaseError, IntegrityError, QueryError, SchemaError
 
 __all__ = [
     "ORMError",
     "DatabaseError",
     "IntegrityError",
     "QueryError",
+    "SchemaError",
     "DoesNotExist",
     "MultipleObjectsReturned",
     "NotLoaded",

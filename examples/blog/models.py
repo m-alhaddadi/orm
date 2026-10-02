@@ -1,54 +1,223 @@
-# Generated from schema.orm. Do not edit.
+# Generated from schema.orm by `python -m orm generate`. Do not edit.
 #
-# Runtime half of the generated module: declares the models with the `orm.fields`
-# descriptors. models.pyi carries the static types (columns, relation paths, typed
-# constructors and query sets) for editors and type checkers.
+# Runtime half of the generated module: the model classes are built from the compiled
+# schema below. models.pyi carries the static types (columns, relation paths, typed
+# inserts / updates and query sets) for editors and type checkers.
 
-from orm import Check, Index, Model, QuerySet
-from orm import fields as f
-from orm.ext import pg_trgm
+from orm import QuerySet, define
 
+_SCHEMA = r"""
+{
+  "models": [
+    {
+      "name": "User",
+      "table": "users",
+      "fields": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "big_int",
+          "primary_key": true,
+          "auto_increment": true
+        },
+        {
+          "name": "email",
+          "column": "email",
+          "type": "string",
+          "unique": true,
+          "max_length": 254
+        },
+        {
+          "name": "name",
+          "column": "name",
+          "type": "string",
+          "max_length": 100
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "date_time",
+          "default_now": true
+        }
+      ],
+      "relations": [
+        {
+          "name": "posts",
+          "kind": "many",
+          "target": "Post",
+          "from": "id",
+          "to": "author_id"
+        },
+        {
+          "name": "comments",
+          "kind": "many",
+          "target": "Comment",
+          "from": "id",
+          "to": "author_id"
+        }
+      ]
+    },
+    {
+      "name": "Post",
+      "table": "posts",
+      "fields": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "big_int",
+          "primary_key": true,
+          "auto_increment": true
+        },
+        {
+          "name": "author_id",
+          "column": "author_id",
+          "type": "big_int",
+          "index": true
+        },
+        {
+          "name": "title",
+          "column": "title",
+          "type": "string",
+          "max_length": 200
+        },
+        {
+          "name": "body",
+          "column": "body",
+          "type": "text"
+        },
+        {
+          "name": "views",
+          "column": "views",
+          "type": "int",
+          "default": 0
+        },
+        {
+          "name": "published",
+          "column": "published",
+          "type": "bool",
+          "default": false
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "date_time",
+          "default_now": true
+        }
+      ],
+      "relations": [
+        {
+          "name": "author",
+          "kind": "one",
+          "target": "User",
+          "from": "author_id",
+          "to": "id",
+          "foreign_key": true,
+          "on_delete": "cascade"
+        },
+        {
+          "name": "comments",
+          "kind": "many",
+          "target": "Comment",
+          "from": "id",
+          "to": "post_id"
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            {
+              "field": "author_id"
+            },
+            {
+              "field": "created_at",
+              "desc": true
+            }
+          ],
+          "where": "published"
+        },
+        {
+          "columns": [
+            {
+              "field": "title",
+              "opclass": "gin_trgm_ops"
+            }
+          ],
+          "method": "gin"
+        }
+      ],
+      "constraints": [
+        {
+          "kind": "check",
+          "name": "posts_views_not_negative",
+          "expr": "views >= 0"
+        }
+      ]
+    },
+    {
+      "name": "Comment",
+      "table": "comments",
+      "fields": [
+        {
+          "name": "id",
+          "column": "id",
+          "type": "big_int",
+          "primary_key": true,
+          "auto_increment": true
+        },
+        {
+          "name": "post_id",
+          "column": "post_id",
+          "type": "big_int",
+          "index": true
+        },
+        {
+          "name": "author_id",
+          "column": "author_id",
+          "type": "big_int",
+          "nullable": true,
+          "index": true
+        },
+        {
+          "name": "body",
+          "column": "body",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "column": "created_at",
+          "type": "date_time",
+          "default_now": true
+        }
+      ],
+      "relations": [
+        {
+          "name": "post",
+          "kind": "one",
+          "target": "Post",
+          "from": "post_id",
+          "to": "id",
+          "foreign_key": true,
+          "on_delete": "cascade"
+        },
+        {
+          "name": "author",
+          "kind": "one",
+          "target": "User",
+          "from": "author_id",
+          "to": "id",
+          "foreign_key": true,
+          "on_delete": "set_null"
+        }
+      ]
+    }
+  ]
+}
+"""
 
-class User(Model, table="users"):
-    id = f.BigInt(primary_key=True, auto_increment=True)
-    email = f.String(254, unique=True)
-    name = f.String(100)
-    created_at = f.DateTime(default_now=True)
-
-    posts = f.HasMany("Post", via="author_id")
-    comments = f.HasMany("Comment", via="author_id")
-
-
-class Post(Model, table="posts"):
-    id = f.BigInt(primary_key=True, auto_increment=True)
-    author_id = f.BigInt(index=True)
-    title = f.String(200)
-    body = f.Text()
-    views = f.Integer(default=0)
-    published = f.Boolean(default=False)
-    created_at = f.DateTime(default_now=True)
-
-    author = f.BelongsTo("User", via="author_id", on_delete="cascade")
-    comments = f.HasMany("Comment", via="post_id")
-
-    class Meta:
-        indexes = [
-            Index("author_id", "-created_at", where="published"),
-            pg_trgm.TrigramIndex("title"),
-        ]
-        constraints = [Check("views >= 0", name="posts_views_not_negative")]
-
-
-class Comment(Model, table="comments"):
-    id = f.BigInt(primary_key=True, auto_increment=True)
-    post_id = f.BigInt(index=True)
-    author_id = f.BigInt(nullable=True, index=True)
-    body = f.Text()
-    created_at = f.DateTime(default_now=True)
-
-    post = f.BelongsTo("Post", via="post_id", on_delete="cascade")
-    author = f.BelongsTo("User", via="author_id", on_delete="set_null")
-
+_models = define(_SCHEMA, module=__name__)
+User = _models["User"]
+Post = _models["Post"]
+Comment = _models["Comment"]
 
 # Typed per model in models.pyi; plain aliases at runtime so the names can be imported.
 UserQuerySet = PostQuerySet = CommentQuerySet = QuerySet

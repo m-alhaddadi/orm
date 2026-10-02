@@ -1,0 +1,2 @@
+name = "btree_gin"
+opclasses = ["int4_ops", "int8_ops", "text_ops", "uuid_ops"]

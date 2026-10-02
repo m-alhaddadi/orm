@@ -4,13 +4,19 @@ import uuid
 
 import pytest
 from conftest import DATABASE_URL
-from test_migrations import v1, v2
+from test_migrations import V1, V2, models
 
 import orm
-from orm import Model, Registry, Sql
-from orm import fields as f
-from orm.ext import citext, pgvector
+from orm import Registry
 from orm.migrations import MigrationError, Migrations, Migrator
+
+
+def v1() -> Registry:
+    return models(V1)
+
+
+def v2() -> Registry:
+    return models(V2)
 
 
 async def connect(reg: Registry) -> orm.Database:
@@ -110,13 +116,15 @@ async def test_failed_migration_rolls_back(tmp_path):
 
 
 async def test_extension_types_at_runtime():
-    reg = Registry()
-
-    class Doc(Model, table="ext_docs", registry=reg):
-        id = f.Uuid(primary_key=True, default=Sql("gen_random_uuid()"))
-        email = citext.CIText()
-        attrs = f.Json(nullable=True)
-        embedding = pgvector.Vector(3, nullable=True)
+    reg = models("""
+        model Doc @table("ext_docs") {
+            id:        Uuid       @primary @default(sql("gen_random_uuid()"))
+            email:     citext
+            attrs:     Json?
+            embedding: vector(3)?
+        }
+    """)
+    Doc = reg.get("Doc")
 
     db = await connect(reg)
     try:

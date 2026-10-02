@@ -608,7 +608,7 @@ impl Builder<'_> {
 pub fn build(schema: &Schema) -> Result<(DbSchema, Renames)> {
     let mut b = Builder {
         schema,
-        catalog: Catalog::new(&schema.extensions),
+        catalog: Catalog::new(&[schema.catalog.as_slice(), schema.extensions.as_slice()].concat()),
         required: BTreeMap::new(),
         names: BTreeSet::new(),
         trigger_functions: vec![],

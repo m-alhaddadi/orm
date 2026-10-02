@@ -1,0 +1,21 @@
+# PostGIS: geometry and geography columns. Values are EWKT strings
+# ("SRID=4326;POINT(1 2)"), converted with ST_AsEWKT / ST_GeomFromEWKT.
+name = "postgis"
+opclasses = ["gist_geometry_ops_2d", "gist_geometry_ops_nd", "gist_geography_ops"]
+functions = ["st_makepoint", "st_setsrid", "st_geomfromtext", "st_point", "st_dwithin", "st_distance"]
+
+[types.geometry]
+sql = "geometry({shape}, {srid})"
+args = ["shape", "srid"]
+defaults = { shape = "Geometry", srid = "4326" }
+value = "text"
+read = "ST_AsEWKT({})"
+write = "CAST(ST_GeomFromEWKT({}) AS geometry({shape}, {srid}))"
+
+[types.geography]
+sql = "geography({shape}, {srid})"
+args = ["shape", "srid"]
+defaults = { shape = "Geometry", srid = "4326" }
+value = "text"
+read = "ST_AsEWKT({})"
+write = "CAST(ST_GeogFromText({}) AS geography({shape}, {srid}))"

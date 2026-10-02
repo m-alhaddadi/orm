@@ -11,6 +11,7 @@ create_exception!(
     "Unique, foreign key, check, exclusion or not-null violation."
 );
 create_exception!(_native, QueryError, PyValueError, "The query IR does not match the schema.");
+create_exception!(_native, SchemaError, PyValueError, "The schema file or IR is invalid.");
 
 /// SQLSTATE of a database-reported error.
 fn sqlstate(e: &DbErr) -> Option<String> {
@@ -33,4 +34,8 @@ pub fn db_err(e: DbErr) -> PyErr {
 
 pub fn query_err(msg: String) -> PyErr {
     QueryError::new_err(msg)
+}
+
+pub fn schema_err(msg: String) -> PyErr {
+    SchemaError::new_err(msg)
 }

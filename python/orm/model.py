@@ -1,61 +1,36 @@
-"""Model base class and the model registry."""
+"""Model base class, the model registry, and models built from a schema file."""
 
 from __future__ import annotations
 
 import json
+import types
+from os import PathLike
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from . import _native
 from .errors import DoesNotExist, MultipleObjectsReturned
 from .expr import ColumnRef
-from .fields import Field, Relation
-from .schema import Constraint, Extension, Function, Index, Trigger
+from .fields import BY_TYPE, BelongsTo, Field, HasMany, Relation, String
 
 if TYPE_CHECKING:
     from typing_extensions import Self
 
     from .query import QuerySet
 
-__all__ = ["Model", "ModelMeta", "Registry", "registry"]
-
-
-_META_OPTIONS = {"indexes", "constraints", "triggers", "functions", "extensions", "comment", "renamed_from"}
+__all__ = ["Model", "ModelMeta", "Registry", "registry", "define", "load", "loads"]
 
 
 class ModelMeta:
-    """Schema information about one model (``User._meta``).
-
-    Database objects come from the model's optional inner ``class Meta`` (see
-    :mod:`orm.schema`): ``indexes``, ``constraints``, ``triggers``, ``functions``,
-    ``extensions``, ``comment`` and ``renamed_from`` (the previous table name).
-    """
+    """Schema information about one model (``User._meta``)."""
 
     def __init__(self, model: type[Model], table: str, registry: Registry) -> None:
         self.model = model
         self.name = model.__name__
         self.table = table
         self.registry = registry
-        options = vars(model.__dict__["Meta"]) if "Meta" in model.__dict__ else {}
-        unknown = {k for k in options if not k.startswith("_")} - _META_OPTIONS
-        if unknown:
-            raise TypeError(f"{self.name}.Meta: unknown option(s) {', '.join(sorted(unknown))}")
-        self.indexes: list[Index] = list(options.get("indexes", ()))
-        self.constraints: list[Constraint] = list(options.get("constraints", ()))
-        self.triggers: list[Trigger] = list(options.get("triggers", ()))
-        self.functions: list[Function] = list(options.get("functions", ()))
-        self.extensions: list[Extension] = list(options.get("extensions", ()))
-        self.comment: str | None = options.get("comment")
-        self.renamed_from: str | None = options.get("renamed_from")
-        for kind, items, cls in (
-            ("indexes", self.indexes, Index),
-            ("constraints", self.constraints, Constraint),
-            ("triggers", self.triggers, Trigger),
-            ("functions", self.functions, Function),
-            ("extensions", self.extensions, Extension),
-        ):
-            for item in items:
-                if not isinstance(item, cls):
-                    raise TypeError(f"{self.name}.Meta.{kind}: expected {cls.__name__}, got {item!r}")
+        # The model's schema IR when it was built from a compiled schema: it carries
+        # everything (indexes, triggers, extension types) the Python side doesn't use.
+        self.schema_ir: dict[str, Any] | None = None
         self.fields: dict[str, Field[Any]] = {}
         self.relations: dict[str, Relation[Any, Any]] = {}
         for klass in reversed(model.__mro__):
@@ -75,23 +50,14 @@ class ModelMeta:
         return ColumnRef(self.model, (), self.pk)
 
     def ir(self) -> dict[str, Any]:
-        out: dict[str, Any] = {
+        if self.schema_ir is not None:
+            return self.schema_ir
+        return {
             "name": self.name,
             "table": self.table,
             "fields": [f.ir() for f in self.fields.values()],
             "relations": [r.ir() for r in self.relations.values()],
         }
-        if self.indexes:
-            out["indexes"] = [i.ir() for i in self.indexes]
-        if self.constraints:
-            out["constraints"] = [c.ir() for c in self.constraints]
-        if self.triggers:
-            out["triggers"] = [t.ir() for t in self.triggers]
-        if self.comment is not None:
-            out["comment"] = self.comment
-        if self.renamed_from is not None:
-            out["renamed_from"] = self.renamed_from
-        return out
 
     def __repr__(self) -> str:
         return f"<ModelMeta {self.name} table={self.table!r}>"
@@ -100,24 +66,16 @@ class ModelMeta:
 class Registry:
     """A set of models compiled together into one native schema.
 
-    Models join the default :data:`registry` unless their class says otherwise
-    (``class User(Model, registry=other)``), which is how one process can describe
-    two versions of a schema, e.g. in migration tests.
+    Models join the default :data:`registry` unless told otherwise (``define(...,
+    registry=other)``), which is how one process can hold two versions of a schema,
+    e.g. in migration tests.
     """
 
     def __init__(self) -> None:
         self._models: dict[str, type[Model]] = {}
-        self._objects: list[Function | Extension] = []
+        # Schema-level IR (extensions, functions, extension catalog) from define().
+        self._schema_extra: dict[str, list[Any]] = {}
         self._native: _native.Schema | None = None
-
-    def add(self, *objects: Function | Extension) -> None:
-        """Declare schema-level functions and extensions that belong to no model."""
-        for obj in objects:
-            if not isinstance(obj, (Function, Extension)):
-                raise TypeError(f"expected Function or Extension, got {obj!r}")
-            if obj not in self._objects:
-                self._objects.append(obj)
-        self._native = None
 
     def register(self, model: type[Model]) -> None:
         name = model.__name__
@@ -136,16 +94,8 @@ class Registry:
         return iter(self._models.values())
 
     def ir(self) -> dict[str, Any]:
-        functions: list[Function] = [o for o in self._objects if isinstance(o, Function)]
-        extensions: list[Extension] = [o for o in self._objects if isinstance(o, Extension)]
-        for m in self._models.values():
-            functions += [f for f in m._meta.functions if f not in functions]
-            extensions += [e for e in m._meta.extensions if e not in extensions]
         out: dict[str, Any] = {"models": [m._meta.ir() for m in self._models.values()]}
-        if functions:
-            out["functions"] = [f.ir() for f in functions]
-        if extensions:
-            out["extensions"] = [e.ir() for e in extensions]
+        out.update(self._schema_extra)
         return out
 
     def native(self) -> _native.Schema:
@@ -159,6 +109,70 @@ registry = Registry()
 
 def _default_registry() -> Registry:
     return registry
+
+
+def _field(ir: dict[str, Any]) -> Field[Any]:
+    cls = BY_TYPE[ir["type"]]
+    kwargs: dict[str, Any] = {
+        "primary_key": ir.get("primary_key", False),
+        "auto_increment": ir.get("auto_increment", False),
+        "nullable": ir.get("nullable", False),
+        "unique": ir.get("unique", False),
+        "index": ir.get("index", False),
+        "column": ir["column"],
+        "default_now": ir.get("default_now", False),
+        "server_default": "default_sql" in ir,
+    }
+    if "default" in ir:
+        kwargs["default"] = ir["default"]
+    if cls is String:
+        return String(ir.get("max_length"), **kwargs)
+    return cls(**kwargs)
+
+
+def _relation(ir: dict[str, Any]) -> Relation[Any, Any]:
+    if ir["kind"] == "one":
+        return BelongsTo(ir["target"], via=ir["from"], to=ir["to"], on_delete=ir.get("on_delete", "no_action"))
+    return HasMany(ir["target"], via=ir["to"], from_=ir["from"])
+
+
+def define(
+    schema: str | dict[str, Any], *, registry: Registry | None = None, module: str | None = None
+) -> dict[str, type[Model]]:
+    """Build model classes from a compiled schema (the JSON IR ``orm compile`` and
+    :func:`load` produce). Generated ``models.py`` modules call this.
+
+    Returns the classes by model name. They join ``registry`` (the default one unless
+    given); ``module`` sets their ``__module__``.
+    """
+    ir: dict[str, Any] = json.loads(schema) if isinstance(schema, str) else schema
+    reg = registry if registry is not None else _default_registry()
+    out: dict[str, type[Model]] = {}
+    for m in ir["models"]:
+        ns: dict[str, Any] = {f["name"]: _field(f) for f in m["fields"]}
+        ns.update({r["name"]: _relation(r) for r in m.get("relations", ())})
+        if module is not None:
+            ns["__module__"] = module
+        cls: type[Model] = types.new_class(
+            m["name"], (Model,), {"table": m["table"], "registry": reg}, lambda body: body.update(ns)
+        )
+        cls._meta.schema_ir = m
+        out[m["name"]] = cls
+    for key in ("extensions", "functions", "catalog"):
+        items = reg._schema_extra.setdefault(key, [])
+        items.extend(x for x in ir.get(key, ()) if x not in items)
+        if not items:
+            del reg._schema_extra[key]
+    reg._native = None
+    return out
+
+
+def load(
+    path: str | PathLike[str], *, registry: Registry | None = None, module: str | None = None
+) -> dict[str, type[Model]]:
+    """Compile a schema file (``schema.orm``) and build its models: no generated code
+    needed (generate ``models.py`` / ``.pyi`` for editor and type-checker support)."""
+    return define(_native.compile_schema_file(str(path)), registry=registry, module=module)
 
 
 class Model:
@@ -261,3 +275,11 @@ class Model:
         shown = ", ".join(f"{n}={d[n]!r}" for n in self._meta.field_names if n in d)
         return f"{type(self).__name__}({shown})"
 
+
+
+def loads(
+    source: str, *, registry: Registry | None = None, module: str | None = None
+) -> dict[str, type[Model]]:
+    """Like :func:`load`, for schema source text (``import`` paths resolve against the
+    current directory)."""
+    return define(_native.compile_schema(source), registry=registry, module=module)

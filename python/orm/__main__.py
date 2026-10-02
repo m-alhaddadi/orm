@@ -1,27 +1,30 @@
-"""``python -m orm``: migration commands.
+"""``python -m orm``: schema and migration commands.
 
+    python -m orm check
+    python -m orm generate [-o models.py]           # models.py + models.pyi from the schema
     python -m orm makemigrations [name] [--empty] [--check]
     python -m orm sqlmigrate <migration> [--down]
     python -m orm migrate [target]
     python -m orm rollback [--steps N | --to <migration>|zero]
     python -m orm showmigrations
 
-Models and the migrations directory come from ``--models`` / ``--dir`` or from
-``[tool.orm]`` in ``pyproject.toml`` (``models = ["blog.models"]``,
-``migrations = "migrations"``, ``pythonpath = ["src"]``). The database URL comes from
-``--url`` or ``ORM_DATABASE_URL``.
+The schema file and migrations directory come from ``--schema`` / ``--dir`` or from
+``[tool.orm]`` in ``pyproject.toml`` (``schema = "schema.orm"``,
+``migrations = "migrations"``). The database URL comes from ``--url`` or
+``ORM_DATABASE_URL``. Everything but the database commands is also available without
+Python as the ``orm`` binary (``core/``).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
+from . import _native
 from .migrations import MigrationError, Migrations, Migrator
 
 
@@ -37,12 +40,15 @@ def _config() -> dict[str, Any]:
 
 
 def _parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="python -m orm", description="Schema migrations.")
-    p.add_argument("--models", action="append", help="module defining models (repeatable)")
+    p = argparse.ArgumentParser(prog="python -m orm", description="Schema and migrations.")
+    p.add_argument("--schema", help="schema file (default: [tool.orm] schema, else schema.orm)")
     p.add_argument("--dir", help="migrations directory (default: migrations)")
     p.add_argument("--url", help="database URL (default: $ORM_DATABASE_URL)")
-    p.add_argument("--pythonpath", action="append", help="extra import path (repeatable)")
     sub = p.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("check", help="compile the schema and report errors")
+    gen = sub.add_parser("generate", help="write models.py and models.pyi from the schema")
+    gen.add_argument("-o", "--out", help="output module (default: models.py next to the schema)")
 
     mk = sub.add_parser("makemigrations", help="write the next migration from model changes")
     mk.add_argument("name", nargs="?")
@@ -68,19 +74,21 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     cfg = _config()
-    for path in [*(cfg.get("pythonpath") or []), *(args.pythonpath or []), "."]:
-        if path not in sys.path:
-            sys.path.insert(0, path)
-    modules = args.models or cfg.get("models") or []
-    if isinstance(modules, str):
-        modules = [modules]
-    if not modules and args.command != "sqlmigrate":
-        print("error: no models; pass --models <module> or set [tool.orm] models", file=sys.stderr)
-        return 2
-    for m in modules:
-        importlib.import_module(m)
-    migrations = Migrations(args.dir or cfg.get("migrations") or "migrations")
+    schema = Path(args.schema or cfg.get("schema") or "schema.orm")
+    migrations = Migrations(args.dir or cfg.get("migrations") or "migrations", schema)
     try:
+        if args.command == "check":
+            _native.compile_schema_file(str(schema))
+            print(f"{schema}: ok")
+            return 0
+        if args.command == "generate":
+            module, stub = _native.generate_python(str(schema))
+            out = Path(args.out) if args.out else schema.with_name("models.py")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(module)
+            out.with_suffix(".pyi").write_text(stub)
+            print(f"wrote {out} and {out.with_suffix('.pyi')}")
+            return 0
         if args.command == "makemigrations":
             return _make(migrations, args)
         if args.command == "sqlmigrate":
@@ -88,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             print(m.down_sql if args.down else m.up_sql, end="")
             return 0
         return asyncio.run(_db_command(migrations, args))
-    except MigrationError as e:
+    except (MigrationError, _native.SchemaError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
@@ -99,7 +107,7 @@ def _make(migrations: Migrations, args: argparse.Namespace) -> int:
         for s in plan.up:
             print(f"  {s.summary}")
         if plan:
-            print("models have changes without a migration", file=sys.stderr)
+            print("the schema has changes without a migration", file=sys.stderr)
         return 1 if plan else 0
     plan = migrations.plan()
     m = migrations.make(args.name, empty=args.empty)
@@ -121,7 +129,11 @@ async def _db_command(migrations: Migrations, args: argparse.Namespace) -> int:
     if not url:
         print("error: no database; pass --url or set ORM_DATABASE_URL", file=sys.stderr)
         return 2
-    db = await connect(url, max_connections=1, default=False)
+    from .model import Registry, define
+
+    registry = Registry()
+    define(_native.compile_schema_file(str(migrations._schema)), registry=registry)
+    db = await connect(url, max_connections=1, default=False, registry=registry)
     try:
         migrator = Migrator(db, migrations)
         if args.command == "migrate":

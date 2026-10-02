@@ -30,6 +30,5 @@ mypy_path = "python:examples"
 
 # `python -m orm ...` from the repo root works on the blog example.
 [tool.orm]
-models = ["blog.models"]
-pythonpath = ["examples"]
+schema = "examples/blog/schema.orm"
 migrations = "examples/blog/migrations"

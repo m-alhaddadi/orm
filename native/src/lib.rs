@@ -6,11 +6,9 @@
 
 mod convert;
 mod errors;
-mod ext;
-mod ir;
-mod migrate;
 mod plan;
-mod schema;
+
+use orm_core::{ir, migrate, schema};
 
 use std::sync::Arc;
 
@@ -25,8 +23,8 @@ use sea_orm::{
 use tokio::sync::Mutex;
 
 use crate::convert::{cell_to_py, cell_to_value};
-use crate::errors::{db_err, query_err};
-use crate::ir::{ColType, Operation};
+use crate::errors::{db_err, query_err, schema_err};
+use orm_core::ir::{ColType, Operation};
 use crate::plan::{Plan, Planner, SelectPlan};
 
 /// Marker for "use the column's server default" in insert rows.
@@ -55,8 +53,8 @@ impl PySchema {
     #[new]
     fn new(schema_json: &str) -> PyResult<Self> {
         let ir: ir::SchemaIr =
-            serde_json::from_str(schema_json).map_err(|e| query_err(format!("invalid schema IR: {e}")))?;
-        let inner = schema::Schema::from_ir(ir).map_err(query_err)?;
+            serde_json::from_str(schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+        let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         Ok(PySchema { inner: Arc::new(inner) })
     }
 
@@ -73,13 +71,28 @@ impl PySchema {
 
     /// Idempotent DDL for the whole schema, in dependency order.
     fn ddl(&self) -> PyResult<Vec<String>> {
-        migrate::create_all(&self.inner).map_err(query_err)
+        migrate::create_all(&self.inner).map_err(schema_err)
     }
 
     /// The database schema as a snapshot (JSON), the format migrations store.
     fn snapshot(&self) -> PyResult<String> {
-        let s = migrate::snapshot(&self.inner).map_err(query_err)?;
-        serde_json::to_string_pretty(&s).map_err(|e| query_err(e.to_string()))
+        let s = migrate::snapshot(&self.inner).map_err(schema_err)?;
+        serde_json::to_string_pretty(&s).map_err(|e| schema_err(e.to_string()))
+    }
+
+    /// The next migration for the migrations directory `dir`, as JSON (see
+    /// `migration`), without writing anything.
+    fn plan_migration(&self, dir: &str) -> PyResult<String> {
+        let plan = migrate::files::next(std::path::Path::new(dir), &self.inner).map_err(schema_err)?;
+        serde_json::to_string(&plan).map_err(|e| schema_err(e.to_string()))
+    }
+
+    /// Writes the next migration into `dir`; returns its folder name, or None when
+    /// nothing changed (and not `empty`).
+    #[pyo3(signature = (dir, name = None, empty = false))]
+    fn make_migration(&self, dir: &str, name: Option<&str>, empty: bool) -> PyResult<Option<String>> {
+        let made = migrate::files::make(std::path::Path::new(dir), &self.inner, name, empty).map_err(schema_err)?;
+        Ok(made.map(|(folder, _)| folder.name))
     }
 
     /// The migration from `previous` (a snapshot; `None` for an empty database) to this
@@ -88,11 +101,11 @@ impl PySchema {
     #[pyo3(signature = (previous = None))]
     fn migration(&self, previous: Option<&str>) -> PyResult<String> {
         let previous = match previous {
-            Some(json) => migrate::parse_snapshot(json).map_err(query_err)?,
+            Some(json) => migrate::parse_snapshot(json).map_err(schema_err)?,
             None => migrate::DbSchema::default(),
         };
-        let plan = migrate::plan(&self.inner, &previous).map_err(query_err)?;
-        serde_json::to_string(&plan).map_err(|e| query_err(e.to_string()))
+        let plan = migrate::plan(&self.inner, &previous).map_err(schema_err)?;
+        serde_json::to_string(&plan).map_err(|e| schema_err(e.to_string()))
     }
 }
 
@@ -381,12 +394,12 @@ impl Engine {
     }
 
     fn create_tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let stmts = migrate::create_all(&self.schema).map_err(query_err)?;
+        let stmts = migrate::create_all(&self.schema).map_err(schema_err)?;
         self.run_script(py, stmts)
     }
 
     fn drop_tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let stmts = migrate::drop_all(&self.schema).map_err(query_err)?;
+        let stmts = migrate::drop_all(&self.schema).map_err(schema_err)?;
         self.run_script(py, stmts)
     }
 
@@ -418,6 +431,34 @@ impl Engine {
     }
 }
 
+/// Compiles schema-language source to the schema IR (JSON). `path` is where it came
+/// from, for error messages and `import` resolution.
+#[pyfunction]
+#[pyo3(signature = (source, path = None))]
+fn compile_schema(source: &str, path: Option<&str>) -> PyResult<String> {
+    let ir = orm_core::dsl::compile(source, path.map(std::path::Path::new)).map_err(schema_err)?;
+    let (ir, _) = orm_core::dsl::check(ir).map_err(schema_err)?;
+    serde_json::to_string(&ir).map_err(|e| schema_err(e.to_string()))
+}
+
+#[pyfunction]
+fn compile_schema_file(path: &str) -> PyResult<String> {
+    let ir = orm_core::dsl::compile_file(std::path::Path::new(path)).map_err(schema_err)?;
+    let (ir, _) = orm_core::dsl::check(ir).map_err(schema_err)?;
+    serde_json::to_string(&ir).map_err(|e| schema_err(e.to_string()))
+}
+
+/// `(models.py, models.pyi)` source for a schema file.
+#[pyfunction]
+fn generate_python(path: &str) -> PyResult<(String, String)> {
+    let p = std::path::Path::new(path);
+    let (ir, schema) =
+        orm_core::dsl::check(orm_core::dsl::compile_file(p).map_err(schema_err)?).map_err(schema_err)?;
+    let source = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let g = orm_core::codegen::python::generate(&ir, &schema, &source).map_err(schema_err)?;
+    Ok((g.module, g.stub))
+}
+
 /// `engine = await connect(url, schema, max_connections=10)`
 #[pyfunction]
 #[pyo3(signature = (url, schema, max_connections = 10))]
@@ -440,6 +481,9 @@ fn connect<'py>(
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add_function(wrap_pyfunction!(connect, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_schema_file, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_python, m)?)?;
     m.add_class::<PySchema>()?;
     m.add_class::<Engine>()?;
     m.add_class::<Transaction>()?;
@@ -447,5 +491,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DatabaseError", py.get_type::<errors::DatabaseError>())?;
     m.add("IntegrityError", py.get_type::<errors::IntegrityError>())?;
     m.add("QueryError", py.get_type::<errors::QueryError>())?;
+    m.add("SchemaError", py.get_type::<errors::SchemaError>())?;
     Ok(())
 }

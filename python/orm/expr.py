@@ -5,7 +5,7 @@
 attributes are the related model's columns and relations, so
 ``User.posts.created_at < yesterday`` is a condition on a column reached through a
 relation. Nothing here talks to the database: expressions compile to the IR
-dictionaries consumed by the native engine (see ``native/src/ir.rs``).
+dictionaries consumed by the native engine (see ``core/src/ir.rs``).
 """
 
 from __future__ import annotations

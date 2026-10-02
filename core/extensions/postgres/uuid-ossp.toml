@@ -1,0 +1,2 @@
+name = "uuid-ossp"
+functions = ["uuid_generate_v1", "uuid_generate_v1mc", "uuid_generate_v4", "uuid_nil"]

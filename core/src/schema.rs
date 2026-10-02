@@ -54,6 +54,7 @@ pub struct Schema {
     pub models: Vec<Model>,
     pub extensions: Vec<ExtensionIr>,
     pub functions: Vec<FunctionIr>,
+    pub catalog: Vec<ExtensionIr>,
     model_index: HashMap<String, usize>,
 }
 
@@ -105,7 +106,7 @@ impl Schema {
                 models[t].field(&r.to).map_err(|e| format!("relation {}.{}: {e}", m.ir.name, r.name))?;
             }
         }
-        Ok(Schema { models, extensions: ir.extensions, functions: ir.functions, model_index })
+        Ok(Schema { models, extensions: ir.extensions, functions: ir.functions, catalog: ir.catalog, model_index })
     }
 
     pub fn model_idx(&self, name: &str) -> Result<usize> {

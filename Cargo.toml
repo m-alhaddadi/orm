@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["core", "native"]
+# bench/ormcore is a separate workspace (Phase 0 harness).
+exclude = ["bench"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

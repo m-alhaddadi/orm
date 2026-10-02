@@ -1,0 +1,29 @@
+# pgvector: embeddings and nearest-neighbour indexes. Values travel as JSON arrays
+# (also pgvector's text format) and are cast to and from vector in SQL.
+name = "vector"
+index_methods = ["hnsw", "ivfflat"]
+opclasses = [
+    "vector_l2_ops", "vector_ip_ops", "vector_cosine_ops", "vector_l1_ops",
+    "halfvec_l2_ops", "halfvec_ip_ops", "halfvec_cosine_ops",
+    "sparsevec_l2_ops", "sparsevec_ip_ops", "sparsevec_cosine_ops",
+    "bit_hamming_ops", "bit_jaccard_ops",
+]
+functions = ["l2_distance", "cosine_distance", "inner_product", "l1_distance"]
+
+[types.vector]
+sql = "vector({dims})"
+args = ["dims"]
+value = "json"
+read = "CAST(CAST({} AS text) AS jsonb)"
+write = "CAST(CAST({} AS text) AS vector({dims}))"
+python = "list[float]"
+typescript = "number[]"
+
+[types.halfvec]
+sql = "halfvec({dims})"
+args = ["dims"]
+value = "json"
+read = "CAST(CAST({} AS text) AS jsonb)"
+write = "CAST(CAST({} AS text) AS halfvec({dims}))"
+python = "list[float]"
+typescript = "number[]"

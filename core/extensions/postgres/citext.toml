@@ -1,0 +1,7 @@
+# Case-insensitive text. Values are strings; bound values are cast so comparisons,
+# IN (...) and ON CONFLICT pick citext's case-insensitive operators.
+name = "citext"
+
+[types.citext]
+value = "text"
+write = "CAST({} AS citext)"

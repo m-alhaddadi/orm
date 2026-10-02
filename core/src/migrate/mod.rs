@@ -8,6 +8,7 @@
 //! migration needs no database. The down migration is the diff in the other direction.
 
 pub mod diff;
+pub mod files;
 pub mod model;
 pub mod pg;
 

@@ -1,0 +1,4 @@
+# Trigram similarity; GIN / GiST indexes that speed up LIKE, ILIKE and similarity().
+name = "pg_trgm"
+opclasses = ["gin_trgm_ops", "gist_trgm_ops"]
+functions = ["similarity", "word_similarity", "strict_word_similarity", "show_trgm"]

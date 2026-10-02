@@ -1,28 +1,27 @@
-// Source of truth for examples/blog. The schema compiler does not exist yet:
-// models.py and models.pyi next to this file are hand-written in the shape the
-// code generator will emit. The DSL syntax below is a placeholder.
+// Source of truth for examples/blog. models.py / models.pyi next to this file are
+// generated from it:  python -m orm generate   (or: orm generate python ...)
 
 model User @table("users") {
-    id:         BigInt   @primary @auto
+    id:         BigInt      @primary @auto
     email:      String(254) @unique
     name:       String(100)
-    created_at: DateTime @default(now)
+    created_at: DateTime    @default(now)
 
-    posts:      Post[]    @relation(via: Post.author_id)
-    comments:   Comment[] @relation(via: Comment.author_id)
+    posts:      Post[]      @relation(via: Post.author_id)
+    comments:   Comment[]   @relation(via: Comment.author_id)
 }
 
 model Post @table("posts") {
-    id:         BigInt   @primary @auto
-    author_id:  BigInt   @index
+    id:         BigInt      @primary @auto
+    author_id:  BigInt      @index
     title:      String(200)
     body:       Text
-    views:      Int      @default(0)
-    published:  Bool     @default(false)
-    created_at: DateTime @default(now)
+    views:      Int         @default(0)
+    published:  Bool        @default(false)
+    created_at: DateTime    @default(now)
 
-    author:     User      @relation(via: author_id, on_delete: cascade)
-    comments:   Comment[] @relation(via: Comment.post_id)
+    author:     User        @relation(via: author_id, on_delete: cascade)
+    comments:   Comment[]   @relation(via: Comment.post_id)
 
     @@index([author_id, created_at(sort: desc)], where: "published")
     @@index([title(ops: gin_trgm_ops)], type: gin)     // pulls in the pg_trgm extension
@@ -30,12 +29,12 @@ model Post @table("posts") {
 }
 
 model Comment @table("comments") {
-    id:         BigInt   @primary @auto
-    post_id:    BigInt   @index
-    author_id:  BigInt?  @index
+    id:         BigInt      @primary @auto
+    post_id:    BigInt      @index
+    author_id:  BigInt?     @index
     body:       Text
-    created_at: DateTime @default(now)
+    created_at: DateTime    @default(now)
 
-    post:       Post      @relation(via: post_id, on_delete: cascade)
-    author:     User?     @relation(via: author_id, on_delete: set_null)
+    post:       Post        @relation(via: post_id, on_delete: cascade)
+    author:     User?       @relation(via: author_id, on_delete: set_null)
 }

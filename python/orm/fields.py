@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Never, TypeVa
 
 from .errors import NotLoaded
 from .expr import ColumnRef, RelationPath
-from .schema import Sql
 
 if TYPE_CHECKING:
     from .model import Model
@@ -42,20 +41,13 @@ MISSING: Any = _Missing()
 class Field(Generic[T]):
     """A column. ``T`` is the Python type of its value (``int | None`` if nullable).
 
-    Schema options beyond the basics: ``check`` (a ``CHECK`` expression in SQL),
-    ``comment``, ``renamed_from`` (the previous column name, so the migration renames
-    instead of dropping) and ``default=Sql("...")`` for a server-side SQL default.
-
-    Extension column types (see :mod:`orm.ext`) set ``db_type`` (the SQL type) and, if
-    the driver can't exchange values of that type directly, ``read_sql`` /
-    ``write_sql`` templates where ``{}`` stands for the column / the bound value.
+    Models normally come from a schema file (``orm.load`` / generated modules), which
+    builds these descriptors from the compiled schema. Everything the database needs
+    beyond what Python uses here (indexes, checks, extension types...) stays in the
+    schema IR.
     """
 
     type_name: ClassVar[str]
-    db_type: str | None = None
-    read_sql: ClassVar[str | None] = None
-    write_sql: str | None = None
-    requires: ClassVar[tuple[str, ...]] = ()
 
     name: str
     column: str
@@ -70,11 +62,9 @@ class Field(Generic[T]):
         unique: bool = False,
         index: bool = False,
         column: str | None = None,
-        default: T | Callable[[], T] | Sql = MISSING,
+        default: T | Callable[[], T] = MISSING,
         default_now: bool = False,
-        check: str | None = None,
-        comment: str | None = None,
-        renamed_from: str | None = None,
+        server_default: bool = False,
     ) -> None:
         self.primary_key = primary_key
         self.auto_increment = auto_increment
@@ -84,9 +74,8 @@ class Field(Generic[T]):
         self._column = column
         self.default = default
         self.default_now = default_now
-        self.check = check
-        self.comment = comment
-        self.renamed_from = renamed_from
+        # The database computes a default (an SQL expression in the schema).
+        self.server_default = server_default
 
     def __set_name__(self, owner: type[Model], name: str) -> None:
         self.name = name
@@ -111,23 +100,16 @@ class Field(Generic[T]):
     @property
     def has_server_value(self) -> bool:
         """True if the database fills the column when the insert leaves it out."""
-        server = self.default is not MISSING and (isinstance(self.default, Sql) or not callable(self.default))
-        return self.auto_increment or self.default_now or server
+        literal = self.default is not MISSING and not callable(self.default)
+        return self.auto_increment or self.default_now or self.server_default or literal
 
     def ir(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "column": self.column, "type": self.type_name}
         for flag in ("nullable", "primary_key", "auto_increment", "unique", "index", "default_now"):
             if getattr(self, flag):
                 out[flag] = True
-        if isinstance(self.default, Sql):
-            out["default_sql"] = self.default.sql
-        elif self.default is not MISSING and not callable(self.default):
+        if self.default is not MISSING and not callable(self.default):
             out["default"] = self.default
-        for key in ("check", "comment", "renamed_from", "db_type", "read_sql", "write_sql"):
-            if (value := getattr(self, key)) is not None:
-                out[key] = value
-        if self.requires:
-            out["requires"] = list(self.requires)
         return out
 
     def __repr__(self) -> str:
@@ -181,8 +163,7 @@ class Date(Field[T]):
 
 
 class Uuid(Field[T]):
-    """``uuid``. Values are ``uuid.UUID``; strings are accepted as input.
-    ``Uuid(primary_key=True, default=Sql("gen_random_uuid()"))`` for server-side keys."""
+    """``uuid``. Values are ``uuid.UUID``; strings are accepted as input."""
 
     type_name = "uuid"
 
@@ -191,6 +172,12 @@ class Json(Field[T]):
     """``jsonb``. Values are dicts, lists, strings, numbers, booleans or None."""
 
     type_name = "json"
+
+
+# IR column type -> descriptor class, for models built from a compiled schema.
+BY_TYPE: dict[str, type[Field[Any]]] = {
+    c.type_name: c for c in (BigInt, Integer, Float, Boolean, String, Text, DateTime, Date, Uuid, Json)
+}
 
 
 # -- relations ----------------------------------------------------------------------------
@@ -242,15 +229,11 @@ class BelongsTo(Relation[M, P]):
         via: str,
         to: str | None = None,
         on_delete: OnDelete = "cascade",
-        on_update: OnDelete | None = None,
-        deferrable: Literal["immediate", "deferred"] | None = None,
     ) -> None:
         super().__init__(target)
         self.via = via
         self._to = to
         self.on_delete = on_delete
-        self.on_update = on_update
-        self.deferrable = deferrable
 
     @property
     def to(self) -> str:
@@ -294,8 +277,6 @@ class BelongsTo(Relation[M, P]):
             "to": self.to,
             "foreign_key": True,
             "on_delete": self.on_delete,
-            **({"on_update": self.on_update} if self.on_update else {}),
-            **({"deferrable": self.deferrable} if self.deferrable else {}),
         }
 
 

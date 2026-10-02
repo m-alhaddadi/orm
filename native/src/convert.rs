@@ -8,7 +8,7 @@ use pyo3::IntoPyObjectExt;
 use sea_orm::sea_query::Value;
 use sea_orm::{DbErr, QueryResult};
 
-use crate::ir::ColType;
+use orm_core::ir::ColType;
 
 fn null_of(ty: Option<ColType>) -> Value {
     match ty {

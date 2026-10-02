@@ -193,9 +193,8 @@ once you count FFI and Python object materialization?
 
 ### Phase 1 — First prototype  (in progress, see [`docs/python-api.md`](docs/python-api.md))
 
-1. Schema parser — not started; `examples/blog/models.py` / `.pyi` are hand-written
-   in the shape codegen will emit
-2. ORM IR — ✅ first cut: schema IR + query/mutation IR (`native/src/ir.rs`)
+1. Schema parser — ✅ `.orm` schema language, compiled by `core/` (see below)
+2. ORM IR — ✅ first cut: schema IR + query/mutation IR (`core/src/ir.rs`)
 3. Python API prototype — ✅ `python/orm`: Django-style managers and loading,
    SQLAlchemy-style typed expressions, relation-path filters (`User.posts.created_at`)
 4. PyO3 binding — ✅ `native/` (`orm._native`), one call per operation
@@ -205,24 +204,24 @@ once you count FFI and Python object materialization?
 Avoid initially: multiple databases, full migration engine, advanced ORM features,
 multiple language bindings. Validate the architecture and API first.
 
-### Schema objects, migrations, extensions  ✅ first cut, see [`docs/schema.md`](docs/schema.md)
+### Schema language, migrations, extensions  ✅ first cut, see [`docs/schema.md`](docs/schema.md)
 
-- Indexes (multi-column, expression, partial, covering, any access method, opclasses),
-  unique / check / exclusion constraints, FK `on_update` / deferrable, triggers and SQL
-  functions, column comments, UUID and JSON columns.
-- Migration generator in Rust (`native/src/migrate`): ORM schema → database snapshot →
-  diff against the previous migration's snapshot → ops → Postgres DDL, up and down.
-  Rename hints, name-insensitive matching of indexes / constraints, warnings for
-  destructive steps. Python side: migration files, runner (`orm_migrations` table,
-  checksums, advisory lock), `python -m orm` CLI.
-- Extension system: a Rust catalog maps types / index methods / opclasses / functions
-  to the extension providing them, so using one pulls in `CREATE EXTENSION`.
-  `orm.ext` ships citext, pg_trgm, pgvector, PostGIS and btree_gist helpers; columns
-  of extension types convert through `read_sql` / `write_sql` templates.
-- SeaORM's own tooling (`sea-orm-migration` runner, entity schema sync) was not used:
-  it has no triggers, exclusion constraints, extensions, renames or down migrations,
-  and would tie the migration IR to SeaORM. `sea-schema` introspection is a candidate
-  for drift detection (diffing a live database instead of a snapshot).
+- One schema for every language: `.orm` files, parsed and compiled by the binding-free
+  `core/` crate (`orm-core`) into the schema IR. Python loads the IR (`orm.load`) or a
+  module generated from it (`models.py` + typed `.pyi`). The JS binding will consume
+  the same IR. The `orm` CLI (compile, check, generate, makemigrations, sqlmigrate)
+  needs no Python.
+- Schema objects: indexes (expression, partial, covering, any method, opclasses,
+  storage params), unique / check / exclusion constraints, FK `on_update` /
+  deferrable, triggers and functions, comments, UUID and JSON columns, rename hints.
+- Extensions are TOML files (`core/extensions/postgres/*.toml`; custom ones are
+  `import`ed): types (SQL template, value conversion, `read` / `write` SQL, per-language
+  type hints), index methods, opclasses and functions. Using any of them makes the
+  migration `CREATE EXTENSION` it.
+- Migration generator: schema → database snapshot → diff against the last migration's
+  snapshot → Postgres DDL, up and down, with warnings. The runner (checksums, advisory
+  lock) is in Python for now; `sqlx::migrate` is the candidate for a shared Rust one.
+  SeaORM's and Refinery's tools were not used (see the doc).
 
 ### Later
 

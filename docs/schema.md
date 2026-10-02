@@ -1,272 +1,315 @@
-# Schema objects, extensions and migrations
+# Schema language, extensions and migrations
 
-Models describe columns and relations (see [`python-api.md`](python-api.md)). Everything
-else the database holds is declared next to them: indexes, constraints, triggers,
-functions and extensions. Migrations are generated from that description, written as
-plain SQL, and applied by a small runner.
+The schema is written once, in a `.orm` file, and every language uses it:
 
 ```
-models (Python)  ──IR──▶  native/src/migrate/model.rs   build the database schema (snapshot)
-                          native/src/migrate/diff.rs    previous snapshot → ops (up and down)
-                          native/src/migrate/pg.rs      ops → Postgres DDL
-                          native/src/ext.rs             which extension provides what
-python/orm/migrations.py  files, runner, `orm_migrations` table
-python/orm/__main__.py    `python -m orm makemigrations / migrate / rollback / ...`
+schema.orm ──▶ orm-core (Rust) ──▶ schema IR (JSON) ──▶ Python: orm.load() / generated models.py + .pyi
+   ▲              │                                └──▶ JS / Go / ...: the same IR (bindings to come)
+extensions/*.toml │
+                  ├──▶ migrations/NNNN_name/{up.sql, down.sql, snapshot.json}
+                  └──▶ Postgres DDL (create_tables)
 ```
 
-The generator diffs against the **snapshot stored with the last migration**, not
-against a live database, so `makemigrations` works offline and gives the same output on
-every machine. The diff, the naming rules and the SQL all live in Rust, so other
-language frontends get them for free.
+No Python, Rust or JS class describes the schema. The parser, the extension catalog,
+the migration generator and the code generators live in the binding-free `core/` crate,
+so each language binding only loads the result. The same crate builds the `orm`
+command-line tool, which needs no Python.
 
-## Declaring schema objects
+| Path | What |
+|---|---|
+| `core/src/dsl/` | parser (`syntax.rs`) and lowering to the IR (`lower.rs`) |
+| `core/src/ext.rs`, `core/extensions/postgres/*.toml` | extension files and the catalog built from them |
+| `core/src/migrate/` | snapshot model, diff, Postgres renderer, migration folders |
+| `core/src/codegen/python.rs` | `models.py` / `models.pyi` generator |
+| `core/src/main.rs` | the `orm` CLI |
+| `python/orm/model.py` | `orm.load()` / `orm.loads()` / `orm.define()`: model classes from the IR |
+| `python/orm/migrations.py`, `__main__.py` | migration runner and `python -m orm` |
+
+## A schema
+
+```
+// examples/blog/schema.orm (excerpt)
+model Post @table("posts") {
+    id:         BigInt      @primary @auto
+    author_id:  BigInt      @index
+    title:      String(200)
+    body:       Text
+    views:      Int         @default(0)
+    published:  Bool        @default(false)
+    created_at: DateTime    @default(now)
+
+    author:     User        @relation(via: author_id, on_delete: cascade)
+    comments:   Comment[]   @relation(via: Comment.post_id)
+
+    @@index([author_id, created_at(sort: desc)], where: "published")
+    @@index([title(ops: gin_trgm_ops)], type: gin)     // pulls in pg_trgm
+    @@check("views >= 0", name: "posts_views_not_negative")
+}
+```
+
+Using it from Python:
 
 ```python
-from orm import Check, Exclude, Index, Key, Model, Sql, Trigger, Unique
-from orm import fields as f
-from orm.ext import btree_gist, citext, pg_trgm, pgvector
-
-
-class Room(Model, table="rooms"):
-    id = f.Uuid(primary_key=True, default=Sql("gen_random_uuid()"))
-    name = citext.CIText(unique=True)            # case-insensitive, needs citext
-    floor = f.Integer(check="floor >= 0")        # column-level CHECK
-    features = f.Json(nullable=True, comment="free-form attributes")
-    embedding = pgvector.Vector(384, nullable=True)
-    updated_at = f.DateTime(default_now=True)
-
-    class Meta:
-        indexes = [
-            Index("floor", "-updated_at", where="features IS NOT NULL"),  # partial, DESC
-            Index(Sql("lower(features->>'kind')"), name="rooms_kind_idx"),  # expression
-            Index("floor", include=["name"]),                               # covering
-            Index(Key("name", collation="C"), name="rooms_name_c_idx"),
-            pg_trgm.TrigramIndex("name"),                                    # GIN gin_trgm_ops
-            pgvector.HnswIndex("embedding", ops="vector_cosine_ops", m=16),
-        ]
-        constraints = [
-            Unique("floor", "name", nulls_not_distinct=True),
-            Check("floor < 200", name="rooms_floor_sane"),
-        ]
-        triggers = [
-            Trigger("touch", before=("update",),
-                    body="BEGIN NEW.updated_at := now(); RETURN NEW; END;"),
-        ]
-        comment = "bookable rooms"
-
-
-class Booking(Model, table="bookings"):
-    id = f.BigInt(primary_key=True, auto_increment=True)
-    room_id = f.Uuid(index=True)
-    starts_at = f.DateTime()
-    ends_at = f.DateTime()
-    room = f.BelongsTo("Room", via="room_id", on_delete="restrict", deferrable="deferred")
-
-    class Meta:
-        constraints = [
-            btree_gist.NoOverlap("room_id", start="starts_at", end="ends_at"),
-            # the same, spelled out:
-            # Exclude(("room_id", "="), (Sql('tstzrange("starts_at", "ends_at")'), "&&"),
-            #         requires=["btree_gist"]),
-        ]
+models = orm.load("schema.orm")          # compile at runtime; models["Post"] ...
+# or generate a module (typed, autocompletes):  python -m orm generate
+from blog.models import Post, User
 ```
 
-| Object | Declared with | Notes |
+## Language reference
+
+The syntax doesn't care about line breaks. Comments are `// ...` and `/* ... */`. Strings
+are `"..."` (escapes `\" \\ \n \t`) or `"""..."""`, taken verbatim with common
+indentation removed, which suits SQL bodies. Raw SQL (predicates, expressions,
+bodies) is written as it appears in the DDL, using column names.
+
+### Top level
+
+```
+import "extensions/acme.toml"            // an extension file (path relative to this file)
+extension postgis(schema: "ext", version: "3.4")   // pin an extension; optional
+extension "uuid-ossp"                    // names that aren't identifiers go in quotes
+
+function audit_row {                     // a stand-alone SQL function
+    returns: trigger                     // default trigger
+    args: ""                             // SQL argument list, e.g. "a integer, b text"
+    language: plpgsql                    // default plpgsql
+    volatility: stable                   // optional: immutable / stable / volatile
+    security_definer: false
+    body: """
+        BEGIN
+            INSERT INTO audit_log (tbl) VALUES (TG_TABLE_NAME);
+            RETURN NULL;
+        END;
+    """
+}
+
+model Name @table("names") @comment("...") @renamed_from("old_table") { ... }
+```
+
+The default table name is the model name in lower case.
+
+### Fields
+
+`name: Type[(args)][?] @attr...`, where `?` makes the column nullable.
+
+| Type | SQL | Python value |
 |---|---|---|
-| index | `Index(*keys, name, unique, method, where, include, with_, nulls_not_distinct)` | keys: field name, `"-field"` (DESC), `Sql("expr")`, or `Key(target, opclass, desc, nulls, collation)` |
-| single-column unique / index | `f.X(unique=True)` / `f.X(index=True)` | |
-| unique constraint | `Unique(*fields, name, nulls_not_distinct, deferrable)` | for expressions or a `WHERE`, use `Index(..., unique=True)` |
-| check | `Check(expr, name)` or `f.X(check=...)` | raw SQL with column names |
-| exclusion | `Exclude((key, operator), ..., method="gist", where, deferrable)` | |
-| foreign key | `f.BelongsTo(..., on_delete, on_update, deferrable)` | `on_delete` adds `set_default` |
-| trigger | `Trigger(name, before= / after= / instead_of=, update_of, for_each, when, body= / function=, args)` | `body` generates `<table>_<name>()` |
-| function | `Function(name, body, returns="trigger", args, language, volatility, security_definer)` | add with `registry.add(fn)` or `Meta.functions` |
-| extension | `Extension(name, schema, version)` | only needed to pin schema / version (see below) |
-| comment | `f.X(comment=...)`, `Meta.comment` | |
-| server default | `f.X(default=Sql("gen_random_uuid()"))` | literals and `default_now` as before |
-| rename | `f.X(renamed_from="old")`, `Meta.renamed_from = "old_table"` | see *Renames* |
+| `BigInt`, `Int` | `bigint`, `integer` | `int` |
+| `Float` | `double precision` | `float` |
+| `Bool` | `boolean` | `bool` |
+| `String`, `String(n)` | `varchar`, `varchar(n)` | `str` |
+| `Text` | `text` | `str` |
+| `DateTime`, `Date` | `timestamp with time zone`, `date` | `datetime` (aware), `date` |
+| `Uuid` | `uuid` | `uuid.UUID` (strings accepted) |
+| `Json` | `jsonb` | dicts, lists, scalars |
+| an extension type | from its extension file, e.g. `citext`, `vector(384)`, `geography(Point, 4326)` | from the file's `value` |
 
-`Meta` options are checked: an unknown option or a wrong object type raises at class
-creation; a field name that doesn't exist raises when the schema is compiled
-(`QueryError` naming the model and field). Raw SQL (predicates, expressions, bodies) is
-taken as is.
+| Attribute | Meaning |
+|---|---|
+| `@primary`, `@auto` | primary key; `GENERATED BY DEFAULT AS IDENTITY` |
+| `@unique`, `@index` | single-column unique constraint / index |
+| `@default(0)` `@default("x")` `@default(true)` `@default({"a": 1})` | literal default |
+| `@default(now)` | `now()` |
+| `@default(sql("gen_random_uuid()"))` | any SQL default |
+| `@check("views >= 0")` | column check constraint |
+| `@comment("...")` | column comment |
+| `@column("db_name")` | column name, if different from the field name |
+| `@renamed_from("old")` | previous column name: the migration renames it instead of dropping |
+| `@db_type("numeric(10, 2)")` | override the SQL type (the value conversion stays the field type's) |
 
-New column types: `f.Uuid` (`uuid`, values `uuid.UUID`, strings accepted) and `f.Json`
-(`jsonb`, values are dicts / lists / scalars).
+### Relations
 
-Constraint violations of any kind (unique, foreign key, check, exclusion, not-null;
-SQLSTATE class 23) raise `orm.IntegrityError`.
+```
+author:   User       @relation(via: author_id)              // to-one: via = a field of this model
+author:   User?      @relation(via: author_id, on_delete: set_null)
+posts:    Post[]     @relation(via: Post.author_id)          // to-many: via = the target's field
+```
+
+To-one relations create the foreign key. Their options are `to:` (default: the target's
+primary key), `on_delete:` / `on_update:` (`cascade`, `set_null`, `set_default`,
+`restrict`, `no_action`; the default is the database's, no action), and
+`deferrable: immediate | deferred`. The relation is optional (`User?`) exactly when the
+`via` field is nullable; the compiler checks this. To-many relations take
+`from:` (default: this model's primary key).
+
+### Model declarations (`@@`)
+
+```
+@@index([author_id, created_at(sort: desc, nulls: last)], where: "published", name: "x")
+@@index([title(ops: gin_trgm_ops)], type: gin)
+@@index([sql("lower(email)", collate: "C")], unique: true)
+@@index([floor], include: [name], nulls_not_distinct: true)
+@@index([embedding(ops: vector_cosine_ops)], type: hnsw, with: {m: 16, ef_construction: 64})
+
+@@unique([author_id, slug], nulls_not_distinct: true, deferrable: deferred)
+@@check("starts_at < ends_at", name: "bookings_order")
+@@exclude([room_id(op: "="), sql("tstzrange(starts_at, ends_at)", op: "&&")], where: "not cancelled")
+
+@@trigger(touch, before: [update], update_of: [title], when: "OLD.title <> NEW.title",
+          body: """BEGIN NEW.updated_at := now(); RETURN NEW; END;""")
+@@trigger(audit, after: [insert, update, delete], for_each: statement,
+          function: audit_row, args: ["posts"])
+```
+
+* Index keys are field names or `sql("expression")`, with options `sort: asc|desc`,
+  `nulls: first|last`, `ops: <operator class>`, `collate: "..."`, and `op: "..."` in
+  `@@exclude`.
+* `type:` (or `using:`) is the access method (default btree for indexes, gist for
+  exclusions), and `with:` sets storage parameters.
+* For a unique *expression* or a partial unique rule, use `@@index(..., unique: true)`.
+* `@@exclude` with `=` on a plain column under GiST pulls in `btree_gist` by itself.
+* A trigger fires on exactly one of `before:` / `after:` / `instead_of:`. Give it
+  either a `body:` (a function `<table>_<name>()` is generated and replaced in place
+  when the body changes) or a `function:`.
+
+Mistakes are reported with file, line and column:
+
+```
+schema.orm:12:15: Post.title: unknown type Strin; expected a built-in type (BigInt, ...), a model, or a type from an extension file
+schema.orm:20:5: Post: @@index: unknown argument `wher`
+schema.orm:9:13: relation author: author_id is nullable, so the relation type is `User?`
+```
 
 ### Names
 
-Generated names follow what Postgres itself would choose: `users_pkey`,
+Generated names follow what Postgres itself would choose: `posts_pkey`,
 `users_email_key`, `posts_author_id_fkey`, `posts_author_id_created_at_idx`,
-`posts_views_check`, `bookings_room_id_expr…_excl`. Expressions contribute a stable
-hash (`expr1a2b3c4d`). Two objects that would get the same generated name (say, a btree
-and a trigram index on one column) are an error: give one an explicit `name=`. Names longer than 63 bytes are cut and get a hash suffix, so two
-long names never collapse into one. Indexes and constraints share one namespace and
-duplicates are rejected.
+`posts_views_check`, `bookings_room_id_expr…_excl`. Expressions contribute a stable hash.
+Names over 63 bytes are cut and get a hash suffix. Indexes and constraints share one
+namespace. Two objects that would get the same name (a btree and a trigram index on
+one column, say) are an error, so give one an explicit `name:`.
 
 ## Extensions
 
-An extension contributes types, index methods, operator classes and functions. The
-engine knows what the common ones provide (`native/src/ext.rs`):
+An extension is a TOML file saying what it adds to the schema language:
 
-| extension | pulled in by |
-|---|---|
-| `citext` | type `citext` |
-| `pg_trgm` | opclasses `gin_trgm_ops`, `gist_trgm_ops`; `similarity()`, ... |
-| `vector` (pgvector) | types `vector`, `halfvec`, `sparsevec`; methods `hnsw`, `ivfflat`; `vector_*_ops` |
-| `postgis` | types `geometry`, `geography`; `ST_*` constructors |
-| `hstore` | type `hstore`, its opclasses |
-| `btree_gist`, `btree_gin` | their opclasses (scalar equality in a GiST exclusion: declare `requires=["btree_gist"]`) |
-| `bloom` | method `bloom` |
-| `pgcrypto`, `uuid-ossp`, `unaccent` | their functions (`uuid_generate_v4()`, `crypt()`, ...) in defaults, checks, predicates |
+```toml
+# core/extensions/postgres/vector.toml (excerpt)
+name = "vector"                                   # the CREATE EXTENSION name
+index_methods = ["hnsw", "ivfflat"]
+opclasses = ["vector_l2_ops", "vector_cosine_ops"]
+functions = ["cosine_distance"]
 
-Using any of these is enough: the next migration starts with `CREATE EXTENSION IF NOT
-EXISTS`, and the down migration drops it last (with a warning, since other schemas may
-use it). Declare `Extension("postgis", schema="extensions", version="3.4")` (in
-`Meta.extensions` or `registry.add(...)`) to pin where and which version. An extension
-the engine doesn't know is taught with the names that should pull it in:
-
-```python
-registry.add(Extension("acme", types=("acme_money",), functions=("acme_slug",)))
+[types.vector]                                    # usable as a field type: vector(384)
+sql = "vector({dims})"                            # {arg} placeholders come from `args`
+args = ["dims"]
+# defaults = { dims = "3" }                       # optional default per argument
+value = "json"                                    # how values travel: text, json, big_int, uuid, ...
+read = "CAST(CAST({} AS text) AS jsonb)"          # optional: SQL around the column when read
+write = "CAST(CAST({} AS text) AS vector({dims}))" # optional: SQL around each bound value
+python = "list[float]"                            # optional type hints for generated code
+typescript = "number[]"
 ```
 
-### Frontend helpers: `orm.ext`
+Built in (`core/extensions/postgres/`, compiled into the core):
 
-Each module wraps one extension with fields and index helpers; they are thin and are the
-template for adding more:
-
-| module | provides |
+| file | adds |
 |---|---|
-| `orm.ext.citext` | `CIText()`: `str` values; parameters are cast so comparisons, `in_()` and `on_conflict` are case-insensitive |
-| `orm.ext.pg_trgm` | `TrigramIndex(*fields, method="gin"/"gist")`: indexes `contains()` / `icontains()` |
-| `orm.ext.pgvector` | `Vector(dims)`: `list[float]` values; `HnswIndex(field, ops, m, ef_construction)`, `IvfflatIndex(field, ops, lists)` |
-| `orm.ext.postgis` | `Geometry(shape, srid)`, `Geography(...)`: EWKT strings; `SpatialIndex(field)` |
-| `orm.ext.btree_gist` | `NoOverlap(*equal_fields, start=, end=)`: exclusion constraint over a time range |
+| `citext` | type `citext` (str; values are cast, so comparisons, `in_()` and `ON CONFLICT` ignore case) |
+| `pg_trgm` | opclasses `gin_trgm_ops`, `gist_trgm_ops`; `similarity()`, ... |
+| `vector` (pgvector) | types `vector(dims)`, `halfvec(dims)` (`list[float]`); methods `hnsw`, `ivfflat`; `*_ops` opclasses |
+| `postgis` | types `geometry(shape, srid)`, `geography(shape, srid)` (EWKT strings); GiST opclasses; `ST_*` functions |
+| `btree_gist`, `btree_gin`, `hstore` | operator classes |
+| `bloom` | method `bloom` |
+| `pgcrypto`, `uuid-ossp`, `unaccent` | functions (`crypt()`, `uuid_generate_v4()`, ...) |
 
-A field of an extension type sets three things on top of the usual field options:
+Anything an extension provides pulls it in: a column of its type, an index using its
+method or operator class, or a call to one of its functions in a default, check or
+predicate. The next migration then starts with `CREATE EXTENSION IF NOT EXISTS`, and
+the down migration drops it last (with a warning). `extension name(schema:, version:)`
+in the schema only pins where it goes and which version. Your own extensions are files
+next to the schema, loaded with `import "extensions/acme.toml"`; unknown keys in a
+file are an error.
 
-* `db_type`: the SQL type (`vector(3)`);
-* `read_sql`: SQL wrapped around the column when it is selected or returned, `{}` being
-  the column (`CAST(CAST({} AS text) AS jsonb)` lets the driver decode a vector as JSON);
-* `write_sql`: SQL wrapped around every bound value assigned to or compared with the
-  column (`CAST({} AS citext)`).
+The planner applies `read` / `write` in `SELECT`, `RETURNING`, `INSERT`, `UPDATE` and
+comparisons, so queries on extension-typed columns look like any other.
 
-Its Python value type is the `type_name` of the field class it extends (text, json, ...).
-The planner applies the templates in `SELECT`, `RETURNING`, `INSERT`, `UPDATE` and in
-comparisons, so the rest of the API works unchanged. (`citext` values decode as text
-natively; pgvector has no driver codec, hence the JSON round trip.)
+## Code generation
+
+```bash
+python -m orm generate                   # models.py + models.pyi next to the schema (or -o path)
+orm generate python schema.orm -o app/models.py
+```
+
+`models.py` embeds the compiled IR and builds the classes with `orm.define()`, so no
+schema detail is restated in Python. `models.pyi` gives editors and type checkers the
+typed classes, relation paths (`User.posts.created_at` is `ColumnRef[datetime]`),
+insert / update `TypedDict`s and query sets (see [`python-api.md`](python-api.md)).
+`tests/test_migrations.py` checks that the committed blog module is up to date.
+Without generation, `orm.load("schema.orm")` returns the same classes at runtime.
+TypeScript generation will come with the JS binding.
 
 ## Migrations
 
 ```bash
-python -m orm makemigrations [name]          # write migrations/NNNN_name/{up.sql,down.sql,snapshot.json}
-python -m orm makemigrations --check         # exit 1 if models changed without a migration (CI)
+python -m orm makemigrations [name]          # migrations/NNNN_name/{up.sql,down.sql,snapshot.json}
+python -m orm makemigrations --check         # exit 1 if the schema changed without a migration (CI)
 python -m orm makemigrations --empty data    # an empty migration for hand-written SQL
-python -m orm sqlmigrate 2 [--down]          # print the SQL
+python -m orm sqlmigrate 2 [--down]
 python -m orm migrate [target]               # apply pending migrations
 python -m orm rollback [--steps N | --to 0002_x | --to zero]
 python -m orm showmigrations
+
+orm makemigrations schema.orm --dir migrations    # the same files, without Python
+orm sqlmigrate 2 --dir migrations
 ```
 
-Settings come from flags (`--models`, `--dir`, `--url`, `--pythonpath`) or
-`[tool.orm]` in `pyproject.toml`; the URL also from `ORM_DATABASE_URL`. This repository's
-`pyproject.toml` points at the blog example, whose first migration is in
-[`examples/blog/migrations`](../examples/blog/migrations/0001_initial/up.sql).
+Settings come from flags (`--schema`, `--dir`, `--url`) or `[tool.orm]` in
+`pyproject.toml` (`schema`, `migrations`), and the URL from `ORM_DATABASE_URL`. This
+repository's `pyproject.toml` points at the blog example; its first migration is
+[`examples/blog/migrations/0001_initial`](../examples/blog/migrations/0001_initial/up.sql).
 
-From Python:
-
-```python
-from orm.migrations import Migrations, Migrator
-
-migs = Migrations("migrations")          # default registry; Migrations(dir, registry) otherwise
-plan = migs.plan()                       # .up / .down steps (summary, sql, warning), .snapshot
-migs.make("add bookings")                # None if nothing changed
-await Migrator(db, migs).upgrade()       # / .downgrade(steps=1, target=None) / .status()
-```
+From Python: `Migrations("migrations", "schema.orm")` (or a `Registry`) has
+`.plan()`, `.make(name)` and `.all()`. `Migrator(db, migrations)` has `.upgrade()`,
+`.downgrade()` and `.status()`.
 
 ### What the generator does
 
-* **Tables and columns** are matched by name. New tables are created in foreign-key
-  order with their primary key, uniques, checks, exclusions and foreign keys inline; a
-  foreign-key cycle is closed with `ALTER TABLE ... ADD CONSTRAINT` after both tables
-  exist. Changed columns are altered in place: `TYPE ... USING col::type`,
-  `SET / DROP NOT NULL`, `SET / DROP DEFAULT`, `ADD / DROP IDENTITY`.
-* **Indexes and constraints** are matched by name, then by definition: if only the
-  name differs (because the table or a column was renamed) the object is renamed; if
-  the definition changed it is dropped and recreated.
-* **Triggers** are dropped and recreated when they change. A trigger function whose
-  body changed is replaced with `CREATE OR REPLACE FUNCTION`; the trigger stays.
-* **Order**: extensions → functions → drop triggers / foreign keys / indexes /
-  constraints → renames → drop tables → create tables → add / alter / drop columns →
-  add constraints (primary keys and uniques before foreign keys) → indexes → triggers →
-  comments → drop unused functions → drop unused extensions.
-* **Down** is the same diff in the other direction, so it is always the exact inverse
-  of up at the schema level (data a drop removed doesn't come back).
-* **Warnings** are emitted (in the CLI output and as `-- WARNING:` lines in `up.sql`)
-  for steps that can lose data or fail on existing rows: dropping tables or columns,
-  type changes, `SET NOT NULL`, a `NOT NULL` column without a default, new unique /
-  check / exclusion / foreign-key constraints, dropping an extension.
+The generator diffs the schema against the **snapshot stored with the last migration**,
+not a live database, so it works offline and gives the same files everywhere.
 
-### Renames
-
-Without a hint, a renamed field is a dropped column plus a new one. `renamed_from`
-turns it into `RENAME`:
-
-```python
-class Post(Model, table="articles"):
-    title = f.String(200, column="headline", renamed_from="title")   # column rename
-
-    class Meta:
-        renamed_from = "posts"                                         # table rename
-```
-
-Generated constraint and index names follow the rename (`posts_pkey` →
-`articles_pkey`). The hints only matter for the migration that performs the rename;
-they can stay (they are ignored once the old name is gone) or be removed afterwards.
+* **Tables and columns** are matched by name or `@renamed_from`. New tables are created
+  in foreign-key order with their keys and constraints inline; a foreign-key cycle is
+  closed with `ALTER TABLE ... ADD CONSTRAINT`. Changed columns are altered in place
+  (`TYPE ... USING`, `SET / DROP NOT NULL`, `SET / DROP DEFAULT`, identity).
+* **Indexes and constraints** are matched by name, then by definition. If only the name
+  changed (a renamed table or column), the object is renamed. If its definition
+  changed, it is dropped and recreated.
+* **Triggers** are recreated when they change. A changed trigger body only replaces its
+  function.
+* **Order**: extensions, functions, then drops (triggers, foreign keys, indexes,
+  constraints), renames, dropped tables, new tables, column changes, new constraints
+  (keys before foreign keys), indexes, triggers, comments, unused functions, and
+  unused extensions last.
+* **Down** is the same diff in reverse.
+* **Warnings** (CLI output and `-- WARNING:` lines) flag steps that can lose data or
+  fail on existing rows: drops, type changes, `SET NOT NULL`, a `NOT NULL` column
+  without a default, new unique / check / exclusion / foreign-key constraints,
+  dropping an extension.
 
 ### Applying
 
-* Each migration runs in **one transaction** together with its row in
-  `orm_migrations` (`name`, `checksum`, `applied_at`), under a transaction-level advisory
-  lock, so concurrent deploys don't apply a migration twice and a failing migration
-  leaves the database at the previous one.
-* `up.sql` is run as one script, so it may hold anything Postgres accepts in a
-  transaction, including hand-written data changes. (`CREATE INDEX CONCURRENTLY`
-  can't run in a transaction and is not supported yet.)
-* The SHA-256 of each applied `up.sql` is recorded; if an applied file changes, the
-  runner stops. A migration applied after a later one, or one recorded in the database
-  but missing from the directory, also stops it.
-* Migrations are numbered (`0001_`, `0002_`, ...). Two branches that both add `0003_`
-  are reported; renumber one of them and regenerate it so its snapshot builds on the
-  other.
+Each migration runs in one transaction together with its `orm_migrations` row (name,
+SHA-256 of `up.sql`, time), under an advisory lock. A failing migration leaves the
+database at the previous one, and concurrent deploys don't apply one twice. The runner
+stops if an applied `up.sql` changed, if migrations were applied out of order, if one
+recorded in the database is missing from the directory, or if two migrations share a
+number. `create_tables()` / `drop_tables()` remain as development helpers (idempotent
+DDL of the whole schema; drop with `CASCADE`).
 
-### `create_tables()` and `drop_tables()`
+### Why not SeaORM's or Refinery's tooling
 
-Still there for development and tests. `create_tables()` runs the full initial
-migration with `IF NOT EXISTS` / `OR REPLACE` forms in one transaction (it never alters
-existing objects); `drop_tables()` drops every model table with `CASCADE` and the
-generated functions, leaving extensions in place.
-
-## Why not SeaORM's migration tooling
-
-SeaORM ships `sea-orm-migration` (a runner plus a Rust DSL for writing migrations by
-hand) and, in 2.0, entity-first schema sync (it creates missing tables and columns). The
-generator here needs things neither has: triggers and functions, exclusion constraints,
-extensions, partial / expression / opclass indexes, renames and down migrations.
-Building on them would also tie the migration IR to SeaORM, which the plan treats as a
-replaceable engine. Its introspection crate `sea-schema` is a good fit for the next
-step, diffing a live database instead of a snapshot to detect drift.
+`sea-orm-migration` and Refinery are runners for hand-written migrations. Refinery
+has no down migrations and doesn't use sqlx. SeaORM's entity schema sync only adds
+missing tables and columns. None has triggers, exclusion constraints, extensions,
+renames or snapshot diffs, and using them would tie the migration IR to one engine. If
+the runner moves into Rust so every binding shares it, `sqlx::migrate` (already a
+dependency) is the natural base. `sea-schema` introspection fits drift detection.
 
 ## Not done yet
 
-* Introspection of a live database: drift detection, adopting an existing schema.
+* TypeScript generation and the JS binding.
+* Introspection of a live database (drift detection, adopting an existing schema).
 * `CREATE INDEX CONCURRENTLY` / non-transactional migrations.
-* Generated columns, views / materialized views, sequences, enum and domain types,
-  row-level security policies, partitioning, multiple database schemas.
-* Composite foreign keys; changing a function's return type (Postgres can't replace
-  it in place; drop the trigger in a hand-edited migration).
-* The schema DSL: `examples/blog/schema.orm` shows the planned `@@index` / `@@check`
-  syntax, but `models.py` is still written by hand.
+* Array columns, generated columns, views, enums and domains, row-level security,
+  partitioning, multiple database schemas, composite foreign keys.

@@ -20,8 +20,9 @@ automatically: each relation hop becomes a correlated `EXISTS`.
 | Path | What |
 |---|---|
 | `python/orm/` | Python package: `expr.py` (expressions → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
-| `native/` | Rust crate `orm._native` (PyO3): `ir.rs` (schema + query IR), `plan.rs` (IR → SQL), `migrate/` (migration generator, see [`schema.md`](schema.md)), `ext.rs` (extension catalog), `convert.rs`, `lib.rs` |
-| `examples/blog/` | `schema.orm` plus `models.py` / `models.pyi` written by hand in the shape codegen will emit; `demo.py` |
+| `core/` | Rust crate `orm-core`, no binding code: schema language, IR (`ir.rs`), extensions, migrations, code generation, the `orm` CLI (see [`schema.md`](schema.md)) |
+| `native/` | Rust crate `orm._native` (PyO3) on top of `orm-core`: `plan.rs` (IR → SQL), `convert.rs`, `lib.rs` |
+| `examples/blog/` | `schema.orm`, the `models.py` / `models.pyi` generated from it, its migrations, `demo.py` |
 | `tests/` | SQL shape tests (no DB), Postgres end-to-end tests, mypy + pyright stub checks |
 
 ```bash
@@ -34,11 +35,11 @@ python examples/blog/demo.py
 
 ## Models: the generated module
 
-For each schema model, the generator will emit two files:
+`python -m orm generate` turns `schema.orm` into two files (see [`schema.md`](schema.md)):
 
-* **`models.py` (runtime).** Declarative field and relation descriptors, e.g.
-  `email = f.String(254, unique=True)`, `posts = f.HasMany("Post", via="author_id")`.
-  This is what the IR is built from.
+* **`models.py` (runtime).** The compiled schema IR plus `orm.define()`, which builds
+  the model classes (field and relation descriptors) from it. `orm.load("schema.orm")`
+  does the same at runtime without a generated file.
 * **`models.pyi` (types).** Per model:
   * the model class (`id: f.BigInt[int]`, `posts: f.HasMany[Post, _PostPath]`, a typed
     `update()`);
@@ -235,7 +236,6 @@ per row, which can move into Rust later.
 
 ## Not done yet
 
-* Schema DSL parser and code generator (`models.py` / `.pyi` are hand-written).
 * `values()` / `values_list()`, aggregates beyond `count()`, `annotate`, `distinct`,
   `in_bulk`, `select_for_update`, `update().returning()` for query sets, upsert with
   expression updates (`views = views + EXCLUDED.views`).

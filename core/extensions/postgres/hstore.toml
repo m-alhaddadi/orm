@@ -1,0 +1,4 @@
+# Key/value store. Only the index operator classes are described here; hstore
+# columns need a value mapping before they can be declared.
+name = "hstore"
+opclasses = ["gin_hstore_ops", "gist_hstore_ops"]
