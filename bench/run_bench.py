@@ -8,6 +8,7 @@ Compares reading and writing 1 / 50 / 1000 posts through:
   sqla-psycopg       SQLAlchemy 2.0 AsyncSession on psycopg 3 (same driver as Django)
   ormcore-obj        PyO3 + SeaORM, returns #[pyclass] objects
   ormcore-dict       PyO3 + SeaORM, returns dicts (reads only)
+  ormcore-sync       PyO3 + SeaORM sync API (block_on, GIL released), #[pyclass] objects
   rust-only          SeaORM timed inside Rust: no Python objects, no event-loop hops
   django-sync        Django sync ORM, for reference
 
@@ -235,6 +236,24 @@ class SqlaAsync:
                 await s.commit()
 
 
+class OrmcoreSync:
+    def __init__(self, client):
+        self.c = client
+
+    def read(self, n, _):
+        touch_obj(self.c.fetch_posts_sync(n, "obj"))
+
+    def read_join(self, n, _):
+        touch_obj(self.c.fetch_posts_with_author_sync(n, "obj"), join=True)
+
+    def write_bulk(self, n, rows):
+        self.c.insert_posts_sync(rows)
+
+    def write_loop(self, n, rows):
+        for r in rows:
+            self.c.insert_post_sync(r)
+
+
 class DjangoSync:
     """Sync reference; run from a worker thread so Django's async-safety check is happy."""
 
@@ -316,6 +335,7 @@ async def main_async(args, u):
         "sqla-psycopg": SqlaAsync(sqla_psycopg),
         "ormcore-obj": Ormcore(rust_client, "obj"),
         "ormcore-dict": Ormcore(rust_client, "dict"),
+        "ormcore-sync": OrmcoreSync(rust_client),
         "rust-only": None,
         "django-sync": DjangoSync(),
     }
@@ -339,6 +359,11 @@ async def main_async(args, u):
                 elif name == "django-sync":
                     samples = await asyncio.to_thread(
                         time_sync, getattr(impl, op), op, n, admin_sync, args.quick
+                    )
+                elif name == "ormcore-sync":
+                    samples = time_sync(
+                        getattr(impl, op), op, n,
+                        lambda: admin.delete_posts_above_sync(SEED_MAX_ID), args.quick,
                     )
                 elif hasattr(impl, op):
                     samples = await time_async(getattr(impl, op), op, n, admin, args.quick)

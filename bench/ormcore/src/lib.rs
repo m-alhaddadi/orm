@@ -283,6 +283,16 @@ async fn delete_above(db: &DatabaseConnection, id: i64) -> Result<u64, DbErr> {
         .map(|r| r.rows_affected)
 }
 
+/// Run a future to completion on the shared Tokio runtime, GIL released.
+fn block_on<F, T>(py: Python<'_>, fut: F) -> PyResult<T>
+where
+    F: std::future::Future<Output = Result<T, DbErr>> + Send,
+    T: Send,
+{
+    py.detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(fut))
+        .map_err(db_err)
+}
+
 #[pyclass(frozen, module = "ormcore")]
 struct Client {
     db: DatabaseConnection,
@@ -425,6 +435,64 @@ impl Client {
             }
             Ok(out)
         })
+    }
+
+    // --- sync API -------------------------------------------------------------
+    // Same queries, but the calling Python thread blocks on the Tokio runtime with the
+    // GIL released, so there is no asyncio <-> Tokio hand-off.
+
+    /// `client.fetch_posts_sync(limit, mode)` -> list of dicts or Post objects.
+    #[pyo3(signature = (limit, mode = "obj"))]
+    fn fetch_posts_sync(&self, py: Python<'_>, limit: u64, mode: &str) -> PyResult<Py<PyList>> {
+        let mode = Mode::parse(mode)?;
+        let rows = block_on(py, select_posts(&self.db, limit))?;
+        let items = rows
+            .iter()
+            .map(|p| post_to_py(py, p, None, mode))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, items)?.unbind())
+    }
+
+    /// `client.fetch_posts_with_author_sync(limit, mode)` -> posts with `author` joined.
+    #[pyo3(signature = (limit, mode = "obj"))]
+    fn fetch_posts_with_author_sync(&self, py: Python<'_>, limit: u64, mode: &str) -> PyResult<Py<PyList>> {
+        let mode = Mode::parse(mode)?;
+        let rows = block_on(py, select_posts_with_author(&self.db, limit))?;
+        let items = rows
+            .iter()
+            .map(|(p, a)| post_to_py(py, p, a.as_ref(), mode))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, items)?.unbind())
+    }
+
+    /// `client.insert_posts_sync([dict, ...])` -> list of new ids.
+    fn insert_posts_sync(&self, py: Python<'_>, rows: &Bound<'_, PyList>) -> PyResult<Vec<i64>> {
+        let rows = rows
+            .iter()
+            .map(|r| NewPost::extract(&r))
+            .collect::<PyResult<Vec<_>>>()?;
+        block_on(py, insert_many(&self.db, rows))
+    }
+
+    /// `client.insert_post_sync(dict)` -> new id.
+    fn insert_post_sync(&self, py: Python<'_>, row: &Bound<'_, PyAny>) -> PyResult<i64> {
+        let row = NewPost::extract(row)?;
+        block_on(py, async {
+            post::Entity::insert(row.into_active())
+                .exec(&self.db)
+                .await
+                .map(|r| r.last_insert_id)
+        })
+    }
+
+    /// `client.delete_posts_above_sync(id)` -> rows deleted.
+    fn delete_posts_above_sync(&self, py: Python<'_>, id: i64) -> PyResult<u64> {
+        block_on(py, delete_above(&self.db, id))
+    }
+
+    /// `client.noop_sync()` -> None. Measures the bare block_on round trip.
+    fn noop_sync(&self, py: Python<'_>) -> PyResult<()> {
+        block_on(py, async { Ok(()) })
     }
 
     /// `await client.noop()` -> None. Measures the bare asyncio <-> Tokio bridge cost.
