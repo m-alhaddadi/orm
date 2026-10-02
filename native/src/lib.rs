@@ -21,7 +21,7 @@ use sea_query::{Alias, Expr as SExpr, ExprTrait};
 use crate::db::{DbResult, Driver, Executor, RowSet};
 use crate::errors::{db_err, query_err, schema_err};
 use crate::plan::{Plan, Planner, SelectPlan};
-use orm_core::dialect::Dialect;
+use orm_core::dialect::{Dialect, Target};
 use orm_core::ir::{ColType, Operation};
 
 /// Marker for "use the column's server default" in insert rows.
@@ -37,6 +37,49 @@ impl DefaultMarker {
 
 fn parse_op(op_json: &str) -> PyResult<Operation> {
     serde_json::from_str(op_json).map_err(|e| query_err(format!("invalid query IR: {e}")))
+}
+
+/// Postgres accepts at most this many parameters in one statement.
+const MAX_PARAMS: usize = 65_535;
+
+/// `update_many`'s statements: `rows` (sequences aligned with `fields`, primary key
+/// first) converted by column type and split so no statement exceeds `MAX_PARAMS`, or
+/// `batch_size` rows.
+#[allow(clippy::too_many_arguments)]
+fn update_many_plan<'py>(
+    schema: &schema::Schema,
+    target: Target,
+    model: &str,
+    fields: &[String],
+    rows: &Bound<'py, PyList>,
+    filters_json: &str,
+    params: &[Bound<'py, PyAny>],
+    returning: bool,
+    batch_size: Option<usize>,
+) -> PyResult<(Vec<sea_query::UpdateStatement>, Option<Vec<ColType>>)> {
+    let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+    let types = fields.iter().map(|f| m.field(f).map(|f| f.ty)).collect::<Result<Vec<_>, _>>().map_err(query_err)?;
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows.iter() {
+        let row = row
+            .try_iter()?
+            .zip(&types)
+            .map(|(item, ty)| convert::py_to_value(&item?, Some(*ty)))
+            .collect::<PyResult<Vec<_>>>()?;
+        if row.len() != fields.len() {
+            return Err(query_err("update_many row length does not match fields".into()));
+        }
+        values.push(row);
+    }
+    let filters: Vec<ir::Expr> =
+        serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
+    let per_row = if target.caps.update_from_values { fields.len() } else { 2 * fields.len() - 1 };
+    // Leave room for the filters' parameters.
+    let mut chunk = MAX_PARAMS.saturating_sub(params.len()) / per_row.max(1);
+    if let Some(n) = batch_size {
+        chunk = chunk.min(n);
+    }
+    plan::plan_update_many(schema, target, model, fields, &values, chunk, &filters, params, returning)
 }
 
 /// The compiled schema. Usable without a connection, e.g. to render SQL.
@@ -59,12 +102,32 @@ impl PySchema {
     fn sql(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<String> {
         let op = parse_op(op_json)?;
         let d = Dialect::Postgres;
-        Ok(match Planner::plan(&self.inner, d, &op, &params)? {
+        Ok(match Planner::plan(&self.inner, Target::new(d), &op, &params)? {
             Plan::Select(p) => db::to_string(d, &p.stmt),
             Plan::Count(s) | Plan::Exists(s) => db::to_string(d, &s),
             Plan::Update(s, _) => db::to_string(d, &s),
             Plan::Delete(s, _) => db::to_string(d, &s),
         })
+    }
+
+    /// The SQL of `update_many` (one statement per batch), parameters inlined. For
+    /// debugging and tests; `disable` switches capabilities off as in `connect`.
+    #[pyo3(signature = (model, fields, rows, filters_json = "[]", params = vec![], batch_size = None, disable = vec![]))]
+    #[allow(clippy::too_many_arguments)]
+    fn update_many_sql<'py>(
+        &self,
+        model: &str,
+        fields: Vec<String>,
+        rows: &Bound<'py, PyList>,
+        filters_json: &str,
+        params: Vec<Bound<'py, PyAny>>,
+        batch_size: Option<usize>,
+        disable: Vec<String>,
+    ) -> PyResult<Vec<String>> {
+        let target = Target::new(Dialect::Postgres).without(&disable).map_err(query_err)?;
+        let (stmts, _) =
+            update_many_plan(&self.inner, target, model, &fields, rows, filters_json, &params, false, batch_size)?;
+        Ok(stmts.iter().map(|s| db::to_string(target.dialect, s)).collect())
     }
 
     /// Idempotent DDL for the whole schema, in dependency order.
@@ -177,7 +240,7 @@ impl Transaction {
 #[pyclass(frozen, module = "orm._native")]
 struct Engine {
     driver: Arc<dyn Driver>,
-    dialect: Dialect,
+    target: Target,
     schema: Arc<schema::Schema>,
 }
 
@@ -232,8 +295,8 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let op = parse_op(op_json)?;
-        let d = self.dialect;
-        let plan = Planner::plan(&self.schema, d, &op, &params)?;
+        let d = self.target.dialect;
+        let plan = Planner::plan(&self.schema, self.target, &op, &params)?;
         let conn = self.conn(tx);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let conn = conn.as_ref();
@@ -301,12 +364,82 @@ impl Engine {
             Some(update) => plan::OnConflict::Update(target, update, set),
             None => plan::OnConflict::Nothing(target),
         });
-        let (stmt, types) = plan::plan_insert(&self.schema, self.dialect, model, &fields, rows, on_conflict, &params)?;
-        let (sql, args) = db::build(self.dialect, &stmt);
+        let (stmt, types) = plan::plan_insert(&self.schema, self.target, model, &fields, rows, on_conflict, &params)?;
+        let (sql, args) = db::build(self.target.dialect, &stmt);
         let conn = self.conn(tx);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let rows = conn.query(sql, args).await.map_err(db_err)?;
             Python::attach(|py| rows.to_py(py, &types).map(|l| l.unbind()))
+        })
+    }
+
+    /// Updates each row (a sequence aligned with `fields`, the primary key first) to its
+    /// own values, among the rows matching `filters_json` (JSON list of filter IR, values
+    /// in `params`). Big inputs run as several statements in one transaction (inside `tx`
+    /// when given). Returns the number of rows updated, or the rows with `returning`.
+    #[pyo3(signature = (model, fields, rows, filters_json, params, returning = false, batch_size = None, tx = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn update_many<'py>(
+        &self,
+        py: Python<'py>,
+        model: &str,
+        fields: Vec<String>,
+        rows: &Bound<'py, PyList>,
+        filters_json: &str,
+        params: Vec<Bound<'py, PyAny>>,
+        returning: bool,
+        batch_size: Option<usize>,
+        tx: Option<&Bound<'py, Transaction>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (stmts, types) = update_many_plan(
+            &self.schema, self.target, model, &fields, rows, filters_json, &params, returning, batch_size,
+        )?;
+        let d = self.target.dialect;
+        let built: Vec<_> = stmts.iter().map(|s| db::build(d, s)).collect();
+        let conn = self.conn(tx);
+        let own_tx = tx.is_none() && built.len() > 1;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let tx = if own_tx { Some(conn.begin().await.map_err(db_err)?) } else { None };
+            let exec: &dyn Executor = match &tx {
+                Some(t) => t.as_ref(),
+                None => conn.as_ref(),
+            };
+            let mut count = 0u64;
+            let mut fetched = vec![];
+            let mut failed = None;
+            for (sql, args) in built {
+                let r = match &types {
+                    None => exec.execute(sql, args).await.map(|n| count += n),
+                    Some(_) => exec.query(sql, args).await.map(|rows| fetched.push(rows)),
+                };
+                if let Err(e) = r {
+                    failed = Some(e);
+                    break;
+                }
+            }
+            if let Some(t) = tx {
+                match failed {
+                    None => t.commit().await.map_err(db_err)?,
+                    Some(_) => {
+                        let _ = t.rollback().await;
+                    }
+                }
+            }
+            if let Some(e) = failed {
+                return Err(db_err(e));
+            }
+            Python::attach(|py| match &types {
+                None => count.into_py_any(py),
+                Some(types) => {
+                    let all = PyList::empty(py);
+                    for rows in &fetched {
+                        for r in rows.to_py(py, types)?.iter() {
+                            all.append(r)?;
+                        }
+                    }
+                    all.into_py_any(py)
+                }
+            })
         })
     }
 
@@ -432,19 +565,23 @@ fn generate_python(path: &str) -> PyResult<(String, String)> {
 }
 
 /// `engine = await connect(url, schema, max_connections=10)`
+///
+/// `disable` switches capabilities off (`"ilike"`, `"update_from_values"`, ...), so the
+/// planner takes its fallback paths: for tests of SQL other databases will need.
 #[pyfunction]
-#[pyo3(signature = (url, schema, max_connections = 10))]
+#[pyo3(signature = (url, schema, max_connections = 10, disable = vec![]))]
 fn connect<'py>(
     py: Python<'py>,
     url: String,
     schema: &Bound<'py, PySchema>,
     max_connections: u32,
+    disable: Vec<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let schema = schema.get().inner.clone();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let driver = db::connect(&url, max_connections as usize).await.map_err(db_err)?;
-        let dialect = driver.dialect();
-        Ok(Engine { driver, dialect, schema })
+        let target = Target::new(driver.dialect()).without(&disable).map_err(query_err)?;
+        Ok(Engine { driver, target, schema })
     })
 }
 

@@ -81,7 +81,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     }
     let names: Vec<&str> = schema.models.iter().map(|m| m.ir.name.as_str()).collect();
     let mut exported: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-    exported.extend(names.iter().flat_map(|n| [format!("{n}Insert"), format!("{n}Update")]));
+    exported.extend(names.iter().flat_map(|n| [format!("{n}Insert"), format!("{n}Update"), format!("{n}UpdateRow")]));
     exported.extend(names.iter().map(|n| format!("{n}QuerySet")));
     let all = exported.iter().map(|n| format!("    \"{n}\",\n")).collect::<String>();
 
@@ -103,7 +103,8 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     py.push_str("\n# Typed per model in models.pyi; plain aliases at runtime so the names can be imported.\n");
     let qs: Vec<String> = names.iter().map(|n| format!("{n}QuerySet")).collect();
     writeln!(py, "{} = QuerySet", qs.join(" = ")).unwrap();
-    let dicts: Vec<String> = names.iter().flat_map(|n| [format!("{n}Insert"), format!("{n}Update")]).collect();
+    let dicts: Vec<String> =
+        names.iter().flat_map(|n| [format!("{n}Insert"), format!("{n}Update"), format!("{n}UpdateRow")]).collect();
     writeln!(py, "{} = dict\n", dicts.join(" = ")).unwrap();
     writeln!(py, "__all__ = [\n{all}]").unwrap();
 
@@ -183,6 +184,20 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
                 writeln!(body, "    {}: {target}", r.name).unwrap();
             }
         }
+        // update_many rows: the primary key plus plain values (no expressions)
+        writeln!(body, "\nclass {name}UpdateRow(TypedDict, total=False):").unwrap();
+        for f in m.fields() {
+            let t = value_type(f);
+            if f.primary_key {
+                writeln!(body, "    {}: Required[{t}]", f.name).unwrap();
+            } else {
+                writeln!(body, "    {}: {t}", f.name).unwrap();
+            }
+            if let Some(r) = belongs(&f.name) {
+                let target = if f.nullable { format!("{} | None", r.target) } else { r.target.clone() };
+                writeln!(body, "    {}: {target}", r.name).unwrap();
+            }
+        }
         writeln!(body, "\nclass {name}QuerySet(QuerySet[{name}]):").unwrap();
         writeln!(
             body,
@@ -196,7 +211,13 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         .unwrap();
         writeln!(
             body,
-            "    def update(self, **values: Unpack[{name}Update]) -> Update[{name}]: ...  # type: ignore[override]\n"
+            "    def update(self, **values: Unpack[{name}Update]) -> Update[{name}]: ...  # type: ignore[override]"
+        )
+        .unwrap();
+        writeln!(
+            body,
+            "    def update_many(self, rows: Iterable[{name}UpdateRow], *, batch_size: int | None = None) \
+             -> UpdateMany[{name}]: ...  # type: ignore[override]\n"
         )
         .unwrap();
     }
@@ -210,22 +231,28 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
          #     a read-only str on an instance), relation descriptors and typed `update()`;\n\
          #   * a path class (`_UserPath`): what a relation to the model evaluates to on the class\n\
          #     side, so `User.posts.created_at` autocompletes and type-checks as ColumnRef[datetime];\n\
-         #   * `UserInsert` / `UserUpdate` TypedDicts: the row shapes accepted by insert / update;\n\
-         #   * a query set class (`UserQuerySet`): typed `insert()`, `insert_many()`, `update()`.\n\n\
+         #   * `UserInsert` / `UserUpdate` / `UserUpdateRow` TypedDicts: the row shapes accepted by\n\
+         #     insert / update / update_many;\n\
+         #   * a query set class (`UserQuerySet`): typed `insert()`, `insert_many()`, `update()`,\n\
+         #     `update_many()`.\n\n\
          from collections.abc import Iterable\n",
     );
     let dt: Vec<&str> = ["date", "datetime"].into_iter().filter(|d| used.contains(d)).collect();
     if !dt.is_empty() {
         writeln!(pyi, "from datetime import {}", dt.join(", ")).unwrap();
     }
-    let typing = if used.contains("Any") { "Any, ClassVar, NotRequired, TypedDict" } else { "ClassVar, NotRequired, TypedDict" };
+    let typing = if used.contains("Any") {
+        "Any, ClassVar, NotRequired, Required, TypedDict"
+    } else {
+        "ClassVar, NotRequired, Required, TypedDict"
+    };
     writeln!(pyi, "from typing import {typing}").unwrap();
     if used.contains("UUID") {
         pyi.push_str("from uuid import UUID\n");
     }
     pyi.push_str(
         "\nfrom typing_extensions import Unpack\n\n\
-         from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update\n\
+         from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update, UpdateMany\n\
          from orm import fields as f\n\n",
     );
     pyi.push_str(&body);

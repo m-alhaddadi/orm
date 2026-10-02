@@ -9,6 +9,7 @@ Writes are explicit statements, never side effects of touching an instance::
     n = await Post.objects.filter(...).update(views=Post.views + 1)
     posts = await Post.objects.filter(...).update(views=Post.views + 1).returning()
     n = await Post.objects.filter(...).delete()
+    n = await Post.objects.update_many([{"id": 1, "title": "a"}, {"id": 2, "title": "b"}])
 
 A statement runs when awaited. Inserts are one ``INSERT ... RETURNING`` that also fills
 in database defaults (ids, timestamps) on the returned instances. Updates and deletes
@@ -32,7 +33,16 @@ if TYPE_CHECKING:
 R = TypeVar("R")
 M = TypeVar("M", bound="Model")
 
-__all__ = ["InsertOne", "InsertMany", "OnConflictOne", "OnConflictMany", "Update", "Delete", "Returning"]
+__all__ = [
+    "InsertOne",
+    "InsertMany",
+    "OnConflictOne",
+    "OnConflictMany",
+    "Update",
+    "UpdateMany",
+    "Delete",
+    "Returning",
+]
 
 
 def prepare_rows(
@@ -70,6 +80,46 @@ def prepare_rows(
     fields = [n for n in meta.field_names if any(n in v for v in normalized)]
     aligned = [[v.get(n, _native.DEFAULT) for n in fields] for v in normalized]
     return fields, aligned, provided
+
+
+def prepare_update_rows(model: type[Model], rows: Iterable[Mapping[str, Any]]) -> tuple[list[str], list[list[Any]]]:
+    """Validates ``update_many`` rows: each has the primary key and the same fields,
+    plain values only, no primary key twice. Returns (fields, rows) with the primary key
+    first and the other fields in schema order."""
+    meta = model._meta
+    pk = meta.pk.name
+    normalized: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    fields: set[str] | None = None
+    for n, row in enumerate(rows):
+        values: dict[str, Any] = {}
+        for key, value in row.items():
+            if isinstance(value, Expression):
+                raise TypeError(f"{meta.name}.{key}: update_many takes plain values, not expressions")
+            if key in meta.fields:
+                values[key] = value
+            elif isinstance(rel := meta.relations.get(key), BelongsTo):
+                values[rel.via] = None if value is None else getattr(value, rel.to)
+            else:
+                raise TypeError(f"{meta.name} has no field {key!r}")
+        if values.get(pk) is None:
+            raise ValueError(f"update_many row {n} has no {pk}")
+        if values[pk] in seen:
+            raise ValueError(f"update_many: {pk}={values[pk]!r} appears twice")
+        seen.add(values[pk])
+        keys = set(values)
+        if fields is None:
+            if keys == {pk}:
+                raise ValueError(f"update_many rows need a field to set besides {pk}")
+            fields = keys
+        elif keys != fields:
+            diff = ", ".join(sorted(keys ^ fields))
+            raise ValueError(f"update_many rows must set the same fields; row {n} differs in {diff}")
+        normalized.append(values)
+    if fields is None:
+        return [], []
+    names = [pk, *(f for f in meta.field_names if f in fields and f != pk)]
+    return names, [[v[f] for f in names] for v in normalized]
 
 
 def assignments(model: type[Model], values: Mapping[str, Any], ctx: IRContext) -> list[dict[str, Any]]:
@@ -341,3 +391,66 @@ class Returning(Generic[M]):
     def __repr__(self) -> str:
         op = "?" if self._ir is None else self._ir["op"]
         return f"<Returning {op} {self._qs!r}>"
+
+
+class UpdateMany(Generic[M]):
+    """``update_many``: ``await`` gives the number of rows updated; ``.returning()`` the
+    rows."""
+
+    __slots__ = ("_qs", "_fields", "_rows", "_batch_size", "_used")
+
+    def __init__(self, qs: QuerySet[M], rows: Iterable[Mapping[str, Any]], batch_size: int | None) -> None:
+        if batch_size is not None and batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        qs._mutation_ir("update", [])  # rejects sliced and locked query sets
+        self._qs = qs
+        self._fields, self._rows = prepare_update_rows(qs.model, rows)
+        self._batch_size = batch_size
+        self._used = False
+
+    async def _run(self, returning: bool) -> Any:
+        from .db import resolve
+
+        if not self._rows:
+            return [] if returning else 0
+        params: list[Any] = []
+        filters = self._qs._mutation_ir("update", params)["filters"]
+        db = resolve(self._qs._db)
+        return await db._update_many(
+            self._qs.model._meta.name, self._fields, self._rows, filters, params, returning, self._batch_size
+        )
+
+    def returning(self) -> _UpdateManyReturning[M]:
+        """Run with ``RETURNING`` and give the updated rows instead of a count."""
+        self._used = True
+        return _UpdateManyReturning(self)
+
+    async def _count(self) -> int:
+        n: int = await self._run(False)
+        return n
+
+    def __await__(self) -> Generator[Any, None, int]:
+        self._used = True
+        return self._count().__await__()
+
+    def __del__(self) -> None:
+        if not getattr(self, "_used", True):
+            warnings.warn(f"{self!r} was never awaited, so nothing was updated", RuntimeWarning, stacklevel=2)
+
+    def __repr__(self) -> str:
+        return f"<UpdateMany {self._qs.model.__name__} x{len(self._rows)} ({', '.join(self._fields[1:])})>"
+
+
+class _UpdateManyReturning(Generic[M]):
+    __slots__ = ("_stmt",)
+
+    def __init__(self, stmt: UpdateMany[M]) -> None:
+        self._stmt = stmt
+
+    async def _rows(self) -> list[M]:
+        qs = self._stmt._qs
+        rows = await self._stmt._run(True)
+        return qs._adopt([qs.model._from_row(r) for r in rows])
+
+    def __await__(self) -> Generator[Any, None, list[M]]:
+        return self._rows().__await__()

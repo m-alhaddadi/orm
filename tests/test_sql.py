@@ -143,3 +143,50 @@ def test_writes_validate_when_built():
         excluded(User.posts.views)
     with pytest.raises(TypeError):
         User.objects.insert(email="a", name="b").on_conflict(User.email).do_update(User.name, name="x")
+
+
+def native():
+    return Post._meta.registry.native()
+
+
+def test_update_many_joins_a_values_list():
+    (sql,) = native().update_many_sql("Post", ["id", "title", "views"], [[1, "a", 10], [2, "b", 20]])
+    assert sql == (
+        'UPDATE "posts" SET "title" = "v"."column2", "views" = "v"."column3" '
+        "FROM (VALUES (1, 'a', 10), (2, 'b', 20)) AS \"v\" WHERE \"posts\".\"id\" = \"v\".\"column1\""
+    )
+
+
+def test_update_many_falls_back_to_case():
+    (sql,) = native().update_many_sql("Post", ["id", "views"], [[1, 10], [2, 20]], disable=["update_from_values"])
+    assert sql == (
+        'UPDATE "posts" SET "views" = (CASE WHEN ("posts"."id" = 1) THEN 10 '
+        'WHEN ("posts"."id" = 2) THEN 20 END) WHERE "posts"."id" IN (1, 2)'
+    )
+
+
+def test_update_many_batches():
+    rows = [[i, "x"] for i in range(5)]
+    assert len(native().update_many_sql("Post", ["id", "title"], rows, batch_size=2)) == 3
+    # Without batch_size, as many rows as Postgres' 65535 parameters allow.
+    rows = [[i, i] for i in range(40_000)]
+    assert len(native().update_many_sql("Post", ["id", "views"], rows)) == 2
+
+
+def test_update_many_validation():
+    with pytest.raises(ValueError, match="has no id"):
+        Post.objects.update_many([{"title": "a"}])
+    with pytest.raises(ValueError, match="appears twice"):
+        Post.objects.update_many([{"id": 1, "title": "a"}, {"id": 1, "title": "b"}])
+    with pytest.raises(ValueError, match="same fields"):
+        Post.objects.update_many([{"id": 1, "title": "a"}, {"id": 2, "views": 3}])
+    with pytest.raises(ValueError, match="besides id"):
+        Post.objects.update_many([{"id": 1}])
+    with pytest.raises(TypeError, match="plain values"):
+        Post.objects.update_many([{"id": 1, "views": Post.views + 1}])
+    with pytest.raises(TypeError, match="no field"):
+        Post.objects.update_many([{"id": 1, "nope": 1}])
+    with pytest.raises(QueryError):
+        Post.objects.all()[:2].update_many([{"id": 1, "views": 1}])
+    with pytest.raises(ValueError):
+        Post.objects.update_many([{"id": 1, "views": 1}], batch_size=0)

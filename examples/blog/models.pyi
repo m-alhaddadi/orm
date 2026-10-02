@@ -5,16 +5,18 @@
 #     a read-only str on an instance), relation descriptors and typed `update()`;
 #   * a path class (`_UserPath`): what a relation to the model evaluates to on the class
 #     side, so `User.posts.created_at` autocompletes and type-checks as ColumnRef[datetime];
-#   * `UserInsert` / `UserUpdate` TypedDicts: the row shapes accepted by insert / update;
-#   * a query set class (`UserQuerySet`): typed `insert()`, `insert_many()`, `update()`.
+#   * `UserInsert` / `UserUpdate` / `UserUpdateRow` TypedDicts: the row shapes accepted by
+#     insert / update / update_many;
+#   * a query set class (`UserQuerySet`): typed `insert()`, `insert_many()`, `update()`,
+#     `update_many()`.
 
 from collections.abc import Iterable
 from datetime import datetime
-from typing import ClassVar, NotRequired, TypedDict
+from typing import ClassVar, NotRequired, Required, TypedDict
 
 from typing_extensions import Unpack
 
-from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update
+from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update, UpdateMany
 from orm import fields as f
 
 # -- User -------------------------------------------------------------------------------
@@ -52,10 +54,17 @@ class UserUpdate(TypedDict, total=False):
     name: str | Expression[str]
     created_at: datetime | Expression[datetime]
 
+class UserUpdateRow(TypedDict, total=False):
+    id: Required[int]
+    email: str
+    name: str
+    created_at: datetime
+
 class UserQuerySet(QuerySet[User]):
     def insert(self, **values: Unpack[UserInsert]) -> InsertOne[User]: ...  # type: ignore[override]
     def insert_many(self, rows: Iterable[UserInsert]) -> InsertMany[User]: ...  # type: ignore[override]
     def update(self, **values: Unpack[UserUpdate]) -> Update[User]: ...  # type: ignore[override]
+    def update_many(self, rows: Iterable[UserUpdateRow], *, batch_size: int | None = None) -> UpdateMany[User]: ...  # type: ignore[override]
 
 # -- Post -------------------------------------------------------------------------------
 
@@ -107,10 +116,21 @@ class PostUpdate(TypedDict, total=False):
     published: bool | Expression[bool]
     created_at: datetime | Expression[datetime]
 
+class PostUpdateRow(TypedDict, total=False):
+    id: Required[int]
+    author_id: int
+    author: User
+    title: str
+    body: str
+    views: int
+    published: bool
+    created_at: datetime
+
 class PostQuerySet(QuerySet[Post]):
     def insert(self, **values: Unpack[PostInsert]) -> InsertOne[Post]: ...  # type: ignore[override]
     def insert_many(self, rows: Iterable[PostInsert]) -> InsertMany[Post]: ...  # type: ignore[override]
     def update(self, **values: Unpack[PostUpdate]) -> Update[Post]: ...  # type: ignore[override]
+    def update_many(self, rows: Iterable[PostUpdateRow], *, batch_size: int | None = None) -> UpdateMany[Post]: ...  # type: ignore[override]
 
 # -- Comment ----------------------------------------------------------------------------
 
@@ -156,10 +176,20 @@ class CommentUpdate(TypedDict, total=False):
     body: str | Expression[str]
     created_at: datetime | Expression[datetime]
 
+class CommentUpdateRow(TypedDict, total=False):
+    id: Required[int]
+    post_id: int
+    post: Post
+    author_id: int | None
+    author: User | None
+    body: str
+    created_at: datetime
+
 class CommentQuerySet(QuerySet[Comment]):
     def insert(self, **values: Unpack[CommentInsert]) -> InsertOne[Comment]: ...  # type: ignore[override]
     def insert_many(self, rows: Iterable[CommentInsert]) -> InsertMany[Comment]: ...  # type: ignore[override]
     def update(self, **values: Unpack[CommentUpdate]) -> Update[Comment]: ...  # type: ignore[override]
+    def update_many(self, rows: Iterable[CommentUpdateRow], *, batch_size: int | None = None) -> UpdateMany[Comment]: ...  # type: ignore[override]
 
 __all__ = [
     "User",
@@ -167,10 +197,13 @@ __all__ = [
     "Comment",
     "UserInsert",
     "UserUpdate",
+    "UserUpdateRow",
     "PostInsert",
     "PostUpdate",
+    "PostUpdateRow",
     "CommentInsert",
     "CommentUpdate",
+    "CommentUpdateRow",
     "UserQuerySet",
     "PostQuerySet",
     "CommentQuerySet",

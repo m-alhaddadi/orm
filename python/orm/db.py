@@ -48,6 +48,20 @@ class Database:
         set_json, params = (json.dumps(set_[0]), set_[1]) if set_ is not None else (None, [])
         return await self._engine.insert(model, fields, rows, conflict, update, set_json, params, self._tx())
 
+    async def _update_many(
+        self,
+        model: str,
+        fields: list[str],
+        rows: list[list[Any]],
+        filters: list[dict[str, Any]],
+        params: list[Any],
+        returning: bool,
+        batch_size: int | None,
+    ) -> Any:
+        return await self._engine.update_many(
+            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx()
+        )
+
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
         """``async with db.transaction():`` — commits on success, rolls back on error.
@@ -123,17 +137,23 @@ class Database:
 
 
 async def connect(
-    url: str, *, max_connections: int = 10, default: bool = True, registry: Registry = registry
+    url: str,
+    *,
+    max_connections: int = 10,
+    default: bool = True,
+    registry: Registry = registry,
+    _disable: tuple[str, ...] = (),
 ) -> Database:
     """Open a connection pool. Import your model modules first: the schema is compiled
     from the models registered at this point (in ``registry``, the default one unless
     given).
 
     With ``default=True`` (the default) queries use this database unless
-    ``.using(db)`` says otherwise.
+    ``.using(db)`` says otherwise. ``_disable`` switches database capabilities off
+    (``"ilike"``, ``"update_from_values"``, ...) to test the SQL other databases get.
     """
     global _default
-    engine = await _native.connect(url, registry.native(), max_connections)
+    engine = await _native.connect(url, registry.native(), max_connections, list(_disable))
     db = Database(engine, url)
     if default:
         _default = db

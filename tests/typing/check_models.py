@@ -56,6 +56,8 @@ async def check() -> None:
         views=Post.views + excluded(Post.views)
     )
     assert_type(bumped, Post)
+    assert_type(await Post.objects.update_many([{"id": 1, "views": 2}]), int)
+    assert_type(await Post.objects.update_many([{"id": 1, "author": alice}]).returning(), list[Post])
     assert_type(Post.objects.lock(exclusive=False, skip_locked=True), PostQuerySet)
     assert_type(await Post.objects.lock().get(Post.id == 1), Post)
     assert_type(await orm_db().lock("key", nowait=True), bool)
@@ -72,6 +74,8 @@ async def errors() -> None:
     await User.objects.insert(email="a@b.c", name="A", nope=1)  # E: unknown field
     await Post.objects.update(views="many")  # E: wrong type
     await Post.objects.update(nope=1).returning()  # E: unknown field
+    await Post.objects.update_many([{"views": 2}])  # E: missing primary key
+    await Post.objects.update_many([{"id": 1, "views": Post.views + 1}])  # E: no expressions
     u = await User.objects.get(User.id == 1)
     u.name = "B"  # E: instances are read-only
     await u.update(name=1)  # E: wrong type

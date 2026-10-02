@@ -221,7 +221,7 @@ Comment = _models["Comment"]
 
 # Typed per model in models.pyi; plain aliases at runtime so the names can be imported.
 UserQuerySet = PostQuerySet = CommentQuerySet = QuerySet
-UserInsert = UserUpdate = PostInsert = PostUpdate = CommentInsert = CommentUpdate = dict
+UserInsert = UserUpdate = UserUpdateRow = PostInsert = PostUpdate = PostUpdateRow = CommentInsert = CommentUpdate = CommentUpdateRow = dict
 
 __all__ = [
     "User",
@@ -229,10 +229,13 @@ __all__ = [
     "Comment",
     "UserInsert",
     "UserUpdate",
+    "UserUpdateRow",
     "PostInsert",
     "PostUpdate",
+    "PostUpdateRow",
     "CommentInsert",
     "CommentUpdate",
+    "CommentUpdateRow",
     "UserQuerySet",
     "PostQuerySet",
     "CommentQuerySet",

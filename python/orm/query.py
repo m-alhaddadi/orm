@@ -21,7 +21,7 @@ from .expr import (
     not_,
 )
 from .fields import BelongsTo, HasMany
-from .write import Delete, InsertMany, InsertOne, Update, prepare_rows
+from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, prepare_rows
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -347,6 +347,17 @@ class QuerySet(Generic[M]):
         ``views=Post.views + 1``. ``await`` gives the number of rows updated;
         ``await qs.update(...).returning()`` gives the updated rows instead."""
         return Update.build(self, values)
+
+    def update_many(self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None) -> UpdateMany[M]:
+        """``UPDATE`` each row to its own values: ``rows`` are dicts with the primary key
+        and the fields to set (the same fields in every row)::
+
+            await Post.objects.update_many([{"id": 1, "title": "a"}, {"id": 2, "title": "b"}])
+
+        Rows outside this query set's filters are left alone. One statement per
+        ``batch_size`` rows (by default as many as fit), all in one transaction.
+        ``await`` gives the number of rows updated; ``.returning()`` gives the rows."""
+        return UpdateMany(self, rows, batch_size)
 
     def delete(self) -> Delete[M]:
         """``DELETE`` every matching row. ``await`` gives the number of rows deleted;

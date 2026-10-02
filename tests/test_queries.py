@@ -9,6 +9,7 @@ import pytest
 from blog.models import Comment, Post, User
 
 import orm
+from conftest import DATABASE_URL
 
 NOW = datetime.now(timezone.utc)
 YESTERDAY = NOW - timedelta(days=1)
@@ -277,6 +278,61 @@ async def test_upsert_with_expressions(clean):
     assert sorted(o.views for o in out) == [2, 100]
     with pytest.raises(orm.QueryError):
         await Post.objects.update(views=orm.excluded(Post.views))
+
+
+async def test_update_many(clean):
+    alice, bob, carol, (a1, a2, b1) = await seed()
+    rows = [
+        {"id": a1.id, "title": "A1", "views": 1},
+        {"id": a2.id, "title": "A2", "views": 2},
+        {"id": b1.id, "title": "B1", "views": 3},
+    ]
+    assert await Post.objects.update_many(rows) == 3
+    assert {(p.title, p.views) for p in await Post.objects} == {("A1", 1), ("A2", 2), ("B1", 3)}
+
+    # The query set's filters still apply: Bob's post is left alone.
+    rows = [{"id": a1.id, "views": 10}, {"id": b1.id, "views": 30}]
+    assert await Post.objects.filter(Post.author_id == alice.id).update_many(rows) == 1
+    assert await alice.posts.update_many([{"id": a2.id, "views": 20}, {"id": b1.id, "views": 30}]) == 1
+    assert sorted(p.views for p in await Post.objects) == [3, 10, 20]
+
+    # Relations, NULLs, RETURNING, unknown ids.
+    out = await Comment.objects.update_many(
+        [{"id": c.id, "author": None} for c in await Comment.objects]
+    ).returning()
+    assert len(out) == 3 and all(c.author_id is None for c in out)
+    moved = await Post.objects.update_many([{"id": b1.id, "author": alice}, {"id": 999, "author": alice}]).returning()
+    assert [(p.id, p.author_id) for p in moved] == [(b1.id, alice.id)]
+    assert await Post.objects.update_many([]) == 0
+
+
+async def test_update_many_batches_are_one_transaction(clean):
+    alice, bob, carol, (a1, a2, b1) = await seed()
+    rows = [{"id": a1.id, "views": 7}, {"id": a2.id, "views": 8}, {"id": b1.id, "views": -1}]
+    with pytest.raises(orm.IntegrityError):  # views >= 0 fails in the third batch
+        await Post.objects.update_many(rows, batch_size=1)
+    assert sorted(p.views for p in await Post.objects) == [5, 50, 100]  # nothing kept
+    assert len(await Post.objects.update_many(rows[:2], batch_size=1).returning()) == 2
+
+
+async def test_fallback_sql_runs_on_postgres(clean):
+    """The SQL used for databases without these features, run on Postgres."""
+    alice, bob, carol, (a1, a2, b1) = await seed()
+    db = await orm.connect(
+        DATABASE_URL, default=False, max_connections=2, _disable=("update_from_values", "ilike", "returning")
+    )
+    try:
+        rows = [{"id": a1.id, "title": "x", "views": 1}, {"id": b1.id, "title": "y", "views": 2}]
+        assert await Post.objects.using(db).update_many(rows) == 2
+        assert {(p.title, p.views) for p in await Post.objects.filter(Post.id.in_([a1.id, b1.id]))} == {
+            ("x", 1),
+            ("y", 2),
+        }
+        assert names(await User.objects.using(db).filter(User.name.icontains("ALI"))) == ["Alice"]
+        with pytest.raises(orm.QueryError, match="does not support update"):
+            await Post.objects.using(db).update(views=0).returning()
+    finally:
+        await db.close()
 
 
 async def _in_new_tx(fn):

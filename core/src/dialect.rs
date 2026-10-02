@@ -65,6 +65,46 @@ impl Dialect {
     }
 }
 
+/// A dialect with the capabilities queries are planned for: the dialect's own, minus
+/// any switched off (tests run the fallback paths on Postgres this way).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub dialect: Dialect,
+    pub caps: Capabilities,
+}
+
+impl Target {
+    pub const fn new(dialect: Dialect) -> Self {
+        Target { dialect, caps: dialect.capabilities() }
+    }
+
+    /// The same target with the named capabilities switched off.
+    pub fn without(mut self, features: &[String]) -> Result<Self, String> {
+        for f in features {
+            let flag = match f.as_str() {
+                "returning" => &mut self.caps.returning,
+                "on_conflict" => &mut self.caps.on_conflict,
+                "ilike" => &mut self.caps.ilike,
+                "lock_exclusive" => &mut self.caps.lock_exclusive,
+                "lock_shared" => &mut self.caps.lock_shared,
+                "lock_of" => &mut self.caps.lock_of,
+                "lock_nowait" => &mut self.caps.lock_nowait,
+                "lock_skip_locked" => &mut self.caps.lock_skip_locked,
+                "update_from_values" => &mut self.caps.update_from_values,
+                "savepoints" => &mut self.caps.savepoints,
+                other => return Err(format!("unknown capability {other:?}")),
+            };
+            *flag = false;
+        }
+        Ok(self)
+    }
+
+    /// `Err` naming the missing feature when `supported` is false.
+    pub fn require(&self, supported: bool, feature: &str) -> Result<(), String> {
+        Capabilities::require(supported, self.dialect, feature)
+    }
+}
+
 impl Capabilities {
     /// `Err` naming the missing feature when `supported` is false.
     pub fn require(supported: bool, dialect: Dialect, feature: &str) -> Result<(), String> {

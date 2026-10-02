@@ -15,7 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use sea_query::{
     self,
-    extension::postgres::PgExpr, Alias, DeleteStatement, Expr as SExpr, ExprTrait, InsertStatement,
+    extension::postgres::PgExpr, Alias, IntoIden, DeleteStatement, Expr as SExpr, ExprTrait, InsertStatement,
     JoinType, LikeExpr, LockBehavior, LockType, Order as SOrder, Query, SelectStatement, UpdateStatement,
 };
 
@@ -24,7 +24,7 @@ use crate::errors::query_err;
 use orm_core::ir::{
     ArithOp, Assignment, CmpOp, ColType, Delete, Expr, FieldIr, Lock, Operation, RelKind, Select, Update,
 };
-use orm_core::dialect::{Capabilities, Dialect};
+use orm_core::dialect::{Capabilities, Target};
 use orm_core::schema::Schema;
 
 pub struct PrefetchPlan {
@@ -165,14 +165,14 @@ pub struct Planner<'s, 'py> {
     next_alias: usize,
     /// `EXCLUDED.<field>` is only valid in an upsert's `DO UPDATE SET`.
     allow_excluded: bool,
-    dialect: Dialect,
+    target: Target,
     caps: Capabilities,
 }
 
 impl<'s, 'py> Planner<'s, 'py> {
     pub fn new(
         schema: &'s Schema,
-        dialect: Dialect,
+        target: Target,
         model: &str,
         params: &'s [Bound<'py, PyAny>],
     ) -> PyResult<Self> {
@@ -186,18 +186,18 @@ impl<'s, 'py> Planner<'s, 'py> {
             joins: vec![],
             next_alias: 0,
             allow_excluded: false,
-            dialect,
-            caps: dialect.capabilities(),
+            target,
+            caps: target.caps,
         })
     }
 
     pub fn plan(
         schema: &'s Schema,
-        dialect: Dialect,
+        target: Target,
         op: &Operation,
         params: &'s [Bound<'py, PyAny>],
     ) -> PyResult<Plan> {
-        let new = |model: &str| Planner::new(schema, dialect, model, params);
+        let new = |model: &str| Planner::new(schema, target, model, params);
         Ok(match op {
             Operation::Select(q) => Plan::Select(new(&q.model)?.select(q)?),
             Operation::Count(q) => Plan::Count(new(&q.model)?.count(q)?),
@@ -215,7 +215,7 @@ impl<'s, 'py> Planner<'s, 'py> {
 
     /// `QueryError` unless the dialect supports `feature`.
     fn require(&self, supported: bool, feature: &str) -> PyResult<()> {
-        Capabilities::require(supported, self.dialect, feature).map_err(query_err)
+        self.target.require(supported, feature).map_err(query_err)
     }
 
     fn alias(&mut self, prefix: &str) -> String {
@@ -693,7 +693,7 @@ pub enum OnConflict {
 /// SQL `DEFAULT` keyword.
 pub fn plan_insert<'py>(
     schema: &Schema,
-    dialect: Dialect,
+    target: Target,
     model: &str,
     fields: &[String],
     rows: &Bound<'py, PyList>,
@@ -727,8 +727,8 @@ pub fn plan_insert<'py>(
             stmt.values(values).map_err(|e| query_err(e.to_string()))?;
         }
     }
-    let caps = dialect.capabilities();
-    let require = |ok: bool, feature: &str| Capabilities::require(ok, dialect, feature).map_err(query_err);
+    let caps = target.caps;
+    let require = |ok: bool, feature: &str| target.require(ok, feature).map_err(query_err);
     require(caps.returning, "insert ... RETURNING")?;
     if let Some(oc) = on_conflict {
         require(caps.on_conflict, "insert(...).on_conflict()")?;
@@ -740,14 +740,14 @@ pub fn plan_insert<'py>(
                 .map_err(query_err)
         };
         let clause = match oc {
-            OnConflict::Nothing(target) => sea_query::OnConflict::columns(columns(&target)?).do_nothing().to_owned(),
-            OnConflict::Update(target, update, set) => {
+            OnConflict::Nothing(conflict) => sea_query::OnConflict::columns(columns(&conflict)?).do_nothing().to_owned(),
+            OnConflict::Update(conflict, update, set) => {
                 if update.is_empty() && set.is_empty() {
                     return Err(query_err("on_conflict(...).do_update() has no columns to update".into()));
                 }
-                let mut clause = sea_query::OnConflict::columns(columns(&target)?);
+                let mut clause = sea_query::OnConflict::columns(columns(&conflict)?);
                 clause.update_columns(columns(&update)?);
-                let mut planner = Planner::new(schema, dialect, model, params)?;
+                let mut planner = Planner::new(schema, target, model, params)?;
                 planner.allow_excluded = true;
                 for a in &set {
                     let f = m.field(&a.field).map_err(query_err)?;
@@ -761,4 +761,83 @@ pub fn plan_insert<'py>(
     }
     stmt.returning(Query::returning().exprs(m.fields().iter().map(returning_col)));
     Ok((stmt, m.fields().iter().map(|f| f.ty).collect()))
+}
+
+/// `UPDATE ... SET` each row to its own values, matched by primary key, as one
+/// statement per chunk of `rows`.
+///
+/// `fields[0]` is the primary key, the rest are the fields set; each row holds a value
+/// per field. Where the dialect can, it joins a `VALUES` list:
+///
+/// ```sql
+/// UPDATE posts SET title = v.column2, views = v.column3
+/// FROM (VALUES ($1, $2, $3), ...) AS v WHERE posts.id = v.column1 AND <filters>
+/// ```
+///
+/// otherwise it uses `SET title = CASE WHEN posts.id = $1 THEN $2 ... END ... WHERE
+/// posts.id IN (...)`. `filters` (planned against `params`) further restrict the rows.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_update_many<'py>(
+    schema: &Schema,
+    target: Target,
+    model: &str,
+    fields: &[String],
+    rows: &[Vec<sea_query::Value>],
+    chunk_rows: usize,
+    filters: &[Expr],
+    params: &[Bound<'py, PyAny>],
+    returning: bool,
+) -> PyResult<(Vec<UpdateStatement>, Option<Vec<ColType>>)> {
+    let mut planner = Planner::new(schema, target, model, params)?;
+    let m = schema.model(planner.root);
+    let table = m.table().to_owned();
+    let cols = fields.iter().map(|f| m.field(f)).collect::<Result<Vec<_>, _>>().map_err(query_err)?;
+    match cols.first() {
+        Some(pk) if pk.primary_key && cols.len() > 1 => {}
+        _ => return Err(query_err("update_many needs the primary key followed by the fields to set".into())),
+    }
+    if returning {
+        planner.require(planner.caps.returning, "update_many().returning()")?;
+    }
+    let where_ = planner.apply_filters(filters)?;
+    let pk_col = col(&table, &cols[0].column);
+    let mut stmts = vec![];
+    for chunk in rows.chunks(chunk_rows.max(1)) {
+        let mut stmt = Query::update();
+        stmt.table(Alias::new(&table));
+        if planner.caps.update_from_values {
+            for (i, c) in cols.iter().enumerate().skip(1) {
+                stmt.value(Alias::new(&c.column), write_expr(col("v", &format!("column{}", i + 1)), c));
+            }
+            let tuples = chunk.iter().map(|r| sea_query::ValueTuple::Many(r.clone())).collect();
+            stmt.from(sea_query::TableRef::ValuesList(tuples, Alias::new("v").into_iden()));
+            stmt.and_where(pk_col.clone().eq(col("v", "column1")));
+        } else {
+            for (i, c) in cols.iter().enumerate().skip(1) {
+                let mut case = sea_query::CaseStatement::new();
+                for r in chunk {
+                    case = case.case(pk_col.clone().eq(bind(r[0].clone(), Some(cols[0]))), bind(r[i].clone(), Some(c)));
+                }
+                let case: SExpr = case.into();
+                stmt.value(Alias::new(&c.column), case);
+            }
+            stmt.and_where(pk_col.clone().is_in(chunk.iter().map(|r| bind(r[0].clone(), Some(cols[0])))));
+        }
+        for w in &where_ {
+            stmt.and_where(w.clone());
+        }
+        if returning {
+            stmt.returning(Query::returning().exprs(m.fields().iter().map(|f| read_col(&table, f))));
+        }
+        stmts.push(stmt);
+    }
+    Ok((stmts, returning.then(|| m.fields().iter().map(|f| f.ty).collect())))
+}
+
+/// An expression assigned to field `f`: through its `write_sql` template, if any.
+fn write_expr(e: SExpr, f: &FieldIr) -> SExpr {
+    match &f.write_sql {
+        Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), e),
+        None => e,
+    }
 }

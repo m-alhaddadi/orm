@@ -26,7 +26,7 @@ from .errors import (
 from .expr import ColumnRef, Condition, Expression, Ordering, RelationPath, and_, excluded, not_, or_
 from .model import Model, Registry, define, load, loads, registry
 from .query import QuerySet, RelatedSet
-from .write import Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update
+from .write import Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update, UpdateMany
 
 __all__ = [
     "fields",
@@ -46,6 +46,7 @@ __all__ = [
     "OnConflictOne",
     "OnConflictMany",
     "Update",
+    "UpdateMany",
     "Delete",
     "Returning",
     "Expression",

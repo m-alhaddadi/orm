@@ -153,6 +153,10 @@ await Post.objects.filter(Post.views < 10).delete()
 posts = await Post.objects.filter(...).update(views=Post.views + 1).returning()   # list[Post]
 gone = await Post.objects.filter(...).delete().returning()
 
+# Each row to its own values, by primary key: one statement per batch
+n = await Post.objects.update_many([{"id": 1, "title": "a"}, {"id": 2, "title": "b"}])
+posts = await Post.objects.update_many(rows, batch_size=1000).returning()
+
 # One row, by primary key
 await post.update(title="New", views=Post.views + 1)   # UPDATE ... RETURNING; refreshes `post`
 await post.delete()
@@ -169,6 +173,14 @@ await post.refresh()
   the conflict columns is overwritten.
 * `update()` and `delete()` validate when called and return a statement: awaiting it
   gives the row count (no `RETURNING` in the SQL), `.returning()` gives the rows.
+* `update_many(rows)` is Django's `bulk_update` without mutated instances: each row is a
+  dict with the primary key and the fields to set, the same fields in every row, plain
+  values only. Postgres gets one `UPDATE posts SET title = v.column2 FROM (VALUES ...) AS
+  v WHERE posts.id = v.column1` per batch; databases without `UPDATE ... FROM` will get
+  Django's `SET title = CASE WHEN id = ... THEN ... END WHERE id IN (...)`. Batches hold as
+  many rows as fit in 65535 parameters unless `batch_size` says fewer, and run in one
+  transaction. The query set's filters still apply (`alice.posts.update_many(rows)`
+  leaves other authors' posts alone); ids that match nothing are skipped.
 * A write statement that is never awaited emits a `RuntimeWarning`, the same safety
   net an un-awaited coroutine has.
 * `instance.update()` changes exactly the fields named, and the instance then shows
@@ -183,6 +195,7 @@ Where the ideas come from:
 | insert many | `await s.execute(insert(User).returning(User), rows)` | `User.insert_all(rows)` | `await User.objects.insert_many(rows)` |
 | upsert | `pg_insert(User).on_conflict_do_update(...)` | `User.upsert_all(rows, unique_by: :email)` | `.insert_many(rows).on_conflict(User.email).do_update()` |
 | update a set | `update(User).where(...).values(...)` | `User.where(...).update_all(...)` | `await User.objects.filter(...).update(...)` |
+| update rows to different values | `session.execute(update(User), rows)` | `User.update(ids, rows)` (one by one) | `await User.objects.update_many(rows)` |
 | update a row | mutate + flush (unit of work) | `user.update(name: "B")` | `await user.update(name="B")` |
 | delete | `delete(User).where(...)` / `session.delete(u)` | `delete_all` / `user.destroy` | `await qs.delete()` / `await user.delete()` |
 
@@ -280,6 +293,8 @@ planner ──sea-query statement──▶ db::build(dialect) ──(SQL, [Value
   checks it, so a query needing a missing feature raises `QueryError` naming it (or is
   emulated: `icontains` becomes `LOWER(x) LIKE ...` without `ILIKE`) instead of sending
   SQL the database rejects. The same table is meant for build-time schema checks.
+  `orm.connect(url, _disable=("ilike", "update_from_values"))` switches capabilities off,
+  so the tests run those fallback paths on Postgres.
 * **Execution is per driver**, behind the traits in `native/src/db/mod.rs`: `Driver`
   (a pool), `Executor` (run SQL with values, on the pool or in a transaction),
   `Transaction` (commit, rollback, savepoints via `begin()`), `RowSet` (decode rows by
@@ -305,8 +320,6 @@ TLS on, the TLS cost hides the difference)
 
 * `values()` / `values_list()`, aggregates beyond `count()`, `annotate`, `distinct`,
   `in_bulk`.
-* `update_many(rows)`: a different value per row, keyed by primary key, in one
-  statement (`UPDATE ... FROM (VALUES ...)`, `CASE WHEN` where unsupported).
 * Drivers for MySQL and SQLite; schema checks against a dialect's capabilities.
 * Nested `prefetch_related` paths and `Prefetch(queryset=...)`.
 * Building instances in Rust (the remaining per-row cost), caching of compiled plans,
