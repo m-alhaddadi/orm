@@ -170,7 +170,7 @@ def define(
 def load(
     path: str | PathLike[str], *, registry: Registry | None = None, module: str | None = None
 ) -> dict[str, type[Model]]:
-    """Compile a schema file (``schema.orm``) and build its models: no generated code
+    """Compile a schema file (``schema.prisma``) and build its models: no generated code
     needed (generate ``models.py`` / ``.pyi`` for editor and type-checker support)."""
     return define(_native.compile_schema_file(str(path)), registry=registry, module=module)
 

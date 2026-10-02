@@ -1,21 +1,27 @@
-//! The schema language (`.orm` files).
+//! The schema language (`.prisma` files): Prisma's schema syntax, plus our own
+//! attributes and blocks for what Prisma lacks.
 //!
 //! ```text
 //! import "extensions/acme.toml"          // extra extension definitions (see ext.rs)
-//! extension postgis(version: "3.4")      // pin an extension; used ones are added anyway
 //!
-//! model User @table("users") {
-//!     id:         BigInt      @primary @auto
-//!     email:      citext      @unique             // extension type
-//!     created_at: DateTime    @default(now)
-//!     posts:      Post[]      @relation(via: Post.author_id)
+//! datasource db {
+//!   provider   = "postgresql"
+//!   extensions = [postgis(version: "3.4")] // pin an extension; used ones are added anyway
+//! }
 //!
-//!     @@index([created_at(sort: desc)], where: "email IS NOT NULL")
+//! model User {
+//!   id         BigInt   @id @default(autoincrement())
+//!   email      String   @unique @db.Citext   // extension type
+//!   created_at DateTime @default(now())
+//!   posts      Post[]
+//!
+//!   @@index([created_at(sort: Desc)], where: raw("email IS NOT NULL"))
+//!   @@map("users")
 //! }
 //! ```
 //!
 //! [`compile`] turns a file into the [`SchemaIr`] every binding consumes. The full
-//! reference is `docs/schema.md`.
+//! reference is `docs/schema.md`; `docs/prisma-syntax.md` has the design.
 
 mod lower;
 mod syntax;

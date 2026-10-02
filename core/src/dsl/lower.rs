@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::syntax::{err, Args, Attr, Item, Member, ModelDecl, Pos, Result, TypeRef, Value};
+use super::syntax::{err, Args, Attr, Item, Member, ModelDecl, Pos, Props, Result, TypeRef, Value};
 use crate::ext::{ExtensionDef, TypeDef};
 use crate::ir::{
     ColType, ConstraintIr, Deferrable, ExcludeElementIr, ExtensionIr, FieldIr, ForEach, FunctionIr, IndexColumnIr,
@@ -37,11 +37,27 @@ impl<'a> Named<'a> {
         }
     }
 
+    /// SQL text: `"..."` or Prisma's `raw("...")`.
+    fn sql(&mut self, key: &'a str) -> Result<Option<String>> {
+        match self.get(key) {
+            None => Ok(None),
+            Some((p, v)) => Ok(Some(raw_sql(p, v, &format!("{}: {key}", self.what))?)),
+        }
+    }
+
     /// A bare name or a string.
     fn name(&mut self, key: &'a str) -> Result<Option<String>> {
         match self.get(key) {
             None => Ok(None),
             Some((p, v)) => Ok(Some(name_of(p, v, &format!("{}: {key}", self.what))?)),
+        }
+    }
+
+    /// The database name of an index or constraint: `name:` or Prisma's `map:`.
+    fn db_name(&mut self) -> Result<Option<String>> {
+        match (self.str("name")?, self.str("map")?) {
+            (Some(_), Some(_)) => err(self.pos, format!("{}: give name: or map:, not both", self.what)),
+            (a, b) => Ok(a.or(b)),
         }
     }
 
@@ -84,6 +100,29 @@ fn name_of(pos: Pos, v: &Value, what: &str) -> Result<String> {
     }
 }
 
+/// `"..."` or `raw("...")`.
+fn raw_sql(pos: Pos, v: &Value, what: &str) -> Result<String> {
+    match v {
+        Value::Str(s) => Ok(s.clone()),
+        Value::Path(p, Some(args)) if p.len() == 1 && p[0] == "raw" => match args.positional.as_slice() {
+            [(_, Value::Str(s))] if args.named.is_empty() => Ok(s.clone()),
+            _ => err(pos, format!("{what}: raw(\"...\") takes one string")),
+        },
+        _ => err(pos, format!("{what}: expected SQL as \"...\" or raw(\"...\")")),
+    }
+}
+
+/// A call `name(...)` with one string argument, e.g. `dbgenerated("now()")`.
+fn call_str<'v>(v: &'v Value, name: &str) -> Option<std::result::Result<&'v str, ()>> {
+    match v {
+        Value::Path(p, args) if p.len() == 1 && p[0] == name => Some(match args.as_ref().map(|a| (a.positional.as_slice(), a.named.len())) {
+            Some(([(_, Value::Str(s))], 0)) => Ok(s.as_str()),
+            _ => Err(()),
+        }),
+        _ => None,
+    }
+}
+
 /// A type or storage-parameter argument as SQL text.
 fn sql_text(pos: Pos, v: &Value) -> Result<String> {
     match v {
@@ -101,11 +140,7 @@ fn json_of(pos: Pos, v: &Value) -> Result<serde_json::Value> {
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Num(n) => serde_json::from_str(n).map_err(|e| super::syntax::Error { pos, msg: e.to_string() })?,
         Value::List(items) => serde_json::Value::Array(items.iter().map(|(p, v)| json_of(*p, v)).collect::<Result<_>>()?),
-        Value::Object(entries) => serde_json::Value::Object(
-            entries.iter().map(|(k, p, v)| Ok((k.clone(), json_of(*p, v)?))).collect::<Result<_>>()?,
-        ),
-        Value::Path(p, _) if p.len() == 1 && p[0] == "null" => serde_json::Value::Null,
-        Value::Path(..) => return err(pos, "expected a literal"),
+        Value::Object(_) | Value::Path(..) => return err(pos, "expected a literal"),
     })
 }
 
@@ -121,32 +156,75 @@ fn deferrable(n: &mut Named<'_>) -> Result<Option<Deferrable>> {
 
 fn action(pos: Pos, s: &str) -> Result<OnDelete> {
     Ok(match s {
-        "cascade" => OnDelete::Cascade,
-        "set_null" => OnDelete::SetNull,
-        "set_default" => OnDelete::SetDefault,
-        "restrict" => OnDelete::Restrict,
-        "no_action" => OnDelete::NoAction,
-        _ => return err(pos, format!("unknown action {s}; use cascade, set_null, set_default, restrict or no_action")),
+        "Cascade" => OnDelete::Cascade,
+        "SetNull" => OnDelete::SetNull,
+        "SetDefault" => OnDelete::SetDefault,
+        "Restrict" => OnDelete::Restrict,
+        "NoAction" => OnDelete::NoAction,
+        _ => return err(pos, format!("unknown referential action {s}; use Cascade, SetNull, SetDefault, Restrict or NoAction")),
     })
 }
 
+/// Prisma's scalar types.
 fn builtin_type(name: &str) -> Option<ColType> {
     Some(match name {
         "BigInt" => ColType::BigInt,
         "Int" => ColType::Int,
         "Float" => ColType::Float,
-        "Bool" => ColType::Bool,
+        "Boolean" => ColType::Bool,
         "String" => ColType::String,
-        "Text" => ColType::Text,
         "DateTime" => ColType::DateTime,
-        "Date" => ColType::Date,
-        "Uuid" => ColType::Uuid,
         "Json" => ColType::Json,
+        // numeric; values travel as strings so no precision is lost
+        "Decimal" => ColType::String,
         _ => return None,
     })
 }
 
-const FIELD_ATTRS: &str = "@primary, @auto, @unique, @index, @default, @check, @comment, @column, @renamed_from, @db_type";
+/// Prisma's Postgres native types (`@db.X`) as SQL, and whether `X` is the SQL type
+/// the field type already maps to.
+fn native_type(name: &str, ty: ColType) -> Option<(&'static str, bool)> {
+    let sql = match name {
+        "Text" => "text",
+        "VarChar" => "varchar",
+        "Char" => "char",
+        "Bit" => "bit",
+        "VarBit" => "varbit",
+        "Uuid" => "uuid",
+        "Xml" => "xml",
+        "Inet" => "inet",
+        "Boolean" => "boolean",
+        "Integer" => "integer",
+        "SmallInt" => "smallint",
+        "Oid" => "oid",
+        "BigInt" => "bigint",
+        "DoublePrecision" => "double precision",
+        "Real" => "real",
+        "Decimal" => "numeric",
+        "Money" => "money",
+        "Timestamp" => "timestamp",
+        "Timestamptz" => "timestamptz",
+        "Date" => "date",
+        "Time" => "time",
+        "Timetz" => "timetz",
+        "Json" => "json",
+        "JsonB" => "jsonb",
+        "ByteA" => "bytea",
+        _ => return None,
+    };
+    let same = matches!(
+        (name, ty),
+        ("BigInt", ColType::BigInt)
+            | ("Integer", ColType::Int)
+            | ("DoublePrecision", ColType::Float)
+            | ("Boolean", ColType::Bool)
+            | ("Timestamptz", ColType::DateTime)
+            | ("JsonB", ColType::Json)
+    );
+    Some((sql, same))
+}
+
+const FIELD_ATTRS: &str = "@id, @unique, @default, @map, @db.*, @check, @comment, @renamed_from";
 
 pub struct Lowering<'l> {
     /// Reads an imported file (path as written in the schema).
@@ -186,19 +264,14 @@ impl Lowering<'_> {
             return err(dup.pos, format!("model {} is declared twice", dup.name));
         }
 
+        let mut datasource = false;
         for item in &items {
             match item {
-                Item::Extension { pos, name, args } => {
-                    let mut n = Named::new(format!("extension {name}"), args);
-                    n.no_positional()?;
-                    let schema = n.str("schema")?;
-                    let version = n.str("version")?;
-                    n.finish()?;
-                    if ir.extensions.iter().any(|e| e.name == *name) {
-                        return err(*pos, format!("extension {name} is declared twice"));
+                Item::Datasource { pos, props } => {
+                    if std::mem::replace(&mut datasource, true) {
+                        return err(*pos, "only one datasource block is allowed");
                     }
-                    let provides = ir.catalog.iter().find(|e| e.name == *name).map(|e| e.provides.clone()).unwrap_or_default();
-                    ir.extensions.push(ExtensionIr { name: name.clone(), schema, version, provides });
+                    datasource_block(&mut ir, *pos, props)?;
                 }
                 Item::Function { pos, name, props } => ir.functions.push(function(*pos, name, props)?),
                 Item::Model(_) | Item::Import { .. } => {}
@@ -215,10 +288,11 @@ impl Lowering<'_> {
             .map(|m| (m.name.clone(), m.fields.iter().find(|f| f.primary_key).map(|f| f.name.clone())))
             .collect();
         for (m, decl) in lowered.iter_mut().zip(&models) {
-            let pk = pks[&m.name].clone();
-            let Some(pk) = pk else { return err(decl.pos, format!("model {} has no @primary field", decl.name)) };
+            if pks[&m.name].is_none() {
+                return err(decl.pos, format!("model {} has no @id field", decl.name));
+            }
             for member in decl.members.iter().filter(|mm| model_names.contains_key(mm.ty.name.as_str())) {
-                let r = relation(member, &m.fields, &pk, &model_names, &pks)?;
+                let r = relation(decl, member, &m.fields, &model_names)?;
                 m.relations.push(r);
             }
             for block in &decl.blocks {
@@ -230,7 +304,43 @@ impl Lowering<'_> {
     }
 }
 
-fn function(pos: Pos, name: &str, props: &[(String, Pos, Value)]) -> Result<FunctionIr> {
+/// `datasource db { provider = "postgresql" extensions = [...] }`
+fn datasource_block(ir: &mut SchemaIr, pos: Pos, props: &Props) -> Result<()> {
+    let args = Args { pos, positional: vec![], named: props.clone() };
+    let mut n = Named::new("datasource", &args);
+    match n.get("provider") {
+        Some((_, Value::Str(p))) if p == "postgresql" || p == "postgres" => {}
+        Some((p, _)) => return err(p, "datasource: provider must be \"postgresql\""),
+        None => return err(pos, "datasource: provider = \"postgresql\" is missing"),
+    }
+    // The connection comes from ORM_DATABASE_URL / --url; Prisma's keys are accepted.
+    for key in ["url", "directUrl", "shadowDatabaseUrl"] {
+        n.get(key);
+    }
+    if let Some((p, v)) = n.get("extensions") {
+        let Value::List(list) = v else { return err(p, "datasource: extensions takes a list, e.g. [postgis, citext]") };
+        for (p, v) in list {
+            let (ident, args) = match v {
+                Value::Path(path, args) if path.len() == 1 => (&path[0], args.clone().unwrap_or(Args { pos: *p, ..Default::default() })),
+                _ => return err(*p, "datasource: an extension is a name, e.g. postgis(schema: \"ext\", version: \"3.4\")"),
+            };
+            let mut e = Named::new(format!("extension {ident}"), &args);
+            e.no_positional()?;
+            let name = e.str("map")?.unwrap_or_else(|| ident.clone());
+            let schema = e.str("schema")?;
+            let version = e.str("version")?;
+            e.finish()?;
+            if ir.extensions.iter().any(|x| x.name == name) {
+                return err(*p, format!("extension {name} is listed twice"));
+            }
+            let provides = ir.catalog.iter().find(|x| x.name == name).map(|x| x.provides.clone()).unwrap_or_default();
+            ir.extensions.push(ExtensionIr { name, schema, version, provides });
+        }
+    }
+    n.finish()
+}
+
+fn function(pos: Pos, name: &str, props: &Props) -> Result<FunctionIr> {
     let args = Args { pos, positional: vec![], named: props.to_vec() };
     let mut n = Named::new(format!("function {name}"), &args);
     let body = n.str("body")?;
@@ -262,18 +372,19 @@ fn model_fields(m: &ModelDecl, models: &HashMap<&str, &ModelDecl>, ctx: &Ctx) ->
         renamed_from: None,
         comment: None,
     };
-    for a in &m.attrs {
+    // model-level attributes that aren't schema objects; the rest come after relations
+    for a in &m.blocks {
         let text = |a: &Attr| -> Result<String> {
             match a.args.positional.as_slice() {
                 [(_, Value::Str(s))] if a.args.named.is_empty() => Ok(s.clone()),
-                _ => err(a.pos, format!("@{}(\"...\") takes one string", a.name)),
+                _ => err(a.pos, format!("{}: @@{}(\"...\") takes one string", m.name, a.name)),
             }
         };
         match a.name.as_str() {
-            "table" => ir.table = text(a)?,
+            "map" => ir.table = text(a)?,
             "comment" => ir.comment = Some(text(a)?),
             "renamed_from" => ir.renamed_from = Some(text(a)?),
-            other => return err(a.pos, format!("unknown model attribute @{other}; use @table, @comment or @renamed_from")),
+            _ => {}
         }
     }
     let mut seen = HashSet::new();
@@ -317,40 +428,55 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
         requires: vec![],
         hints: BTreeMap::new(),
     };
-    if let Some(ty) = builtin_type(name) {
-        f.ty = ty;
-        match (ty, args.positional.as_slice()) {
-            (_, []) => {}
-            (ColType::String, [(_, Value::Num(n))]) => {
-                f.max_length = Some(n.parse().map_err(|_| super::syntax::Error { pos: *pos, msg: format!("{what}: String(n) needs a positive integer") })?)
-            }
-            _ => return err(args.pos, format!("{what}: {name} takes no arguments")),
-        }
-        if !args.named.is_empty() {
-            return err(args.pos, format!("{what}: {name} takes no named arguments"));
-        }
-    } else if let Some((ext, def)) = ctx.types.get(name) {
-        let values = args.positional.iter().map(|(p, v)| sql_text(*p, v)).collect::<Result<Vec<_>>>()?;
-        if !args.named.is_empty() {
-            return err(args.pos, format!("{what}: extension types take positional arguments"));
-        }
-        let r = def.resolve(ext, name, &values).map_err(|e| super::syntax::Error { pos: *pos, msg: format!("{what}: {e}") })?;
+    let resolve = |f: &mut FieldIr, ty: &str, values: &[String]| -> Result<()> {
+        let Some((ext, def)) = ctx.types.get(ty) else {
+            return err(*pos, format!("{what}: unknown type {ty}; extension types come from the built-in extensions or an imported file"));
+        };
+        let r = def.resolve(ext, ty, values).map_err(|e| super::syntax::Error { pos: *pos, msg: format!("{what}: {e}") })?;
         f.ty = r.value;
         f.db_type = Some(r.db_type);
         f.read_sql = r.read_sql;
         f.write_sql = r.write_sql;
         f.hints = r.hints;
         f.requires = vec![r.extension];
+        Ok(())
+    };
+    let decimal = name == "Decimal";
+    if name == "Unsupported" {
+        // Unsupported("vector(384)"): a type from the extension catalog
+        let sql = match args.positional.as_slice() {
+            [(_, Value::Str(s))] if args.named.is_empty() => s.trim(),
+            _ => return err(args.pos, format!("{what}: Unsupported takes the SQL type as a string, e.g. Unsupported(\"vector(384)\")")),
+        };
+        let (ty, values) = match sql.split_once('(') {
+            Some((ty, rest)) => {
+                let Some(inner) = rest.trim_end().strip_suffix(')') else {
+                    return err(*pos, format!("{what}: unbalanced parentheses in {sql:?}"));
+                };
+                (ty.trim(), inner.split(',').map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()).collect())
+            }
+            None => (sql, vec![]),
+        };
+        resolve(&mut f, ty, &values)?;
+    } else if let Some(ty) = builtin_type(name) {
+        f.ty = ty;
+        if !args.positional.is_empty() || !args.named.is_empty() {
+            return err(args.pos, format!("{what}: {name} takes no arguments"));
+        }
+        if decimal {
+            f.db_type = Some("numeric".into());
+        }
     } else {
         return err(
             *pos,
             format!(
-                "{what}: unknown type {name}; expected a built-in type (BigInt, Int, Float, Bool, String, Text, \
-                 DateTime, Date, Uuid, Json), a model, or a type from an extension file"
+                "{what}: unknown type {name}; expected a model or BigInt, Int, Float, Boolean, String, DateTime, \
+                 Json, Decimal or Unsupported(\"<extension type>\")"
             ),
         );
     }
 
+    let mut native = false;
     for a in &member.attrs {
         fn one<'a>(a: &'a Attr, what: &str) -> Result<&'a Value> {
             match a.args.positional.as_slice() {
@@ -371,29 +497,86 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
                 err(a.pos, format!("{what}: @{} takes no arguments", a.name))
             }
         };
+        if let Some(db) = a.name.strip_prefix("db.") {
+            if std::mem::replace(&mut native, true) {
+                return err(a.pos, format!("{what}: only one @db.* attribute"));
+            }
+            if name == "Unsupported" {
+                return err(a.pos, format!("{what}: Unsupported(...) already names the SQL type"));
+            }
+            if !a.args.named.is_empty() {
+                return err(a.pos, format!("{what}: @db.{db} takes positional arguments"));
+            }
+            let values = a.args.positional.iter().map(|(p, v)| sql_text(*p, v)).collect::<Result<Vec<_>>>()?;
+            match (f.ty, db, values.as_slice()) {
+                (ColType::String, "VarChar", [n]) if !decimal => {
+                    f.max_length = Some(n.parse().map_err(|_| super::syntax::Error { pos: a.pos, msg: format!("{what}: @db.VarChar(n) needs a positive integer") })?)
+                }
+                (ColType::String, "VarChar", []) if !decimal => {}
+                (ColType::String, "Text", []) if !decimal => f.ty = ColType::Text,
+                (ColType::String, "Uuid", []) if !decimal => f.ty = ColType::Uuid,
+                (ColType::String, "Citext", []) if !decimal => resolve(&mut f, "citext", &[])?,
+                (ColType::DateTime, "Date", []) => f.ty = ColType::Date,
+                (ty, _, _) => {
+                    let Some((sql, same)) = native_type(db, ty) else {
+                        return err(a.pos, format!("{what}: unknown native type @db.{db}"));
+                    };
+                    if !(same && values.is_empty()) {
+                        f.db_type = Some(if values.is_empty() { sql.to_owned() } else { format!("{sql}({})", values.join(", ")) });
+                    }
+                }
+            }
+            continue;
+        }
         match a.name.as_str() {
-            "primary" => f.primary_key = flag(a)?,
-            "auto" => f.auto_increment = flag(a)?,
+            "id" => f.primary_key = flag(a)?,
             "unique" => f.unique = flag(a)?,
-            "index" => f.index = flag(a)?,
             "check" => f.check = Some(text(a)?),
             "comment" => f.comment = Some(text(a)?),
-            "column" => f.column = text(a)?,
+            "map" => f.column = text(a)?,
             "renamed_from" => f.renamed_from = Some(text(a)?),
-            "db_type" => f.db_type = Some(text(a)?),
-            "default" => match one(a, &what)? {
-                Value::Path(p, None) if p.len() == 1 && p[0] == "now" => f.default_now = true,
-                Value::Path(p, Some(args)) if p.len() == 1 && p[0] == "sql" => match args.positional.as_slice() {
-                    [(_, Value::Str(s))] if args.named.is_empty() => f.default_sql = Some(s.clone()),
-                    _ => return err(a.pos, format!("{what}: sql(\"...\") takes one string")),
-                },
-                Value::Path(..) => {
-                    return err(a.pos, format!("{what}: @default takes a literal, now or sql(\"...\")"));
+            "default" => {
+                let v = one(a, &what)?;
+                let bad_call = |c: &str| err(a.pos, format!("{what}: {c}(\"...\") takes one string"));
+                match v {
+                    Value::Path(p, Some(args)) if p.len() == 1 && p[0] == "autoincrement" && args.positional.is_empty() && args.named.is_empty() => {
+                        f.auto_increment = true
+                    }
+                    Value::Path(p, Some(args)) if p.len() == 1 && p[0] == "now" && args.positional.is_empty() && args.named.is_empty() => {
+                        f.default_now = true
+                    }
+                    _ => match call_str(v, "dbgenerated") {
+                        Some(Ok(s)) => f.default_sql = Some(s.to_owned()),
+                        Some(Err(())) => return bad_call("dbgenerated"),
+                        None => match v {
+                            Value::Path(p, _) => {
+                                return err(
+                                    a.pos,
+                                    format!(
+                                        "{what}: @default takes a literal, autoincrement(), now() or dbgenerated(\"...\"), not {}",
+                                        p.join(".")
+                                    ),
+                                )
+                            }
+                            // a Json default is its JSON text
+                            Value::Str(s) if f.ty == ColType::Json => {
+                                f.default = Some(serde_json::from_str(s).map_err(|e| super::syntax::Error {
+                                    pos: a.pos,
+                                    msg: format!("{what}: @default on a Json field is JSON text: {e}"),
+                                })?)
+                            }
+                            v => f.default = Some(json_of(a.pos, v)?),
+                        },
+                    },
                 }
-                v => f.default = Some(json_of(a.pos, v)?),
-            },
+            }
+            "relation" => return err(a.pos, format!("{what}: @relation goes on a field whose type is a model")),
             other => return err(a.pos, format!("{what}: unknown attribute @{other}; use {FIELD_ATTRS}")),
         }
+    }
+    if let Some(t) = f.db_type.as_deref().filter(|_| decimal) {
+        f.read_sql = Some("CAST({} AS text)".into());
+        f.write_sql = Some(format!("CAST({{}} AS {t})"));
     }
     if f.primary_key && f.nullable {
         return err(member.pos, format!("{what}: a primary key can't be optional"));
@@ -401,88 +584,126 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
     Ok(f)
 }
 
-fn relation(
-    member: &Member,
-    fields: &[FieldIr],
-    pk: &str,
-    models: &HashMap<&str, &ModelDecl>,
-    pks: &HashMap<String, Option<String>>,
-) -> Result<RelationIr> {
+/// The parts of `@relation(...)` both sides of a relation need.
+struct RelArgs {
+    name: Option<String>,
+    fields: Vec<String>,
+    references: Vec<String>,
+}
+
+fn rel_args(a: &Attr) -> RelArgs {
+    let names = |key: &str| match a.args.named.iter().find(|(k, _, _)| k == key) {
+        Some((_, _, Value::List(items))) => items.iter().filter_map(|(p, v)| name_of(*p, v, "").ok()).collect(),
+        _ => vec![],
+    };
+    let name = match (a.args.positional.first(), a.args.named.iter().find(|(k, _, _)| k == "name")) {
+        (Some((_, Value::Str(s))), _) | (None, Some((_, _, Value::Str(s)))) => Some(s.clone()),
+        _ => None,
+    };
+    RelArgs { name, fields: names("fields"), references: names("references") }
+}
+
+fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap<&str, &ModelDecl>) -> Result<RelationIr> {
     let target = &member.ty.name;
-    let what = format!("relation {}", member.name);
-    let rel = member.attrs.iter().find(|a| a.name == "relation");
+    let what = format!("relation {}.{}", m.name, member.name);
     if let Some(a) = member.attrs.iter().find(|a| a.name != "relation") {
         return err(a.pos, format!("{what}: relations take only @relation(...)"));
     }
-    let Some(rel) = rel else {
-        return err(
-            member.pos,
-            format!("{what}: say how it joins with @relation(via: ...): a field of this model for `{target}`, `{target}.field` for `{target}[]`"),
-        );
-    };
+    let empty = Attr { pos: member.pos, name: "relation".into(), args: Args { pos: member.pos, ..Default::default() } };
+    let rel = member.attrs.iter().find(|a| a.name == "relation").unwrap_or(&empty);
     let mut n = Named::new(what.clone(), &rel.args);
-    n.no_positional()?;
-    let (vpos, via) = match n.get("via") {
-        Some((p, Value::Path(path, None))) => (p, path.clone()),
-        Some((p, _)) => return err(p, format!("{what}: via must name a field")),
-        None => return err(rel.pos, format!("{what}: @relation needs via:")),
+    let name = match rel.args.positional.as_slice() {
+        [] => n.str("name")?,
+        [(_, Value::Str(s))] => Some(s.clone()),
+        [(p, _), ..] => return err(*p, format!("{what}: the only positional argument is the relation name, a string")),
     };
-    let target_fields: Vec<String> = models[target.as_str()]
+    let target_decl = models[target.as_str()];
+    let target_fields: Vec<&str> = target_decl
         .members
         .iter()
         .filter(|m| !models.contains_key(m.ty.name.as_str()))
-        .map(|m| m.name.clone())
+        .map(|m| m.name.as_str())
         .collect();
-    if member.ty.list {
+    let field_list = |n: &mut Named<'_>, key: &'static str| -> Result<Option<(Pos, String)>> {
+        match n.get(key) {
+            None => Ok(None),
+            Some((p, Value::List(items))) => match items.as_slice() {
+                [(fp, v)] => Ok(Some((*fp, name_of(*fp, v, &what)?))),
+                _ => err(p, format!("{what}: {key}: takes one field (composite keys aren't supported)")),
+            },
+            Some((p, _)) => err(p, format!("{what}: {key}: takes a list, e.g. [author_id]")),
+        }
+    };
+    let from = field_list(&mut n, "fields")?;
+    let to = field_list(&mut n, "references")?;
+
+    let Some((fpos, from)) = from else {
+        // The back side: the other model's relation to this one holds the key.
+        if to.is_some() {
+            return err(rel.pos, format!("{what}: references: needs fields:"));
+        }
+        n.finish()?;
+        let back: Vec<RelArgs> = target_decl
+            .members
+            .iter()
+            .filter(|o| o.ty.name == m.name && !std::ptr::eq(*o, member))
+            .filter_map(|o| o.attrs.iter().find(|a| a.name == "relation").map(rel_args))
+            .filter(|r| !r.fields.is_empty() && r.name == name)
+            .collect();
+        let back = match back.as_slice() {
+            [b] => b,
+            [] => {
+                return err(
+                    member.pos,
+                    format!(
+                        "{what}: {target} has no relation to {} with fields: / references:{}",
+                        m.name,
+                        name.as_ref().map(|n| format!(" named {n:?}")).unwrap_or_default()
+                    ),
+                )
+            }
+            _ => return err(member.pos, format!("{what}: {target} has several relations to {}; name them: @relation(\"name\", ...) on both sides", m.name)),
+        };
+        if !member.ty.list {
+            return err(member.ty.pos, format!("{what}: one-to-one back relations aren't supported yet; declare {target}[] or only the side with fields:"));
+        }
         if member.ty.optional {
             return err(member.ty.pos, format!("{what}: a to-many relation can't be optional"));
         }
-        let to = match via.as_slice() {
-            [t, f] if t == target => f.clone(),
-            [f] => f.clone(),
-            _ => return err(vpos, format!("{what}: via must be {target}.<field>")),
+        let (Some(from), Some(to)) = (back.references.first(), back.fields.first()) else {
+            return err(member.pos, format!("{what}: the relation on {target} needs references:"));
         };
-        if !target_fields.contains(&to) {
-            return err(vpos, format!("{what}: {target} has no field {to}"));
-        }
-        let from = n.name("from")?.unwrap_or_else(|| pk.to_owned());
-        n.finish()?;
         return Ok(RelationIr {
             name: member.name.clone(),
             kind: RelKind::Many,
             target: target.clone(),
-            from,
-            to,
+            from: from.clone(),
+            to: to.clone(),
             foreign_key: false,
             on_delete: None,
             on_update: None,
             deferrable: None,
         });
-    }
-    let [from] = via.as_slice() else {
-        return err(vpos, format!("{what}: via must name a field of this model"));
     };
-    let Some(local) = fields.iter().find(|f| f.name == *from) else {
-        return err(vpos, format!("{what}: no field {from} in this model"));
+    if member.ty.list {
+        return err(rel.pos, format!("{what}: fields: goes on the to-one side, not on {target}[]"));
+    }
+    let Some(local) = fields.iter().find(|f| f.name == from) else {
+        return err(fpos, format!("{what}: no field {from} in this model"));
     };
     if local.nullable != member.ty.optional {
         let hint = if local.nullable { format!("{target}?") } else { target.clone() };
         return err(member.ty.pos, format!("{what}: {from} is {}nullable, so the relation type is `{hint}`", if local.nullable { "" } else { "not " }));
     }
-    let to = match n.name("to")? {
-        Some(t) => {
-            if !target_fields.contains(&t) {
-                return err(rel.pos, format!("{what}: {target} has no field {t}"));
-            }
-            t
-        }
-        None => pks[target.as_str()].clone().unwrap_or_default(),
-    };
-    let on_delete = match n.get("on_delete") {
+    let Some((tpos, to)) = to else { return err(rel.pos, format!("{what}: fields: needs references: [<field of {target}>]")) };
+    if !target_fields.contains(&to.as_str()) {
+        return err(tpos, format!("{what}: {target} has no field {to}"));
+    }
+    let on_delete = match n.get("onDelete") {
         Some((p, v)) => Some(action(p, &name_of(p, v, &what)?)?),
         None => None,
     };
-    let on_update = match n.get("on_update") {
+    let on_update = match n.get("onUpdate") {
         Some((p, v)) => Some(action(p, &name_of(p, v, &what)?)?),
         None => None,
     };
@@ -492,7 +713,7 @@ fn relation(
         name: member.name.clone(),
         kind: RelKind::One,
         target: target.clone(),
-        from: from.clone(),
+        from,
         to,
         foreign_key: true,
         on_delete,
@@ -501,11 +722,11 @@ fn relation(
     })
 }
 
-/// `[field, field(sort: desc, ops: x), sql("expr", ...)]` -> index keys (and the
-/// exclusion operator of each, when `with_op`).
+/// `[field, field(sort: Desc, ops: raw("x")), sql("expr", ...)]` -> index keys (and
+/// the exclusion operator of each, when `with_op`).
 fn keys(pos: Pos, v: Option<&Value>, what: &str, with_op: bool) -> Result<Vec<(IndexColumnIr, Option<String>)>> {
     let Some(Value::List(items)) = v else {
-        return err(pos, format!("{what}: the first argument is a list of keys, e.g. [author_id, created_at(sort: desc)]"));
+        return err(pos, format!("{what}: the first argument is a list of keys, e.g. [author_id, created_at(sort: Desc)]"));
     };
     if items.is_empty() {
         return err(pos, format!("{what}: no keys"));
@@ -530,9 +751,9 @@ fn keys(pos: Pos, v: Option<&Value>, what: &str, with_op: bool) -> Result<Vec<(I
         }
         let mut n = Named::new(format!("{what} key"), &args);
         let desc = match n.name("sort")?.as_deref() {
-            None | Some("asc") => false,
-            Some("desc") => true,
-            Some(o) => return err(*p, format!("sort must be asc or desc, not {o}")),
+            None | Some("Asc") => false,
+            Some("Desc") => true,
+            Some(o) => return err(*p, format!("sort must be Asc or Desc, not {o}")),
         };
         let nulls = match n.name("nulls")?.as_deref() {
             None => None,
@@ -540,7 +761,11 @@ fn keys(pos: Pos, v: Option<&Value>, what: &str, with_op: bool) -> Result<Vec<(I
             Some("last") => Some(Nulls::Last),
             Some(o) => return err(*p, format!("nulls must be first or last, not {o}")),
         };
-        let opclass = n.name("ops")?;
+        let opclass = match n.get("ops") {
+            None => None,
+            Some((op, v @ Value::Path(path, Some(_)))) if path.len() == 1 && path[0] == "raw" => Some(raw_sql(op, v, what)?),
+            Some((op, v)) => Some(name_of(op, v, &format!("{what}: ops"))?),
+        };
         let collation = n.str("collate")?;
         let op = if with_op { n.str("op")? } else { None };
         n.finish()?;
@@ -550,6 +775,11 @@ fn keys(pos: Pos, v: Option<&Value>, what: &str, with_op: bool) -> Result<Vec<(I
         out.push((IndexColumnIr { field, expr, opclass, collation, desc, nulls }, op));
     }
     Ok(out)
+}
+
+/// `type: Gin` (Prisma's names) or `type: hnsw` -> the access method.
+fn method(n: &mut Named<'_>) -> Result<Option<String>> {
+    Ok(n.name("type")?.map(|t| t.to_lowercase()))
 }
 
 fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
@@ -562,14 +792,21 @@ fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
         }
     };
     match b.name.as_str() {
+        "map" | "comment" | "renamed_from" => {}
         "index" => {
             extra_positional(1)?;
-            let columns = keys(b.pos, first, &what, false)?.into_iter().map(|(k, _)| k).collect();
+            let columns: Vec<IndexColumnIr> = keys(b.pos, first, &what, false)?.into_iter().map(|(k, _)| k).collect();
+            // `@@index([col])` is the column's own index
+            if let ([c], []) = (columns.as_slice(), b.args.named.as_slice()) {
+                if c.expr.is_none() && c.opclass.is_none() && c.collation.is_none() && !c.desc && c.nulls.is_none() {
+                    if let Some(f) = m.fields.iter_mut().find(|f| Some(&f.name) == c.field.as_ref()) {
+                        f.index = true;
+                        return Ok(());
+                    }
+                }
+            }
             let mut n = Named::new(what.clone(), &b.args);
-            let method = match (n.name("type")?, n.name("using")?) {
-                (Some(_), Some(_)) => return err(b.pos, format!("{what}: give type: or using:, not both")),
-                (a, b) => a.or(b),
-            };
+            let method = method(&mut n)?;
             let with = match n.get("with") {
                 None => vec![],
                 Some((_, Value::Object(entries))) => {
@@ -578,11 +815,11 @@ fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
                 Some((p, _)) => return err(p, format!("{what}: with: takes {{ name: value, ... }}")),
             };
             let ix = IndexIr {
-                name: n.str("name")?,
+                name: n.db_name()?,
                 columns,
                 unique: n.bool("unique")?,
                 method,
-                where_: n.str("where")?,
+                where_: n.sql("where")?,
                 include: n.names("include")?,
                 with,
                 nulls_not_distinct: n.bool("nulls_not_distinct")?,
@@ -599,7 +836,7 @@ fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
             };
             let mut n = Named::new(what.clone(), &b.args);
             let c = ConstraintIr::Unique {
-                name: n.str("name")?,
+                name: n.db_name()?,
                 fields,
                 nulls_not_distinct: n.bool("nulls_not_distinct")?,
                 deferrable: deferrable(&mut n)?,
@@ -621,7 +858,7 @@ fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
             extra_positional(1)?;
             let ks = keys(b.pos, first, &what, true)?;
             let mut n = Named::new(what.clone(), &b.args);
-            let method = n.name("type")?.or(n.name("using")?).unwrap_or_else(|| "gist".into());
+            let method = method(&mut n)?.unwrap_or_else(|| "gist".into());
             // `=` on a plain column inside GiST needs btree_gist.
             let requires = if method == "gist" && ks.iter().any(|(k, op)| k.field.is_some() && op.as_deref() == Some("=")) {
                 vec!["btree_gist".to_owned()]
@@ -635,7 +872,7 @@ fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
                     .into_iter()
                     .map(|(column, op)| ExcludeElementIr { column, operator: op.unwrap_or_default() })
                     .collect(),
-                where_: n.str("where")?,
+                where_: n.sql("where")?,
                 deferrable: deferrable(&mut n)?,
                 requires,
             };
@@ -683,7 +920,7 @@ fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
                 events,
                 update_of: n.names("update_of")?,
                 for_each,
-                when: n.str("when")?,
+                when: n.sql("when")?,
                 function: n.name("function")?,
                 args: match n.get("args") {
                     None => vec![],
@@ -695,12 +932,20 @@ fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
             };
             n.finish()?;
             if t.body.is_some() == t.function.is_some() {
-                return err(b.pos, format!("{what}({}): give body: \"\"\"...\"\"\" or function: name", t.name));
+                return err(b.pos, format!("{what}({}): give body: \"...\" or function: name (a `function` block)", t.name));
             }
             m.triggers.push(t);
         }
+        "id" => return err(b.pos, format!("{what}: composite primary keys aren't supported yet")),
         other => {
-            return err(b.pos, format!("{}: unknown declaration @@{other}; use @@index, @@unique, @@check, @@exclude or @@trigger", m.name))
+            return err(
+                b.pos,
+                format!(
+                    "{}: unknown attribute @@{other}; use @@map, @@index, @@unique, @@check, @@exclude, @@trigger, \
+                     @@comment or @@renamed_from",
+                    m.name
+                ),
+            )
         }
     }
     Ok(())

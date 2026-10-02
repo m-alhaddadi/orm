@@ -13,47 +13,51 @@ from orm.migrations import Migrations
 ROOT = Path(__file__).resolve().parent.parent
 
 V1 = """
-model Author @table("authors") {
-    id:     BigInt      @primary @auto
-    email:  String(254) @unique
-    books:  Book[]      @relation(via: Book.author_id)
+model Author {
+  id    BigInt @id @default(autoincrement())
+  email String @unique @db.VarChar(254)
+  books Book[]
+
+  @@map("authors")
 }
 
-model Book @table("books") {
-    id:        BigInt      @primary @auto
-    author_id: BigInt      @index
-    title:     String(200)
-    pages:     Int         @default(0)
-    author:    Author      @relation(via: author_id, on_delete: cascade)
+model Book {
+  id        BigInt @id @default(autoincrement())
+  author_id BigInt
+  title     String @db.VarChar(200)
+  pages     Int    @default(0)
+  author    Author @relation(fields: [author_id], references: [id], onDelete: Cascade)
+
+  @@index([author_id])
+  @@map("books")
 }
 """
 
 # v1 + an extension type, a renamed column, new columns, indexes, constraints, a trigger
-V2 = """
-model Author @table("authors") {
-    id:     BigInt  @primary @auto
-    email:  citext  @unique
-    books:  Book[]  @relation(via: Book.author_id)
+V2 = r"""
+model Author {
+  id    BigInt @id @default(autoincrement())
+  email String @unique @db.Citext
+  books Book[]
+
+  @@map("authors")
 }
 
-model Book @table("books") {
-    id:         BigInt      @primary @auto
-    author_id:  BigInt      @index
-    name:       String(200) @renamed_from("title")
-    pages:      Int         @default(0) @check("pages >= 0")
-    meta:       Json?       @comment("free-form attributes")
-    updated_at: DateTime    @default(now)
-    author:     Author      @relation(via: author_id, on_delete: cascade)
+model Book {
+  id         BigInt   @id @default(autoincrement())
+  author_id  BigInt
+  name       String   @renamed_from("title") @db.VarChar(200)
+  pages      Int      @default(0) @check("pages >= 0")
+  meta       Json?    @comment("free-form attributes")
+  updated_at DateTime @default(now())
+  author     Author   @relation(fields: [author_id], references: [id], onDelete: Cascade)
 
-    @@index([author_id, updated_at(sort: desc)], where: "pages > 0")
-    @@index([name(ops: gin_trgm_ops)], type: gin)
-    @@unique([author_id, name])
-    @@trigger(touch, before: [update], body: \"\"\"
-        BEGIN
-            NEW.updated_at := now();
-            RETURN NEW;
-        END;
-    \"\"\")
+  @@index([author_id])
+  @@index([author_id, updated_at(sort: Desc)], where: raw("pages > 0"))
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@unique([author_id, name])
+  @@map("books")
+  @@trigger(touch, before: [update], body: "BEGIN\n    NEW.updated_at := now();\n    RETURN NEW;\nEND;")
 }
 """
 
@@ -81,10 +85,10 @@ def test_loads_builds_models_from_schema_text():
 
 
 def test_schema_errors_name_the_line():
-    with pytest.raises(SchemaError, match=r"<schema>:3:12: Book.title: unknown type Strin"):
-        orm.loads("model Book {\n    id: BigInt @primary\n    title: Strin\n}")
+    with pytest.raises(SchemaError, match=r"<schema>:3:9: Book.title: unknown type Strin"):
+        orm.loads("model Book {\n  id    BigInt @id\n  title Strin\n}")
     with pytest.raises(SchemaError, match="unknown argument `wher`"):
-        orm.loads("model Book {\n    id: BigInt @primary\n    @@index([id], wher: \"x\")\n}")
+        orm.loads("model Book {\n  id BigInt @id\n  @@index([id], wher: \"x\")\n}")
 
 
 def test_first_migration(tmp_path):
@@ -132,7 +136,7 @@ def test_second_migration_alters_in_place(tmp_path):
 
 def test_table_rename_renames_generated_constraint_names(tmp_path):
     Migrations(tmp_path, models(V1)).make()
-    v1b = V1.replace('model Author @table("authors")', 'model Author @table("writers") @renamed_from("authors")')
+    v1b = V1.replace('@@map("authors")', '@@map("writers")\n  @@renamed_from("authors")')
     up = [s.sql for s in Migrations(tmp_path, models(v1b)).plan().up]
     assert up == [
         'ALTER TABLE "authors" RENAME TO "writers"',
@@ -142,19 +146,19 @@ def test_table_rename_renames_generated_constraint_names(tmp_path):
 
 
 def test_migrations_from_a_schema_file(tmp_path):
-    (tmp_path / "schema.orm").write_text(V1)
-    m = Migrations(tmp_path / "migrations", tmp_path / "schema.orm").make()
+    (tmp_path / "schema.prisma").write_text(V1)
+    m = Migrations(tmp_path / "migrations", tmp_path / "schema.prisma").make()
     assert m is not None and (m.path / "snapshot.json").is_file()
 
 
 def test_generated_blog_module_is_current():
-    module, stub = orm._native.generate_python(str(ROOT / "examples/blog/schema.orm"))
+    module, stub = orm._native.generate_python(str(ROOT / "examples/blog/schema.prisma"))
     assert (ROOT / "examples/blog/models.py").read_text() == module, "run `python -m orm generate`"
     assert (ROOT / "examples/blog/models.pyi").read_text() == stub, "run `python -m orm generate`"
 
 
 def test_cli(tmp_path, capsys, monkeypatch):
-    (tmp_path / "schema.orm").write_text(V1)
+    (tmp_path / "schema.prisma").write_text(V1)
     monkeypatch.chdir(tmp_path)
     assert cli(["check"]) == 0
     assert cli(["generate", "-o", "app/models.py"]) == 0
@@ -165,6 +169,6 @@ def test_cli(tmp_path, capsys, monkeypatch):
     assert cli(["makemigrations", "--check"]) == 0
     assert cli(["sqlmigrate", "1"]) == 0
     assert 'CREATE TABLE "books"' in capsys.readouterr().out
-    (tmp_path / "schema.orm").write_text("model X {")
+    (tmp_path / "schema.prisma").write_text("model X {")
     assert cli(["check"]) == 1
-    assert "schema.orm:1:1: model X is not closed" in capsys.readouterr().err
+    assert "schema.prisma:1:1: model X is not closed" in capsys.readouterr().err

@@ -117,11 +117,13 @@ async def test_failed_migration_rolls_back(tmp_path):
 
 async def test_extension_types_at_runtime():
     reg = models("""
-        model Doc @table("ext_docs") {
-            id:        Uuid       @primary @default(sql("gen_random_uuid()"))
-            email:     citext
-            attrs:     Json?
-            embedding: vector(3)?
+        model Doc {
+          id        String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+          email     String                    @db.Citext
+          attrs     Json?
+          embedding Unsupported("vector(3)")?
+
+          @@map("ext_docs")
         }
     """)
     Doc = reg.get("Doc")

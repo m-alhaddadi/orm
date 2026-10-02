@@ -1,27 +1,35 @@
-//! Tokens and syntax tree of the schema language.
+//! Tokens and syntax tree of the schema language (`.prisma` files).
 //!
-//! The grammar is small and newline-insensitive:
+//! The grammar is Prisma's, with our attributes and blocks added (see
+//! `docs/prisma-syntax.md`):
 //!
 //! ```text
 //! file      := item*
-//! item      := "model" IDENT attr* "{" member* "}"
-//!            | "extension" (IDENT | STRING) args?
-//!            | "function" IDENT "{" (IDENT ":" value)* "}"
+//! item      := "model" IDENT "{" member* "}"
+//!            | "datasource" IDENT "{" prop* "}"
+//!            | "generator" IDENT "{" prop* "}"      (read and ignored)
+//!            | "function" IDENT "{" prop* "}"
 //!            | "import" STRING
-//! member    := IDENT ":" type attr*          (a field or relation)
-//!            | "@@" IDENT args?               (a model-level declaration)
+//! prop      := IDENT "=" value
+//! member    := IDENT type attr*                  (a field or relation, on one line)
+//!            | "@@" NAME args?                    (a model attribute, on one line)
 //! type      := IDENT args? "[]"? "?"?
-//! attr      := "@" IDENT args?
+//! attr      := "@" NAME args?
+//! NAME      := IDENT ("." IDENT)*                 (`map`, `db.VarChar`)
 //! args      := "(" (arg ("," arg)*)? ","? ")"
 //! arg       := IDENT ":" value | value
-//! value     := STRING | RAW_STRING | NUMBER | "true" | "false"
-//!            | IDENT ("." IDENT)* args?       (names, paths, calls: now, Post.author_id, sql("..."))
+//! value     := STRING | NUMBER | "true" | "false"
+//!            | IDENT ("." IDENT)* args?           (names and calls: Cascade, now(), raw("..."))
 //!            | "[" (value ("," value)*)? ","? "]"
 //!            | "{" (key ":" value ("," key ":" value)*)? ","? "}"
 //! ```
 //!
 //! Strings are `"..."` with `\"`, `\\`, `\n`, `\t` escapes, or `"""..."""` taken
-//! verbatim (for SQL bodies). Comments are `// ...` and `/* ... */`.
+//! verbatim (for SQL bodies). Comments are `// ...`.
+//!
+//! Two rules keep a file stable under the Prisma formatter (format-on-save):
+//! each field and each attribute is on one line, and `"""` only appears in the
+//! `key = value` blocks (`function`, `datasource`), never inside a model.
 
 use std::fmt;
 
@@ -53,11 +61,14 @@ pub fn err<T>(pos: Pos, msg: impl Into<String>) -> Result<T> {
 enum Tok {
     Ident(String),
     Str(String),
+    /// `"""..."""`
+    Text(String),
     Num(String),
     Punct(&'static str),
     Eof,
 }
 
+#[derive(Clone)]
 struct Lexer<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
     rest: &'a str,
@@ -77,7 +88,7 @@ impl<'a> Lexer<'a> {
         Some(c)
     }
 
-    fn skip_trivia(&mut self) -> Result<()> {
+    fn skip_trivia(&mut self) {
         loop {
             match self.chars.peek() {
                 Some(c) if c.is_whitespace() => {
@@ -88,28 +99,13 @@ impl<'a> Lexer<'a> {
                         self.bump();
                     }
                 }
-                Some('/') if self.rest.starts_with("/*") => {
-                    let start = self.pos;
-                    self.bump();
-                    self.bump();
-                    loop {
-                        if self.rest.starts_with("*/") {
-                            self.bump();
-                            self.bump();
-                            break;
-                        }
-                        if self.bump().is_none() {
-                            return err(start, "unterminated comment");
-                        }
-                    }
-                }
-                _ => return Ok(()),
+                _ => return,
             }
         }
     }
 
     fn next(&mut self) -> Result<(Pos, Tok)> {
-        self.skip_trivia()?;
+        self.skip_trivia();
         let pos = self.pos;
         let Some(&c) = self.chars.peek() else { return Ok((pos, Tok::Eof)) };
         if c.is_alphabetic() || c == '_' {
@@ -155,7 +151,7 @@ impl<'a> Lexer<'a> {
                 for _ in 0..body.chars().count() + 3 {
                     self.bump();
                 }
-                return Ok((pos, Tok::Str(dedent(&body))));
+                return Ok((pos, Tok::Text(dedent(&body))));
             }
             self.bump();
             let mut s = String::new();
@@ -174,7 +170,7 @@ impl<'a> Lexer<'a> {
             }
             return Ok((pos, Tok::Str(s)));
         }
-        for p in ["@@", "[]", "@", "{", "}", "(", ")", "[", "]", ",", ":", "?", "."] {
+        for p in ["@@", "[]", "@", "{", "}", "(", ")", "[", "]", ",", ":", "?", ".", "="] {
             if self.rest.starts_with(p) {
                 for _ in 0..p.len() {
                     self.bump();
@@ -214,7 +210,7 @@ pub enum Value {
     Str(String),
     Num(String),
     Bool(bool),
-    /// `name`, `Post.author_id`, `sql("...")`, `created_at(sort: desc)`
+    /// `name`, `Cascade`, `now()`, `raw("...")`, `created_at(sort: Desc)`
     Path(Vec<String>, Option<Args>),
     List(Vec<(Pos, Value)>),
     Object(Vec<(String, Pos, Value)>),
@@ -230,6 +226,7 @@ pub struct Args {
 #[derive(Debug)]
 pub struct Attr {
     pub pos: Pos,
+    /// `id`, `default`, `db.VarChar`, ...
     pub name: String,
     pub args: Args,
 }
@@ -255,17 +252,18 @@ pub struct Member {
 pub struct ModelDecl {
     pub pos: Pos,
     pub name: String,
-    pub attrs: Vec<Attr>,
     pub members: Vec<Member>,
-    /// `@@...` declarations
+    /// `@@...` attributes
     pub blocks: Vec<Attr>,
 }
+
+pub type Props = Vec<(String, Pos, Value)>;
 
 #[derive(Debug)]
 pub enum Item {
     Model(ModelDecl),
-    Extension { pos: Pos, name: String, args: Args },
-    Function { pos: Pos, name: String, props: Vec<(String, Pos, Value)> },
+    Datasource { pos: Pos, props: Props },
+    Function { pos: Pos, name: String, props: Props },
     Import { pos: Pos, path: String },
 }
 
@@ -273,11 +271,18 @@ struct Parser<'a> {
     lexer: Lexer<'a>,
     tok: Tok,
     pos: Pos,
+    /// Where the current token ends.
+    end: Pos,
+    /// Where the last consumed token ended.
+    prev_end: Pos,
+    /// Inside a model: `"""` strings are refused.
+    in_model: bool,
 }
 
 impl Parser<'_> {
     fn advance(&mut self) -> Result<(Pos, Tok)> {
         let (pos, tok) = self.lexer.next()?;
+        self.prev_end = std::mem::replace(&mut self.end, self.lexer.pos);
         let prev = std::mem::replace(&mut self.tok, tok);
         let prev_pos = std::mem::replace(&mut self.pos, pos);
         Ok((prev_pos, prev))
@@ -316,82 +321,122 @@ impl Parser<'_> {
         let mut items = vec![];
         loop {
             let pos = self.pos;
-            match &self.tok {
+            let keyword = match &self.tok {
                 Tok::Eof => return Ok(items),
-                Tok::Ident(k) if k == "model" => {
-                    self.advance()?;
-                    items.push(Item::Model(self.model(pos)?));
+                Tok::Ident(k) => k.clone(),
+                other => return err(pos, format!("expected a block (`model`, `datasource`, `function`, ...), found {}", describe(other))),
+            };
+            self.advance()?;
+            match keyword.as_str() {
+                "model" => {
+                    let (_, name) = self.ident("a model name")?;
+                    self.in_model = true;
+                    let m = self.model(pos, name)?;
+                    self.in_model = false;
+                    items.push(Item::Model(m));
                 }
-                Tok::Ident(k) if k == "extension" => {
-                    self.advance()?;
-                    let name = match self.advance()? {
-                        (_, Tok::Ident(s) | Tok::Str(s)) => s,
-                        (p, t) => return err(p, format!("expected an extension name, found {}", describe(&t))),
-                    };
-                    let args = if self.is("(") { self.args()? } else { Args::default() };
-                    items.push(Item::Extension { pos, name, args });
+                "datasource" => {
+                    self.ident("a datasource name")?;
+                    let props = self.props("datasource")?;
+                    items.push(Item::Datasource { pos, props });
                 }
-                Tok::Ident(k) if k == "function" => {
-                    self.advance()?;
+                // Prisma's own generators (`prisma-client-js`, ...) may share the file.
+                "generator" => {
+                    self.ident("a generator name")?;
+                    self.props("generator")?;
+                }
+                "function" => {
                     let (_, name) = self.ident("a function name")?;
-                    let props = self.object()?;
+                    let props = self.props(&format!("function {name}"))?;
                     items.push(Item::Function { pos, name, props });
                 }
-                Tok::Ident(k) if k == "import" => {
-                    self.advance()?;
-                    match self.advance()? {
-                        (_, Tok::Str(path)) => items.push(Item::Import { pos, path }),
-                        (p, t) => return err(p, format!("expected a file path string, found {}", describe(&t))),
-                    }
-                }
-                other => {
-                    return err(pos, format!("expected `model`, `extension`, `function` or `import`, found {}", describe(other)))
+                "import" => match self.advance()? {
+                    (_, Tok::Str(path)) => items.push(Item::Import { pos, path }),
+                    (p, t) => return err(p, format!("expected a file path string, found {}", describe(&t))),
+                },
+                "enum" | "type" | "view" => return err(pos, format!("`{keyword}` blocks aren't supported yet")),
+                _ => {
+                    return err(
+                        pos,
+                        format!("expected `model`, `datasource`, `generator`, `function` or `import`, found `{keyword}`"),
+                    )
                 }
             }
         }
     }
 
-    fn attrs(&mut self) -> Result<Vec<Attr>> {
-        let mut out = vec![];
-        while self.is("@") {
-            let pos = self.advance()?.0;
-            let (_, name) = self.ident("an attribute name")?;
-            let args = if self.is("(") { self.args()? } else { Args { pos, ..Default::default() } };
-            out.push(Attr { pos, name, args });
+    /// `{ key = value ... }`
+    fn props(&mut self, what: &str) -> Result<Props> {
+        self.expect("{")?;
+        let mut out: Props = vec![];
+        while !self.eat("}")? {
+            if self.tok == Tok::Eof {
+                return err(self.pos, format!("{what} is not closed with `}}`"));
+            }
+            let (pos, key) = self.ident("a key or `}`")?;
+            self.expect("=")?;
+            let v = self.value()?;
+            if out.iter().any(|(k, _, _)| *k == key) {
+                return err(pos, format!("{what}: {key} given twice"));
+            }
+            out.push((key, pos, v));
         }
         Ok(out)
     }
 
-    fn model(&mut self, pos: Pos) -> Result<ModelDecl> {
-        let (_, name) = self.ident("a model name")?;
-        let attrs = self.attrs()?;
+    /// `@name(args)`, `@db.VarChar(n)`; `marker` is `@` or `@@`.
+    fn attr(&mut self, marker: &str) -> Result<Attr> {
+        let pos = self.expect(marker)?;
+        let (_, mut name) = self.ident("an attribute name")?;
+        while self.eat(".")? {
+            name = format!("{name}.{}", self.ident("a name after `.`")?.1);
+        }
+        let args = if self.is("(") { self.args()? } else { Args { pos, ..Default::default() } };
+        Ok(Attr { pos, name, args })
+    }
+
+    fn model(&mut self, pos: Pos, name: String) -> Result<ModelDecl> {
         self.expect("{")?;
         let (mut members, mut blocks) = (vec![], vec![]);
+        let mut last_line = 0;
         loop {
             if self.eat("}")? {
                 break;
             }
-            if self.is("@@") {
-                let pos = self.advance()?.0;
-                let (_, bname) = self.ident("a declaration name (index, unique, check, exclude, trigger)")?;
-                let args = if self.is("(") { self.args()? } else { Args { pos, ..Default::default() } };
-                blocks.push(Attr { pos, name: bname, args });
-                continue;
-            }
             if self.tok == Tok::Eof {
                 return err(pos, format!("model {name} is not closed with `}}`"));
             }
-            let (mpos, mname) = self.ident("a field name, `@@` or `}`")?;
-            self.expect(":")?;
-            let (tpos, tname) = self.ident("a type")?;
-            let targs = if self.is("(") { self.args()? } else { Args { pos: tpos, ..Default::default() } };
-            let list = self.eat("[]")?;
-            let optional = self.eat("?")?;
-            let ty = TypeRef { pos: tpos, name: tname, args: targs, list, optional };
-            let attrs = self.attrs()?;
-            members.push(Member { pos: mpos, name: mname, ty, attrs });
+            let start = self.pos;
+            if start.line == last_line {
+                return err(start, format!("model {name}: one field or attribute per line"));
+            }
+            let what = if self.is("@@") {
+                blocks.push(self.attr("@@")?);
+                "an attribute"
+            } else {
+                let (mpos, mname) = self.ident("a field name, `@@` or `}`")?;
+                let (tpos, tname) = self.ident("a type")?;
+                let targs = if self.is("(") { self.args()? } else { Args { pos: tpos, ..Default::default() } };
+                let list = self.eat("[]")?;
+                let optional = self.eat("?")?;
+                let ty = TypeRef { pos: tpos, name: tname, args: targs, list, optional };
+                let mut attrs = vec![];
+                while self.is("@") && self.pos.line == start.line {
+                    attrs.push(self.attr("@")?);
+                }
+                members.push(Member { pos: mpos, name: mname, ty, attrs });
+                "a field"
+            };
+            // The Prisma formatter reads line by line: a split line falls apart on format.
+            if self.prev_end.line != start.line || self.is("@") {
+                return err(
+                    start,
+                    format!("model {name}: {what} must be on one line (put a long trigger body in a `function` block)"),
+                );
+            }
+            last_line = start.line;
         }
-        Ok(ModelDecl { pos, name, attrs, members, blocks })
+        Ok(ModelDecl { pos, name, members, blocks })
     }
 
     fn args(&mut self) -> Result<Args> {
@@ -426,10 +471,11 @@ impl Parser<'_> {
 
     /// True if the token after the current identifier is `:`.
     fn peek_is_colon(&mut self) -> Result<bool> {
-        let mut probe = Lexer { chars: self.lexer.rest.chars().peekable(), rest: self.lexer.rest, pos: self.lexer.pos };
+        let mut probe = self.lexer.clone();
         Ok(matches!(probe.next()?.1, Tok::Punct(":")))
     }
 
+    /// `{ key: value, ... }` inside attribute arguments (storage parameters).
     fn object(&mut self) -> Result<Vec<(String, Pos, Value)>> {
         self.expect("{")?;
         let mut out: Vec<(String, Pos, Value)> = vec![];
@@ -445,8 +491,9 @@ impl Parser<'_> {
                 return err(pos, format!("key {key} given twice"));
             }
             out.push((key, pos, v));
-            // commas between entries are optional (one entry per line reads well)
-            self.eat(",")?;
+            if !self.eat(",")? {
+                break;
+            }
         }
         self.expect("}")?;
         Ok(out)
@@ -476,6 +523,10 @@ impl Parser<'_> {
         }
         match self.advance()? {
             (_, Tok::Str(s)) => Ok(Value::Str(s)),
+            (p, Tok::Text(_)) if self.in_model => {
+                err(p, "\"\"\" strings only go in top-level blocks; put the SQL in a `function` block or use \"...\"")
+            }
+            (_, Tok::Text(s)) => Ok(Value::Str(s)),
             (_, Tok::Num(n)) => Ok(Value::Num(n)),
             (_, Tok::Ident(s)) if s == "true" => Ok(Value::Bool(true)),
             (_, Tok::Ident(s)) if s == "false" => Ok(Value::Bool(false)),
@@ -495,7 +546,7 @@ impl Parser<'_> {
 fn describe(t: &Tok) -> String {
     match t {
         Tok::Ident(s) => format!("`{s}`"),
-        Tok::Str(_) => "a string".into(),
+        Tok::Str(_) | Tok::Text(_) => "a string".into(),
         Tok::Num(n) => format!("number {n}"),
         Tok::Punct(p) => format!("`{p}`"),
         Tok::Eof => "end of file".into(),
@@ -505,7 +556,8 @@ fn describe(t: &Tok) -> String {
 pub fn parse(source: &str) -> Result<Vec<Item>> {
     let mut lexer = Lexer { chars: source.chars().peekable(), rest: source, pos: Pos { line: 1, col: 1 } };
     let (pos, tok) = lexer.next()?;
-    let mut p = Parser { lexer, tok, pos };
+    let end = lexer.pos;
+    let mut p = Parser { lexer, tok, pos, end, prev_end: Pos::default(), in_model: false };
     p.file()
 }
 
@@ -518,39 +570,75 @@ mod tests {
         let items = parse(
             r#"
             // a comment
-            model User @table("users") {
-                id: BigInt @primary @auto
-                email: String(254)? @unique /* inline */
-                posts: Post[] @relation(via: Post.author_id)
-                @@index([email(sort: desc), sql("lower(email)")], where: "id > 0", with: {m: 16})
+            datasource db {
+              provider   = "postgresql"
+              extensions = [pg_trgm, uuid_ossp(map: "uuid-ossp")]
             }
-            function f { returns: trigger, body: """
-                BEGIN
-                  RETURN NEW;
-                END;
-            """ }
-            extension "uuid-ossp"(schema: "ext")
+
+            generator client {
+              provider = "prisma-client-js"
+            }
+
+            model User {
+              id    BigInt  @id @default(autoincrement())
+              email String? @unique @db.VarChar(254)
+              posts Post[]
+
+              @@index([email(sort: Desc), sql("lower(email)")], where: raw("id > 0"), with: { m: 16 })
+              @@map("users")
+            }
+
+            function f {
+            returns = trigger
+            body    = """
+              BEGIN
+                RETURN NEW;
+              END;
+            """
+            }
+
             import "x.toml"
             "#,
         )
         .unwrap();
         assert_eq!(items.len(), 4);
-        let Item::Model(m) = &items[0] else { panic!() };
+        let Item::Datasource { props, .. } = &items[0] else { panic!() };
+        assert_eq!(props[0].2, Value::Str("postgresql".into()));
+        let Item::Model(m) = &items[1] else { panic!() };
         assert_eq!(m.members[1].ty.name, "String");
         assert!(m.members[1].ty.optional && !m.members[1].ty.list);
+        assert_eq!(m.members[1].attrs[1].name, "db.VarChar");
         assert!(m.members[2].ty.list);
         assert_eq!(m.blocks[0].name, "index");
         assert_eq!(m.blocks[0].args.named.len(), 2);
-        let Item::Function { props, .. } = &items[1] else { panic!() };
+        assert_eq!(m.blocks[1].name, "map");
+        let Item::Function { props, .. } = &items[2] else { panic!() };
         assert_eq!(props[1].2, Value::Str("BEGIN\n  RETURN NEW;\nEND;".into()));
     }
 
     #[test]
     fn reports_positions() {
-        let e = parse("model User {\n  id BigInt\n}").unwrap_err();
-        assert_eq!((e.pos.line, e.pos.col), (2, 6));
-        assert!(e.msg.contains("expected `:`"), "{}", e.msg);
-        let e = parse("model X { a: \"oops }").unwrap_err();
+        let e = parse("model User {\n  id: BigInt\n}").unwrap_err();
+        assert_eq!((e.pos.line, e.pos.col), (2, 5));
+        assert!(e.msg.contains("expected a type"), "{}", e.msg);
+        let e = parse("model X {\n  a String @default(\"oops)\n}").unwrap_err();
         assert!(e.msg.contains("unterminated"));
+    }
+
+    #[test]
+    fn enforces_the_formatter_rules() {
+        // one attribute per line
+        let e = parse("model A {\n  id Int @id\n  @@trigger(t, after: [insert],\n    function: f)\n}").unwrap_err();
+        assert_eq!(e.pos.line, 3);
+        assert!(e.msg.contains("must be on one line"), "{}", e.msg);
+        let e = parse("model A {\n  id Int\n    @id\n}").unwrap_err();
+        assert!(e.msg.contains("a field must be on one line"), "{}", e.msg);
+        let e = parse("model A {\n  id Int @id  b Int\n}").unwrap_err();
+        assert!(e.msg.contains("one field or attribute per line"), "{}", e.msg);
+        // """ only in top-level blocks
+        let e = parse("model A {\n  id Int @id\n  @@trigger(t, before: [update], body: \"\"\"BEGIN RETURN NEW; END;\"\"\")\n}")
+            .unwrap_err();
+        assert!(e.msg.contains("only go in top-level blocks"), "{}", e.msg);
+        assert!(parse("function f {\nbody = \"\"\"\nBEGIN RETURN NEW; END;\n\"\"\"\n}").is_ok());
     }
 }

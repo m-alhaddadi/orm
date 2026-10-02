@@ -95,19 +95,22 @@ Bad: `Python → Rust → Python` repeatedly; one FFI conversion per row.
 Describes database concepts only: models/tables, columns, types, relations, indexes,
 constraints, triggers, database-specific features, inheritance.
 
-```
+```prisma
 model User {
-    id: UUID @primary
-    email: String @unique
-    posts: Post[]
+  id    String @id @db.Uuid
+  email String @unique
+  posts Post[]
 }
 
 model Post {
-    id: UUID @primary
-    title: String
-    author: User
+  id        String @id @db.Uuid
+  title     String
+  author_id String @db.Uuid
+  author    User   @relation(fields: [author_id], references: [id])
 }
 ```
+
+The syntax is Prisma's (see [`docs/prisma-syntax.md`](docs/prisma-syntax.md)).
 
 ### Separation of concerns
 
@@ -196,7 +199,7 @@ once you count FFI and Python object materialization?
 
 ### Phase 1 — First prototype  (in progress, see [`docs/python-api.md`](docs/python-api.md))
 
-1. Schema parser — ✅ `.orm` schema language, compiled by `core/` (see below)
+1. Schema parser — ✅ `.prisma` schema language (Prisma syntax + our attributes), compiled by `core/` (see below)
 2. ORM IR — ✅ first cut: schema IR + query/mutation IR (`core/src/ir.rs`)
 3. Python API prototype — ✅ `python/orm`: Django-style managers and loading,
    SQLAlchemy-style typed expressions, relation-path filters (`User.posts.created_at`)
@@ -211,7 +214,7 @@ multiple language bindings. Validate the architecture and API first.
 
 ### Schema language, migrations, extensions  ✅ first cut, see [`docs/schema.md`](docs/schema.md)
 
-- One schema for every language: `.orm` files, parsed and compiled by the binding-free
+- One schema for every language: `.prisma` files, parsed and compiled by the binding-free
   `core/` crate (`orm-core`) into the schema IR. Python loads the IR (`orm.load`) or a
   module generated from it (`models.py` + typed `.pyi`). The JS binding will consume
   the same IR. The `orm` CLI (compile, check, generate, makemigrations, sqlmigrate)

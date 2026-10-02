@@ -1,4 +1,4 @@
-# Generated from schema.orm by `python -m orm generate`. Do not edit.
+# Generated from schema.prisma by `python -m orm generate`. Do not edit.
 #
 # Static half of the generated module. Each model gets:
 #   * the model class: column descriptors (`User.email` is a ColumnRef[str] on the class,

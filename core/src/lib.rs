@@ -1,9 +1,9 @@
 //! Language-independent ORM core.
 //!
 //! ```text
-//! schema.orm ──dsl──▶ SchemaIr ──schema──▶ validated Schema ──migrate──▶ snapshots, DDL
-//!                         │                        └──codegen──▶ models for each language
-//!                         └──(JSON)──▶ language bindings (Python today, JS next)
+//! schema.prisma ──dsl──▶ SchemaIr ──schema──▶ validated Schema ──migrate──▶ snapshots, DDL
+//!                           │                        └──codegen──▶ models for each language
+//!                           └──(JSON)──▶ language bindings (Python today, JS next)
 //! ```
 //!
 //! Nothing here knows about Python, JS or a database driver: bindings and the `orm`

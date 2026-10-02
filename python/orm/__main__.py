@@ -9,7 +9,7 @@
     python -m orm showmigrations
 
 The schema file and migrations directory come from ``--schema`` / ``--dir`` or from
-``[tool.orm]`` in ``pyproject.toml`` (``schema = "schema.orm"``,
+``[tool.orm]`` in ``pyproject.toml`` (``schema = "schema.prisma"``,
 ``migrations = "migrations"``). The database URL comes from ``--url`` or
 ``ORM_DATABASE_URL``. Everything but the database commands is also available without
 Python as the ``orm`` binary (``core/``).
@@ -41,7 +41,7 @@ def _config() -> dict[str, Any]:
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m orm", description="Schema and migrations.")
-    p.add_argument("--schema", help="schema file (default: [tool.orm] schema, else schema.orm)")
+    p.add_argument("--schema", help="schema file (default: [tool.orm] schema, else schema.prisma)")
     p.add_argument("--dir", help="migrations directory (default: migrations)")
     p.add_argument("--url", help="database URL (default: $ORM_DATABASE_URL)")
     sub = p.add_subparsers(dest="command", required=True)
@@ -74,7 +74,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     cfg = _config()
-    schema = Path(args.schema or cfg.get("schema") or "schema.orm")
+    schema = Path(args.schema or cfg.get("schema") or "schema.prisma")
     migrations = Migrations(args.dir or cfg.get("migrations") or "migrations", schema)
     try:
         if args.command == "check":

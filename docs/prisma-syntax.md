@@ -1,7 +1,8 @@
 # Prisma-compatible schema syntax (design)
 
-Status: design only. The parser is written later; the current `.orm` parser in
-`core/src/dsl/` stays until then. This document fixes the syntax that parser will read.
+Status: implemented in `core/src/dsl/`, which reads only `.prisma` files; the `.orm`
+syntax is gone. The language reference is [`schema.md`](schema.md). This document
+records why the syntax looks the way it does and how the `.orm` syntax maps onto it.
 
 ## Decisions
 
@@ -46,7 +47,7 @@ Prisma VS Code extension) on the two schemas below:
 * Inside an unknown top-level block (`function x { }`), the formatter removes
   indentation. Content is kept; SQL doesn't care.
 
-Two rules follow, and the parser should enforce them so a format can't break a file:
+Two rules follow, and the parser enforces them so a format can't break a file:
 
 1. **Each attribute is on one line.** The formatter treats a `@@trigger(...)` split
    across lines as two unknown lines and can move them away from the other `@@`
@@ -126,13 +127,15 @@ already does.
 
 ## The blog example
 
-`examples/blog/schema.orm` in the new syntax, as the formatter leaves it. The only IDE
-error is the `@@check` line.
+[`examples/blog/schema.prisma`](../examples/blog/schema.prisma), as the formatter
+leaves it. The only IDE error is the `@@check` line. Its IR, generated models and
+migrations are the same as those of the `.orm` file it replaced. It doesn't list
+`extensions = [pg_trgm]`: the trigram index pulls the extension in, and listing it
+would add an explicit pin to the IR.
 
 ```prisma
 datasource db {
-  provider   = "postgresql"
-  extensions = [pg_trgm]
+  provider = "postgresql"
 }
 
 model User {
@@ -159,7 +162,7 @@ model Post {
 
   @@index([author_id])
   @@index([author_id, created_at(sort: Desc)], where: raw("published"))
-  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin) // pulls in the pg_trgm extension
   @@map("posts")
   @@check("views >= 0", name: "posts_views_not_negative")
 }
@@ -229,6 +232,27 @@ model Account {
 This is the formatter's output, so it is stable under format-on-save. IDE errors:
 `import`, the lines of `function audit_row`, and our attributes and arguments in
 `Account`. Everything else is native Prisma.
+
+## Choices made in the parser
+
+Where the mapping above leaves something open:
+
+* `@@index([col])` with a single plain key is the column's own index, as `@index` was,
+  so the IR doesn't change.
+* `where:` takes `raw("...")` or a plain string, in `@@index` and `@@exclude` alike;
+  `ops:` takes `raw("...")` or a bare name. `name:` and Prisma's `map:` both set the
+  database name of an index or unique constraint.
+* Extension types are written `Unsupported("...")` (or `String @db.Citext`), never as
+  bare type names, so Prisma's editor reads every field type.
+* `Decimal` is `numeric`; values travel as strings so no precision is lost.
+* Prisma's other `@db.*` types set the column's SQL type, like `@db_type` did.
+* A to-many relation finds its key through the to-one relation on the other model;
+  relations without `fields:` on the to-one side (one-to-one back relations) and
+  composite keys aren't supported, as before.
+* `datasource` is optional and its `url` is ignored (the URL comes from
+  `ORM_DATABASE_URL`). `generator` blocks are read and ignored, so a file can also
+  drive Prisma Client.
+* Comments are `//` only, as in Prisma.
 
 ## Migrations
 

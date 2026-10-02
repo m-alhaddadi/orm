@@ -22,7 +22,7 @@ automatically: each relation hop becomes a correlated `EXISTS`.
 | `python/orm/` | Python package: `expr.py` (expressions, `func` → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet), `select.py` (`select()`, `Row`), `write.py` (insert / update / delete statements), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
 | `core/` | Rust crate `orm-core`, no binding code: schema language, IR (`ir.rs`), extensions, migrations, code generation, the `orm` CLI (see [`schema.md`](schema.md)) |
 | `native/` | Rust crate `orm._native` (PyO3) on top of `orm-core`: `plan.rs` (IR → sea-query statements), `db/` (drivers: `mod.rs` traits, `postgres.rs`), `convert.rs` (Python ↔ values), `lib.rs` |
-| `examples/blog/` | `schema.orm`, the `models.py` / `models.pyi` generated from it, its migrations, `demo.py` |
+| `examples/blog/` | `schema.prisma`, the `models.py` / `models.pyi` generated from it, its migrations, `demo.py` |
 | `tests/` | SQL shape tests (no DB), Postgres end-to-end tests, mypy + pyright stub checks |
 
 Python 3.11 or newer (`select()` rows are typed with `TypeVarTuple`).
@@ -37,10 +37,10 @@ python examples/blog/demo.py
 
 ## Models: the generated module
 
-`python -m orm generate` turns `schema.orm` into two files (see [`schema.md`](schema.md)):
+`python -m orm generate` turns `schema.prisma` into two files (see [`schema.md`](schema.md)):
 
 * **`models.py` (runtime).** The compiled schema IR plus `orm.define()`, which builds
-  the model classes (field and relation descriptors) from it. `orm.load("schema.orm")`
+  the model classes (field and relation descriptors) from it. `orm.load("schema.prisma")`
   does the same at runtime without a generated file.
 * **`models.pyi` (types).** Per model:
   * the model class (`id: f.BigInt[int]`, `posts: f.HasMany[Post, _PostPath]`, a typed

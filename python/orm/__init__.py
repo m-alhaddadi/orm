@@ -1,6 +1,6 @@
 """Async Python ORM with a Rust core.
 
-Models come from a schema file (``schema.orm``): ``orm.load("schema.orm")``, or a
+Models come from a schema file (``schema.prisma``): ``orm.load("schema.prisma")``, or a
 module generated from it (``python -m orm generate``, see ``examples/blog``). Queries are
 expressions over model attributes, Django-style managers on top::
 

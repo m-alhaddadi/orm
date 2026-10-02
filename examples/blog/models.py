@@ -1,4 +1,4 @@
-# Generated from schema.orm by `python -m orm generate`. Do not edit.
+# Generated from schema.prisma by `python -m orm generate`. Do not edit.
 #
 # Runtime half of the generated module: the model classes are built from the compiled
 # schema below. models.pyi carries the static types (columns, relation paths, typed

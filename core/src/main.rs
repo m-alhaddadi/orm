@@ -1,10 +1,10 @@
 //! `orm`: the schema tool, independent of any language binding.
 //!
 //! ```text
-//! orm check <schema.orm>
-//! orm compile <schema.orm> [-o ir.json]
-//! orm generate python <schema.orm> [-o models.py]          (also writes models.pyi)
-//! orm makemigrations <schema.orm> [--dir migrations] [--name N] [--empty] [--check]
+//! orm check <schema.prisma>
+//! orm compile <schema.prisma> [-o ir.json]
+//! orm generate python <schema.prisma> [-o models.py]          (also writes models.pyi)
+//! orm makemigrations <schema.prisma> [--dir migrations] [--name N] [--empty] [--check]
 //! orm sqlmigrate <migration> [--dir migrations] [--down]
 //! ```
 //!
@@ -17,10 +17,10 @@ use std::process::ExitCode;
 use orm_core::{codegen, dsl, migrate};
 
 const USAGE: &str = "usage:
-  orm check <schema.orm>
-  orm compile <schema.orm> [-o ir.json]
-  orm generate python <schema.orm> [-o models.py]
-  orm makemigrations <schema.orm> [--dir migrations] [--name N] [--empty] [--check]
+  orm check <schema.prisma>
+  orm compile <schema.prisma> [-o ir.json]
+  orm generate python <schema.prisma> [-o models.py]
+  orm makemigrations <schema.prisma> [--dir migrations] [--name N] [--empty] [--check]
   orm sqlmigrate <migration> [--dir migrations] [--down]";
 
 struct Args {

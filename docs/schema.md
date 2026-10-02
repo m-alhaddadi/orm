@@ -1,14 +1,21 @@
 # Schema language, extensions and migrations
 
-The schema is written once, in a `.orm` file, and every language uses it:
+The schema is written once, in a `.prisma` file, and every language uses it:
 
 ```
-schema.orm ──▶ orm-core (Rust) ──▶ schema IR (JSON) ──▶ Python: orm.load() / generated models.py + .pyi
-   ▲              │                                └──▶ JS / Go / ...: the same IR (bindings to come)
-extensions/*.toml │
-                  ├──▶ migrations/NNNN_name/{up.sql, down.sql, snapshot.json}
-                  └──▶ Postgres DDL (create_tables)
+schema.prisma ──▶ orm-core (Rust) ──▶ schema IR (JSON) ──▶ Python: orm.load() / generated models.py + .pyi
+   ▲                 │                                └──▶ JS / Go / ...: the same IR (bindings to come)
+extensions/*.toml    │
+                     ├──▶ migrations/NNNN_name/{up.sql, down.sql, snapshot.json}
+                     └──▶ Postgres DDL (create_tables)
 ```
+
+The file uses Prisma's schema syntax, so Prisma's VS Code extension highlights,
+formats and completes it. What Prisma has no syntax for (checks, exclusions,
+triggers, functions, ...) is written as our own attributes and blocks; the editor
+marks those lines as errors, which is expected. Nothing calls Prisma's CLI or
+engines: our parser, migrator and code generators do the work. The reasoning, and
+the mapping from the old `.orm` syntax, is in [`prisma-syntax.md`](prisma-syntax.md).
 
 No Python, Rust or JS class describes the schema. The parser, the extension catalog,
 the migration generator and the code generators live in the binding-free `core/` crate,
@@ -27,147 +34,183 @@ command-line tool, which needs no Python.
 
 ## A schema
 
-```
-// examples/blog/schema.orm (excerpt)
-model Post @table("posts") {
-    id:         BigInt      @primary @auto
-    author_id:  BigInt      @index
-    title:      String(200)
-    body:       Text
-    views:      Int         @default(0)
-    published:  Bool        @default(false)
-    created_at: DateTime    @default(now)
+```prisma
+// examples/blog/schema.prisma (excerpt)
+model Post {
+  id         BigInt    @id @default(autoincrement())
+  author_id  BigInt
+  title      String    @db.VarChar(200)
+  body       String    @db.Text
+  views      Int       @default(0)
+  published  Boolean   @default(false)
+  created_at DateTime  @default(now())
+  author     User      @relation(fields: [author_id], references: [id], onDelete: Cascade)
+  comments   Comment[]
 
-    author:     User        @relation(via: author_id, on_delete: cascade)
-    comments:   Comment[]   @relation(via: Comment.post_id)
-
-    @@index([author_id, created_at(sort: desc)], where: "published")
-    @@index([title(ops: gin_trgm_ops)], type: gin)     // pulls in pg_trgm
-    @@check("views >= 0", name: "posts_views_not_negative")
+  @@index([author_id])
+  @@index([author_id, created_at(sort: Desc)], where: raw("published"))
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin) // pulls in pg_trgm
+  @@map("posts")
+  @@check("views >= 0", name: "posts_views_not_negative")
 }
 ```
 
 Using it from Python:
 
 ```python
-models = orm.load("schema.orm")          # compile at runtime; models["Post"] ...
+models = orm.load("schema.prisma")       # compile at runtime; models["Post"] ...
 # or generate a module (typed, autocompletes):  python -m orm generate
 from blog.models import Post, User
 ```
 
 ## Language reference
 
-The syntax doesn't care about line breaks. Comments are `// ...` and `/* ... */`. Strings
-are `"..."` (escapes `\" \\ \n \t`) or `"""..."""`, taken verbatim with common
+As in Prisma, each field and each attribute is on its own line. Comments are `// ...`.
+Strings are `"..."` (escapes `\" \\ \n \t`) or `"""..."""`, taken verbatim with common
 indentation removed, which suits SQL bodies. Raw SQL (predicates, expressions,
 bodies) is written as it appears in the DDL, using column names.
 
+Two rules keep a file intact when the Prisma formatter runs on save, and the parser
+enforces both:
+
+1. **Each attribute is on one line.** The formatter would tear a split `@@trigger(...)`
+   apart. Put a long trigger body in a `function` block.
+2. **`"""` strings only appear in top-level blocks** (`function`, `datasource`), never
+   inside a model. Inside a model, write `"...\n..."` on one line.
+
+The parser doesn't depend on the order of `@@` attributes (the formatter puts Prisma's
+own first and ours after them).
+
 ### Top level
 
-```
-import "extensions/acme.toml"            // an extension file (path relative to this file)
-extension postgis(schema: "ext", version: "3.4")   // pin an extension; optional
-extension "uuid-ossp"                    // names that aren't identifiers go in quotes
+```prisma
+import "extensions/acme.toml" // an extension file (path relative to this file)
 
-function audit_row {                     // a stand-alone SQL function
-    returns: trigger                     // default trigger
-    args: ""                             // SQL argument list, e.g. "a integer, b text"
-    language: plpgsql                    // default plpgsql
-    volatility: stable                   // optional: immutable / stable / volatile
-    security_definer: false
-    body: """
-        BEGIN
-            INSERT INTO audit_log (tbl) VALUES (TG_TABLE_NAME);
-            RETURN NULL;
-        END;
-    """
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL") // accepted and ignored: the URL comes from ORM_DATABASE_URL
+  extensions = [postgis(schema: "ext", version: "3.4"), uuid_ossp(map: "uuid-ossp")]
 }
 
-model Name @table("names") @comment("...") @renamed_from("old_table") { ... }
+function audit_row {
+returns  = trigger
+args     = ""
+language = plpgsql
+body     = """
+BEGIN
+INSERT INTO audit_log (tbl) VALUES (TG_TABLE_NAME);
+RETURN NULL;
+END;
+"""
+}
 ```
 
-The default table name is the model name in lower case.
+* The `datasource` is optional (Postgres is implied), but Prisma's editor wants one.
+  `extensions` pins where an extension goes and which version; extensions the schema
+  uses are added anyway. `map:` gives the real name of one that isn't an identifier.
+* `function name { ... }` is a stand-alone SQL function: `returns` (default `trigger`),
+  `args` (the SQL argument list, e.g. `"a integer, b text"`), `language` (default
+  `plpgsql`), `volatility` (`immutable` / `stable` / `volatile`), `security_definer`,
+  `body`. The formatter removes the indentation inside it, which SQL doesn't mind.
+* `generator` blocks (Prisma Client's) are read and ignored. `enum`, `type` and `view`
+  aren't supported yet.
+
+A model's table is the model name in lower case, or `@@map("name")`.
+`@@comment("...")` and `@@renamed_from("old_table")` set its comment and previous name.
 
 ### Fields
 
-`name: Type[(args)][?] @attr...`, where `?` makes the column nullable.
+`name Type[?] @attr...`, where `?` makes the column nullable.
 
 | Type | SQL | Python value |
 |---|---|---|
 | `BigInt`, `Int` | `bigint`, `integer` | `int` |
 | `Float` | `double precision` | `float` |
-| `Bool` | `boolean` | `bool` |
-| `String`, `String(n)` | `varchar`, `varchar(n)` | `str` |
-| `Text` | `text` | `str` |
-| `DateTime`, `Date` | `timestamp with time zone`, `date` | `datetime` (aware), `date` |
-| `Uuid` | `uuid` | `uuid.UUID` (strings accepted) |
+| `Boolean` | `boolean` | `bool` |
+| `String`, `String @db.VarChar(n)` | `varchar`, `varchar(n)` | `str` |
+| `String @db.Text` | `text` | `str` |
+| `String @db.Uuid` | `uuid` | `uuid.UUID` (strings accepted) |
+| `DateTime`, `DateTime @db.Date` | `timestamp with time zone`, `date` | `datetime` (aware), `date` |
 | `Json` | `jsonb` | dicts, lists, scalars |
-| an extension type | from its extension file, e.g. `citext`, `vector(384)`, `geography(Point, 4326)` | from the file's `value` |
+| `Decimal`, `Decimal @db.Decimal(p, s)` | `numeric`, `numeric(p, s)` | `str` (no precision lost) |
+| `String @db.Citext` | `citext` (the extension type) | `str` |
+| `Unsupported("vector(384)")`, `Unsupported("geography(Point, 4326)")` | an extension type, from its extension file | from the file's `value` |
+
+Prisma's other `@db.*` types (`@db.SmallInt`, `@db.Timestamp(3)`, `@db.Char(2)`,
+`@db.Inet`, ...) set the column's SQL type; values convert as the field type's.
 
 | Attribute | Meaning |
 |---|---|
-| `@primary`, `@auto` | primary key; `GENERATED BY DEFAULT AS IDENTITY` |
-| `@unique`, `@index` | single-column unique constraint / index |
-| `@default(0)` `@default("x")` `@default(true)` `@default({"a": 1})` | literal default |
-| `@default(now)` | `now()` |
-| `@default(sql("gen_random_uuid()"))` | any SQL default |
+| `@id` | primary key |
+| `@default(autoincrement())` | `GENERATED BY DEFAULT AS IDENTITY` |
+| `@unique` | single-column unique constraint |
+| `@default(0)` `@default("x")` `@default(true)` | literal default |
+| `@default("{\"a\": 1}")` on `Json` | JSON default, written as JSON text |
+| `@default(now())` | `now()` |
+| `@default(dbgenerated("gen_random_uuid()"))` | any SQL default |
+| `@map("db_name")` | column name, if different from the field name |
+| `@db.*` | the SQL type (above) |
 | `@check("views >= 0")` | column check constraint |
 | `@comment("...")` | column comment |
-| `@column("db_name")` | column name, if different from the field name |
 | `@renamed_from("old")` | previous column name: the migration renames it instead of dropping |
-| `@db_type("numeric(10, 2)")` | override the SQL type (the value conversion stays the field type's) |
 
 ### Relations
 
 ```
-author:   User       @relation(via: author_id)              // to-one: via = a field of this model
-author:   User?      @relation(via: author_id, on_delete: set_null)
-posts:    Post[]     @relation(via: Post.author_id)          // to-many: via = the target's field
+author   User      @relation(fields: [author_id], references: [id])  // to-one: holds the key
+author   User?     @relation(fields: [author_id], references: [id], onDelete: SetNull)
+posts    Post[]                                                         // to-many: the other side
 ```
 
-To-one relations create the foreign key. Their options are `to:` (default: the target's
-primary key), `on_delete:` / `on_update:` (`cascade`, `set_null`, `set_default`,
-`restrict`, `no_action`; the default is the database's, no action), and
-`deferrable: immediate | deferred`. The relation is optional (`User?`) exactly when the
-`via` field is nullable; the compiler checks this. To-many relations take
-`from:` (default: this model's primary key).
+To-one relations name their key field in `fields:` and the target field in
+`references:`, and create the foreign key. Their options are `onDelete:` / `onUpdate:`
+(`Cascade`, `SetNull`, `SetDefault`, `Restrict`, `NoAction`; the default is the
+database's, no action) and `deferrable: immediate | deferred`. The relation is
+optional (`User?`) exactly when the key field is nullable; the compiler checks this.
+A to-many relation (`Post[]`) is paired with the to-one relation on the other model.
+When two models have more than one relation between them, name both sides:
+`@relation("author", fields: ...)` and `@relation("author")`. One-to-one back
+relations (`Profile?` without `fields:`) and composite keys aren't supported yet.
 
-### Model declarations (`@@`)
+### Model attributes (`@@`)
 
 ```
-@@index([author_id, created_at(sort: desc, nulls: last)], where: "published", name: "x")
-@@index([title(ops: gin_trgm_ops)], type: gin)
+@@index([author_id])
+@@index([author_id, created_at(sort: Desc, nulls: last)], where: raw("published"), name: "x")
+@@index([title(ops: raw("gin_trgm_ops"))], type: Gin)
 @@index([sql("lower(email)", collate: "C")], unique: true)
 @@index([floor], include: [name], nulls_not_distinct: true)
-@@index([embedding(ops: vector_cosine_ops)], type: hnsw, with: {m: 16, ef_construction: 64})
+@@index([embedding(ops: vector_cosine_ops)], type: hnsw, with: { m: 16, ef_construction: 64 })
 
 @@unique([author_id, slug], nulls_not_distinct: true, deferrable: deferred)
 @@check("starts_at < ends_at", name: "bookings_order")
 @@exclude([room_id(op: "="), sql("tstzrange(starts_at, ends_at)", op: "&&")], where: "not cancelled")
 
-@@trigger(touch, before: [update], update_of: [title], when: "OLD.title <> NEW.title",
-          body: """BEGIN NEW.updated_at := now(); RETURN NEW; END;""")
-@@trigger(audit, after: [insert, update, delete], for_each: statement,
-          function: audit_row, args: ["posts"])
+@@trigger(touch, before: [update], update_of: [title], when: "OLD.title <> NEW.title", body: "BEGIN NEW.updated_at := now(); RETURN NEW; END;")
+@@trigger(audit, after: [insert, update, delete], for_each: statement, function: audit_row, args: ["posts"])
 ```
 
-* Index keys are field names or `sql("expression")`, with options `sort: asc|desc`,
-  `nulls: first|last`, `ops: <operator class>`, `collate: "..."`, and `op: "..."` in
-  `@@exclude`.
-* `type:` (or `using:`) is the access method (default btree for indexes, gist for
-  exclusions), and `with:` sets storage parameters.
+* Index keys are field names or `sql("expression")`, with options `sort: Asc|Desc`,
+  `nulls: first|last`, `ops: <operator class>` (a name or `raw("...")`),
+  `collate: "..."`, and `op: "..."` in `@@exclude`.
+* `@@index([field])` with one plain key is that column's index.
+* `type:` is the access method (default btree for indexes, gist for exclusions):
+  Prisma's `BTree`, `Hash`, `Gist`, `Gin`, `SpGist`, `Brin`, or any other method
+  (`hnsw`, `ivfflat`, `bloom`). `with:` sets storage parameters. `where:` takes
+  `raw("...")` or a string. The database name is `name:` or `map:`.
 * For a unique *expression* or a partial unique rule, use `@@index(..., unique: true)`.
 * `@@exclude` with `=` on a plain column under GiST pulls in `btree_gist` by itself.
 * A trigger fires on exactly one of `before:` / `after:` / `instead_of:`. Give it
-  either a `body:` (a function `<table>_<name>()` is generated and replaced in place
-  when the body changes) or a `function:`.
+  either a one-line `body:` (a function `<table>_<name>()` is generated and replaced in
+  place when the body changes) or a `function:` declared in a `function` block.
 
 Mistakes are reported with file, line and column:
 
 ```
-schema.orm:12:15: Post.title: unknown type Strin; expected a built-in type (BigInt, ...), a model, or a type from an extension file
-schema.orm:20:5: Post: @@index: unknown argument `wher`
-schema.orm:9:13: relation author: author_id is nullable, so the relation type is `User?`
+schema.prisma:22:14: Post.title: unknown type Strin; expected a model or BigInt, Int, Float, Boolean, String, ...
+schema.prisma:30:24: Post: @@index: unknown argument `wher`
+schema.prisma:44:14: relation Comment.author: author_id is not nullable, so the relation type is `User`
+schema.prisma:34:3: model Post: an attribute must be on one line (put a long trigger body in a `function` block)
 ```
 
 ### Names
@@ -190,7 +233,7 @@ index_methods = ["hnsw", "ivfflat"]
 opclasses = ["vector_l2_ops", "vector_cosine_ops"]
 functions = ["cosine_distance"]
 
-[types.vector]                                    # usable as a field type: vector(384)
+[types.vector]                                    # a field type: Unsupported("vector(384)")
 sql = "vector({dims})"                            # {arg} placeholders come from `args`
 args = ["dims"]
 # defaults = { dims = "3" }                       # optional default per argument
@@ -205,7 +248,7 @@ Built in (`core/extensions/postgres/`, compiled into the core):
 
 | file | adds |
 |---|---|
-| `citext` | type `citext` (str; values are cast, so comparisons, `in_()` and `ON CONFLICT` ignore case) |
+| `citext` | type `citext`, written `String @db.Citext` (str; values are cast, so comparisons, `in_()` and `ON CONFLICT` ignore case) |
 | `pg_trgm` | opclasses `gin_trgm_ops`, `gist_trgm_ops`; `similarity()`, ... |
 | `vector` (pgvector) | types `vector(dims)`, `halfvec(dims)` (`list[float]`); methods `hnsw`, `ivfflat`; `*_ops` opclasses |
 | `postgis` | types `geometry(shape, srid)`, `geography(shape, srid)` (EWKT strings); GiST opclasses; `ST_*` functions |
@@ -216,10 +259,10 @@ Built in (`core/extensions/postgres/`, compiled into the core):
 Anything an extension provides pulls it in: a column of its type, an index using its
 method or operator class, or a call to one of its functions in a default, check or
 predicate. The next migration then starts with `CREATE EXTENSION IF NOT EXISTS`, and
-the down migration drops it last (with a warning). `extension name(schema:, version:)`
-in the schema only pins where it goes and which version. Your own extensions are files
-next to the schema, loaded with `import "extensions/acme.toml"`; unknown keys in a
-file are an error.
+the down migration drops it last (with a warning). `extensions = [name(schema:, version:)]`
+in the `datasource` only pins where it goes and which version. Your own extensions are
+files next to the schema, loaded with `import "extensions/acme.toml"`; their types are used
+as `Unsupported("money(12)")`. Unknown keys in a file are an error.
 
 The planner applies `read` / `write` in `SELECT`, `RETURNING`, `INSERT`, `UPDATE` and
 comparisons, so queries on extension-typed columns look like any other.
@@ -228,7 +271,7 @@ comparisons, so queries on extension-typed columns look like any other.
 
 ```bash
 python -m orm generate                   # models.py + models.pyi next to the schema (or -o path)
-orm generate python schema.orm -o app/models.py
+orm generate python schema.prisma -o app/models.py
 ```
 
 `models.py` embeds the compiled IR and builds the classes with `orm.define()`, so no
@@ -236,7 +279,7 @@ schema detail is restated in Python. `models.pyi` gives editors and type checker
 typed classes, relation paths (`User.posts.created_at` is `ColumnRef[datetime]`),
 insert / update `TypedDict`s and query sets (see [`python-api.md`](python-api.md)).
 `tests/test_migrations.py` checks that the committed blog module is up to date.
-Without generation, `orm.load("schema.orm")` returns the same classes at runtime.
+Without generation, `orm.load("schema.prisma")` returns the same classes at runtime.
 TypeScript generation will come with the JS binding.
 
 ## Migrations
@@ -250,7 +293,7 @@ python -m orm migrate [target]               # apply pending migrations
 python -m orm rollback [--steps N | --to 0002_x | --to zero]
 python -m orm showmigrations
 
-orm makemigrations schema.orm --dir migrations    # the same files, without Python
+orm makemigrations schema.prisma --dir migrations # the same files, without Python
 orm sqlmigrate 2 --dir migrations
 ```
 
@@ -259,7 +302,7 @@ Settings come from flags (`--schema`, `--dir`, `--url`) or `[tool.orm]` in
 repository's `pyproject.toml` points at the blog example; its first migration is
 [`examples/blog/migrations/0001_initial`](../examples/blog/migrations/0001_initial/up.sql).
 
-From Python: `Migrations("migrations", "schema.orm")` (or a `Registry`) has
+From Python: `Migrations("migrations", "schema.prisma")` (or a `Registry`) has
 `.plan()`, `.make(name)` and `.all()`. `Migrator(db, migrations)` has `.upgrade()`,
 `.downgrade()` and `.status()`.
 

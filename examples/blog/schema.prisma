@@ -1,0 +1,49 @@
+// Source of truth for examples/blog. models.py / models.pyi next to this file are
+// generated from it:  python -m orm generate   (or: orm generate python ...)
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id         BigInt    @id @default(autoincrement())
+  email      String    @unique @db.VarChar(254)
+  name       String    @db.VarChar(100)
+  created_at DateTime  @default(now())
+  posts      Post[]
+  comments   Comment[]
+
+  @@map("users")
+}
+
+model Post {
+  id         BigInt    @id @default(autoincrement())
+  author_id  BigInt
+  title      String    @db.VarChar(200)
+  body       String    @db.Text
+  views      Int       @default(0)
+  published  Boolean   @default(false)
+  created_at DateTime  @default(now())
+  author     User      @relation(fields: [author_id], references: [id], onDelete: Cascade)
+  comments   Comment[]
+
+  @@index([author_id])
+  @@index([author_id, created_at(sort: Desc)], where: raw("published"))
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin) // pulls in the pg_trgm extension
+  @@map("posts")
+  @@check("views >= 0", name: "posts_views_not_negative")
+}
+
+model Comment {
+  id         BigInt   @id @default(autoincrement())
+  post_id    BigInt
+  author_id  BigInt?
+  body       String   @db.Text
+  created_at DateTime @default(now())
+  post       Post     @relation(fields: [post_id], references: [id], onDelete: Cascade)
+  author     User?    @relation(fields: [author_id], references: [id], onDelete: SetNull)
+
+  @@index([post_id])
+  @@index([author_id])
+  @@map("comments")
+}
