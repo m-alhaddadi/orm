@@ -4,6 +4,7 @@
 //! operation. Every operation is one FFI crossing returning an awaitable; results come
 //! back as a list of tuples built in one pass, in schema field order.
 
+mod build;
 mod convert;
 mod db;
 mod errors;
@@ -16,8 +17,8 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
-use sea_query::{Alias, Expr as SExpr, ExprTrait};
 
+use crate::build::{Builder, Classes, Fetched};
 use crate::db::{DbResult, Driver, Executor, RowSet};
 use crate::errors::{db_err, query_err, schema_err};
 use crate::plan::{Plan, Planner, SelectPlan};
@@ -86,16 +87,23 @@ fn update_many_plan<'py>(
 #[pyclass(frozen, module = "orm._native", name = "Schema")]
 struct PySchema {
     inner: Arc<schema::Schema>,
+    classes: Arc<Classes>,
 }
 
 #[pymethods]
 impl PySchema {
+    /// `classes` maps model names to the classes queries build instances of.
     #[new]
-    fn new(schema_json: &str) -> PyResult<Self> {
+    #[pyo3(signature = (schema_json, classes = None))]
+    fn new(py: Python<'_>, schema_json: &str, classes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let ir: ir::SchemaIr =
             serde_json::from_str(schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
-        Ok(PySchema { inner: Arc::new(inner) })
+        let classes = match classes {
+            Some(c) => Classes::new(py, &inner, c)?,
+            None => Classes::empty(),
+        };
+        Ok(PySchema { inner: Arc::new(inner), classes: Arc::new(classes) })
     }
 
     /// SQL for an operation with parameters inlined. For debugging and tests only.
@@ -170,31 +178,50 @@ impl PySchema {
     }
 }
 
-struct Fetched {
+struct Selected {
     rows: Box<dyn RowSet>,
-    types: Vec<ColType>,
-    prefetched: Vec<(String, Vec<ColType>, Box<dyn RowSet>)>,
+    plan: SelectPlan,
+    prefetched: Vec<Fetched>,
 }
 
-async fn run_select(conn: &dyn Executor, dialect: Dialect, plan: SelectPlan) -> DbResult<Fetched> {
+async fn run_select(conn: &dyn Executor, dialect: Dialect, mut plan: SelectPlan) -> DbResult<Selected> {
     let (sql, args) = db::build(dialect, &plan.stmt);
     let rows = conn.query(sql, args).await?;
-    let mut prefetched = Vec::with_capacity(plan.prefetch.len());
-    for p in plan.prefetch {
-        let keys = (0..rows.len()).map(|i| rows.value(i, p.key_pos, p.key_type)).collect::<DbResult<Vec<_>>>()?;
-        let related = if keys.is_empty() {
-            Box::new(EmptyRows) as Box<dyn RowSet>
-        } else {
-            let mut stmt = p.stmt;
-            stmt.and_where(
-                SExpr::col((Alias::new(&p.to_table), Alias::new(&p.to_column))).is_in(keys.into_iter().map(SExpr::val)),
-            );
-            let (sql, args) = db::build(dialect, &stmt);
-            conn.query(sql, args).await?
-        };
-        prefetched.push((p.name, p.types, related));
-    }
-    Ok(Fetched { rows, types: plan.types, prefetched })
+    let prefetched = run_prefetch(conn, dialect, rows.as_ref(), std::mem::take(&mut plan.prefetch)).await?;
+    Ok(Selected { rows, plan, prefetched })
+}
+
+/// Runs each prefetch query for the keys in `parent`, then the prefetches nested in it.
+fn run_prefetch<'a>(
+    conn: &'a dyn Executor,
+    dialect: Dialect,
+    parent: &'a dyn RowSet,
+    plans: Vec<plan::PrefetchPlan>,
+) -> db::BoxFuture<'a, DbResult<Vec<Fetched>>> {
+    Box::pin(async move {
+        let mut out = Vec::with_capacity(plans.len());
+        for mut p in plans {
+            let null = convert::null_of(Some(p.key_type));
+            let mut seen = std::collections::HashSet::new();
+            let mut keys = vec![];
+            for i in 0..parent.len() {
+                let k = parent.value(i, p.key_pos, p.key_type)?;
+                if k != null && seen.insert(k.clone()) {
+                    keys.push(k);
+                }
+            }
+            let rows = if keys.is_empty() {
+                Box::new(EmptyRows) as Box<dyn RowSet>
+            } else {
+                let (sql, args) = db::build(dialect, &p.statement(keys));
+                conn.query(sql, args).await?
+            };
+            let nested = std::mem::take(&mut p.children);
+            let children = run_prefetch(conn, dialect, rows.as_ref(), nested).await?;
+            out.push(Fetched { plan: p, rows, children });
+        }
+        Ok(out)
+    })
 }
 
 /// The result of a prefetch with no keys: no query runs.
@@ -204,8 +231,8 @@ impl RowSet for EmptyRows {
     fn len(&self) -> usize {
         0
     }
-    fn to_py<'py>(&self, py: Python<'py>, _: &[ColType]) -> PyResult<Bound<'py, PyList>> {
-        Ok(PyList::empty(py))
+    fn cell(&self, _: Python<'_>, _: usize, _: usize, _: ColType) -> PyResult<Py<PyAny>> {
+        Err(db_err(db::DbError::other("no rows")))
     }
     fn value(&self, _: usize, _: usize, _: ColType) -> DbResult<sea_query::Value> {
         Err(db::DbError::other("no rows"))
@@ -242,6 +269,7 @@ struct Engine {
     driver: Arc<dyn Driver>,
     target: Target,
     schema: Arc<schema::Schema>,
+    classes: Arc<Classes>,
 }
 
 impl Engine {
@@ -283,33 +311,39 @@ impl Engine {
 
 #[pymethods]
 impl Engine {
-    /// Runs one query IR document. Returns, by operation:
-    /// select -> `(rows, {relation: rows})`, count -> int, exists -> bool,
-    /// update / delete -> rows affected (with `returning` -> rows).
-    #[pyo3(signature = (op_json, params, tx = None))]
+    /// Runs one query IR document. Returns, by operation: select -> a list of model
+    /// instances (prefetched relations attached), or of `row_cls(values)` rows for
+    /// `select(...)` columns; count -> int; exists -> bool; update / delete -> rows
+    /// affected (with `returning` -> instances). Instances get `db` as `_db`.
+    #[pyo3(signature = (op_json, params, tx = None, row_cls = None, db = None))]
+    #[allow(clippy::too_many_arguments)]
     fn run<'py>(
         &self,
         py: Python<'py>,
         op_json: &str,
         params: Vec<Bound<'py, PyAny>>,
         tx: Option<&Bound<'py, Transaction>>,
+        row_cls: Option<Bound<'py, PyAny>>,
+        db: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let op = parse_op(op_json)?;
         let d = self.target.dialect;
         let plan = Planner::plan(&self.schema, self.target, &op, &params)?;
         let conn = self.conn(tx);
+        let classes = self.classes.clone();
+        let row_cls = row_cls.map(Bound::unbind);
+        let db = db.map(Bound::unbind);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let conn = conn.as_ref();
             match plan {
                 Plan::Select(p) => {
-                    let f = run_select(conn, d, p).await.map_err(db_err)?;
+                    let s = run_select(conn, d, p).await.map_err(db_err)?;
                     Python::attach(|py| {
-                        let rows = f.rows.to_py(py, &f.types)?;
-                        let related = PyDict::new(py);
-                        for (name, types, rows) in &f.prefetched {
-                            related.set_item(name, rows.to_py(py, types)?)?;
-                        }
-                        (rows, related).into_py_any(py)
+                        let db = db.map(|d| d.into_bound(py));
+                        let row_cls = row_cls.map(|c| c.into_bound(py));
+                        let b = Builder::new(py, &classes, db.as_ref());
+                        let out = b.select(&s.plan.output, s.rows.as_ref(), &s.plan.types, &s.prefetched, row_cls.as_ref())?;
+                        Ok(out.unbind().into_any())
                     })
                 }
                 Plan::Count(s) => {
@@ -326,23 +360,23 @@ impl Engine {
                 }
                 Plan::Update(s, types) => {
                     let (sql, args) = db::build(d, &s);
-                    count_or_rows(conn, sql, args, types).await
+                    count_or_rows(conn, sql, args, types, &classes, db).await
                 }
                 Plan::Delete(s, types) => {
                     let (sql, args) = db::build(d, &s);
-                    count_or_rows(conn, sql, args, types).await
+                    count_or_rows(conn, sql, args, types, &classes, db).await
                 }
             }
         })
     }
 
-    /// `INSERT ... RETURNING` every column; returns the inserted rows as tuples.
+    /// `INSERT ... RETURNING` every column; returns the inserted rows as instances.
     ///
     /// With `conflict` (unique field names) rows hitting that constraint update the
     /// `update` fields from the new row and apply the `set` assignments (JSON list of
     /// `{"field", "value"}` IR, parameters in `params`), or are skipped if `update` is
     /// None.
-    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None))]
+    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None))]
     #[allow(clippy::too_many_arguments)]
     fn insert<'py>(
         &self,
@@ -355,7 +389,9 @@ impl Engine {
         set: Option<&str>,
         params: Vec<Bound<'py, PyAny>>,
         tx: Option<&Bound<'py, Transaction>>,
+        db: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let model_idx = self.schema.model_idx(model).map_err(query_err)?;
         let set: Vec<ir::Assignment> = match set {
             Some(json) => serde_json::from_str(json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
             None => vec![],
@@ -367,9 +403,14 @@ impl Engine {
         let (stmt, types) = plan::plan_insert(&self.schema, self.target, model, &fields, rows, on_conflict, &params)?;
         let (sql, args) = db::build(self.target.dialect, &stmt);
         let conn = self.conn(tx);
+        let classes = self.classes.clone();
+        let db = db.map(Bound::unbind);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let rows = conn.query(sql, args).await.map_err(db_err)?;
-            Python::attach(|py| rows.to_py(py, &types).map(|l| l.unbind()))
+            Python::attach(|py| {
+                let db = db.map(|d| d.into_bound(py));
+                Builder::new(py, &classes, db.as_ref()).model_rows(model_idx, rows.as_ref(), &types).map(|l| l.unbind())
+            })
         })
     }
 
@@ -377,7 +418,7 @@ impl Engine {
     /// own values, among the rows matching `filters_json` (JSON list of filter IR, values
     /// in `params`). Big inputs run as several statements in one transaction (inside `tx`
     /// when given). Returns the number of rows updated, or the rows with `returning`.
-    #[pyo3(signature = (model, fields, rows, filters_json, params, returning = false, batch_size = None, tx = None))]
+    #[pyo3(signature = (model, fields, rows, filters_json, params, returning = false, batch_size = None, tx = None, db = None))]
     #[allow(clippy::too_many_arguments)]
     fn update_many<'py>(
         &self,
@@ -390,7 +431,11 @@ impl Engine {
         returning: bool,
         batch_size: Option<usize>,
         tx: Option<&Bound<'py, Transaction>>,
+        db: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let model_idx = self.schema.model_idx(model).map_err(query_err)?;
+        let classes = self.classes.clone();
+        let db = db.map(Bound::unbind);
         let (stmts, types) = update_many_plan(
             &self.schema, self.target, model, &fields, rows, filters_json, &params, returning, batch_size,
         )?;
@@ -431,9 +476,11 @@ impl Engine {
             Python::attach(|py| match &types {
                 None => count.into_py_any(py),
                 Some(types) => {
+                    let db = db.map(|d| d.into_bound(py));
+                    let b = Builder::new(py, &classes, db.as_ref());
                     let all = PyList::empty(py);
                     for rows in &fetched {
-                        for r in rows.to_py(py, types)?.iter() {
+                        for r in b.model_rows(model_idx, rows.as_ref(), types)?.iter() {
                             all.append(r)?;
                         }
                     }
@@ -522,16 +569,21 @@ async fn count_or_rows(
     conn: &dyn Executor,
     sql: String,
     args: Vec<sea_query::Value>,
-    types: Option<Vec<ColType>>,
+    returning: Option<(usize, Vec<ColType>)>,
+    classes: &Classes,
+    db: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    match types {
+    match returning {
         None => {
             let n = conn.execute(sql, args).await.map_err(db_err)?;
             Python::attach(|py| n.into_py_any(py))
         }
-        Some(types) => {
+        Some((model, types)) => {
             let rows = conn.query(sql, args).await.map_err(db_err)?;
-            Python::attach(|py| rows.to_py(py, &types)?.into_py_any(py))
+            Python::attach(|py| {
+                let db = db.map(|d| d.into_bound(py));
+                Builder::new(py, classes, db.as_ref()).model_rows(model, rows.as_ref(), &types)?.into_py_any(py)
+            })
         }
     }
 }
@@ -577,11 +629,12 @@ fn connect<'py>(
     max_connections: u32,
     disable: Vec<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    let classes = schema.get().classes.clone();
     let schema = schema.get().inner.clone();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let driver = db::connect(&url, max_connections as usize).await.map_err(db_err)?;
         let target = Target::new(driver.dialect()).without(&disable).map_err(query_err)?;
-        Ok(Engine { driver, target, schema })
+        Ok(Engine { driver, target, schema, classes })
     })
 }
 

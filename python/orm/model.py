@@ -100,7 +100,7 @@ class Registry:
 
     def native(self) -> _native.Schema:
         if self._native is None:
-            self._native = _native.Schema(json.dumps(self.ir()))
+            self._native = _native.Schema(json.dumps(self.ir()), dict(self._models))
         return self._native
 
 
@@ -205,12 +205,6 @@ class Model:
             f"{name} instances come from the database; insert a row with "
             f"`await {name}.objects.insert(...)`"
         )
-
-    @classmethod
-    def _from_row(cls, row: tuple[Any, ...]) -> Self:
-        obj = cls.__new__(cls)
-        obj.__dict__.update(zip(cls._meta.field_names, row))
-        return obj
 
     def __setattr__(self, name: str, value: Any) -> None:
         raise AttributeError(

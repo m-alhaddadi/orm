@@ -13,7 +13,7 @@ orm-core = { path = "../core" }
 pyo3 = { version = "0.29", features = ["chrono", "uuid"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 # SQL building: one builder per dialect (multi-database support lives here).
-sea-query = { version = "1.0", features = ["backend-postgres", "with-chrono", "with-json", "with-uuid", "thread-safe"] }
+sea-query = { version = "1.0", features = ["backend-postgres", "with-chrono", "with-json", "with-uuid", "thread-safe", "hashable-value"] }
 # Postgres driver (see src/db/postgres.rs).
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 deadpool-postgres = "0.14"

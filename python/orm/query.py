@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, Unpack, overload
 
 from .errors import QueryError, TransactionRequired
 from .expr import (
+    IR,
     ColumnRef,
     Condition,
     ConditionLike,
@@ -16,16 +17,20 @@ from .expr import (
     IRContext,
     Ordering,
     RelationPath,
+    _Ctes,
     and_,
     as_condition,
     not_,
 )
-from .fields import BelongsTo, HasMany
-from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, prepare_rows
+from .fields import HasMany
+from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, prepare_rows, assignments
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from typing_extensions import Self
 
+    from .cte import Cte
     from .db import Database
     from .model import Model
     from .select import Select
@@ -38,7 +43,97 @@ T4 = TypeVar("T4")
 T5 = TypeVar("T5")
 T6 = TypeVar("T6")
 
-__all__ = ["QuerySet", "RelatedSet"]
+__all__ = ["QuerySet", "RelatedSet", "Prefetch"]
+
+# Ids per query in in_bulk(), well below Postgres' 65535 parameters.
+IN_BULK_CHUNK = 10_000
+
+
+class Prefetch(Generic[M]):
+    """A ``prefetch_related`` entry with its own query::
+
+        User.objects.prefetch_related(
+            Prefetch(User.posts, Post.objects.filter(Post.published).order_by(Post.views.desc())[:3]),
+        )
+
+    ``queryset`` filters, orders and slices the related rows (a slice applies per parent:
+    "the 3 most viewed posts of each user"); its own ``prefetch_related`` /
+    ``select_related`` apply to them. The rows fill ``user.posts`` (so
+    ``user.posts.cached`` and ``await user.posts`` give only them), or the plain list
+    attribute ``to_attr`` (``user.top_posts``) when given.
+    """
+
+    __slots__ = ("path", "queryset", "to_attr")
+
+    def __init__(self, path: RelationPath[M], queryset: QuerySet[M] | None = None, *, to_attr: str | None = None) -> None:
+        if not isinstance(path, RelationPath):
+            raise TypeError(f"Prefetch() takes a relation such as User.posts, got {path!r}")
+        if queryset is not None and queryset.model is not path._target:
+            raise TypeError(f"Prefetch({path!r}) needs a query set of {path._target.__name__}")
+        if to_attr is not None and (not to_attr.isidentifier() or to_attr.startswith("_")):
+            raise ValueError(f"to_attr {to_attr!r} must be an identifier not starting with '_'")
+        self.path = path
+        self.queryset = queryset
+        self.to_attr = to_attr
+
+    def __repr__(self) -> str:
+        return f"Prefetch({self.path!r}, {self.queryset!r}, to_attr={self.to_attr!r})"
+
+
+class _Node:
+    """One relation in the tree of prefetches."""
+
+    __slots__ = ("relation", "attr", "qs", "children")
+
+    def __init__(self, relation: str, attr: str, qs: QuerySet[Any] | None) -> None:
+        self.relation = relation
+        self.attr = attr
+        self.qs = qs
+        self.children: list[tuple[tuple[str, ...], Prefetch[Any]]] = []
+
+
+def _prefetch_tree(model: type[Model], items: Iterable[tuple[tuple[str, ...], Prefetch[Any]]]) -> dict[str, _Node]:
+    """Nodes by attribute: paths sharing a prefix share its node, so
+    ``User.posts.comments`` nests under ``User.posts``."""
+    nodes: dict[str, _Node] = {}
+    for hops, p in items:
+        hop = hops[0]
+        if hop not in model._meta.relations:
+            raise ValueError(f"{model.__name__} has no relation {hop!r}")
+        attr = (p.to_attr or hop) if len(hops) == 1 else hop
+        node = nodes.get(attr)
+        if node is None:
+            node = nodes[attr] = _Node(hop, attr, None)
+        elif node.relation != hop:
+            raise ValueError(f"prefetch_related stores {model.__name__}.{node.relation} and .{hop} both in {attr!r}")
+        if len(hops) == 1:
+            if p.queryset is not None:
+                if node.qs is not None and node.qs is not p.queryset:
+                    raise ValueError(f"{p.path!r} is prefetched twice with different query sets; use to_attr")
+                node.qs = p.queryset
+        else:
+            node.children.append((hops[1:], p))
+    return nodes
+
+
+def _prefetch_ir(model: type[Model], items: Iterable[tuple[tuple[str, ...], Prefetch[Any]]], params: list[Any]) -> list[IR]:
+    out = []
+    for node in _prefetch_tree(model, items).values():
+        target = model._meta.relations[node.relation].target
+        qs: QuerySet[Any] = node.qs if node.qs is not None else target.objects
+        if qs._lock is not None:
+            raise QueryError("a prefetch query set can't lock rows")
+        children = [(p.path._path, p) for p in qs._prefetch] + node.children
+        ir, ctx = qs._query_ir("select", params, prefetch=False)
+        if children:
+            ir["prefetch"] = _prefetch_ir(target, children, params)
+        ctx.finish(ir)
+        del ir["op"]
+        ir["relation"] = node.relation
+        if node.attr != node.relation:
+            ir["attr"] = node.attr
+        out.append(ir)
+    return out
 
 
 class QuerySet(Generic[M]):
@@ -56,7 +151,7 @@ class QuerySet(Generic[M]):
     ``exclude(User.posts.published == False)`` keeps users with no unpublished post.
     """
 
-    __slots__ = ("_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db")
+    __slots__ = ("_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db", "_from")
 
     def __init__(self, model: type[M]) -> None:
         self._model = model
@@ -65,9 +160,10 @@ class QuerySet(Generic[M]):
         self._limit: int | None = None
         self._offset: int | None = None
         self._related: tuple[tuple[str, ...], ...] = ()
-        self._prefetch: tuple[str, ...] = ()
+        self._prefetch: tuple[Prefetch[Any], ...] = ()
         self._lock: dict[str, bool] | None = None
         self._db: Database | None = None
+        self._from: Cte | None = None
 
     @property
     def model(self) -> type[M]:
@@ -139,18 +235,23 @@ class QuerySet(Generic[M]):
                     related.append(p._path[:i])
         return self._clone(_related=tuple(related))
 
-    def prefetch_related(self, *relations: RelationPath[Any]) -> Self:
-        """Load to-many relations with one extra ``IN (...)`` query each, in the same
-        call: ``User.objects.prefetch_related(User.posts)``."""
+    def prefetch_related(self, *relations: RelationPath[Any] | Prefetch[Any]) -> Self:
+        """Load relations with one extra ``IN (...)`` query each, in the same call::
+
+            User.objects.prefetch_related(User.posts)              # user.posts.cached
+            User.objects.prefetch_related(User.posts.comments)     # and each post's comments
+            Comment.objects.prefetch_related(Comment.post)         # to-one: comment.post
+            User.objects.prefetch_related(Prefetch(User.posts, Post.objects.filter(...)))
+
+        A path loads every relation along it. :class:`Prefetch` gives the related rows
+        a query of their own (filters, order, a slice per parent, nested loading).
+        """
         prefetch = list(self._prefetch)
         for p in relations:
-            self._check_path(p)
-            if len(p._path) != 1:
-                raise ValueError("prefetch_related supports direct relations only (for now)")
-            if not isinstance(self._model._meta.relations[p._path[0]], HasMany):
-                raise ValueError(f"{p!r} is to-one; use select_related")
-            if p._path[0] not in prefetch:
-                prefetch.append(p._path[0])
+            item = p if isinstance(p, Prefetch) else Prefetch(p)
+            self._check_path(item.path)
+            prefetch.append(item)
+        _prefetch_tree(self._model, ((p.path._path, p) for p in prefetch))  # validates
         return self._clone(_prefetch=tuple(prefetch))
 
     def lock(self, exclusive: bool = True, *, nowait: bool = False, skip_locked: bool = False) -> Self:
@@ -169,6 +270,39 @@ class QuerySet(Generic[M]):
 
     def using(self, db: Database | None) -> Self:
         return self._clone(_db=db)
+
+    # -- CTEs -------------------------------------------------------------------------------
+
+    def cte(
+        self,
+        name: str,
+        *,
+        recursive: Callable[[Cte], QuerySet[Any]] | None = None,
+        distinct: bool = False,
+        materialized: bool | None = None,
+    ) -> Cte:
+        """This query as a CTE (``WITH <name> AS (...)``) with the model's columns: read
+        it with ``Model.objects.from_(cte)``. ``recursive`` builds the recursive part
+        from the CTE (``WITH RECURSIVE``; ``UNION ALL``, or ``UNION`` with ``distinct``);
+        ``materialized`` forces ``[NOT] MATERIALIZED``. See :mod:`orm.cte`."""
+        from .cte import Cte
+
+        return Cte(name, self, recursive=recursive, distinct=distinct, materialized=materialized)
+
+    def from_(self, cte: Cte) -> Self:
+        """Read the rows from ``cte`` instead of the model's table: a subquery in
+        ``FROM``. The CTE must have the model's columns (``Post.objects....cte(...)`` or
+        a ``select(Post, ...)``); its other columns are ``cte.c.<name>``::
+
+            await Post.objects.from_(ranked).filter(ranked.c.rank <= 3)
+        """
+        from .cte import Cte
+
+        if not isinstance(cte, Cte):
+            raise TypeError(f"from_() takes a CTE, got {cte!r}")
+        if cte._model is not self._model:
+            raise TypeError(f"from_({cte.name}) needs a CTE with the columns of {self._model.__name__}")
+        return self._clone(_from=cte)
 
     # -- select(...) ----------------------------------------------------------------------
     # Each column is an expression (its value type) or the model itself (an instance).
@@ -269,9 +403,31 @@ class QuerySet(Generic[M]):
 
     # -- IR ------------------------------------------------------------------------------
 
-    def _select_ir(self, op: str, params: list[Any]) -> dict[str, Any]:
-        ctx = IRContext(self._model, params)
-        ir: dict[str, Any] = {"op": op, "model": self._model._meta.name}
+    def _context(self, params: list[Any], outer: IRContext | None, ctes: _Ctes | None) -> IRContext:
+        ctx = IRContext(self._model, params, outer, ctes)
+        if self._from is not None:
+            ctx.use_cte(self._from)
+        return ctx
+
+    def _root_name(self) -> str:
+        name: str = self._model._meta.name
+        return name
+
+    def _query_ir(
+        self,
+        op: str,
+        params: list[Any],
+        outer: IRContext | None = None,
+        ctes: _Ctes | None = None,
+        *,
+        prefetch: bool = True,
+    ) -> tuple[dict[str, Any], IRContext]:
+        """The query's IR and the context it compiled in (``finish()`` it to declare its
+        CTEs). In a subquery (``outer``) or a CTE (``ctes``), related loading is left out."""
+        ctx = self._context(params, outer, ctes)
+        ir: dict[str, Any] = {"op": op, "model": self._root_name()}
+        if self._from is not None:
+            ir["from"] = self._from.name
         if self._filters:
             ir["filters"] = [f._ir(ctx) for f in self._filters]
         if self._order:
@@ -280,36 +436,58 @@ class QuerySet(Generic[M]):
             ir["limit"] = self._limit
         if self._offset is not None:
             ir["offset"] = self._offset
-        if self._related and op == "select":
+        top = outer is None and ctes is None
+        if self._related and op == "select" and top:
             ir["select_related"] = [list(p) for p in self._related]
-        if self._prefetch and op == "select":
-            ir["prefetch"] = list(self._prefetch)
+        if self._prefetch and op == "select" and top and prefetch:
+            ir["prefetch"] = _prefetch_ir(self._model, ((p.path._path, p) for p in self._prefetch), params)
         if self._lock is not None:
             if op != "select":
                 raise QueryError(f"{op}() can't lock rows; lock() applies to reading rows")
             ir["lock"] = self._lock
-        return ir
+        return ir, ctx
 
-    def _mutation_ir(self, op: str, params: list[Any]) -> dict[str, Any]:
+    def _select_ir(self, op: str, params: list[Any]) -> dict[str, Any]:
+        ir, ctx = self._query_ir(op, params)
+        return ctx.finish(ir)
+
+    def _subquery_ir(self, ctx: IRContext, what: str) -> dict[str, Any]:
+        if self._lock is not None:
+            raise QueryError("a subquery can't lock rows")
+        return self._query_ir("select", ctx.params, ctx)[0]
+
+    def _cte_ir(self, params: list[Any], ctes: _Ctes) -> dict[str, Any]:
+        return self._query_ir("select", params, ctes=ctes)[0]
+
+    def _mutation_ir(self, op: str, params: list[Any], values: Mapping[str, Any] | None = None) -> dict[str, Any]:
         if self._limit is not None or self._offset is not None:
             raise QueryError(f"{op}() is not supported on a sliced query set")
         if self._lock is not None:
             raise QueryError(f"{op}() locks the rows it changes; drop lock()")
+        if self._from is not None:
+            raise QueryError(f"{op}() writes the model's table; it can't run on from_({self._from.name})")
         ctx = IRContext(self._model, params)
-        return {"op": op, "model": self._model._meta.name, "filters": [f._ir(ctx) for f in self._filters]}
+        ir = {"op": op, "model": self._model._meta.name, "filters": [f._ir(ctx) for f in self._filters]}
+        if values is not None:
+            ir["set"] = assignments(self._model, values, ctx)
+        return ctx.finish(ir)
+
+    def _native(self) -> Any:
+        return self._model._meta.registry.native()
 
     def sql(self) -> str:
         """The SELECT this query set runs, with parameters inlined (for debugging)."""
         params: list[Any] = []
         ir = self._select_ir("select", params)
-        return self._model._meta.registry.native().sql(json.dumps(ir), params)
+        sql: str = self._native().sql(json.dumps(ir), params)
+        return sql
 
     # -- execution -----------------------------------------------------------------------
 
-    async def _run(self, ir: dict[str, Any], params: list[Any]) -> Any:
+    async def _run(self, ir: dict[str, Any], params: list[Any], row_cls: type | None = None) -> Any:
         from .db import resolve
 
-        return await resolve(self._db)._run(ir, params)
+        return await resolve(self._db)._run(ir, params, row_cls, self._db)
 
     def _default_order(self) -> tuple[Ordering, ...]:
         return self._order or (Ordering(self._model._meta.pk_ref(), desc=False),)
@@ -318,8 +496,8 @@ class QuerySet(Generic[M]):
         params: list[Any] = []
         ir = self._select_ir("select", params)
         self._check_lock()
-        rows, prefetched = await self._run(ir, params)
-        return self._adopt(self._materialize(rows, prefetched))
+        objs: list[M] = await self._run(ir, params)
+        return objs
 
     def _check_lock(self) -> None:
         if self._lock is not None:
@@ -330,78 +508,6 @@ class QuerySet(Generic[M]):
                     "lock() outside a transaction would release the locks as soon as the "
                     "query ends; run it inside `async with db.transaction():`"
                 )
-
-    def _adopt(self, objs: list[M]) -> list[M]:
-        if self._db is not None:  # instance writes go back to the same database
-            for o in objs:
-                o.__dict__["_db"] = self._db
-        return objs
-
-    def _materialize(self, rows: list[tuple[Any, ...]], prefetched: dict[str, list[tuple[Any, ...]]]) -> list[M]:
-        model = self._model
-        if self._related:
-            layout = self._join_layout()
-            objs = [self._materialize_joined(r, layout) for r in rows]
-        else:
-            make = model._from_row
-            objs = [make(r) for r in rows]
-        for name, related_rows in prefetched.items():
-            self._attach_prefetched(objs, model._meta.relations[name], related_rows)  # type: ignore[arg-type]
-        return objs
-
-    def _join_layout(self) -> list[tuple[tuple[str, ...], type[Model], int, int]]:
-        """(path, model, column count, pk position) per select_related path, in the order
-        the engine appends their columns to each row."""
-        layout = []
-        for path in self._related:
-            meta = self._model._meta
-            for hop in path[:-1]:
-                meta = meta.relations[hop].target._meta
-            target = meta.relations[path[-1]].target
-            tm = target._meta
-            layout.append((path, target, len(tm.field_names), tm.field_names.index(tm.pk.name)))
-        return layout
-
-    def _materialize_joined(
-        self, row: tuple[Any, ...], layout: list[tuple[tuple[str, ...], type[Model], int, int]]
-    ) -> M:
-        pos = len(self._model._meta.field_names)
-        obj = self._model._from_row(row[:pos])
-        by_path: dict[tuple[str, ...], Any] = {(): obj}
-        for path, target, width, pk_pos in layout:
-            chunk = row[pos : pos + width]
-            pos += width
-            # A LEFT JOIN without a match yields NULLs, including the primary key.
-            child = None if chunk[pk_pos] is None else target._from_row(chunk)
-            by_path[path] = child
-            parent = by_path[path[:-1]]
-            if parent is not None:
-                parent.__dict__[path[-1]] = child
-        return obj
-
-    @staticmethod
-    def _attach_prefetched(objs: list[Any], rel: HasMany[Any, Any], rows: list[tuple[Any, ...]]) -> None:
-        target = rel.target
-        key_pos = target._meta.field_names.index(rel.via)
-        # The reverse to-one relation (Post.author for User.posts) gets filled in too.
-        back = next(
-            (
-                r
-                for r in target._meta.relations.values()
-                if isinstance(r, BelongsTo) and r.via == rel.via and r.target is rel.model
-            ),
-            None,
-        )
-        groups: dict[Any, list[Any]] = {}
-        make = target._from_row
-        for r in rows:
-            groups.setdefault(r[key_pos], []).append(make(r))
-        for obj in objs:
-            children = groups.get(obj.__dict__.get(rel.from_), [])
-            if back is not None:
-                for c in children:
-                    c.__dict__[back.name] = obj
-            obj.__dict__[rel.name] = children
 
     def __await__(self) -> Generator[Any, None, list[M]]:
         return self._fetch().__await__()
@@ -439,9 +545,34 @@ class QuerySet(Generic[M]):
         return n
 
     async def exists(self) -> bool:
+        """Whether any row matches. For ``EXISTS`` inside another query use
+        :func:`orm.exists`."""
         params: list[Any] = []
         b: bool = await self._run(self._select_ir("exists", params), params)
         return b
+
+    async def in_bulk(self, ids: Iterable[Any] | None = None, *, field: ColumnRef[Any] | None = None) -> dict[Any, M]:
+        """The rows whose ``field`` (the primary key by default; otherwise a unique
+        field) is one of ``ids``, by that value: ``{1: <Post 1>, 3: <Post 3>}``. Missing
+        ids are left out. Without ``ids``, every row. Large id lists run as several
+        queries of 10 000 ids."""
+        meta = self._model._meta
+        col = meta.pk_ref() if field is None else field
+        if not isinstance(col, ColumnRef) or col._root is not self._model or col._path:
+            raise TypeError(f"in_bulk(field=...) takes a column of {self._model.__name__}, got {col!r}")
+        if not (col._field.primary_key or col._field.unique):
+            raise ValueError(f"in_bulk(field={col!r}) needs a unique field")
+        if self._limit is not None or self._offset is not None:
+            raise QueryError("in_bulk() can't be used on a sliced query set")
+        name = col._field.name
+        if ids is None:
+            return {o.__dict__[name]: o for o in await self._fetch()}
+        keys = list(dict.fromkeys(ids))
+        out: dict[Any, M] = {}
+        for i in range(0, len(keys), IN_BULK_CHUNK):
+            for o in await self.filter(col.in_(keys[i : i + IN_BULK_CHUNK]))._fetch():
+                out[o.__dict__[name]] = o
+        return out
 
     def update(self, **values: Any) -> Update[M]:
         """``UPDATE`` every matching row; values may be expressions, e.g.

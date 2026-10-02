@@ -13,7 +13,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-use pyo3::types::PyList;
 use sea_query::{PostgresQueryBuilder, QueryStatementWriter, Value};
 
 use orm_core::dialect::Dialect;
@@ -52,8 +51,8 @@ impl std::fmt::Display for DbError {
 /// The rows one statement returned, decoded by the schema's column types.
 pub trait RowSet: Send + Sync {
     fn len(&self) -> usize;
-    /// Every row as a tuple, `types[i]` giving column `i`'s type, in one pass.
-    fn to_py<'py>(&self, py: Python<'py>, types: &[ColType]) -> PyResult<Bound<'py, PyList>>;
+    /// One cell as a Python value.
+    fn cell(&self, py: Python<'_>, row: usize, col: usize, ty: ColType) -> PyResult<Py<PyAny>>;
     /// One cell as a bind parameter (prefetch keys are read back this way).
     fn value(&self, row: usize, col: usize, ty: ColType) -> DbResult<Value>;
     fn get_i64(&self, row: usize, col: usize) -> DbResult<i64>;

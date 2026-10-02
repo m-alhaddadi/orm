@@ -33,8 +33,11 @@ class Database:
         cur = _current_tx.get()
         return cur[1] if cur is not None and cur[0] is self else None
 
-    async def _run(self, ir: dict[str, Any], params: list[Any]) -> Any:
-        return await self._engine.run(json.dumps(ir), params, self._tx())
+    async def _run(
+        self, ir: dict[str, Any], params: list[Any], row_cls: type | None = None, db: Database | None = None
+    ) -> Any:
+        """Runs a query; instances it builds get ``db`` to write back to (``using()``)."""
+        return await self._engine.run(json.dumps(ir), params, self._tx(), row_cls, db)
 
     async def _insert(
         self,
@@ -44,9 +47,10 @@ class Database:
         conflict: list[str] | None = None,
         update: list[str] | None = None,
         set_: tuple[list[dict[str, Any]], list[Any]] | None = None,
-    ) -> list[tuple[Any, ...]]:
+        db: Database | None = None,
+    ) -> list[Any]:
         set_json, params = (json.dumps(set_[0]), set_[1]) if set_ is not None else (None, [])
-        return await self._engine.insert(model, fields, rows, conflict, update, set_json, params, self._tx())
+        return await self._engine.insert(model, fields, rows, conflict, update, set_json, params, self._tx(), db)
 
     async def _update_many(
         self,
@@ -57,9 +61,10 @@ class Database:
         params: list[Any],
         returning: bool,
         batch_size: int | None,
+        db: Database | None = None,
     ) -> Any:
         return await self._engine.update_many(
-            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx()
+            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx(), db
         )
 
     @asynccontextmanager

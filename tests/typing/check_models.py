@@ -2,11 +2,11 @@
 and pyright. Never executed."""
 
 from datetime import datetime, timedelta, timezone
-from typing import assert_type
+from typing import Any, assert_type
 
 from blog.models import Comment, Post, PostInsert, PostQuerySet, User, UserQuerySet
 
-from orm import ColumnRef, Condition, RelatedSet, Row, excluded, func
+from orm import ColumnRef, Condition, Prefetch, RelatedSet, Row, Window, excluded, exists, func, outer
 from orm import get_database as orm_db
 
 
@@ -80,6 +80,22 @@ async def check() -> None:
     await alice.posts.insert(title="t", body="b")
     await post.delete()
 
+    # in_bulk, subqueries, windows, CTEs, prefetch.
+    assert_type(await Post.objects.in_bulk([1, 2]), dict[Any, Post])
+    assert_type(exists(Post.objects.filter(Post.author_id == outer(User.id))), Condition)
+    latest = Post.objects.filter(Post.author_id == outer(User.id)).select(Post.title)[:1].as_scalar()
+    assert_type(await User.objects.select(User, latest), list[Row[User, str]])
+    rank = func.row_number().over(partition_by=Post.author_id, order_by=Post.views.desc())
+    assert_type(rank, Window[int])
+    assert_type(func.lag(Post.views).over(order_by=Post.id), Window[int | None])
+    ranked = Post.objects.select(Post, rank.label("rank")).cte("ranked")
+    assert_type(await Post.objects.from_(ranked).filter(ranked.c.rank <= 3), list[Post])
+    await ranked.select(ranked.c.author_id).group_by(ranked.c.author_id)
+    assert_type(
+        await User.objects.prefetch_related(User.posts.comments, Prefetch(User.posts, Post.objects.all()[:3])),
+        list[User],
+    )
+
 
 async def errors() -> None:
     User.email < 1  # E: ordering a str column against an int
@@ -97,3 +113,5 @@ async def errors() -> None:
     u.name = "B"  # E: instances are read-only
     await u.update(name=1)  # E: wrong type
     u.posts = []  # E: read-only relation
+    Prefetch(User.posts, Comment.objects.all())  # E: query set of the wrong model
+    func.ntile("2")  # E: buckets are ints

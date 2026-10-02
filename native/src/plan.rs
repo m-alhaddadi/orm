@@ -22,28 +22,77 @@ use sea_query::{
 use crate::convert::py_to_value;
 use crate::errors::query_err;
 use orm_core::ir::{
-    ArithOp, Assignment, CmpOp, ColType, Delete, Expr, FieldIr, Lock, Operation, RelKind, Select, SelectItem,
-    Update,
+    ArithOp, Assignment, CmpOp, ColType, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Operation, Order,
+    Prefetch, RelKind, Select, SelectItem, Update,
 };
 use orm_core::dialect::{Capabilities, Target};
-use orm_core::schema::Schema;
+use orm_core::schema::{Model, Schema};
 
+/// A `select_related` object inside each row: its columns start at `start` and it is
+/// attached to the root object (`parent` None) or to an earlier join's object.
+pub struct JoinShape {
+    pub parent: Option<usize>,
+    pub attr: String,
+    pub model: usize,
+    pub start: usize,
+    pub pk_pos: usize,
+}
+
+/// How a statement's rows become objects.
+pub enum Output {
+    /// Instances of `model` (its fields first), with `select_related` objects attached.
+    Instances { model: usize, joins: Vec<JoinShape> },
+    /// `select(...)` rows: per item, `Some(width)` for an instance of `model` (taking
+    /// that many columns) or `None` for one value.
+    Rows { model: usize, items: Vec<Option<usize>> },
+}
+
+/// A relation loaded once the parent rows are known: `stmt` plus `WHERE <key> IN (...)`.
 pub struct PrefetchPlan {
-    pub name: String,
-    /// Position of the relation's `from` field in the root row.
+    /// Attribute of the parent objects the related objects go to.
+    pub attr: String,
+    /// A list per parent (to-many) or one object or None (to-one).
+    pub many: bool,
+    /// Position and type of the relation's `from` field in the parent rows.
     pub key_pos: usize,
     pub key_type: ColType,
-    /// `SELECT <target columns> FROM <target> ORDER BY <pk>`; the executor adds the
-    /// `WHERE <to> IN (...)` once the keys are known.
-    pub stmt: SelectStatement,
-    pub to_table: String,
-    pub to_column: String,
+    /// Position of the relation's `to` field in the related rows.
+    pub child_key_pos: usize,
+    /// The related model's to-one relation back to the parent, filled in too.
+    pub back: Option<String>,
+    stmt: SelectStatement,
+    key: SExpr,
+    key_field: FieldIr,
+    /// A slice per parent: (offset, limit) over the `_rn` column `stmt` computes.
+    slice: Option<(u64, Option<u64>)>,
     pub types: Vec<ColType>,
+    pub output: Output,
+    pub children: Vec<PrefetchPlan>,
+}
+
+impl PrefetchPlan {
+    /// The statement for these parent keys (non-NULL, distinct).
+    pub fn statement(&self, keys: Vec<sea_query::Value>) -> SelectStatement {
+        let mut stmt = self.stmt.clone();
+        stmt.and_where(self.key.clone().is_in(keys.into_iter().map(|k| bind(k, Some(&self.key_field)))));
+        let Some((offset, limit)) = self.slice else { return stmt };
+        let mut outer = Query::select();
+        outer.column(sea_query::Asterisk).from_subquery(stmt, Alias::new("p"));
+        if offset > 0 {
+            outer.and_where(col("p", "_rn").gt(offset));
+        }
+        if let Some(n) = limit {
+            outer.and_where(col("p", "_rn").lte(offset + n));
+        }
+        outer.order_by_expr(col("p", "_rn"), SOrder::Asc);
+        outer
+    }
 }
 
 pub struct SelectPlan {
     pub stmt: SelectStatement,
     pub types: Vec<ColType>,
+    pub output: Output,
     pub prefetch: Vec<PrefetchPlan>,
 }
 
@@ -51,10 +100,10 @@ pub enum Plan {
     Select(SelectPlan),
     Count(SelectStatement),
     Exists(SelectStatement),
-    /// Column types of the returned rows when the update has `RETURNING`.
-    Update(UpdateStatement, Option<Vec<ColType>>),
-    /// Column types of the returned rows when the delete has `RETURNING`.
-    Delete(DeleteStatement, Option<Vec<ColType>>),
+    /// The model and column types of the returned rows when the update has `RETURNING`.
+    Update(UpdateStatement, Option<(usize, Vec<ColType>)>),
+    /// The model and column types of the returned rows when the delete has `RETURNING`.
+    Delete(DeleteStatement, Option<(usize, Vec<ColType>)>),
 }
 
 /// What a bound value is compared with or assigned to: its type drives the conversion
@@ -124,12 +173,18 @@ fn fold(items: Vec<SExpr>, and: bool) -> SExpr {
 
 const AGGREGATES: [&str; 5] = ["count", "sum", "avg", "min", "max"];
 const SCALAR_FUNCS: [&str; 6] = ["lower", "upper", "length", "abs", "coalesce", "now"];
+/// Functions that only exist with `OVER (...)`.
+const WINDOW_FUNCS: [&str; 11] = [
+    "row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead", "first_value",
+    "last_value", "nth_value",
+];
 
 fn is_aggregate(name: &str) -> bool {
     AGGREGATES.contains(&name)
 }
 
-/// Whether `e` contains an aggregate computed in this query (not in a subquery).
+/// Whether `e` contains an aggregate computed in this query (not in a subquery or a
+/// window).
 fn has_local_aggregate(e: &Expr) -> bool {
     match e {
         Expr::Func { name, args, rel, .. } => {
@@ -144,6 +199,21 @@ fn has_local_aggregate(e: &Expr) -> bool {
         Expr::Cmp { l, r, .. } | Expr::Arith { l, r, .. } => has_local_aggregate(l) || has_local_aggregate(r),
         Expr::And { items } | Expr::Or { items } => items.iter().any(has_local_aggregate),
         Expr::Not { item } | Expr::IsNull { item, .. } => has_local_aggregate(item),
+        _ => false,
+    }
+}
+
+/// Whether `e` contains a window function (outside subqueries).
+fn has_window(e: &Expr) -> bool {
+    match e {
+        Expr::Window { .. } => true,
+        Expr::Func { args, .. } => args.iter().any(has_window),
+        Expr::Cmp { l, r, .. } | Expr::Arith { l, r, .. } => has_window(l) || has_window(r),
+        Expr::And { items } | Expr::Or { items } => items.iter().any(has_window),
+        Expr::In { item, values, .. } => has_window(item) || values.iter().any(has_window),
+        Expr::Not { item } | Expr::IsNull { item, .. } | Expr::Like { item, .. } | Expr::InSelect { item, .. } => {
+            has_window(item)
+        }
         _ => false,
     }
 }
@@ -166,12 +236,29 @@ fn col_paths_all<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut boo
 fn col_paths<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
     match e {
         Expr::Col { path, .. } => out.push(path),
-        Expr::Param { .. } | Expr::Const { .. } | Expr::Excluded { .. } => {}
+        Expr::Param { .. }
+        | Expr::Const { .. }
+        | Expr::Excluded { .. }
+        | Expr::Int { .. }
+        | Expr::Outer { .. }
+        | Expr::CteCol { .. }
+        | Expr::Exists { .. }
+        | Expr::Subquery { .. } => {}
         Expr::Func { name, args, .. } => {
             if !is_aggregate(name) {
                 for a in args {
                     col_paths(a, out, has_not);
                 }
+            }
+        }
+        // A window is computed over the query's own rows: its paths are read here.
+        Expr::Window { func, partition_by, order_by, .. } => {
+            col_paths_all(func, out, has_not);
+            for p in partition_by {
+                col_paths(p, out, has_not);
+            }
+            for o in order_by {
+                col_paths(&o.expr, out, has_not);
             }
         }
         Expr::InSelect { item, .. } => col_paths(item, out, has_not),
@@ -202,64 +289,201 @@ fn col_paths<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
     }
 }
 
+/// `ROWS BETWEEN <start> AND <end>` bounds: `None` unbounded, 0 the current row,
+/// negative preceding, positive following.
+fn frame_bound(b: Option<i64>, start: bool) -> String {
+    match b {
+        None if start => "UNBOUNDED PRECEDING".into(),
+        None => "UNBOUNDED FOLLOWING".into(),
+        Some(0) => "CURRENT ROW".into(),
+        Some(n) if n < 0 => format!("{} PRECEDING", n.unsigned_abs()),
+        Some(n) => format!("{n} FOLLOWING"),
+    }
+}
+
+/// The columns of each CTE in `ctes`, as models without tables (indexed after the
+/// schema's models), so queries can read them like tables.
+pub fn derive_ctes(schema: &Schema, target: Target, ctes: &[Cte], params: &[Bound<'_, PyAny>]) -> PyResult<Vec<Model>> {
+    let mut virt: Vec<Model> = vec![];
+    for cte in ctes {
+        if schema.model_idx(&cte.name).is_ok() || virt.iter().any(|m| m.ir.name == cte.name) {
+            return Err(query_err(format!("CTE name {:?} is already taken", cte.name)));
+        }
+        let q = &cte.query;
+        let p = Planner::new(schema, &virt, target, &q.model, q.from.as_deref(), params, vec![], 0)?;
+        let mut fields = vec![];
+        let model_fields = |fields: &mut Vec<FieldIr>| {
+            for f in p.model(p.root).fields() {
+                let mut f = f.clone();
+                f.primary_key = false;
+                fields.push(f);
+            }
+        };
+        match &q.columns {
+            None => model_fields(&mut fields),
+            Some(items) => {
+                for item in items {
+                    match item {
+                        SelectItem::Model => model_fields(&mut fields),
+                        SelectItem::Expr { expr, name } => {
+                            let name = name.as_deref().ok_or_else(|| query_err("CTE columns need names".into()))?;
+                            fields.push(FieldIr::plain(name, p.expr_type(expr)?));
+                        }
+                    }
+                }
+            }
+        }
+        drop(p);
+        virt.push(Model::derived(&cte.name, fields).map_err(query_err)?);
+    }
+    Ok(virt)
+}
+
 pub struct Planner<'s, 'py> {
     schema: &'s Schema,
+    /// The statement's CTEs, as models (see `derive_ctes`).
+    virt: &'s [Model],
     params: &'s [Bound<'py, PyAny>],
     root: usize,
-    /// Innermost last. `scopes[0]` is the root table, referenced by its own name so the
-    /// same filters work in SELECT, UPDATE and DELETE.
+    /// What the root rows are read from: the model's table, or a CTE.
+    source: String,
+    /// Innermost last. `scopes[0]` is the root, referenced by its own name (unless an
+    /// enclosing query uses that name) so the same filters work in SELECT, UPDATE and
+    /// DELETE.
     scopes: Vec<Scope>,
     /// Top-level to-one LEFT JOINs (select_related / order_by), keyed by path.
     joins: Vec<(Scope, SExpr)>,
+    /// The roots of enclosing queries (alias, model), innermost last: `outer()`.
+    outer: Vec<(String, usize)>,
+    /// In the recursive part of a CTE: its name, and whether the query read its columns
+    /// (which adds it to `FROM`).
+    recursive: Option<(String, bool)>,
     next_alias: usize,
     /// `EXCLUDED.<field>` is only valid in an upsert's `DO UPDATE SET`.
     allow_excluded: bool,
+    /// Window functions are only valid in the select list and `ORDER BY`.
+    allow_window: bool,
     target: Target,
     caps: Capabilities,
 }
 
 impl<'s, 'py> Planner<'s, 'py> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         schema: &'s Schema,
+        virt: &'s [Model],
         target: Target,
         model: &str,
+        from: Option<&str>,
         params: &'s [Bound<'py, PyAny>],
+        outer: Vec<(String, usize)>,
+        next_alias: usize,
     ) -> PyResult<Self> {
-        let root = schema.model_idx(model).map_err(query_err)?;
-        let scope = Scope { path: vec![], model: root, alias: schema.model(root).table().to_owned() };
-        Ok(Planner {
+        let mut p = Planner {
             schema,
+            virt,
             params,
-            root,
-            scopes: vec![scope],
+            root: 0,
+            source: String::new(),
+            scopes: vec![],
             joins: vec![],
-            next_alias: 0,
+            outer,
+            recursive: None,
+            next_alias,
             allow_excluded: false,
+            allow_window: false,
             target,
             caps: target.caps,
+        };
+        p.root = p.model_idx(model)?;
+        p.source = match from {
+            None => p.model(p.root).table().to_owned(),
+            Some(cte) => {
+                let cols = p.model(p.model_idx(cte)?);
+                if p.root >= schema.models.len() || cols.ir.name != cte {
+                    return Err(query_err(format!("{cte:?} is not a CTE")));
+                }
+                for f in p.model(p.root).fields() {
+                    if cols.field(&f.name).is_err() {
+                        return Err(query_err(format!(
+                            "CTE {cte:?} has no column {:?}: build it from a query of {} (or a select() including it)",
+                            f.name,
+                            p.model(p.root).ir.name
+                        )));
+                    }
+                }
+                cte.to_owned()
+            }
+        };
+        let alias =
+            if p.outer.iter().any(|(a, _)| *a == p.source) { p.alias("s") } else { p.source.clone() };
+        p.scopes.push(Scope { path: vec![], model: p.root, alias });
+        Ok(p)
+    }
+
+    pub fn plan(schema: &'s Schema, target: Target, op: &Operation, params: &'s [Bound<'py, PyAny>]) -> PyResult<Plan> {
+        Ok(match op {
+            Operation::Select(q) => Plan::Select(plan_select(schema, target, q, params)?),
+            Operation::Count(q) | Operation::Exists(q) => {
+                let virt = derive_ctes(schema, target, &q.with, params)?;
+                let mut p = Planner::new(schema, &virt, target, &q.model, q.from.as_deref(), params, vec![], 0)?;
+                let is_count = matches!(op, Operation::Count(_));
+                let mut stmt = if is_count { p.count(q)? } else { p.exists(q)? };
+                if let Some(w) = p.with_clause(&q.with)? {
+                    stmt.with_cte(w);
+                }
+                if is_count {
+                    Plan::Count(stmt)
+                } else {
+                    Plan::Exists(stmt)
+                }
+            }
+            Operation::Update(q) => {
+                let virt = derive_ctes(schema, target, &q.with, params)?;
+                let mut p = Planner::new(schema, &virt, target, &q.model, None, params, vec![], 0)?;
+                let (mut stmt, types) = p.update(q)?;
+                if let Some(w) = p.with_clause(&q.with)? {
+                    stmt.with_cte(w);
+                }
+                Plan::Update(stmt, types.map(|t| (p.root, t)))
+            }
+            Operation::Delete(q) => {
+                let virt = derive_ctes(schema, target, &q.with, params)?;
+                let mut p = Planner::new(schema, &virt, target, &q.model, None, params, vec![], 0)?;
+                let (mut stmt, types) = p.delete(q)?;
+                if let Some(w) = p.with_clause(&q.with)? {
+                    stmt.with_cte(w);
+                }
+                Plan::Delete(stmt, types.map(|t| (p.root, t)))
+            }
         })
     }
 
-    pub fn plan(
-        schema: &'s Schema,
-        target: Target,
-        op: &Operation,
-        params: &'s [Bound<'py, PyAny>],
-    ) -> PyResult<Plan> {
-        let new = |model: &str| Planner::new(schema, target, model, params);
-        Ok(match op {
-            Operation::Select(q) => Plan::Select(new(&q.model)?.select(q)?),
-            Operation::Count(q) => Plan::Count(new(&q.model)?.count(q)?),
-            Operation::Exists(q) => Plan::Exists(new(&q.model)?.exists(q)?),
-            Operation::Update(q) => {
-                let (stmt, types) = new(&q.model)?.update(q)?;
-                Plan::Update(stmt, types)
-            }
-            Operation::Delete(q) => {
-                let (stmt, types) = new(&q.model)?.delete(q)?;
-                Plan::Delete(stmt, types)
-            }
-        })
+    fn model(&self, idx: usize) -> &'s Model {
+        let n = self.schema.models.len();
+        if idx < n {
+            self.schema.model(idx)
+        } else {
+            &self.virt[idx - n]
+        }
+    }
+
+    fn model_idx(&self, name: &str) -> PyResult<usize> {
+        match self.schema.model_idx(name) {
+            Ok(i) => Ok(i),
+            Err(e) => match self.virt.iter().position(|m| m.ir.name == name) {
+                Some(i) => Ok(self.schema.models.len() + i),
+                None => Err(query_err(e)),
+            },
+        }
+    }
+
+    fn walk(&self, root: usize, path: &[String]) -> PyResult<usize> {
+        let mut cur = root;
+        for hop in path {
+            cur = self.model(cur).relation(hop).map_err(query_err)?.1;
+        }
+        Ok(cur)
     }
 
     /// `QueryError` unless the dialect supports `feature`.
@@ -274,6 +498,112 @@ impl<'s, 'py> Planner<'s, 'py> {
 
     fn scope(&self) -> &Scope {
         self.scopes.last().expect("root scope")
+    }
+
+    fn root_alias(&self) -> &str {
+        &self.scopes[0].alias
+    }
+
+    // -- subqueries and CTEs ----------------------------------------------------------------
+
+    /// A planner for a subquery: it sees this query's root (and the ones enclosing it)
+    /// through `outer()`.
+    fn child(&self, q: &Select) -> PyResult<Planner<'s, 'py>> {
+        if !q.with.is_empty() {
+            return Err(query_err("a subquery can't declare CTEs; declare them on the outermost query".into()));
+        }
+        let mut outer = self.outer.clone();
+        outer.push((self.root_alias().to_owned(), self.root));
+        Planner::new(self.schema, self.virt, self.target, &q.model, q.from.as_deref(), self.params, outer, self.next_alias)
+    }
+
+    /// The statement of a subquery. For `EXISTS` a query without columns selects `1`.
+    fn subselect(&mut self, q: &Select, exists: bool) -> PyResult<SelectStatement> {
+        if q.lock.is_some() {
+            return Err(query_err("a subquery can't lock rows".into()));
+        }
+        let mut child = self.child(q)?;
+        let stmt = if exists && q.columns.is_none() { child.sliced_inner(q)? } else { child.build_select(q)?.stmt };
+        self.next_alias = child.next_alias;
+        Ok(stmt)
+    }
+
+    /// The single column of a subquery used as a value.
+    fn one_column<'q>(q: &'q Select, what: &str) -> PyResult<&'q Expr> {
+        match q.columns.as_deref() {
+            Some([SelectItem::Expr { expr, .. }]) => Ok(expr),
+            _ => Err(query_err(format!("{what} takes a query that selects exactly one column"))),
+        }
+    }
+
+    /// `WITH [RECURSIVE] <name> (<columns>) AS (...), ...` for this statement's CTEs.
+    fn with_clause(&mut self, ctes: &[Cte]) -> PyResult<Option<sea_query::WithClause>> {
+        if ctes.is_empty() {
+            return Ok(None);
+        }
+        let mut clause = sea_query::WithClause::new();
+        let mut recursive = false;
+        for cte in ctes {
+            let cols = self.model(self.model_idx(&cte.name)?);
+            let mut body = self.cte_body(&cte.query, None)?;
+            if let Some(rec) = &cte.recursive {
+                recursive = true;
+                let step = self.cte_body(rec, Some(&cte.name))?;
+                let ty = if cte.distinct { sea_query::UnionType::Distinct } else { sea_query::UnionType::All };
+                body.union(ty, step);
+            }
+            let mut c = sea_query::CommonTableExpression::new();
+            c.table_name(Alias::new(&cte.name)).columns(cols.fields().iter().map(|f| Alias::new(&f.column)));
+            c.query(body);
+            if let Some(m) = cte.materialized {
+                c.materialized(m);
+            }
+            clause.cte(c);
+        }
+        clause.recursive(recursive);
+        Ok(Some(clause))
+    }
+
+    /// A CTE's query: its columns as stored (no `read_sql`), named after the CTE's columns.
+    fn cte_body(&mut self, q: &Select, recursive: Option<&str>) -> PyResult<SelectStatement> {
+        if !q.with.is_empty() || !q.prefetch.is_empty() || !q.select_related.is_empty() || q.lock.is_some() {
+            return Err(query_err("a CTE's query can't declare CTEs, prefetch, select_related or lock".into()));
+        }
+        let mut p =
+            Planner::new(self.schema, self.virt, self.target, &q.model, q.from.as_deref(), self.params, vec![], self.next_alias)?;
+        p.recursive = recursive.map(|r| (r.to_owned(), false));
+        let model_only = [SelectItem::Model];
+        let items = q.columns.as_deref().unwrap_or(&model_only);
+        let plan = p.select_columns(q, items, true)?;
+        if let Some(r) = recursive {
+            let base = self.model(self.model_idx(r)?).fields().len();
+            if plan.types.len() != base {
+                return Err(query_err(format!(
+                    "the recursive part of CTE {r:?} has {} columns, its first part {base}",
+                    plan.types.len()
+                )));
+            }
+        }
+        self.next_alias = p.next_alias;
+        Ok(plan.stmt)
+    }
+
+    /// A column of a CTE: the one this query reads, or (in its recursive part) the CTE
+    /// being defined.
+    fn cte_col(&mut self, cte: &str, name: &str) -> PyResult<(String, &'s FieldIr)> {
+        let f = self.model(self.model_idx(cte)?).field(name).map_err(query_err)?;
+        if cte == self.source {
+            return Ok((self.root_alias().to_owned(), f));
+        }
+        if let Some((r, used)) = &mut self.recursive {
+            if r == cte {
+                *used = true;
+                return Ok((cte.to_owned(), f));
+            }
+        }
+        Err(query_err(format!(
+            "{cte}.c.{name} is only available in queries reading {cte} (from_({cte}) or {cte}.select(...))"
+        )))
     }
 
     // -- filters ------------------------------------------------------------------------
@@ -322,12 +652,11 @@ impl<'s, 'py> Planner<'s, 'py> {
         hop: &str,
         body: impl FnOnce(&mut Self) -> PyResult<SExpr>,
     ) -> PyResult<SExpr> {
-        let schema = self.schema;
         let cur = self.scope();
-        let cur_model = schema.model(cur.model);
+        let cur_model = self.model(cur.model);
         let (rel, target) = cur_model.relation(hop).map_err(query_err)?;
         let from_col = &cur_model.field(&rel.from).map_err(query_err)?.column;
-        let target_model = schema.model(target);
+        let target_model = self.model(target);
         let to_col = &target_model.field(&rel.to).map_err(query_err)?.column;
         let mut path = cur.path.clone();
         path.push(hop.to_owned());
@@ -408,16 +737,12 @@ impl<'s, 'py> Planner<'s, 'py> {
             Expr::InSelect { item, select, neg } => {
                 let hint = self.hint_of(item);
                 let item = self.value(item, hint)?;
-                if select.columns.as_ref().map(Vec::len) != Some(1)
-                    || matches!(select.columns.as_deref(), Some([SelectItem::Model]))
-                {
-                    return Err(query_err("in_() takes a query that selects exactly one column".into()));
-                }
-                let sub = Planner::new(self.schema, self.target, &select.model, self.params)?.select(select)?;
+                Self::one_column(select, "in_()")?;
+                let sub = self.subselect(select, false)?;
                 if *neg {
-                    item.not_in_subquery(sub.stmt)
+                    item.not_in_subquery(sub)
                 } else {
-                    item.in_subquery(sub.stmt)
+                    item.in_subquery(sub)
                 }
             }
             Expr::IsNull { item, neg } => {
@@ -458,42 +783,44 @@ impl<'s, 'py> Planner<'s, 'py> {
         self.params.get(i).ok_or_else(|| query_err(format!("parameter {i} out of range")))
     }
 
+    fn outer_field(&self, depth: usize, name: &str) -> PyResult<(&str, &'s FieldIr)> {
+        if depth == 0 || depth > self.outer.len() {
+            return Err(query_err(format!("outer() column {name:?} has no enclosing query at that depth")));
+        }
+        let (alias, model) = &self.outer[self.outer.len() - depth];
+        Ok((alias, self.model(*model).field(name).map_err(query_err)?))
+    }
+
     fn hint_of(&self, e: &Expr) -> Hint<'s> {
         match e {
             Expr::Col { path, name } => {
-                let schema = self.schema;
-                let field = schema.walk(self.root, path).ok().and_then(|m| schema.model(m).field(name).ok());
+                let field = self.walk(self.root, path).ok().and_then(|m| self.model(m).field(name).ok());
                 Hint { ty: field.map(|f| f.ty), field }
             }
             Expr::Excluded { name } => {
-                let field = self.schema.model(self.root).field(name).ok();
+                let field = self.model(self.root).field(name).ok();
+                Hint { ty: field.map(|f| f.ty), field }
+            }
+            Expr::Outer { depth, name } => {
+                let field = self.outer_field(*depth, name).ok().map(|(_, f)| f);
+                Hint { ty: field.map(|f| f.ty), field }
+            }
+            Expr::CteCol { cte, name } => {
+                let field = self.model_idx(cte).ok().and_then(|m| self.model(m).field(name).ok());
                 Hint { ty: field.map(|f| f.ty), field }
             }
             // Arithmetic results are plain values: no write_sql cast.
             Expr::Arith { l, r, .. } => Hint { ty: self.hint_of(l).or(self.hint_of(r)).ty, field: None },
-            Expr::Func { .. } => Hint { ty: self.expr_type(e).ok(), field: None },
+            Expr::Func { .. } | Expr::Subquery { .. } | Expr::Window { .. } => {
+                Hint { ty: self.expr_type(e).ok(), field: None }
+            }
             _ => Hint::default(),
         }
     }
 
     fn resolve(&self, path: &[String], name: &str) -> PyResult<SExpr> {
-        let found = self
-            .scopes
-            .iter()
-            .rev()
-            .chain(self.joins.iter().map(|(s, _)| s))
-            .find(|s| s.path == path);
-        match found {
-            Some(s) => {
-                let f = self.schema.model(s.model).field(name).map_err(query_err)?;
-                Ok(col(&s.alias, &f.column))
-            }
-            None => Err(query_err(format!(
-                "{}.{name} is not reachable here: one comparison can follow only one \
-                 relation path",
-                path.join(".")
-            ))),
-        }
+        let (alias, column) = self.resolve_parts(path, name)?;
+        Ok(col(&alias, &column))
     }
 
     fn value(&mut self, e: &Expr, hint: Hint<'s>) -> PyResult<SExpr> {
@@ -501,13 +828,28 @@ impl<'s, 'py> Planner<'s, 'py> {
             Expr::Col { path, name } => self.resolve(path, name)?,
             Expr::Param { i } => bind(py_to_value(self.param(*i)?, hint.ty)?, hint.field),
             Expr::Const { value } => SExpr::val(*value),
+            Expr::Int { value } => SExpr::cust(value.to_string()),
             Expr::Excluded { name } => {
                 if !self.allow_excluded {
                     return Err(query_err("excluded() can only be used in on_conflict(...).do_update()".into()));
                 }
-                let f = self.schema.model(self.root).field(name).map_err(query_err)?;
+                let f = self.model(self.root).field(name).map_err(query_err)?;
                 col("excluded", &f.column)
             }
+            Expr::Outer { depth, name } => {
+                let (alias, f) = self.outer_field(*depth, name)?;
+                col(alias, &f.column)
+            }
+            Expr::CteCol { cte, name } => {
+                let (alias, f) = self.cte_col(cte, name)?;
+                col(&alias, &f.column)
+            }
+            Expr::Exists { select } => SExpr::exists(self.subselect(select, true)?),
+            Expr::Subquery { select } => {
+                Self::one_column(select, "as_scalar()")?;
+                SExpr::SubQuery(None, Box::new(self.subselect(select, false)?.into()))
+            }
+            Expr::Window { func, partition_by, order_by, frame } => self.window(func, partition_by, order_by, frame)?,
             Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
             Expr::Arith { op, l, r } => {
                 let inner = self.hint_of(l).or(self.hint_of(r));
@@ -531,9 +873,14 @@ impl<'s, 'py> Planner<'s, 'py> {
     fn expr_type(&self, e: &Expr) -> PyResult<ColType> {
         Ok(match e {
             Expr::Col { path, name } => {
-                let m = self.schema.walk(self.root, path).map_err(query_err)?;
-                self.schema.model(m).field(name).map_err(query_err)?.ty
+                let m = self.walk(self.root, path)?;
+                self.model(m).field(name).map_err(query_err)?.ty
             }
+            Expr::Outer { depth, name } => self.outer_field(*depth, name)?.1.ty,
+            Expr::CteCol { cte, name } => self.model(self.model_idx(cte)?).field(name).map_err(query_err)?.ty,
+            Expr::Int { .. } => ColType::BigInt,
+            Expr::Subquery { select } => self.child(select)?.expr_type(Self::one_column(select, "as_scalar()")?)?,
+            Expr::Window { func, .. } => self.expr_type(func)?,
             Expr::Arith { l, r, .. } => match self.expr_type(l) {
                 Ok(t) => t,
                 Err(_) => self.expr_type(r)?,
@@ -544,9 +891,9 @@ impl<'s, 'py> Planner<'s, 'py> {
                     None => Err(query_err(format!("{name}() needs an argument"))),
                 };
                 match name.as_str() {
-                    "count" => ColType::BigInt,
-                    "avg" => ColType::Float,
-                    "length" => ColType::Int,
+                    "count" | "row_number" | "rank" | "dense_rank" => ColType::BigInt,
+                    "avg" | "percent_rank" | "cume_dist" => ColType::Float,
+                    "length" | "ntile" => ColType::Int,
                     "lower" | "upper" => ColType::Text,
                     "now" => ColType::DateTime,
                     // SUM of integers is cast to bigint (see `func`).
@@ -565,7 +912,8 @@ impl<'s, 'py> Planner<'s, 'py> {
             | Expr::IsNull { .. }
             | Expr::Like { .. }
             | Expr::Const { .. }
-            | Expr::InSelect { .. } => ColType::Bool,
+            | Expr::InSelect { .. }
+            | Expr::Exists { .. } => ColType::Bool,
             Expr::Param { .. } => {
                 return Err(query_err("select() takes columns and expressions, not plain values".into()))
             }
@@ -578,6 +926,9 @@ impl<'s, 'py> Planner<'s, 'py> {
     /// relations: `func.count(User.posts)` is `(SELECT COUNT(*) FROM posts WHERE
     /// posts.author_id = users.id)`, never a JOIN that would multiply rows.
     fn func(&mut self, name: &str, args: &[Expr], rel: Option<&[String]>, distinct: bool) -> PyResult<SExpr> {
+        if WINDOW_FUNCS.contains(&name) {
+            return Err(query_err(format!("{name}() is a window function: add .over(...)")));
+        }
         if !is_aggregate(name) && !SCALAR_FUNCS.contains(&name) {
             return Err(query_err(format!("unknown function {name}()")));
         }
@@ -607,30 +958,98 @@ impl<'s, 'py> Planner<'s, 'py> {
         self.call(name, args, distinct)
     }
 
+    /// `<func> OVER (PARTITION BY ... ORDER BY ... <frame>)`, over this query's rows.
+    fn window(&mut self, func: &Expr, partition_by: &[Expr], order_by: &[Order], frame: &Option<Frame>) -> PyResult<SExpr> {
+        if !self.allow_window {
+            return Err(query_err(
+                "window functions can only be used in select() and order_by(), not in filters, \
+                 group_by(), having() or updates; select them in a CTE to filter on them"
+                    .into(),
+            ));
+        }
+        let Expr::Func { name, args, rel, distinct } = func else {
+            return Err(query_err("over() applies to a function".into()));
+        };
+        if rel.is_some() || !(is_aggregate(name) || WINDOW_FUNCS.contains(&name.as_str())) {
+            return Err(query_err(format!("{name}() can't be used as a window function")));
+        }
+        let (call, cast) = self.call_parts(name, args, *distinct)?;
+        let mut exprs = vec![call];
+        let mut clauses = vec![];
+        if !partition_by.is_empty() {
+            let mut slots = vec![];
+            for p in partition_by {
+                exprs.push(self.value(p, Hint::default())?);
+                slots.push(format!("${}", exprs.len()));
+            }
+            clauses.push(format!("PARTITION BY {}", slots.join(", ")));
+        }
+        if !order_by.is_empty() {
+            let mut slots = vec![];
+            for o in order_by {
+                exprs.push(self.value(&o.expr, Hint::default())?);
+                slots.push(format!("${}{}", exprs.len(), if o.desc { " DESC" } else { "" }));
+            }
+            clauses.push(format!("ORDER BY {}", slots.join(", ")));
+        }
+        if let Some(f) = frame {
+            let kind = match f.kind {
+                FrameKind::Rows => "ROWS",
+                FrameKind::Range => "RANGE",
+            };
+            clauses.push(format!("{kind} BETWEEN {} AND {}", frame_bound(f.start, true), frame_bound(f.end, false)));
+        }
+        let sql = format!("$1 OVER ({})", clauses.join(" "));
+        Ok(SExpr::cust_with_exprs(
+            match cast {
+                Some(ty) => format!("CAST({sql} AS {ty})"),
+                None => sql,
+            },
+            exprs,
+        ))
+    }
+
     /// The SQL call itself, arguments planned in the current scope.
     fn call(&mut self, name: &str, args: &[Expr], distinct: bool) -> PyResult<SExpr> {
+        let (e, cast) = self.call_parts(name, args, distinct)?;
+        Ok(match cast {
+            Some(ty) => SExpr::cust_with_expr(format!("CAST($1 AS {ty})"), e),
+            None => e,
+        })
+    }
+
+    /// The call, and the type its result is cast to (outside a window's `OVER`).
+    fn call_parts(&mut self, name: &str, args: &[Expr], distinct: bool) -> PyResult<(SExpr, Option<&'static str>)> {
         let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
         let hint = Hint { ty: hint.ty, field: None };
         let planned = args.iter().map(|a| self.value(a, hint)).collect::<PyResult<Vec<_>>>()?;
         let d = if distinct { "DISTINCT " } else { "" };
+        let n = planned.len();
+        let call = |sql: &str, planned: Vec<SExpr>| -> PyResult<SExpr> {
+            let slots = (1..=planned.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+            Ok(SExpr::cust_with_exprs(format!("{sql}({slots})"), planned))
+        };
         let one = |tpl: &str, planned: Vec<SExpr>| -> PyResult<SExpr> {
             match <[SExpr; 1]>::try_from(planned) {
                 Ok([a]) => Ok(SExpr::cust_with_expr(tpl.to_owned(), a)),
                 Err(_) => Err(query_err(format!("{name}() takes one argument"))),
             }
         };
-        Ok(match name {
+        let mut cast = None;
+        let e = match name {
             "count" if planned.is_empty() => SExpr::cust("COUNT(*)"),
             "count" => one(&format!("COUNT({d}$1)"), planned)?,
             "sum" => {
                 let ty = args.first().map(|a| self.expr_type(a)).transpose()?;
                 if matches!(ty, Some(ColType::Int | ColType::BigInt)) {
-                    one(&format!("CAST(SUM({d}$1) AS BIGINT)"), planned)?
-                } else {
-                    one(&format!("SUM({d}$1)"), planned)?
+                    cast = Some("BIGINT");
                 }
+                one(&format!("SUM({d}$1)"), planned)?
             }
-            "avg" => one(&format!("CAST(AVG({d}$1) AS DOUBLE PRECISION)"), planned)?,
+            "avg" => {
+                cast = Some("DOUBLE PRECISION");
+                one(&format!("AVG({d}$1)"), planned)?
+            }
             "min" => one("MIN($1)", planned)?,
             "max" => one("MAX($1)", planned)?,
             "lower" => one("LOWER($1)", planned)?,
@@ -638,12 +1057,16 @@ impl<'s, 'py> Planner<'s, 'py> {
             "length" => one("LENGTH($1)", planned)?,
             "abs" => one("ABS($1)", planned)?,
             "now" if planned.is_empty() => SExpr::cust("CURRENT_TIMESTAMP"),
-            "coalesce" if !planned.is_empty() => {
-                let slots = (1..=planned.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
-                SExpr::cust_with_exprs(format!("COALESCE({slots})"), planned)
+            "coalesce" if !planned.is_empty() => call("COALESCE", planned)?,
+            "row_number" | "rank" | "dense_rank" | "percent_rank" | "cume_dist" if planned.is_empty() => {
+                SExpr::cust(format!("{}()", name.to_uppercase()))
             }
+            "ntile" | "first_value" | "last_value" => one(&format!("{}($1)", name.to_uppercase()), planned)?,
+            "lag" | "lead" if (1..=3).contains(&n) => call(&name.to_uppercase(), planned)?,
+            "nth_value" if n == 2 => call("NTH_VALUE", planned)?,
             _ => return Err(query_err(format!("wrong arguments for {name}()"))),
-        })
+        };
+        Ok((e, cast))
     }
 
     /// `(SELECT <agg> FROM <hop 1> a1 [JOIN <hop 2> a2 ON ...] WHERE a1.to = <scope>.from)`.
@@ -655,17 +1078,16 @@ impl<'s, 'py> Planner<'s, 'py> {
         count_rows: bool,
         distinct: bool,
     ) -> PyResult<SExpr> {
-        let schema = self.schema;
         let base = self.scope().path.clone();
         let hops = &path[base.len()..];
         let mut sub = Query::select();
         let mut outer = (self.scope().alias.clone(), self.scope().model);
         let pushed = self.scopes.len();
         for (k, hop) in hops.iter().enumerate() {
-            let m = schema.model(outer.1);
+            let m = self.model(outer.1);
             let (rel, target) = m.relation(hop).map_err(query_err)?;
             let from_col = &m.field(&rel.from).map_err(query_err)?.column;
-            let tm = schema.model(target);
+            let tm = self.model(target);
             let to_col = &tm.field(&rel.to).map_err(query_err)?.column;
             let alias = self.alias("a");
             let link = col(&alias, to_col).eq(col(&outer.0, from_col));
@@ -685,39 +1107,66 @@ impl<'s, 'py> Planner<'s, 'py> {
 
     // -- select(...) ----------------------------------------------------------------------
 
-    fn select_columns(mut self, q: &Select, items: &[SelectItem]) -> PyResult<SelectPlan> {
+    /// `select(...)` columns. In a CTE (`cte`), columns are named after the CTE's columns
+    /// and the model's are stored as they are (`read_sql` applies when they are read).
+    fn select_columns(&mut self, q: &Select, items: &[SelectItem], cte: bool) -> PyResult<SelectPlan> {
         if !q.select_related.is_empty() || !q.prefetch.is_empty() {
             return Err(query_err("select() can't be combined with select_related / prefetch_related".into()));
         }
         if items.is_empty() {
             return Err(query_err("select() needs at least one column".into()));
         }
-        let schema = self.schema;
-        let root = schema.model(self.root);
+        let root = self.model(self.root);
+        let alias = self.root_alias().to_owned();
         let mut stmt = Query::select();
         let mut types = vec![];
+        let mut shape = vec![];
         let mut aggregated = !q.group_by.is_empty() || !q.having.is_empty();
+        let mut windowed = false;
         for item in items {
             match item {
                 SelectItem::Model => {
+                    if self.root >= self.schema.models.len() {
+                        return Err(query_err("a CTE without a model has no model to select".into()));
+                    }
                     for f in root.fields() {
-                        stmt.expr(read_col(root.table(), f));
+                        if cte {
+                            stmt.expr_as(col(&alias, &f.column), Alias::new(&f.column));
+                        } else {
+                            stmt.expr(read_col(&alias, f));
+                        }
                         types.push(f.ty);
                     }
+                    shape.push(Some(root.fields().len()));
                 }
-                SelectItem::Expr { expr } => {
+                SelectItem::Expr { expr, name } => {
                     self.join_paths(expr, "select()")?;
                     aggregated |= has_local_aggregate(expr);
+                    windowed |= has_window(expr);
                     types.push(self.expr_type(expr)?);
-                    let mut e = self.value(expr, Hint::default())?;
-                    if let Expr::Col { path, name } = expr {
-                        let m = schema.walk(self.root, path).map_err(query_err)?;
-                        let f = schema.model(m).field(name).map_err(query_err)?;
-                        if let Some(t) = &f.read_sql {
-                            e = SExpr::cust_with_expr(t.replace("{}", "$1"), e);
+                    self.allow_window = true;
+                    let e = self.value(expr, Hint::default());
+                    self.allow_window = false;
+                    let mut e = e?;
+                    let read_sql = match expr {
+                        Expr::Col { path, name } => {
+                            let m = self.walk(self.root, path)?;
+                            self.model(m).field(name).map_err(query_err)?.read_sql.as_ref()
                         }
+                        Expr::CteCol { cte, name } => {
+                            self.model(self.model_idx(cte)?).field(name).map_err(query_err)?.read_sql.as_ref()
+                        }
+                        _ => None,
+                    };
+                    if let Some(t) = read_sql {
+                        e = SExpr::cust_with_expr(t.replace("{}", "$1"), e);
                     }
-                    stmt.expr(e);
+                    match (cte, name) {
+                        (true, Some(n)) => stmt.expr_as(e, Alias::new(n)),
+                        (true, None) => return Err(query_err("CTE columns need names".into())),
+                        (false, _) => stmt.expr(e),
+                    };
+                    shape.push(None);
                 }
             }
         }
@@ -745,15 +1194,18 @@ impl<'s, 'py> Planner<'s, 'py> {
         } else if q.distinct {
             stmt.distinct();
         }
+        windowed |= q.order.iter().any(|o| has_window(&o.expr));
         self.base_select(q, &mut stmt, true)?;
         self.apply_joins(&mut stmt);
         if let Some(lock) = q.lock {
-            if aggregated || q.distinct || !q.distinct_on.is_empty() {
-                return Err(query_err("lock() can't be used with aggregates, group_by() or distinct()".into()));
+            if aggregated || windowed || q.distinct || !q.distinct_on.is_empty() {
+                return Err(query_err(
+                    "lock() can't be used with aggregates, window functions, group_by() or distinct()".into(),
+                ));
             }
-            apply_lock(&mut stmt, lock, self.caps.lock_of.then(|| root.table()));
+            self.apply_lock(&mut stmt, lock)?;
         }
-        Ok(SelectPlan { stmt, types, prefetch: vec![] })
+        Ok(SelectPlan { stmt, types, output: Output::Rows { model: self.root, items: shape }, prefetch: vec![] })
     }
 
     /// LEFT JOINs for the to-one paths `e` reads outside aggregates.
@@ -779,8 +1231,13 @@ impl<'s, 'py> Planner<'s, 'py> {
             .rev()
             .chain(self.joins.iter().map(|(s, _)| s))
             .find(|s| s.path == path)
-            .ok_or_else(|| query_err(format!("{}.{name} is not reachable here", path.join("."))))?;
-        let f = self.schema.model(s.model).field(name).map_err(query_err)?;
+            .ok_or_else(|| {
+                query_err(format!(
+                    "{}.{name} is not reachable here: one comparison can follow only one relation path",
+                    path.join(".")
+                ))
+            })?;
+        let f = self.model(s.model).field(name).map_err(query_err)?;
         Ok((s.alias.clone(), f.column.clone()))
     }
 
@@ -788,15 +1245,14 @@ impl<'s, 'py> Planner<'s, 'py> {
 
     /// Adds LEFT JOINs for every prefix of `path`; returns (alias, model) of the last hop.
     fn ensure_join(&mut self, path: &[String], why: &str) -> PyResult<(String, usize)> {
-        let schema = self.schema;
-        let (mut alias, mut model) = (self.scopes[0].alias.clone(), self.root);
+        let (mut alias, mut model) = (self.root_alias().to_owned(), self.root);
         for i in 0..path.len() {
             let prefix = &path[..=i];
             if let Some((s, _)) = self.joins.iter().find(|(s, _)| s.path == prefix) {
                 (alias, model) = (s.alias.clone(), s.model);
                 continue;
             }
-            let m = schema.model(model);
+            let m = self.model(model);
             let (rel, target) = m.relation(&path[i]).map_err(query_err)?;
             if rel.kind != RelKind::One {
                 return Err(query_err(format!(
@@ -805,7 +1261,7 @@ impl<'s, 'py> Planner<'s, 'py> {
                 )));
             }
             let from_col = &m.field(&rel.from).map_err(query_err)?.column;
-            let to_col = &schema.model(target).field(&rel.to).map_err(query_err)?.column;
+            let to_col = &self.model(target).field(&rel.to).map_err(query_err)?.column;
             let new_alias = self.alias("j");
             let on = col(&new_alias, to_col).eq(col(&alias, from_col));
             self.joins.push((Scope { path: prefix.to_vec(), model: target, alias: new_alias.clone() }, on));
@@ -818,16 +1274,21 @@ impl<'s, 'py> Planner<'s, 'py> {
         for (s, on) in &self.joins {
             stmt.join_as(
                 JoinType::LeftJoin,
-                Alias::new(self.schema.model(s.model).table()),
+                Alias::new(self.model(s.model).table()),
                 Alias::new(&s.alias),
                 on.clone(),
             );
         }
     }
 
+    /// `FROM <source>`, filters, ordering (when `order`) and slicing.
     fn base_select(&mut self, q: &Select, stmt: &mut SelectStatement, order: bool) -> PyResult<()> {
-        let root = self.schema.model(self.root);
-        stmt.from(Alias::new(root.table()));
+        let alias = self.root_alias().to_owned();
+        if alias == self.source {
+            stmt.from(Alias::new(&self.source));
+        } else {
+            stmt.from_as(Alias::new(&self.source), Alias::new(&alias));
+        }
         for w in self.apply_filters(&q.filters)? {
             stmt.and_where(w);
         }
@@ -837,8 +1298,10 @@ impl<'s, 'py> Planner<'s, 'py> {
             for p in paths.into_iter().filter(|p| !p.is_empty()) {
                 self.ensure_join(p, "order_by")?;
             }
-            let e = self.value(&o.expr, Hint::default())?;
-            stmt.order_by_expr(e, if o.desc { SOrder::Desc } else { SOrder::Asc });
+            self.allow_window = true;
+            let e = self.value(&o.expr, Hint::default());
+            self.allow_window = false;
+            stmt.order_by_expr(e?, if o.desc { SOrder::Desc } else { SOrder::Asc });
         }
         if let Some(n) = q.limit {
             stmt.limit(n);
@@ -846,74 +1309,90 @@ impl<'s, 'py> Planner<'s, 'py> {
         if let Some(n) = q.offset {
             stmt.offset(n);
         }
+        if let Some((name, true)) = &self.recursive {
+            stmt.from(Alias::new(name));
+        }
+        Ok(())
+    }
+
+    fn apply_lock(&self, stmt: &mut SelectStatement, lock: Lock) -> PyResult<()> {
+        if self.source != self.model(self.root).table() {
+            return Err(query_err("lock() can't be used on a query reading a CTE".into()));
+        }
+        let c = self.caps;
+        if lock.exclusive {
+            self.require(c.lock_exclusive, "lock() (SELECT ... FOR UPDATE)")?;
+        } else {
+            self.require(c.lock_shared, "lock(exclusive=False) (SELECT ... FOR SHARE)")?;
+        }
+        self.require(c.lock_nowait || !lock.nowait, "lock(nowait=True)")?;
+        self.require(c.lock_skip_locked || !lock.skip_locked, "lock(skip_locked=True)")?;
+        self.require(c.lock_of || self.joins.is_empty(), "lock() together with select_related")?;
+        apply_lock(stmt, lock, c.lock_of.then(|| self.root_alias()));
         Ok(())
     }
 
     // -- statements ---------------------------------------------------------------------
 
-    pub fn select(mut self, q: &Select) -> PyResult<SelectPlan> {
+    /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
+    /// columns.
+    fn build_select(&mut self, q: &Select) -> PyResult<SelectPlan> {
         if let Some(items) = &q.columns {
-            return self.select_columns(q, items);
+            return self.select_columns(q, items, false);
         }
         if !q.group_by.is_empty() || !q.having.is_empty() || q.distinct || !q.distinct_on.is_empty() {
             return Err(query_err("group_by / having / distinct need select(...)".into()));
         }
-        let schema = self.schema;
-        let root = schema.model(self.root);
+        if self.root >= self.schema.models.len() {
+            return Err(query_err("a CTE without a model is read with select(...)".into()));
+        }
+        let root = self.model(self.root);
+        let alias = self.root_alias().to_owned();
         let mut stmt = Query::select();
         let mut types = vec![];
         for f in root.fields() {
-            stmt.expr(read_col(root.table(), f));
+            stmt.expr(read_col(&alias, f));
             types.push(f.ty);
         }
+        let mut joins: Vec<JoinShape> = vec![];
         for path in &q.select_related {
             let (alias, model) = self.ensure_join(path, "select_related")?;
-            for f in schema.model(model).fields() {
+            let m = self.model(model);
+            let parent = match path.len() {
+                0 => return Err(query_err("select_related needs a relation".into())),
+                1 => None,
+                n => Some(
+                    q.select_related
+                        .iter()
+                        .position(|p| p.as_slice() == &path[..n - 1])
+                        .ok_or_else(|| query_err("select_related paths must list their prefixes first".into()))?,
+                ),
+            };
+            joins.push(JoinShape {
+                parent,
+                attr: path[path.len() - 1].clone(),
+                model,
+                start: types.len(),
+                pk_pos: m.pk,
+            });
+            for f in m.fields() {
                 stmt.expr(read_col(&alias, f));
                 types.push(f.ty);
             }
         }
         self.base_select(q, &mut stmt, true)?;
         self.apply_joins(&mut stmt);
+        if q.order.iter().any(|o| has_window(&o.expr)) && q.lock.is_some() {
+            return Err(query_err("lock() can't be used with window functions".into()));
+        }
         if let Some(lock) = q.lock {
-            let c = self.caps;
-            if lock.exclusive {
-                self.require(c.lock_exclusive, "lock() (SELECT ... FOR UPDATE)")?;
-            } else {
-                self.require(c.lock_shared, "lock(exclusive=False) (SELECT ... FOR SHARE)")?;
-            }
-            self.require(c.lock_nowait || !lock.nowait, "lock(nowait=True)")?;
-            self.require(c.lock_skip_locked || !lock.skip_locked, "lock(skip_locked=True)")?;
-            self.require(c.lock_of || self.joins.is_empty(), "lock() together with select_related")?;
-            apply_lock(&mut stmt, lock, c.lock_of.then(|| root.table()));
+            self.apply_lock(&mut stmt, lock)?;
         }
-
         let mut prefetch = vec![];
-        for name in &q.prefetch {
-            let (rel, target) = root.relation(name).map_err(query_err)?;
-            if rel.kind != RelKind::Many {
-                return Err(query_err(format!(
-                    "prefetch_related expects a to-many relation; use select_related for {name}"
-                )));
-            }
-            let tm = schema.model(target);
-            let mut sub = Query::select();
-            for f in tm.fields() {
-                sub.expr(read_col(tm.table(), f));
-            }
-            sub.from(Alias::new(tm.table()))
-                .order_by_expr(col(tm.table(), &tm.pk_field().column), SOrder::Asc);
-            prefetch.push(PrefetchPlan {
-                name: name.clone(),
-                key_pos: root.field_pos(&rel.from).map_err(query_err)?,
-                key_type: root.field(&rel.from).map_err(query_err)?.ty,
-                stmt: sub,
-                to_table: tm.table().to_owned(),
-                to_column: tm.field(&rel.to).map_err(query_err)?.column.clone(),
-                types: tm.fields().iter().map(|f| f.ty).collect(),
-            });
+        for node in &q.prefetch {
+            prefetch.push(plan_prefetch(self.schema, self.target, self.params, self.root, node)?);
         }
-        Ok(SelectPlan { stmt, types, prefetch })
+        Ok(SelectPlan { stmt, types, output: Output::Instances { model: self.root, joins }, prefetch })
     }
 
     fn sliced_inner(&mut self, q: &Select) -> PyResult<SelectStatement> {
@@ -924,7 +1403,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(inner)
     }
 
-    pub fn count(mut self, q: &Select) -> PyResult<SelectStatement> {
+    pub fn count(&mut self, q: &Select) -> PyResult<SelectStatement> {
         no_lock(q, "count")?;
         let mut stmt = Query::select();
         if q.limit.is_some() || q.offset.is_some() {
@@ -938,7 +1417,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(stmt)
     }
 
-    pub fn exists(mut self, q: &Select) -> PyResult<SelectStatement> {
+    pub fn exists(&mut self, q: &Select) -> PyResult<SelectStatement> {
         no_lock(q, "exists")?;
         let mut inner = self.sliced_inner(q)?;
         if q.limit.is_none() {
@@ -949,8 +1428,8 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(stmt)
     }
 
-    pub fn update(mut self, q: &Update) -> PyResult<(UpdateStatement, Option<Vec<ColType>>)> {
-        let root = self.schema.model(self.root);
+    pub fn update(&mut self, q: &Update) -> PyResult<(UpdateStatement, Option<Vec<ColType>>)> {
+        let root = self.model(self.root);
         let mut stmt = Query::update();
         stmt.table(Alias::new(root.table()));
         if q.set.is_empty() {
@@ -972,8 +1451,8 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok((stmt, Some(root.fields().iter().map(|f| f.ty).collect())))
     }
 
-    pub fn delete(mut self, q: &Delete) -> PyResult<(DeleteStatement, Option<Vec<ColType>>)> {
-        let root = self.schema.model(self.root);
+    pub fn delete(&mut self, q: &Delete) -> PyResult<(DeleteStatement, Option<Vec<ColType>>)> {
+        let root = self.model(self.root);
         let mut stmt = Query::delete();
         stmt.from_table(Alias::new(root.table()));
         for w in self.apply_filters(&q.filters)? {
@@ -986,6 +1465,114 @@ impl<'s, 'py> Planner<'s, 'py> {
         stmt.returning(Query::returning().exprs(root.fields().iter().map(returning_col)));
         Ok((stmt, Some(root.fields().iter().map(|f| f.ty).collect())))
     }
+}
+
+/// A top-level SELECT with its `WITH` clause.
+pub fn plan_select<'py>(schema: &Schema, target: Target, q: &Select, params: &[Bound<'py, PyAny>]) -> PyResult<SelectPlan> {
+    let virt = derive_ctes(schema, target, &q.with, params)?;
+    let mut p = Planner::new(schema, &virt, target, &q.model, q.from.as_deref(), params, vec![], 0)?;
+    let mut plan = p.build_select(q)?;
+    if let Some(w) = p.with_clause(&q.with)? {
+        plan.stmt.with_cte(w);
+    }
+    Ok(plan)
+}
+
+fn rn_orders(e: &Expr) -> Vec<&Expr> {
+    match e {
+        Expr::Window { order_by, .. } => order_by.iter().map(|o| &o.expr).collect(),
+        _ => vec![],
+    }
+}
+
+/// The query loading `node` (a relation of `parent`) for a set of parent keys. A slice
+/// applies per parent: `ROW_NUMBER() OVER (PARTITION BY <key> ORDER BY ...)` numbers
+/// the related rows and the outer query keeps the slice.
+fn plan_prefetch<'py>(
+    schema: &Schema,
+    target: Target,
+    params: &[Bound<'py, PyAny>],
+    parent: usize,
+    node: &Prefetch,
+) -> PyResult<PrefetchPlan> {
+    let pm = schema.model(parent);
+    let (rel, child) = pm.relation(&node.relation).map_err(query_err)?;
+    let cm = schema.model(child);
+    if node.query.model != cm.ir.name {
+        return Err(query_err(format!(
+            "the query prefetching {}.{} must be over {}, not {}",
+            pm.ir.name, node.relation, cm.ir.name, node.query.model
+        )));
+    }
+    if node.query.columns.is_some() || node.query.lock.is_some() {
+        return Err(query_err("a prefetch query can't select columns or lock rows".into()));
+    }
+    let many = rel.kind == RelKind::Many;
+    let mut q = node.query.clone();
+    let pk_order = Order { expr: Expr::Col { path: vec![], name: cm.pk_field().name.clone() }, desc: false };
+    let sliced = q.limit.is_some() || q.offset.is_some();
+    let slice = sliced.then(|| (q.offset.unwrap_or(0), q.limit));
+    let mut window_order = vec![];
+    if sliced {
+        window_order = std::mem::take(&mut q.order);
+        window_order.push(pk_order);
+        (q.limit, q.offset) = (None, None);
+    } else if q.order.is_empty() {
+        q.order.push(pk_order);
+    }
+    let virt = derive_ctes(schema, target, &q.with, params)?;
+    let mut p = Planner::new(schema, &virt, target, &q.model, q.from.as_deref(), params, vec![], 0)?;
+    let mut plan = p.build_select(&q)?;
+    let key_field = cm.field(&rel.to).map_err(query_err)?;
+    let key = col(p.root_alias(), &key_field.column);
+    if sliced {
+        let rn = Expr::Window {
+            func: Box::new(Expr::Func { name: "row_number".into(), args: vec![], rel: None, distinct: false }),
+            partition_by: vec![Expr::Col { path: vec![], name: rel.to.clone() }],
+            order_by: window_order,
+            frame: None,
+        };
+        // The window's ORDER BY may follow to-one relations not joined yet.
+        let joined = p.joins.len();
+        for o in rn_orders(&rn) {
+            p.join_paths(o, "a prefetch's order_by()")?;
+        }
+        p.allow_window = true;
+        let e = p.value(&rn, Hint::default())?;
+        for (s, on) in &p.joins[joined..] {
+            plan.stmt.join_as(JoinType::LeftJoin, Alias::new(p.model(s.model).table()), Alias::new(&s.alias), on.clone());
+        }
+        plan.stmt.expr_as(e, Alias::new("_rn"));
+    }
+    if let Some(w) = p.with_clause(&q.with)? {
+        plan.stmt.with_cte(w);
+    }
+    let back = many
+        .then(|| {
+            cm.ir.relations.iter().find(|r| {
+                r.kind == RelKind::One
+                    && r.from == rel.to
+                    && r.to == rel.from
+                    && cm.relation(&r.name).map(|(_, t)| t) == Ok(parent)
+            })
+        })
+        .flatten()
+        .map(|r| r.name.clone());
+    Ok(PrefetchPlan {
+        attr: node.attr.clone().unwrap_or_else(|| node.relation.clone()),
+        many,
+        key_pos: pm.field_pos(&rel.from).map_err(query_err)?,
+        key_type: pm.field(&rel.from).map_err(query_err)?.ty,
+        child_key_pos: cm.field_pos(&rel.to).map_err(query_err)?,
+        back,
+        stmt: plan.stmt,
+        key,
+        key_field: key_field.clone(),
+        slice,
+        types: plan.types,
+        output: plan.output,
+        children: plan.prefetch,
+    })
 }
 
 /// `FOR UPDATE | FOR SHARE [OF <root>] [NOWAIT | SKIP LOCKED]`. `OF` limits the lock to
@@ -1078,7 +1665,7 @@ pub fn plan_insert<'py>(
                 }
                 let mut clause = sea_query::OnConflict::columns(columns(&conflict)?);
                 clause.update_columns(columns(&update)?);
-                let mut planner = Planner::new(schema, target, model, params)?;
+                let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
                 planner.allow_excluded = true;
                 for a in &set {
                     let f = m.field(&a.field).map_err(query_err)?;
@@ -1119,7 +1706,7 @@ pub fn plan_update_many<'py>(
     params: &[Bound<'py, PyAny>],
     returning: bool,
 ) -> PyResult<(Vec<UpdateStatement>, Option<Vec<ColType>>)> {
-    let mut planner = Planner::new(schema, target, model, params)?;
+    let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
     let m = schema.model(planner.root);
     let table = m.table().to_owned();
     let cols = fields.iter().map(|f| m.field(f)).collect::<Result<Vec<_>, _>>().map_err(query_err)?;

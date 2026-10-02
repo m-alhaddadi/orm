@@ -9,7 +9,7 @@ use sea_query::Value;
 
 use orm_core::ir::ColType;
 
-fn null_of(ty: Option<ColType>) -> Value {
+pub fn null_of(ty: Option<ColType>) -> Value {
     match ty {
         Some(ColType::BigInt) => Value::BigInt(None),
         Some(ColType::Int) => Value::Int(None),

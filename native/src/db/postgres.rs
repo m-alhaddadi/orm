@@ -20,7 +20,6 @@ use bytes::BytesMut;
 use chrono::{DateTime, NaiveDate, Utc};
 use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
 use sea_query::Value;
 use tokio::sync::Mutex;
@@ -206,16 +205,8 @@ impl RowSet for PgRows {
         self.0.len()
     }
 
-    fn to_py<'py>(&self, py: Python<'py>, types: &[ColType]) -> PyResult<Bound<'py, PyList>> {
-        let list = PyList::empty(py);
-        let mut cells = Vec::with_capacity(types.len());
-        for row in &self.0 {
-            for (i, ty) in types.iter().enumerate() {
-                cells.push(cell_to_py(py, row, i, *ty)?);
-            }
-            list.append(PyTuple::new(py, cells.drain(..))?)?;
-        }
-        Ok(list)
+    fn cell(&self, py: Python<'_>, row: usize, col: usize, ty: ColType) -> PyResult<Py<PyAny>> {
+        cell_to_py(py, &self.0[row], col, ty)
     }
 
     fn value(&self, row: usize, col: usize, ty: ColType) -> DbResult<Value> {

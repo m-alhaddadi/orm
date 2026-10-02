@@ -15,6 +15,29 @@ pub struct Model {
 }
 
 impl Model {
+    /// The columns of a derived table (a CTE): no table of its own, no relations, no
+    /// primary key (`pk` points at the first column).
+    pub fn derived(name: &str, fields: Vec<FieldIr>) -> Result<Model> {
+        let mut field_index = HashMap::new();
+        for (i, f) in fields.iter().enumerate() {
+            if field_index.insert(f.name.clone(), i).is_some() {
+                return Err(format!("{name} has several columns named {:?}", f.name));
+            }
+        }
+        let ir = ModelIr {
+            name: name.to_owned(),
+            table: name.to_owned(),
+            fields,
+            relations: vec![],
+            indexes: vec![],
+            constraints: vec![],
+            triggers: vec![],
+            renamed_from: None,
+            comment: None,
+        };
+        Ok(Model { ir, pk: 0, field_index, relation_index: HashMap::new() })
+    }
+
     pub fn table(&self) -> &str {
         &self.ir.table
     }

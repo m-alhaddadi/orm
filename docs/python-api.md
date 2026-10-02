@@ -19,9 +19,9 @@ automatically: each relation hop becomes a correlated `EXISTS`.
 
 | Path | What |
 |---|---|
-| `python/orm/` | Python package: `expr.py` (expressions, `func` → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet), `select.py` (`select()`, `Row`), `write.py` (insert / update / delete statements), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
+| `python/orm/` | Python package: `expr.py` (expressions, `func`, `outer` / `exists`, windows → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet, `Prefetch`), `select.py` (`select()`, `Row`), `cte.py` (CTEs), `write.py` (insert / update / delete statements), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
 | `core/` | Rust crate `orm-core`, no binding code: schema language, IR (`ir.rs`), extensions, migrations, code generation, the `orm` CLI (see [`schema.md`](schema.md)) |
-| `native/` | Rust crate `orm._native` (PyO3) on top of `orm-core`: `plan.rs` (IR → sea-query statements), `db/` (drivers: `mod.rs` traits, `postgres.rs`), `convert.rs` (Python ↔ values), `lib.rs` |
+| `native/` | Rust crate `orm._native` (PyO3) on top of `orm-core`: `plan.rs` (IR → sea-query statements), `db/` (drivers: `mod.rs` traits, `postgres.rs`), `build.rs` (rows → instances and `Row`s), `convert.rs` (Python ↔ values), `lib.rs` |
 | `examples/blog/` | `schema.prisma`, the `models.py` / `models.pyi` generated from it, its migrations, `demo.py` |
 | `tests/` | SQL shape tests (no DB), Postgres end-to-end tests, mypy + pyright stub checks |
 
@@ -75,6 +75,8 @@ async for u in User.objects.filter(...): ...
 await qs.first() / qs.last()                  # by ordering, else pk; None if empty
 await qs.get(cond)                            # User.DoesNotExist / MultipleObjectsReturned
 await qs.count() / qs.exists()
+await qs.in_bulk([1, 2, 3])                   # {1: <User 1>, 3: <User 3>}: by pk, missing ids left out
+await qs.in_bulk(emails, field=User.email)    # by a unique field; no ids: every row
 qs.sql()                                      # SQL with values inlined, for debugging
 ```
 
@@ -121,10 +123,31 @@ us[0].posts.cached                  # list[Post], no await; post.author is set b
 await us[0].posts                   # uses the prefetched rows if present, else queries
 await us[0].posts.filter(Post.published).count()
 await us[0].posts.insert(title=..., body=...)   # author_id filled in
-post.author                         # NotLoaded unless select_related
+post.author                         # NotLoaded unless select_related or prefetched
+
+await User.objects.prefetch_related(User.posts.comments)   # +2 queries: posts, then their comments
+await Comment.objects.prefetch_related(Comment.post)       # to-one too: comment.post
+await User.objects.prefetch_related(
+    Prefetch(User.posts, Post.objects.filter(Post.published).order_by(Post.views.desc())[:3]),
+    Prefetch(User.comments, Comment.objects.select_related(Comment.post), to_attr="recent"),
+)
 ```
 
-The main query and its prefetch queries run in the same Rust call.
+The main query and its prefetch queries run in the same Rust call, one query per
+relation level (keys deduplicated, `NULL` keys skipped).
+
+* A path loads every relation along it: `User.posts.comments` fills `user.posts` and
+  each post's `comments`. Paths with a common prefix share its query.
+* `Prefetch(path, queryset, to_attr=None)` gives the related rows their own query set:
+  filters, ordering, `select_related` and further `prefetch_related` (nested under it).
+  As in Django, the rows fill the relation itself, so `user.posts.cached` and `await
+  user.posts` then give the filtered rows; `user.posts.filter(...)` and other new
+  queries still see every post. With `to_attr` they go to a plain list attribute
+  (`user.recent`) and the relation stays unloaded. Two different query sets for the same
+  attribute raise `ValueError`.
+* A **slice applies per parent**: `[:3]` above is each user's three most viewed posts,
+  planned as `ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY views DESC, id)` in a
+  subquery and `WHERE _rn <= 3` around it (Django 4.2 does the same).
 
 ### Big tables: batches
 
@@ -195,8 +218,95 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
 * Integer `SUM`s come back as `int` (cast to `bigint`), `AVG` as `float`.
 * Columns through to-one relations are `LEFT JOIN`ed; a to-many column outside an
   aggregate is rejected (it would repeat rows).
-* `lock()` works with plain column selects, not with aggregates, `group_by` or
-  `distinct`. `select_related` / `prefetch_related` don't combine with `select()`.
+* `lock()` works with plain column selects, not with aggregates, window functions,
+  `group_by` or `distinct`. `select_related` / `prefetch_related` don't combine with
+  `select()`.
+* A condition is a boolean column once labelled: `select(User.name, (User.id > 3).label("big"))`.
+
+## Subqueries: `exists()`, scalar values, `outer()`
+
+Relation paths cover subqueries along declared relations. For anything else a query
+set or `select()` goes inside another query, and `outer(col)` (Django's `OuterRef`)
+names a column of the enclosing query:
+
+```python
+from orm import exists, outer
+
+# EXISTS as a condition (negate with ~), or a boolean column
+await User.objects.filter(exists(Post.objects.filter(Post.author_id == outer(User.id), Post.views > 100)))
+await User.objects.filter(~exists(Comment.objects.filter(Comment.author_id == outer(User.id))))
+
+# A one-column, at-most-one-row query as a value: (SELECT ...)
+latest = (Post.objects.filter(Post.author_id == outer(User.id))
+          .order_by(Post.created_at.desc()).select(Post.title)[:1].as_scalar())
+await User.objects.select(User, latest.label("latest"))              # Row[User, str]
+avg = Post.objects.filter(Post.author_id == outer(Post.author_id)).select(func.avg(Post.views)).as_scalar()
+await Post.objects.filter(Post.views > avg)                           # above their author's average
+await Post.objects.update(views=Comment.objects.filter(Comment.post_id == outer(Post.id)).select(func.count()).as_scalar())
+```
+
+* `outer(Model.col)` refers to the nearest enclosing query over `Model` (a subquery
+  of a subquery can reach two levels up). Using `User.id` directly inside a `Post`
+  subquery raises a `ValueError` that suggests `outer(User.id)`.
+* A scalar subquery returning more than one row is a database error, as in SQL:
+  slice it (`[:1]`) or aggregate. No row gives `NULL` (`None`).
+* `in_()` subqueries take `outer()` too. A subquery over the same table as its outer
+  query gets an alias (`FROM posts AS s1`), so both stay addressable.
+* `qs.exists()` (awaited, a `bool`) stays the way to ask about one query set.
+
+## Window functions
+
+```python
+rank = func.row_number().over(partition_by=Post.author_id, order_by=Post.views.desc())
+await Post.objects.select(Post.title, rank.label("rank"))
+await Post.objects.select(Post.title, func.sum(Post.views).over(order_by=Post.created_at, rows=(None, 0)))  # running total
+await Post.objects.select(Post.title, func.lag(Post.views, 1, 0).over(order_by=Post.created_at))
+```
+
+* `.over(partition_by=..., order_by=..., rows=(start, end) | range=(start, end))` on any
+  `func` call. Frame bounds: `None` unbounded, `0` the current row, `-n` n preceding,
+  `n` n following (SQLAlchemy's convention).
+* Window-only functions: `row_number`, `rank`, `dense_rank`, `percent_rank`,
+  `cume_dist`, `ntile(n)`, `lag` / `lead(expr, offset=1, default=None)`,
+  `first_value`, `last_value`, `nth_value(expr, n)`. Without `.over()` they raise
+  `QueryError`. The aggregates (`count`, `sum`, ...) work over windows too.
+* Window functions go in `select()` and `order_by()`. In `filter()`, `having()`,
+  `group_by()` or an update they raise `QueryError`, since SQL evaluates them after
+  `WHERE`. To filter on one, compute it in a CTE and filter that (below).
+
+## CTEs: `WITH`
+
+`qs.cte(name)` and `qs.select(...).cte(name)` name a query; whatever reads it declares
+it, so it ends up once in the statement's `WITH` clause (subqueries included):
+
+```python
+ranked = Post.objects.select(Post, rank.label("rank")).cte("ranked")
+await Post.objects.from_(ranked).filter(ranked.c.rank <= 3)          # top 3 per author, as Post instances
+
+totals = (Post.objects.select(Post.author_id, func.sum(Post.views).label("views"))
+          .group_by(Post.author_id).cte("totals"))
+await totals.select(totals.c.author_id, totals.c.views).filter(totals.c.views > 100)   # rows
+await User.objects.filter(User.id.in_(totals.select(totals.c.author_id)))
+
+chain = User.objects.filter(User.id == 1).cte(                          # WITH RECURSIVE
+    "chain", recursive=lambda c: User.objects.filter(User.id == c.c.id + 1))
+await User.objects.from_(chain)
+```
+
+* **Subqueries in `FROM`**: `Model.objects.from_(cte)` reads the model's rows from a
+  CTE with the model's columns (`Post.objects....cte(...)` or a `select(Post, ...)`),
+  so filters, relation paths, `select_related`, `prefetch_related`, `count()` and
+  `select()` work as usual; its extra columns are `cte.c.<name>`. Writes refuse a
+  `from_()` query set.
+* `cte.select(...)` queries a CTE with no model: filter, group, order and slice it like
+  any `select()`, await it for rows, or use it in `in_()`, `exists()` and
+  `as_scalar()`. Columns are named as in `select()` rows (labels, field names).
+* `recursive=lambda cte: query` adds the recursive part, joined with the CTE itself
+  (`FROM users, chain WHERE users.id = chain.id + 1`), `UNION ALL` or (`distinct=True`)
+  `UNION`. It must have as many columns as the first part.
+  `materialized=True / False` adds `[NOT] MATERIALIZED`.
+* CTEs work in `update()` / `delete()` filters too. Each prefetch query declares the
+  CTEs it reads. Two different CTEs with one name in a statement raise `ValueError`.
 
 ## Writes
 
@@ -325,15 +435,19 @@ QuerySet ──(IR json + params list)──▶ Engine.run ──▶ planner (se
   compared with (`native/src/convert.rs`).
 * The IR talks about models, fields and relation paths only. Joins, `EXISTS` and
   aliases stay in `plan.rs`; SQL text and driver types stay in `db/`.
-* Rows come back as tuples in schema field order. Python builds the instances
-  (`_from_row`: `__new__` + `__dict__.update`).
+* Rust builds the result objects (`native/src/build.rs`). `Schema` holds each model's
+  class (passed by `Registry.native()`), and an instance is made as `cls.__new__(cls)`
+  would make it, its fields written straight into its `__dict__`: no Python code runs per
+  row. `select_related` objects, prefetched lists, the reverse to-one (`post.author`)
+  and `_db` (for `using()`) are attached in the same pass; `select()` rows are built as
+  `Row` objects; `insert` / `.returning()` rows are instances too.
 
 Rough numbers (release build, localhost TCP, 1000-row reads): building a query set and its
 IR costs ~15 µs of Python. A 1-row read is ~0.1 ms over a bare `SELECT 1` on the same
-connection. Reading 1000 posts takes 3.3 ms (Django async was 10.4 ms in Phase 0), and
-1000 posts + author via `select_related` take 7.0 ms (Django 18.1 ms). Most of the gap
-to the Phase 0 prototype (2.5 / 4.7 ms) is Python-side instance construction, ~0.6 µs
-per row, which can move into Rust later.
+connection. Reading 1000 posts takes ~2.0 ms (Django async was 10.4 ms in Phase 0), and
+1000 posts + author via `select_related` ~3.4 ms (Django 18.1 ms). Building instances in
+Rust took these from ~2.5 / ~4.6 ms (`bench/engine_bench.py`, same machine), below the
+Phase 0 prototype's 2.5 / 4.7 ms.
 
 ## Decisions taken in this round (open to change)
 
@@ -393,11 +507,10 @@ TLS on, the TLS cost hides the difference)
 
 ## Not done yet
 
-* `in_bulk`, `exists()` as an expression, scalar subqueries, window functions, more SQL
-  functions (one line each in the planner).
+* More SQL functions (one line each in the planner), string concatenation.
 * Drivers for MySQL and SQLite; schema checks against a dialect's capabilities.
-* Nested `prefetch_related` paths and `Prefetch(queryset=...)`.
-* Building instances in Rust (the remaining per-row cost), caching of compiled plans,
-  chunking very large `IN (...)` prefetches.
+* Caching of compiled plans, chunking very large `IN (...)` prefetches.
+* `outer()` through relation paths (`outer(Post.author.name)`), `SEARCH` / `CYCLE`
+  clauses for recursive CTEs, filtering on window functions without a CTE.
 * `has_one`, many-to-many, composite keys, decimal / array column types. (UUID and JSON
   are done, see [`schema.md`](schema.md).)

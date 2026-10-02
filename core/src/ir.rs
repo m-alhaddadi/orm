@@ -73,7 +73,7 @@ pub struct ModelIr {
     pub comment: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct FieldIr {
     pub name: String,
     pub column: String,
@@ -125,6 +125,34 @@ pub struct FieldIr {
     /// Per-language type hints for generated code (`{"python": "list[float]"}`).
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", default)]
     pub hints: std::collections::BTreeMap<String, String>,
+}
+
+impl FieldIr {
+    /// A plain column: no key, default or SQL templates.
+    pub fn plain(name: &str, ty: ColType) -> FieldIr {
+        FieldIr {
+            name: name.to_owned(),
+            column: name.to_owned(),
+            ty,
+            nullable: true,
+            primary_key: false,
+            auto_increment: false,
+            unique: false,
+            index: false,
+            max_length: None,
+            default: None,
+            default_now: false,
+            default_sql: None,
+            db_type: None,
+            read_sql: None,
+            write_sql: None,
+            check: None,
+            renamed_from: None,
+            comment: None,
+            requires: vec![],
+            hints: Default::default(),
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -383,7 +411,7 @@ pub enum ArithOp {
     Div,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Expr {
     /// A field reached from the query's root model through `path` (relation names).
@@ -415,17 +443,91 @@ pub enum Expr {
     },
     /// `<item> [NOT] IN (SELECT <one column> ...)`.
     InSelect { item: Box<Expr>, select: Box<Select>, #[serde(default)] neg: bool },
+    /// An integer written into the SQL (window function offsets, `ntile` buckets).
+    Int { value: i64 },
+    /// A field of an enclosing query's root model (or CTE), `depth` queries up:
+    /// `outer(User.id)` in a subquery of a `User` query.
+    Outer { depth: usize, name: String },
+    /// A column of a CTE (`cte.c.<name>`), in a query reading that CTE, or in the
+    /// recursive part of the CTE itself.
+    CteCol { cte: String, name: String },
+    /// `EXISTS (<select>)`.
+    Exists { select: Box<Select> },
+    /// `(<select>)` returning one column and at most one row.
+    Subquery { select: Box<Select> },
+    /// `<func> OVER (PARTITION BY ... ORDER BY ... <frame>)`.
+    Window {
+        func: Box<Expr>,
+        #[serde(default)]
+        partition_by: Vec<Expr>,
+        #[serde(default)]
+        order_by: Vec<Order>,
+        #[serde(default)]
+        frame: Option<Frame>,
+    },
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameKind {
+    Rows,
+    Range,
+}
+
+/// A window frame. Bounds: `None` is unbounded, `0` the current row, negative values
+/// rows (or values) preceding, positive ones following.
+#[derive(Deserialize, Clone, Copy, Debug)]
+pub struct Frame {
+    pub kind: FrameKind,
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub end: Option<i64>,
+}
+
+/// `WITH <name> AS (<query> [UNION [ALL] <recursive>])`.
+#[derive(Deserialize, Debug, Clone)]
+pub struct Cte {
+    pub name: String,
+    pub query: Select,
+    /// The recursive part: may read the CTE's own columns (`CteCol`), which joins it.
+    #[serde(default)]
+    pub recursive: Option<Select>,
+    /// `UNION` instead of `UNION ALL` between the two parts.
+    #[serde(default)]
+    pub distinct: bool,
+    /// `MATERIALIZED` / `NOT MATERIALIZED`.
+    #[serde(default)]
+    pub materialized: Option<bool>,
+}
+
+/// A relation loaded with a separate `IN (...)` query once the parent rows are known.
+/// `query` (on the relation's target model) filters, orders and slices the related rows
+/// (a slice applies per parent row) and nests further prefetches.
+#[derive(Deserialize, Debug, Clone)]
+pub struct Prefetch {
+    pub relation: String,
+    /// Attribute the rows are stored under; the relation's name when absent.
+    #[serde(default)]
+    pub attr: Option<String>,
+    #[serde(flatten)]
+    pub query: Select,
 }
 
 /// One entry of `select(...)`: every column of the root model, or an expression.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum SelectItem {
     Model,
-    Expr { expr: Expr },
+    /// `name` is the column's name when the select is a CTE.
+    Expr {
+        expr: Expr,
+        #[serde(default)]
+        name: Option<String>,
+    },
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Order {
     pub expr: Expr,
     #[serde(default)]
@@ -435,9 +537,18 @@ pub struct Order {
 /// One entry per `filter()` call. Entries are AND-ed, but each is planned on its own:
 /// conditions inside one entry that go through the same to-many relation must hold for
 /// the same related row, while separate entries are independent (Django semantics).
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Select {
+    /// The root model, or a CTE of this statement when the query reads a CTE that has no
+    /// model.
     pub model: String,
+    /// CTEs this statement declares (`WITH ...`). Subqueries don't declare their own:
+    /// frontends hoist them to the statement.
+    #[serde(default)]
+    pub with: Vec<Cte>,
+    /// Read the root model's rows from this CTE instead of its table.
+    #[serde(default)]
+    pub from: Option<String>,
     #[serde(default)]
     pub filters: Vec<Expr>,
     #[serde(default)]
@@ -449,10 +560,10 @@ pub struct Select {
     /// To-one relation paths loaded with LEFT JOINs in the same statement.
     #[serde(default)]
     pub select_related: Vec<Vec<String>>,
-    /// To-many relations of the root model loaded with one extra `IN (...)` query each,
-    /// inside the same frontend call.
+    /// Relations of the root model loaded with one extra `IN (...)` query each, inside
+    /// the same frontend call.
     #[serde(default)]
-    pub prefetch: Vec<String>,
+    pub prefetch: Vec<Prefetch>,
     /// Row lock on the root model's rows (`FOR UPDATE` / `FOR SHARE`). Select only.
     #[serde(default)]
     pub lock: Option<Lock>,
@@ -494,6 +605,8 @@ pub struct Assignment {
 pub struct Update {
     pub model: String,
     #[serde(default)]
+    pub with: Vec<Cte>,
+    #[serde(default)]
     pub filters: Vec<Expr>,
     pub set: Vec<Assignment>,
     /// Return the updated rows (every column) instead of a row count.
@@ -504,6 +617,8 @@ pub struct Update {
 #[derive(Deserialize, Debug)]
 pub struct Delete {
     pub model: String,
+    #[serde(default)]
+    pub with: Vec<Cte>,
     #[serde(default)]
     pub filters: Vec<Expr>,
     /// Return the deleted rows (every column) instead of a row count.

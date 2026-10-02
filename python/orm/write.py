@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from . import _native
 from .expr import ColumnRef, Expression, IRContext
+from .errors import QueryError
 from .fields import BelongsTo
 
 if TYPE_CHECKING:
@@ -186,12 +187,9 @@ class _Insert:
             return []
         model = self._qs.model
         db = resolve(self._qs._db)
-        rows = await db._insert(model._meta.name, self._fields, self._rows, self._conflict, self._update, self._set)
-        make = model._from_row
-        objs = [make(r) for r in rows]
-        if self._qs._db is not None:
-            for o in objs:
-                o.__dict__["_db"] = self._qs._db
+        objs: list[Any] = await db._insert(
+            model._meta.name, self._fields, self._rows, self._conflict, self._update, self._set, self._qs._db
+        )
         return objs
 
     def __del__(self) -> None:
@@ -346,8 +344,7 @@ class Update(_SetStatement[M]):
     @classmethod
     def build(cls, qs: QuerySet[M], values: Mapping[str, Any]) -> Update[M]:
         params: list[Any] = []
-        ir = qs._mutation_ir("update", params)
-        ir["set"] = assignments(qs.model, values, IRContext(qs.model, params))
+        ir = qs._mutation_ir("update", params, values)
         return cls(qs, ir if ir["set"] else None, params)
 
 
@@ -377,8 +374,8 @@ class Returning(Generic[M]):
     async def _rows(self) -> list[M]:
         if self._ir is None:
             return []
-        rows = await self._qs._run(self._ir, self._params)
-        return self._qs._adopt([self._qs.model._from_row(r) for r in rows])
+        rows: list[M] = await self._qs._run(self._ir, self._params)
+        return rows
 
     def __await__(self) -> Generator[Any, None, list[M]]:
         self._used = True
@@ -414,10 +411,13 @@ class UpdateMany(Generic[M]):
         if not self._rows:
             return [] if returning else 0
         params: list[Any] = []
-        filters = self._qs._mutation_ir("update", params)["filters"]
+        ir = self._qs._mutation_ir("update", params)
+        if "with" in ir:
+            raise QueryError("update_many() filters can't read CTEs")
         db = resolve(self._qs._db)
         return await db._update_many(
-            self._qs.model._meta.name, self._fields, self._rows, filters, params, returning, self._batch_size
+            self._qs.model._meta.name, self._fields, self._rows, ir["filters"], params, returning, self._batch_size,
+            self._qs._db,
         )
 
     def returning(self) -> _UpdateManyReturning[M]:
@@ -448,9 +448,8 @@ class _UpdateManyReturning(Generic[M]):
         self._stmt = stmt
 
     async def _rows(self) -> list[M]:
-        qs = self._stmt._qs
-        rows = await self._stmt._run(True)
-        return qs._adopt([qs.model._from_row(r) for r in rows])
+        rows: list[M] = await self._stmt._run(True)
+        return rows
 
     def __await__(self) -> Generator[Any, None, list[M]]:
         return self._rows().__await__()

@@ -20,7 +20,7 @@ def generate_python(path: str) -> tuple[str, str]: ...
 
 @final
 class Schema:
-    def __init__(self, schema_json: str) -> None: ...
+    def __init__(self, schema_json: str, classes: dict[str, type] | None = None) -> None: ...
     def sql(self, op_json: str, params: list[Any]) -> str: ...
     def update_many_sql(
         self,
@@ -45,7 +45,14 @@ class Transaction:
 
 @final
 class Engine:
-    def run(self, op_json: str, params: list[Any], tx: Transaction | None = None) -> Awaitable[Any]: ...
+    def run(
+        self,
+        op_json: str,
+        params: list[Any],
+        tx: Transaction | None = None,
+        row_cls: type | None = None,
+        db: Any = None,
+    ) -> Awaitable[Any]: ...
     def insert(
         self,
         model: str,
@@ -56,7 +63,8 @@ class Engine:
         set: str | None = None,
         params: list[Any] = ...,
         tx: Transaction | None = None,
-    ) -> Awaitable[list[tuple[Any, ...]]]: ...
+        db: Any = None,
+    ) -> Awaitable[list[Any]]: ...
     def update_many(
         self,
         model: str,
@@ -67,6 +75,7 @@ class Engine:
         returning: bool = False,
         batch_size: int | None = None,
         tx: Transaction | None = None,
+        db: Any = None,
     ) -> Awaitable[Any]: ...
     def begin(self, tx: Transaction | None = None) -> Awaitable[Transaction]: ...
     def execute(self, sql: str, tx: Transaction | None = None) -> Awaitable[int]: ...

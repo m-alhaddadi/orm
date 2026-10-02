@@ -262,3 +262,50 @@ def orm_func(name, *args):
     from orm.expr import Func
 
     return Func(name, args)
+
+
+# -- subqueries, windows, CTEs ------------------------------------------------------------------
+
+
+def test_exists_with_outer_correlates():
+    from orm import exists, outer
+
+    w = where(User.objects.filter(exists(Post.objects.filter(Post.author_id == outer(User.id)))))
+    assert w == 'EXISTS(SELECT 1 FROM "posts" WHERE "posts"."author_id" = "users"."id")'
+
+
+def test_subquery_over_the_same_table_gets_an_alias():
+    from orm import outer
+
+    avg = Post.objects.filter(Post.author_id == outer(Post.author_id)).select(func.avg(Post.views)).as_scalar()
+    w = where(Post.objects.filter(Post.views > avg))
+    assert 'FROM "posts" AS "s1" WHERE "s1"."author_id" = "posts"."author_id"' in w
+
+
+def test_window_function_sql():
+    sql = Post.objects.select(
+        func.sum(Post.views).over(partition_by=Post.author_id, order_by=Post.created_at.desc(), rows=(-2, 0))
+    ).sql()
+    assert sql.startswith(
+        'SELECT CAST(SUM("posts"."views") OVER (PARTITION BY "posts"."author_id" '
+        'ORDER BY "posts"."created_at" DESC ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS BIGINT)'
+    )
+    assert "NTILE(4) OVER ()" in Post.objects.select(func.ntile(4).over()).sql()
+
+
+def test_cte_sql():
+    totals = Post.objects.select(Post.author_id, func.count().label("n")).group_by(Post.author_id).cte("totals")
+    sql = User.objects.filter(User.id.in_(totals.select(totals.c.author_id).filter(totals.c.n > 2))).sql()
+    assert sql.startswith(
+        'WITH "totals" ("author_id", "n") AS (SELECT "posts"."author_id" AS "author_id", COUNT(*) AS "n" '
+        'FROM "posts" GROUP BY "posts"."author_id") SELECT'
+    )
+    assert sql.endswith('IN (SELECT "totals"."author_id" FROM "totals" WHERE "totals"."n" > 2)')
+
+
+def test_recursive_cte_joins_itself():
+    chain = User.objects.filter(User.id == 1).cte("chain", recursive=lambda c: User.objects.filter(User.id == c.c.id + 1))
+    sql = User.objects.from_(chain).sql()
+    assert sql.startswith('WITH RECURSIVE "chain"')
+    assert 'FROM "users", "chain" WHERE "users"."id" = "chain"."id" + 1' in sql
+    assert sql.endswith('FROM "chain"')

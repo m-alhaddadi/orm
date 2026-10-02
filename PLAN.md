@@ -202,7 +202,9 @@ once you count FFI and Python object materialization?
 1. Schema parser — ✅ `.prisma` schema language (Prisma syntax + our attributes), compiled by `core/` (see below)
 2. ORM IR — ✅ first cut: schema IR + query/mutation IR (`core/src/ir.rs`)
 3. Python API prototype — ✅ `python/orm`: Django-style managers and loading,
-   SQLAlchemy-style typed expressions, relation-path filters (`User.posts.created_at`)
+   SQLAlchemy-style typed expressions, relation-path filters (`User.posts.created_at`), subqueries
+   (`exists()`, scalar, `outer()`), window functions, CTEs (recursive, subqueries in
+   `FROM`), nested / filtered / per-parent-sliced prefetch, instances built in Rust
 4. PyO3 binding — ✅ `native/` (`orm._native`), one call per operation
 5. Engine — ✅ IR → sea-query planner; first on SeaORM's pool, now our own driver
    layer (`native/src/db/`, tokio-postgres) with per-dialect capabilities, transactions,

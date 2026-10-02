@@ -27,11 +27,14 @@ from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, TypeVarTuple, Unpack, cast
 
 from .errors import DoesNotExist, MultipleObjectsReturned, QueryError
-from .expr import ColumnRef, ConditionLike, Expression, Func, IRContext, Labeled, Ordering, and_
+from .expr import ColumnRef, ConditionLike, Expression, Func, IRContext, Labeled, Ordering, ScalarSubquery, _Ctes, and_
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from typing_extensions import Self
 
+    from .cte import Cte
     from .db import Database
     from .model import Model
     from .query import QuerySet
@@ -92,6 +95,10 @@ def _column_name(item: Any, i: int) -> str:
     if isinstance(item, ColumnRef):
         return item._field.name
     if isinstance(item, Func):
+        return item._name
+    from .cte import CteColumn
+
+    if isinstance(item, CteColumn):
         return item._name
     if isinstance(item, type):
         return item.__name__.lower()
@@ -186,12 +193,13 @@ class Select(Generic[Unpack[Ts]]):
 
     # -- IR -------------------------------------------------------------------------------
 
-    def _ir(self, params: list[Any]) -> dict[str, Any]:
-        qs = self._qs
-        ir = qs._select_ir("select", params)
-        ctx = IRContext(qs.model, params)
+    def _build(
+        self, params: list[Any], outer: IRContext | None = None, ctes: _Ctes | None = None
+    ) -> tuple[dict[str, Any], IRContext]:
+        ir, ctx = self._qs._query_ir("select", params, outer, ctes)
         ir["columns"] = [
-            {"t": "model"} if isinstance(item, type) else {"t": "expr", "expr": item._ir(ctx)} for item in self._items
+            {"t": "model"} if isinstance(item, type) else {"t": "expr", "expr": item._ir(ctx), "name": name}
+            for item, name in zip(self._items, self._names)
         ]
         if self._group:
             ir["group_by"] = [g._ir(ctx) for g in self._group]
@@ -201,20 +209,54 @@ class Select(Generic[Unpack[Ts]]):
             ir["distinct_on"] = [c._ir(ctx) for c in self._distinct_on]
         elif self._distinct:
             ir["distinct"] = True
-        return ir
+        return ir, ctx
 
-    def _subquery_ir(self, params: list[Any]) -> dict[str, Any]:
-        if len(self._items) != 1 or isinstance(self._items[0], type):
-            raise QueryError("in_() takes a query that selects exactly one column")
+    def _ir(self, params: list[Any]) -> dict[str, Any]:
+        ir, ctx = self._build(params)
+        return ctx.finish(ir)
+
+    def _subquery_ir(self, ctx: IRContext, what: str) -> dict[str, Any]:
+        if what != "exists()" and (len(self._items) != 1 or isinstance(self._items[0], type)):
+            raise QueryError(f"{what} takes a query that selects exactly one column")
         if self._qs._lock is not None:
             raise QueryError("a subquery can't lock rows")
-        return self._ir(params)
+        return self._build(ctx.params, outer=ctx)[0]
+
+    def _cte_ir(self, params: list[Any], ctes: _Ctes) -> dict[str, Any]:
+        return self._build(params, ctes=ctes)[0]
+
+    def as_scalar(self: Select[T]) -> ScalarSubquery[T]:
+        """This one-column query as a value in another query: ``(SELECT ...)``. It must
+        return at most one row (slice it with ``[:1]``); no row is ``NULL``. Correlate it
+        with :func:`orm.outer`::
+
+            latest = (Post.objects.filter(Post.author_id == outer(User.id))
+                      .order_by(Post.created_at.desc()).select(Post.title)[:1].as_scalar())
+            await User.objects.select(User, latest.label("latest"))
+        """
+        self._one_column("as_scalar")
+        return ScalarSubquery(self)
+
+    def cte(
+        self,
+        name: str,
+        *,
+        recursive: Callable[[Cte], Any] | None = None,
+        distinct: bool = False,
+        materialized: bool | None = None,
+    ) -> Cte:
+        """This query as a CTE (``WITH <name> AS (...)``) whose columns are the selected
+        items' names (``cte.c.<name>``; a selected model gives its fields). See
+        :mod:`orm.cte`."""
+        from .cte import Cte
+
+        return Cte(name, self, recursive=recursive, distinct=distinct, materialized=materialized)
 
     def sql(self) -> str:
         """The SELECT this runs, with parameters inlined (for debugging)."""
         params: list[Any] = []
         ir = self._ir(params)
-        sql: str = self._qs.model._meta.registry.native().sql(json.dumps(ir), params)
+        sql: str = self._qs._native().sql(json.dumps(ir), params)
         return sql
 
     # -- execution ------------------------------------------------------------------------
@@ -224,35 +266,8 @@ class Select(Generic[Unpack[Ts]]):
         params: list[Any] = []
         ir = self._ir(params)
         qs._check_lock()
-        rows, _ = await qs._run(ir, params)
-        return self._materialize(rows)
-
-    def _materialize(self, rows: list[tuple[Any, ...]]) -> list[Any]:
-        new = tuple.__new__
-        cls = row_class(self._names)
-        if not any(isinstance(i, type) for i in self._items):
-            return [new(cls, r) for r in rows]
-        # A selected model takes its fields' columns; build the instance in their place.
-        model = self._qs.model
-        width = len(model._meta.field_names)
-        out: list[Any] = []
-        for r in rows:
-            values: list[Any] = []
-            pos = 0
-            for item in self._items:
-                if isinstance(item, type):
-                    values.append(model._from_row(r[pos : pos + width]))
-                    pos += width
-                else:
-                    values.append(r[pos])
-                    pos += 1
-            out.append(new(cls, values))
-        if self._qs._db is not None:
-            for row in out:
-                for v in row:
-                    if isinstance(v, model):
-                        v.__dict__["_db"] = self._qs._db
-        return out
+        rows: list[Any] = await qs._run(ir, params, row_class(self._names))
+        return rows
 
     def __await__(self) -> Generator[Any, None, list[Row[Unpack[Ts]]]]:
         return self._rows().__await__()

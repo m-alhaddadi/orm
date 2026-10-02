@@ -23,9 +23,26 @@ from .errors import (
     SchemaError,
     TransactionRequired,
 )
-from .expr import ColumnRef, Condition, Expression, Func, Ordering, RelationPath, and_, excluded, func, not_, or_
+from .expr import (
+    ColumnRef,
+    Condition,
+    Expression,
+    Func,
+    Ordering,
+    RelationPath,
+    ScalarSubquery,
+    Window,
+    and_,
+    excluded,
+    exists,
+    func,
+    not_,
+    or_,
+    outer,
+)
 from .model import Model, Registry, define, load, loads, registry
-from .query import QuerySet, RelatedSet
+from .query import Prefetch, QuerySet, RelatedSet
+from .cte import Cte, CteColumn
 from .select import Row, Select
 from .write import Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update, UpdateMany
 
@@ -42,6 +59,9 @@ __all__ = [
     "registry",
     "QuerySet",
     "RelatedSet",
+    "Prefetch",
+    "Cte",
+    "CteColumn",
     "Select",
     "Row",
     "InsertOne",
@@ -61,8 +81,12 @@ __all__ = [
     "or_",
     "not_",
     "excluded",
+    "exists",
+    "outer",
     "func",
     "Func",
+    "Window",
+    "ScalarSubquery",
     "ORMError",
     "DatabaseError",
     "IntegrityError",

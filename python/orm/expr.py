@@ -12,11 +12,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, Unpack, overload
 
 if TYPE_CHECKING:
+    from .cte import Cte
     from .fields import Field
     from .model import Model
+    from .query import QuerySet
     from .select import Select
 
 T = TypeVar("T")
@@ -35,26 +37,71 @@ __all__ = [
     "excluded",
     "Func",
     "Labeled",
+    "Window",
+    "ScalarSubquery",
     "func",
+    "outer",
+    "exists",
     "and_",
     "or_",
     "not_",
 ]
 
 
+class _Ctes:
+    """The CTEs one statement uses, in dependency order, compiled once each."""
+
+    __slots__ = ("items", "building")
+
+    def __init__(self) -> None:
+        self.items: list[tuple[Cte, IR]] = []
+        self.building: list[Cte] = []
+
+    def use(self, cte: Cte, params: list[Any]) -> None:
+        for c, _ in self.items:
+            if c is cte:
+                return
+            if c.name == cte.name:
+                raise ValueError(f"two different CTEs are named {cte.name!r} in one query")
+        if any(c is cte for c in self.building):
+            return  # the recursive part of `cte` reading `cte`
+        self.building.append(cte)
+        try:
+            ir = cte._body_ir(params, self)
+        finally:
+            self.building.pop()
+        self.items.append((cte, ir))
+
+
 class IRContext:
-    """Collects literal parameters while compiling, and checks that every column
-    belongs to the query's root model."""
+    """Collects literal parameters and CTEs while compiling, and checks that every
+    column belongs to the query's root model (or CTE). ``outer`` is the context of the
+    enclosing query, for subqueries."""
 
-    __slots__ = ("root", "params")
+    __slots__ = ("root", "params", "outer", "ctes", "_owner")
 
-    def __init__(self, root: type[Model], params: list[Any]) -> None:
+    def __init__(
+        self, root: type[Model] | Cte, params: list[Any], outer: IRContext | None = None, ctes: _Ctes | None = None
+    ) -> None:
         self.root = root
         self.params = params
+        self.outer = outer
+        self._owner = outer is None and ctes is None
+        self.ctes: _Ctes = ctes if ctes is not None else (outer.ctes if outer is not None else _Ctes())
 
     def param(self, value: Any) -> IR:
         self.params.append(value)
         return {"t": "param", "i": len(self.params) - 1}
+
+    def use_cte(self, cte: Cte) -> None:
+        self.ctes.use(cte, self.params)
+
+    def finish(self, ir: IR) -> IR:
+        """Declares the CTEs the statement uses (``WITH``), if this context compiles the
+        statement itself rather than a part of it."""
+        if self._owner and self.ctes.items:
+            ir["with"] = [c for _, c in self.ctes.items]
+        return ir
 
 
 def _bool_misuse(self: object) -> bool:
@@ -237,11 +284,15 @@ class ColumnRef(Expression[T]):
 
     def _ir(self, ctx: IRContext) -> IR:
         if self._root is not ctx.root:
-            raise ValueError(
-                f"{self!r} belongs to {self._root.__name__}, not to a "
-                f"{ctx.root.__name__} query; reach it through a relation of "
-                f"{ctx.root.__name__} instead"
-            )
+            root = ctx.root.__name__ if isinstance(ctx.root, type) else f"CTE {ctx.root.name}"
+            hint = f"reach it through a relation of {root} instead"
+            c = ctx.outer
+            while c is not None:
+                if c.root is self._root:
+                    hint = f"use outer({self!r}) for a column of the enclosing query"
+                    break
+                c = c.outer
+            raise ValueError(f"{self!r} belongs to {self._root.__name__}, not to a {root} query; {hint}")
         return {"t": "col", "path": list(self._path), "name": self._field.name}
 
     def __repr__(self) -> str:
@@ -270,7 +321,7 @@ class Excluded(Expression[T]):
 class Labeled(Expression[T]):
     __slots__ = ("_inner", "_name")
 
-    def __init__(self, inner: Expression[T], name: str) -> None:
+    def __init__(self, inner: Node, name: str) -> None:
         if not name.isidentifier() or name.startswith("_"):
             raise ValueError(f"label {name!r} must be an identifier not starting with '_'")
         self._inner = inner
@@ -300,7 +351,8 @@ class Func(Expression[T]):
         ir: IR = {"t": "func", "name": self._name, "args": [a._ir(ctx) for a in self._args]}
         if self._rel is not None:
             if self._rel._root is not ctx.root:
-                raise ValueError(f"{self._rel!r} does not start at {ctx.root.__name__}")
+                root = ctx.root.__name__ if isinstance(ctx.root, type) else ctx.root.name
+                raise ValueError(f"{self._rel!r} does not start at {root}")
             ir["rel"] = list(self._rel._path)
         if self._distinct:
             ir["distinct"] = True
@@ -309,6 +361,129 @@ class Func(Expression[T]):
     def __repr__(self) -> str:
         args = [repr(a) for a in self._args] + ([repr(self._rel)] if self._rel is not None else [])
         return f"func.{self._name}({', '.join(args)})"
+
+    def over(
+        self,
+        partition_by: Expression[Any] | Iterable[Expression[Any]] | None = None,
+        order_by: Expression[Any] | Ordering | Iterable[Expression[Any] | Ordering] | None = None,
+        *,
+        rows: tuple[int | None, int | None] | None = None,
+        range: tuple[int | None, int | None] | None = None,
+    ) -> Window[T]:
+        """``<function> OVER (PARTITION BY ... ORDER BY ...)``: the function computed over
+        a window of rows related to each row, without grouping them::
+
+            func.row_number().over(partition_by=Post.author_id, order_by=Post.views.desc())
+            func.sum(Post.views).over(order_by=Post.created_at, rows=(None, 0))  # running total
+
+        ``rows`` / ``range`` set the frame as ``(start, end)``: ``None`` is unbounded, ``0``
+        the current row, ``-n`` n preceding, ``n`` n following. Window functions can be
+        selected and ordered by; to filter on one, select it in a CTE and filter that.
+        """
+        if rows is not None and range is not None:
+            raise ValueError("over() takes rows or range, not both")
+        frame = None
+        for kind, bounds in (("rows", rows), ("range", range)):
+            if bounds is not None:
+                start, end = bounds
+                for b in (start, end):
+                    if b is not None and (isinstance(b, bool) or not isinstance(b, int)):
+                        raise TypeError(f"frame bounds are ints or None, got {b!r}")
+                frame = {"kind": kind, "start": start, "end": end}
+        return Window(self, _many(partition_by), _orderings(order_by), frame)
+
+
+def _many(items: Any) -> list[Any]:
+    if items is None:
+        return []
+    if isinstance(items, (Expression, Ordering)):
+        return [items]
+    return list(items)
+
+
+def _orderings(items: Any) -> list[Ordering]:
+    return [i if isinstance(i, Ordering) else Ordering(i, desc=False) for i in _many(items)]
+
+
+class Window(Expression[T]):
+    """``func.<name>(...).over(...)``: a window function call."""
+
+    __slots__ = ("_func", "_partition", "_order", "_frame")
+
+    def __init__(
+        self, fn: Func[T], partition: list[Expression[Any]], order: list[Ordering], frame: IR | None
+    ) -> None:
+        self._func = fn
+        self._partition = partition
+        self._order = order
+        self._frame = frame
+
+    def _ir(self, ctx: IRContext) -> IR:
+        ir: IR = {"t": "window", "func": self._func._ir(ctx)}
+        if self._partition:
+            ir["partition_by"] = [p._ir(ctx) for p in self._partition]
+        if self._order:
+            ir["order_by"] = [o._ir(ctx) for o in self._order]
+        if self._frame is not None:
+            ir["frame"] = self._frame
+        return ir
+
+    def __repr__(self) -> str:
+        return f"{self._func!r}.over(partition_by={self._partition!r}, order_by={self._order!r})"
+
+
+class _Int(Expression[int]):
+    """An integer written into the SQL text (window function arguments)."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"expected an int, got {value!r}")
+        self.value = value
+
+    def _ir(self, ctx: IRContext) -> IR:
+        return {"t": "int", "value": self.value}
+
+    def __repr__(self) -> str:
+        return repr(self.value)
+
+
+class Outer(Expression[T]):
+    """``outer(User.id)``: a column of an enclosing query, in a subquery."""
+
+    __slots__ = ("_column",)
+
+    def __init__(self, column: ColumnRef[T]) -> None:
+        if not isinstance(column, ColumnRef) or column._path:
+            raise TypeError(f"outer() takes a column of a model (no relation path), got {column!r}")
+        self._column = column
+
+    def _ir(self, ctx: IRContext) -> IR:
+        depth, c = 1, ctx.outer
+        while c is not None:
+            if c.root is self._column._root:
+                return {"t": "outer", "depth": depth, "name": self._column._field.name}
+            depth, c = depth + 1, c.outer
+        raise ValueError(f"{self!r} is not a column of an enclosing query")
+
+    def __repr__(self) -> str:
+        return f"outer({self._column!r})"
+
+
+class ScalarSubquery(Expression[T]):
+    """``qs.select(x).as_scalar()``: a one-column subquery used as a value."""
+
+    __slots__ = ("_select",)
+
+    def __init__(self, select: Select[T]) -> None:
+        self._select = select
+
+    def _ir(self, ctx: IRContext) -> IR:
+        return {"t": "subquery", "select": self._select._subquery_ir(ctx, "as_scalar()")}
+
+    def __repr__(self) -> str:
+        return f"({self._select!r}).as_scalar()"
 
 
 N = TypeVar("N", int, float)
@@ -367,8 +542,67 @@ class _Functions:
     def now(self) -> Func[datetime]:
         return Func("now")
 
+    # Window functions: only valid with .over(...).
+
+    def row_number(self) -> Func[int]:
+        """1, 2, 3, ... in the window's order."""
+        return Func("row_number")
+
+    def rank(self) -> Func[int]:
+        """Rank with gaps: ties share a rank, the next rank skips (1, 1, 3)."""
+        return Func("rank")
+
+    def dense_rank(self) -> Func[int]:
+        """Rank without gaps (1, 1, 2)."""
+        return Func("dense_rank")
+
+    def percent_rank(self) -> Func[float]:
+        return Func("percent_rank")
+
+    def cume_dist(self) -> Func[float]:
+        return Func("cume_dist")
+
+    def ntile(self, buckets: int) -> Func[int]:
+        """The bucket (1..buckets) of the row when the window is split evenly."""
+        return Func("ntile", (_Int(buckets),))
+
+    def lag(self, expr: Expression[T], offset: int = 1, default: T | None = None) -> Func[T | None]:
+        """``expr`` on the row ``offset`` rows before this one, ``default`` if none."""
+        args: tuple[Any, ...] = (expr, _Int(offset)) if default is None else (expr, _Int(offset), default)
+        return Func("lag", args)
+
+    def lead(self, expr: Expression[T], offset: int = 1, default: T | None = None) -> Func[T | None]:
+        """``expr`` on the row ``offset`` rows after this one, ``default`` if none."""
+        args: tuple[Any, ...] = (expr, _Int(offset)) if default is None else (expr, _Int(offset), default)
+        return Func("lead", args)
+
+    def first_value(self, expr: Expression[T]) -> Func[T]:
+        return Func("first_value", (expr,))
+
+    def last_value(self, expr: Expression[T]) -> Func[T]:
+        return Func("last_value", (expr,))
+
+    def nth_value(self, expr: Expression[T], n: int) -> Func[T | None]:
+        return Func("nth_value", (expr, _Int(n)))
+
 
 func = _Functions()
+
+
+def outer(column: ColumnRef[T]) -> Outer[T]:
+    """A column of the enclosing query, inside a subquery (Django's ``OuterRef``)::
+
+        await User.objects.filter(exists(Post.objects.filter(Post.author_id == outer(User.id))))
+
+    It refers to the nearest enclosing query over the column's model.
+    """
+    return Outer(column)
+
+
+def exists(query: QuerySet[Any] | Select[Unpack[tuple[Any, ...]]]) -> Condition:
+    """``EXISTS (<query>)``, a condition: true when the query has a row. Correlate it
+    with :func:`outer`; negate it with ``~``."""
+    return Exists(query)
 
 
 def excluded(column: ColumnRef[T]) -> Excluded[T]:
@@ -455,6 +689,10 @@ class Condition(Node):
     def __invert__(self) -> Condition:
         return not_(self)
 
+    def label(self, name: str) -> Labeled[bool]:
+        """The condition as a named boolean column in ``select()``."""
+        return Labeled(self, name)
+
 
 class Comparison(Condition):
     __slots__ = ("op", "left", "right")
@@ -497,10 +735,28 @@ class InSelect(Condition):
         self.neg = neg
 
     def _ir(self, ctx: IRContext) -> IR:
-        return {"t": "in_select", "item": self.item._ir(ctx), "select": self.select._subquery_ir(ctx.params), "neg": self.neg}
+        return {"t": "in_select", "item": self.item._ir(ctx), "select": self.select._subquery_ir(ctx, "in_()"), "neg": self.neg}
 
     def __repr__(self) -> str:
         return f"{self.item!r} {'NOT IN' if self.neg else 'IN'} ({self.select!r})"
+
+
+class Exists(Condition):
+    __slots__ = ("query",)
+
+    def __init__(self, query: Any) -> None:
+        from .query import QuerySet
+        from .select import Select
+
+        if not isinstance(query, (QuerySet, Select)):
+            raise TypeError(f"exists() takes a query set or a select(), got {query!r}")
+        self.query = query
+
+    def _ir(self, ctx: IRContext) -> IR:
+        return {"t": "exists", "select": self.query._subquery_ir(ctx, "exists()")}
+
+    def __repr__(self) -> str:
+        return f"exists({self.query!r})"
 
 
 class In(Condition):
