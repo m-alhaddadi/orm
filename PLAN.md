@@ -159,9 +159,11 @@ execution — the runtime stays in Rust.
 
 ## Decisions
 
-1. **Async first.** The Python API is async (asyncio), bridged to Tokio via
-   `pyo3-async-runtimes`, the simplest working approach. Both Django and SQLAlchemy support
-   async, so all benchmarks compare async paths.
+1. **Async only.** The Python API is async (asyncio), bridged to Tokio via
+   `pyo3-async-runtimes`; JS will be async too. No sync API: it would double every
+   terminal method (Django's `get` / `aget` split) for one benefit, skipping the
+   asyncio ↔ Tokio hand-off (~115 µs per call in Phase 0). If that cost matters, make the
+   bridge cheaper (complete the Python future from Tokio directly) instead.
 2. **No codegen for now.** Typed stubs / autocomplete are deferred. A rough API is
    acceptable while checking performance.
 3. **Schema → IR → engine translation happens at compile time**, not at runtime: the
@@ -226,9 +228,23 @@ multiple language bindings. Validate the architecture and API first.
   lock) is in Python for now; `sqlx::migrate` is the candidate for a shared Rust one.
   SeaORM's and Refinery's tools were not used (see the doc).
 
+### Next: JS / TypeScript binding (deferred)
+
+1. Split the engine out of the Python binding: `engine/` (`orm-engine`: planner + drivers,
+   neutral parameter values, typed row accessors) with thin `bindings/python` (PyO3) and
+   `bindings/node` (napi-rs; Node, Bun, Deno). No behaviour change; Python tests guard it.
+2. TypeScript codegen from the same schema and the same API shape: methods instead of
+   operators (`.eq() .lt()`), `select({ name: expr })` object rows, `AsyncLocalStorage`
+   for the current transaction. Tests on Node and Bun, `tsc` type checks, a benchmark
+   against Drizzle and Prisma.
+
+Open questions: camelCase field names in TS (recommended); `BigInt` columns as `number`
+with an error past 2^53 (recommended) vs `bigint`; `Date` for timestamps (ms precision)
+vs waiting for `Temporal`; `await qs` (recommended, like Python) vs `.execute()`.
+
 ### Later
 
-Node/Bun binding, more databases (a dialect + a driver each), introspection / drift
+More databases (a dialect + a driver each), introspection / drift
 detection.
 
 ---

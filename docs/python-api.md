@@ -353,6 +353,7 @@ per row, which can move into Rust later.
    `using()`.
 8. `db.create_tables()` / `drop_tables()` stay as a development helper (idempotent
    `IF NOT EXISTS` DDL). Evolving databases use migrations: see [`schema.md`](schema.md).
+9. **Async only**, no sync API (see `PLAN.md`, Decisions).
 
 ## Drivers and dialects
 
@@ -400,4 +401,3 @@ TLS on, the TLS cost hides the difference)
   chunking very large `IN (...)` prefetches.
 * `has_one`, many-to-many, composite keys, decimal / array column types. (UUID and JSON
   are done, see [`schema.md`](schema.md).)
-* A sync API.
