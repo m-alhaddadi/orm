@@ -242,6 +242,6 @@ per row, which can move into Rust later.
 * Nested `prefetch_related` paths and `Prefetch(queryset=...)`.
 * Building instances in Rust (the remaining per-row cost), caching of compiled plans,
   chunking very large `IN (...)` prefetches.
-* `TCP_NODELAY` for sqlx (the Phase 0 finding) is still open.
+* `TCP_NODELAY`: `bench/ormcore` now carries a patched sqlx-core; `native/` does not use it yet.
 * `has_one`, many-to-many, composite keys, UUID / JSON / decimal column types.
 * A sync API.
