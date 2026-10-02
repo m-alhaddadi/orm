@@ -13,7 +13,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyList;
-use sea_orm::sea_query::{
+use sea_query::{
     self,
     extension::postgres::PgExpr, Alias, DeleteStatement, Expr as SExpr, ExprTrait, InsertStatement,
     JoinType, LikeExpr, LockBehavior, LockType, Order as SOrder, Query, SelectStatement, UpdateStatement,
@@ -24,6 +24,7 @@ use crate::errors::query_err;
 use orm_core::ir::{
     ArithOp, Assignment, CmpOp, ColType, Delete, Expr, FieldIr, Lock, Operation, RelKind, Select, Update,
 };
+use orm_core::dialect::{Capabilities, Dialect};
 use orm_core::schema::Schema;
 
 pub struct PrefetchPlan {
@@ -164,29 +165,57 @@ pub struct Planner<'s, 'py> {
     next_alias: usize,
     /// `EXCLUDED.<field>` is only valid in an upsert's `DO UPDATE SET`.
     allow_excluded: bool,
+    dialect: Dialect,
+    caps: Capabilities,
 }
 
 impl<'s, 'py> Planner<'s, 'py> {
-    pub fn new(schema: &'s Schema, model: &str, params: &'s [Bound<'py, PyAny>]) -> PyResult<Self> {
+    pub fn new(
+        schema: &'s Schema,
+        dialect: Dialect,
+        model: &str,
+        params: &'s [Bound<'py, PyAny>],
+    ) -> PyResult<Self> {
         let root = schema.model_idx(model).map_err(query_err)?;
         let scope = Scope { path: vec![], model: root, alias: schema.model(root).table().to_owned() };
-        Ok(Planner { schema, params, root, scopes: vec![scope], joins: vec![], next_alias: 0, allow_excluded: false })
+        Ok(Planner {
+            schema,
+            params,
+            root,
+            scopes: vec![scope],
+            joins: vec![],
+            next_alias: 0,
+            allow_excluded: false,
+            dialect,
+            caps: dialect.capabilities(),
+        })
     }
 
-    pub fn plan(schema: &'s Schema, op: &Operation, params: &'s [Bound<'py, PyAny>]) -> PyResult<Plan> {
+    pub fn plan(
+        schema: &'s Schema,
+        dialect: Dialect,
+        op: &Operation,
+        params: &'s [Bound<'py, PyAny>],
+    ) -> PyResult<Plan> {
+        let new = |model: &str| Planner::new(schema, dialect, model, params);
         Ok(match op {
-            Operation::Select(q) => Plan::Select(Planner::new(schema, &q.model, params)?.select(q)?),
-            Operation::Count(q) => Plan::Count(Planner::new(schema, &q.model, params)?.count(q)?),
-            Operation::Exists(q) => Plan::Exists(Planner::new(schema, &q.model, params)?.exists(q)?),
+            Operation::Select(q) => Plan::Select(new(&q.model)?.select(q)?),
+            Operation::Count(q) => Plan::Count(new(&q.model)?.count(q)?),
+            Operation::Exists(q) => Plan::Exists(new(&q.model)?.exists(q)?),
             Operation::Update(q) => {
-                let (stmt, types) = Planner::new(schema, &q.model, params)?.update(q)?;
+                let (stmt, types) = new(&q.model)?.update(q)?;
                 Plan::Update(stmt, types)
             }
             Operation::Delete(q) => {
-                let (stmt, types) = Planner::new(schema, &q.model, params)?.delete(q)?;
+                let (stmt, types) = new(&q.model)?.delete(q)?;
                 Plan::Delete(stmt, types)
             }
         })
+    }
+
+    /// `QueryError` unless the dialect supports `feature`.
+    fn require(&self, supported: bool, feature: &str) -> PyResult<()> {
+        Capabilities::require(supported, self.dialect, feature).map_err(query_err)
     }
 
     fn alias(&mut self, prefix: &str) -> String {
@@ -337,10 +366,17 @@ impl<'s, 'py> Planner<'s, 'py> {
             }
             Expr::Like { item, pattern, ci, neg } => {
                 let item = self.value(item, Hint::default())?;
-                let pattern = match pattern.as_ref() {
-                    Expr::Param { i } => LikeExpr::new(self.param(*i)?.extract::<String>()?),
+                let text = match pattern.as_ref() {
+                    Expr::Param { i } => self.param(*i)?.extract::<String>()?,
                     _ => return Err(query_err("LIKE pattern must be a string parameter".into())),
                 };
+                if *ci && !self.caps.ilike {
+                    // LOWER(x) LIKE LOWER(pattern), for databases without ILIKE.
+                    let lowered = SExpr::cust_with_expr("LOWER($1)", item);
+                    let pattern = LikeExpr::new(text.to_lowercase());
+                    return Ok(if *neg { lowered.not_like(pattern) } else { lowered.like(pattern) });
+                }
+                let pattern = LikeExpr::new(text);
                 match (ci, neg) {
                     (false, false) => item.like(pattern),
                     (false, true) => item.not_like(pattern),
@@ -509,7 +545,16 @@ impl<'s, 'py> Planner<'s, 'py> {
         self.base_select(q, &mut stmt, true)?;
         self.apply_joins(&mut stmt);
         if let Some(lock) = q.lock {
-            apply_lock(&mut stmt, lock, root.table());
+            let c = self.caps;
+            if lock.exclusive {
+                self.require(c.lock_exclusive, "lock() (SELECT ... FOR UPDATE)")?;
+            } else {
+                self.require(c.lock_shared, "lock(exclusive=False) (SELECT ... FOR SHARE)")?;
+            }
+            self.require(c.lock_nowait || !lock.nowait, "lock(nowait=True)")?;
+            self.require(c.lock_skip_locked || !lock.skip_locked, "lock(skip_locked=True)")?;
+            self.require(c.lock_of || self.joins.is_empty(), "lock() together with select_related")?;
+            apply_lock(&mut stmt, lock, c.lock_of.then(|| root.table()));
         }
 
         let mut prefetch = vec![];
@@ -591,6 +636,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         if !q.returning {
             return Ok((stmt, None));
         }
+        self.require(self.caps.returning, "update().returning()")?;
         stmt.returning(Query::returning().exprs(root.fields().iter().map(returning_col)));
         Ok((stmt, Some(root.fields().iter().map(|f| f.ty).collect())))
     }
@@ -605,17 +651,18 @@ impl<'s, 'py> Planner<'s, 'py> {
         if !q.returning {
             return Ok((stmt, None));
         }
+        self.require(self.caps.returning, "delete().returning()")?;
         stmt.returning(Query::returning().exprs(root.fields().iter().map(returning_col)));
         Ok((stmt, Some(root.fields().iter().map(|f| f.ty).collect())))
     }
 }
 
-/// `FOR UPDATE | FOR SHARE OF <root> [NOWAIT | SKIP LOCKED]`. `OF` limits the lock to
+/// `FOR UPDATE | FOR SHARE [OF <root>] [NOWAIT | SKIP LOCKED]`. `OF` limits the lock to
 /// the model's own rows: rows joined by `select_related` stay unlocked (Postgres can't
 /// lock the nullable side of a LEFT JOIN anyway).
-fn apply_lock(stmt: &mut SelectStatement, lock: Lock, table: &str) {
+fn apply_lock(stmt: &mut SelectStatement, lock: Lock, of: Option<&str>) {
     let ty = if lock.exclusive { LockType::Update } else { LockType::Share };
-    let tables = [Alias::new(table)];
+    let tables: Vec<Alias> = of.map(Alias::new).into_iter().collect();
     match (lock.nowait, lock.skip_locked) {
         (true, _) => stmt.lock_with_tables_behavior(ty, tables, LockBehavior::Nowait),
         (_, true) => stmt.lock_with_tables_behavior(ty, tables, LockBehavior::SkipLocked),
@@ -646,6 +693,7 @@ pub enum OnConflict {
 /// SQL `DEFAULT` keyword.
 pub fn plan_insert<'py>(
     schema: &Schema,
+    dialect: Dialect,
     model: &str,
     fields: &[String],
     rows: &Bound<'py, PyList>,
@@ -679,7 +727,11 @@ pub fn plan_insert<'py>(
             stmt.values(values).map_err(|e| query_err(e.to_string()))?;
         }
     }
+    let caps = dialect.capabilities();
+    let require = |ok: bool, feature: &str| Capabilities::require(ok, dialect, feature).map_err(query_err);
+    require(caps.returning, "insert ... RETURNING")?;
     if let Some(oc) = on_conflict {
+        require(caps.on_conflict, "insert(...).on_conflict()")?;
         let columns = |names: &[String]| -> PyResult<Vec<Alias>> {
             names
                 .iter()
@@ -695,7 +747,7 @@ pub fn plan_insert<'py>(
                 }
                 let mut clause = sea_query::OnConflict::columns(columns(&target)?);
                 clause.update_columns(columns(&update)?);
-                let mut planner = Planner::new(schema, model, params)?;
+                let mut planner = Planner::new(schema, dialect, model, params)?;
                 planner.allow_excluded = true;
                 for a in &set {
                     let f = m.field(&a.field).map_err(query_err)?;

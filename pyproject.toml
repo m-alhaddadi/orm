@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "orm"
 version = "0.1.0"
-description = "Async Python ORM with a Rust core (SeaORM engine for the MVP)"
+description = "Async Python ORM with a Rust core"
 requires-python = ">=3.10"
 
 [project.optional-dependencies]

@@ -5,6 +5,7 @@
 //! back as a list of tuples built in one pass, in schema field order.
 
 mod convert;
+mod db;
 mod errors;
 mod plan;
 
@@ -15,17 +16,13 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
-use sea_orm::sea_query::{Alias, Expr as SExpr, ExprTrait, PostgresQueryBuilder};
-use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
-    QueryResult, Statement, StatementBuilder, TransactionTrait,
-};
-use tokio::sync::Mutex;
+use sea_query::{Alias, Expr as SExpr, ExprTrait};
 
-use crate::convert::{cell_to_py, cell_to_value};
+use crate::db::{DbResult, Driver, Executor, RowSet};
 use crate::errors::{db_err, query_err, schema_err};
-use orm_core::ir::{ColType, Operation};
 use crate::plan::{Plan, Planner, SelectPlan};
+use orm_core::dialect::Dialect;
+use orm_core::ir::{ColType, Operation};
 
 /// Marker for "use the column's server default" in insert rows.
 #[pyclass(frozen, module = "orm._native", name = "_Default")]
@@ -61,11 +58,12 @@ impl PySchema {
     /// SQL for an operation with parameters inlined. For debugging and tests only.
     fn sql(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<String> {
         let op = parse_op(op_json)?;
-        Ok(match Planner::plan(&self.inner, &op, &params)? {
-            Plan::Select(p) => p.stmt.to_string(PostgresQueryBuilder),
-            Plan::Count(s) | Plan::Exists(s) => s.to_string(PostgresQueryBuilder),
-            Plan::Update(s, _) => s.to_string(PostgresQueryBuilder),
-            Plan::Delete(s, _) => s.to_string(PostgresQueryBuilder),
+        let d = Dialect::Postgres;
+        Ok(match Planner::plan(&self.inner, d, &op, &params)? {
+            Plan::Select(p) => db::to_string(d, &p.stmt),
+            Plan::Count(s) | Plan::Exists(s) => db::to_string(d, &s),
+            Plan::Update(s, _) => db::to_string(d, &s),
+            Plan::Delete(s, _) => db::to_string(d, &s),
         })
     }
 
@@ -109,143 +107,114 @@ impl PySchema {
     }
 }
 
-type TxSlot = Arc<Mutex<Option<DatabaseTransaction>>>;
-
-#[derive(Clone)]
-enum Conn {
-    Pool(DatabaseConnection),
-    Tx(TxSlot),
-}
-
-fn closed_tx() -> DbErr {
-    DbErr::Custom("transaction is already committed or rolled back".into())
-}
-
-impl Conn {
-    async fn query_all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
-        match self {
-            Conn::Pool(db) => db.query_all_raw(stmt).await,
-            Conn::Tx(slot) => slot.lock().await.as_ref().ok_or_else(closed_tx)?.query_all_raw(stmt).await,
-        }
-    }
-
-    async fn query_one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
-        match self {
-            Conn::Pool(db) => db.query_one_raw(stmt).await,
-            Conn::Tx(slot) => slot.lock().await.as_ref().ok_or_else(closed_tx)?.query_one_raw(stmt).await,
-        }
-    }
-
-    async fn execute(&self, stmt: Statement) -> Result<u64, DbErr> {
-        let r = match self {
-            Conn::Pool(db) => db.execute_raw(stmt).await,
-            Conn::Tx(slot) => slot.lock().await.as_ref().ok_or_else(closed_tx)?.execute_raw(stmt).await,
-        };
-        r.map(|r| r.rows_affected())
-    }
-
-    async fn execute_unprepared(&self, sql: &str) -> Result<u64, DbErr> {
-        let r = match self {
-            Conn::Pool(db) => db.execute_unprepared(sql).await,
-            Conn::Tx(slot) => slot.lock().await.as_ref().ok_or_else(closed_tx)?.execute_unprepared(sql).await,
-        };
-        r.map(|r| r.rows_affected())
-    }
-}
-
-fn build<S: StatementBuilder>(stmt: &S) -> Statement {
-    DbBackend::Postgres.build(stmt)
-}
-
-fn rows_to_py<'py>(py: Python<'py>, rows: &[QueryResult], types: &[ColType]) -> PyResult<Bound<'py, PyList>> {
-    let list = PyList::empty(py);
-    let mut cells = Vec::with_capacity(types.len());
-    for row in rows {
-        cells.clear();
-        for (i, ty) in types.iter().enumerate() {
-            cells.push(cell_to_py(py, row, i, *ty)?);
-        }
-        list.append(PyTuple::new(py, cells.drain(..))?)?;
-    }
-    Ok(list)
-}
-
 struct Fetched {
-    rows: Vec<QueryResult>,
+    rows: Box<dyn RowSet>,
     types: Vec<ColType>,
-    prefetched: Vec<(String, Vec<ColType>, Vec<QueryResult>)>,
+    prefetched: Vec<(String, Vec<ColType>, Box<dyn RowSet>)>,
 }
 
-async fn run_select(conn: &Conn, plan: SelectPlan) -> Result<Fetched, DbErr> {
-    let rows = conn.query_all(build(&plan.stmt)).await?;
+async fn run_select(conn: &dyn Executor, dialect: Dialect, plan: SelectPlan) -> DbResult<Fetched> {
+    let (sql, args) = db::build(dialect, &plan.stmt);
+    let rows = conn.query(sql, args).await?;
     let mut prefetched = Vec::with_capacity(plan.prefetch.len());
     for p in plan.prefetch {
-        let keys = rows
-            .iter()
-            .map(|r| cell_to_value(r, p.key_pos, p.key_type))
-            .collect::<Result<Vec<_>, _>>()?;
+        let keys = (0..rows.len()).map(|i| rows.value(i, p.key_pos, p.key_type)).collect::<DbResult<Vec<_>>>()?;
         let related = if keys.is_empty() {
-            vec![]
+            Box::new(EmptyRows) as Box<dyn RowSet>
         } else {
             let mut stmt = p.stmt;
             stmt.and_where(
                 SExpr::col((Alias::new(&p.to_table), Alias::new(&p.to_column))).is_in(keys.into_iter().map(SExpr::val)),
             );
-            conn.query_all(build(&stmt)).await?
+            let (sql, args) = db::build(dialect, &stmt);
+            conn.query(sql, args).await?
         };
         prefetched.push((p.name, p.types, related));
     }
     Ok(Fetched { rows, types: plan.types, prefetched })
 }
 
+/// The result of a prefetch with no keys: no query runs.
+struct EmptyRows;
+
+impl RowSet for EmptyRows {
+    fn len(&self) -> usize {
+        0
+    }
+    fn to_py<'py>(&self, py: Python<'py>, _: &[ColType]) -> PyResult<Bound<'py, PyList>> {
+        Ok(PyList::empty(py))
+    }
+    fn value(&self, _: usize, _: usize, _: ColType) -> DbResult<sea_query::Value> {
+        Err(db::DbError::other("no rows"))
+    }
+    fn get_i64(&self, _: usize, _: usize) -> DbResult<i64> {
+        Err(db::DbError::other("no rows"))
+    }
+    fn get_bool(&self, _: usize, _: usize) -> DbResult<bool> {
+        Err(db::DbError::other("no rows"))
+    }
+}
+
 /// A database transaction (or savepoint, when nested).
 #[pyclass(frozen, module = "orm._native")]
 struct Transaction {
-    slot: TxSlot,
+    inner: Arc<dyn db::Transaction>,
 }
 
 #[pymethods]
 impl Transaction {
     fn commit<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let slot = self.slot.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let tx = slot.lock().await.take().ok_or_else(closed_tx).map_err(db_err)?;
-            tx.commit().await.map_err(db_err)
-        })
+        let tx = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { tx.commit().await.map_err(db_err) })
     }
 
     fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let slot = self.slot.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let tx = slot.lock().await.take().ok_or_else(closed_tx).map_err(db_err)?;
-            tx.rollback().await.map_err(db_err)
-        })
+        let tx = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { tx.rollback().await.map_err(db_err) })
     }
 }
 
 #[pyclass(frozen, module = "orm._native")]
 struct Engine {
-    db: DatabaseConnection,
+    driver: Arc<dyn Driver>,
+    dialect: Dialect,
     schema: Arc<schema::Schema>,
 }
 
 impl Engine {
-    fn run_script<'py>(&self, py: Python<'py>, statements: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
-        let db = self.db.clone();
+    fn conn(&self, tx: Option<&Bound<'_, Transaction>>) -> Arc<dyn Executor> {
+        match tx {
+            Some(tx) => tx.get().inner.clone(),
+            None => self.driver.clone(),
+        }
+    }
+
+    /// Runs `statements` in order, in one transaction (Postgres DDL is transactional),
+    /// or inside `tx`.
+    fn run_script<'py>(
+        &self,
+        py: Python<'py>,
+        statements: Vec<String>,
+        tx: Option<&Bound<'py, Transaction>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let conn = self.conn(tx);
+        let own_tx = tx.is_none();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let tx = db.begin().await.map_err(db_err)?;
-            for s in &statements {
-                tx.execute_unprepared(s).await.map_err(db_err)?;
+            if !own_tx {
+                for s in statements {
+                    conn.batch(s).await.map_err(db_err)?;
+                }
+                return Ok(());
+            }
+            let tx = conn.begin().await.map_err(db_err)?;
+            for s in statements {
+                if let Err(e) = tx.batch(s).await {
+                    let _ = tx.rollback().await;
+                    return Err(db_err(e));
+                }
             }
             tx.commit().await.map_err(db_err)
         })
-    }
-
-    fn conn(&self, tx: Option<&Bound<'_, Transaction>>) -> Conn {
-        match tx {
-            Some(tx) => Conn::Tx(tx.get().slot.clone()),
-            None => Conn::Pool(self.db.clone()),
-        }
     }
 }
 
@@ -263,52 +232,42 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let op = parse_op(op_json)?;
-        let plan = Planner::plan(&self.schema, &op, &params)?;
+        let d = self.dialect;
+        let plan = Planner::plan(&self.schema, d, &op, &params)?;
         let conn = self.conn(tx);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let conn = conn.as_ref();
             match plan {
                 Plan::Select(p) => {
-                    let f = run_select(&conn, p).await.map_err(db_err)?;
+                    let f = run_select(conn, d, p).await.map_err(db_err)?;
                     Python::attach(|py| {
-                        let rows = rows_to_py(py, &f.rows, &f.types)?;
+                        let rows = f.rows.to_py(py, &f.types)?;
                         let related = PyDict::new(py);
                         for (name, types, rows) in &f.prefetched {
-                            related.set_item(name, rows_to_py(py, rows, types)?)?;
+                            related.set_item(name, rows.to_py(py, types)?)?;
                         }
                         (rows, related).into_py_any(py)
                     })
                 }
                 Plan::Count(s) => {
-                    let row = conn.query_one(build(&s)).await.map_err(db_err)?;
-                    let n: i64 = match row {
-                        Some(r) => r.try_get_by_index(0).map_err(db_err)?,
-                        None => 0,
-                    };
+                    let (sql, args) = db::build(d, &s);
+                    let rows = conn.query(sql, args).await.map_err(db_err)?;
+                    let n = if rows.len() == 0 { 0 } else { rows.get_i64(0, 0).map_err(db_err)? };
                     Python::attach(|py| n.into_py_any(py))
                 }
                 Plan::Exists(s) => {
-                    let row = conn.query_one(build(&s)).await.map_err(db_err)?;
-                    let b: bool = match row {
-                        Some(r) => r.try_get_by_index(0).map_err(db_err)?,
-                        None => false,
-                    };
+                    let (sql, args) = db::build(d, &s);
+                    let rows = conn.query(sql, args).await.map_err(db_err)?;
+                    let b = rows.len() > 0 && rows.get_bool(0, 0).map_err(db_err)?;
                     Python::attach(|py| b.into_py_any(py))
                 }
-                Plan::Update(s, None) => {
-                    let n = conn.execute(build(&s)).await.map_err(db_err)?;
-                    Python::attach(|py| n.into_py_any(py))
+                Plan::Update(s, types) => {
+                    let (sql, args) = db::build(d, &s);
+                    count_or_rows(conn, sql, args, types).await
                 }
-                Plan::Update(s, Some(types)) => {
-                    let rows = conn.query_all(build(&s)).await.map_err(db_err)?;
-                    Python::attach(|py| rows_to_py(py, &rows, &types)?.into_py_any(py))
-                }
-                Plan::Delete(s, None) => {
-                    let n = conn.execute(build(&s)).await.map_err(db_err)?;
-                    Python::attach(|py| n.into_py_any(py))
-                }
-                Plan::Delete(s, Some(types)) => {
-                    let rows = conn.query_all(build(&s)).await.map_err(db_err)?;
-                    Python::attach(|py| rows_to_py(py, &rows, &types)?.into_py_any(py))
+                Plan::Delete(s, types) => {
+                    let (sql, args) = db::build(d, &s);
+                    count_or_rows(conn, sql, args, types).await
                 }
             }
         })
@@ -342,11 +301,12 @@ impl Engine {
             Some(update) => plan::OnConflict::Update(target, update, set),
             None => plan::OnConflict::Nothing(target),
         });
-        let (stmt, types) = plan::plan_insert(&self.schema, model, &fields, rows, on_conflict, &params)?;
+        let (stmt, types) = plan::plan_insert(&self.schema, self.dialect, model, &fields, rows, on_conflict, &params)?;
+        let (sql, args) = db::build(self.dialect, &stmt);
         let conn = self.conn(tx);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let rows = conn.query_all(build(&stmt)).await.map_err(db_err)?;
-            Python::attach(|py| rows_to_py(py, &rows, &types).map(|l| l.unbind()))
+            let rows = conn.query(sql, args).await.map_err(db_err)?;
+            Python::attach(|py| rows.to_py(py, &types).map(|l| l.unbind()))
         })
     }
 
@@ -355,16 +315,12 @@ impl Engine {
     fn begin<'py>(&self, py: Python<'py>, tx: Option<&Bound<'py, Transaction>>) -> PyResult<Bound<'py, PyAny>> {
         let conn = self.conn(tx);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let inner = match conn {
-                Conn::Pool(db) => db.begin().await,
-                Conn::Tx(slot) => slot.lock().await.as_ref().ok_or_else(closed_tx).map_err(db_err)?.begin().await,
-            }
-            .map_err(db_err)?;
-            Ok(Transaction { slot: Arc::new(Mutex::new(Some(inner))) })
+            let inner = conn.begin().await.map_err(db_err)?;
+            Ok(Transaction { inner })
         })
     }
 
-    /// Raw SQL escape hatch; returns rows affected.
+    /// Raw SQL escape hatch (one or more statements); returns rows affected.
     #[pyo3(signature = (sql, tx = None))]
     fn execute<'py>(
         &self,
@@ -373,12 +329,10 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let conn = self.conn(tx);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            conn.execute_unprepared(&sql).await.map_err(db_err)
-        })
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { conn.batch(sql).await.map_err(db_err) })
     }
 
-    /// Raw query returning rows of text: every selected column must be text (cast it).
+    /// Raw query returning rows of text: every selected column is read as text.
     /// For tooling such as the migration runner, not for application queries.
     #[pyo3(signature = (sql, tx = None))]
     fn fetch_text<'py>(
@@ -389,12 +343,7 @@ impl Engine {
     ) -> PyResult<Bound<'py, PyAny>> {
         let conn = self.conn(tx);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let rows = conn.query_all(Statement::from_string(DbBackend::Postgres, sql)).await.map_err(db_err)?;
-            let mut out: Vec<Vec<Option<String>>> = Vec::with_capacity(rows.len());
-            for r in &rows {
-                let n = r.column_names().len();
-                out.push((0..n).map(|i| r.try_get_by_index::<Option<String>>(i)).collect::<Result<_, _>>().map_err(db_err)?);
-            }
+            let out = conn.query_text(sql).await.map_err(db_err)?;
             Python::attach(|py| {
                 let list = PyList::empty(py);
                 for row in out {
@@ -407,12 +356,12 @@ impl Engine {
 
     fn create_tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stmts = migrate::create_all(&self.schema).map_err(schema_err)?;
-        self.run_script(py, stmts)
+        self.run_script(py, stmts, None)
     }
 
     fn drop_tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stmts = migrate::drop_all(&self.schema).map_err(schema_err)?;
-        self.run_script(py, stmts)
+        self.run_script(py, stmts, None)
     }
 
     /// Runs SQL statements in order, in one transaction (Postgres DDL is transactional).
@@ -423,23 +372,34 @@ impl Engine {
         statements: Vec<String>,
         tx: Option<&Bound<'py, Transaction>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        match tx {
-            Some(tx) => {
-                let conn = Conn::Tx(tx.get().slot.clone());
-                pyo3_async_runtimes::tokio::future_into_py(py, async move {
-                    for s in &statements {
-                        conn.execute_unprepared(s).await.map_err(db_err)?;
-                    }
-                    Ok(())
-                })
-            }
-            None => self.run_script(py, statements),
-        }
+        self.run_script(py, statements, tx)
     }
 
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let db = self.db.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { db.close().await.map_err(db_err) })
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            driver.close().await;
+            Ok(())
+        })
+    }
+}
+
+/// An UPDATE / DELETE: the row count, or the rows when it has `RETURNING`.
+async fn count_or_rows(
+    conn: &dyn Executor,
+    sql: String,
+    args: Vec<sea_query::Value>,
+    types: Option<Vec<ColType>>,
+) -> PyResult<Py<PyAny>> {
+    match types {
+        None => {
+            let n = conn.execute(sql, args).await.map_err(db_err)?;
+            Python::attach(|py| n.into_py_any(py))
+        }
+        Some(types) => {
+            let rows = conn.query(sql, args).await.map_err(db_err)?;
+            Python::attach(|py| rows.to_py(py, &types)?.into_py_any(py))
+        }
     }
 }
 
@@ -482,10 +442,9 @@ fn connect<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let schema = schema.get().inner.clone();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let mut opts = ConnectOptions::new(url);
-        opts.max_connections(max_connections).min_connections(1).sqlx_logging(false);
-        let db = Database::connect(opts).await.map_err(db_err)?;
-        Ok(Engine { db, schema })
+        let driver = db::connect(&url, max_connections as usize).await.map_err(db_err)?;
+        let dialect = driver.dialect();
+        Ok(Engine { driver, dialect, schema })
     })
 }
 

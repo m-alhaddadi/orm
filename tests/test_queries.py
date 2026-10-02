@@ -1,4 +1,4 @@
-"""End-to-end tests against Postgres (python -> PyO3 -> SeaORM -> Postgres)."""
+"""End-to-end tests against Postgres (python -> PyO3 -> planner -> tokio-postgres -> Postgres)."""
 
 import asyncio
 import contextvars

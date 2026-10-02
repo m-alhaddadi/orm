@@ -3,8 +3,8 @@
 The query style is SQLAlchemy's: typed expressions over model attributes. The model
 layer is Django's: `Model.objects` managers, `select_related` / `prefetch_related`,
 `DoesNotExist` per model. Everything is async. Queries compile to the ORM IR in Python
-and cross into Rust once per operation. Rust plans the SQL with sea-query and runs it on
-SeaORM's connection pool.
+and cross into Rust once per operation. Rust plans the SQL with sea-query and runs it
+with its own Postgres driver (tokio-postgres; see [Drivers and dialects](#drivers-and-dialects)).
 
 ```python
 yesterday = datetime.now(timezone.utc) - timedelta(days=1)
@@ -21,7 +21,7 @@ automatically: each relation hop becomes a correlated `EXISTS`.
 |---|---|
 | `python/orm/` | Python package: `expr.py` (expressions → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
 | `core/` | Rust crate `orm-core`, no binding code: schema language, IR (`ir.rs`), extensions, migrations, code generation, the `orm` CLI (see [`schema.md`](schema.md)) |
-| `native/` | Rust crate `orm._native` (PyO3) on top of `orm-core`: `plan.rs` (IR → SQL), `convert.rs`, `lib.rs` |
+| `native/` | Rust crate `orm._native` (PyO3) on top of `orm-core`: `plan.rs` (IR → sea-query statements), `db/` (drivers: `mod.rs` traits, `postgres.rs`), `convert.rs` (Python ↔ values), `lib.rs` |
 | `examples/blog/` | `schema.orm`, the `models.py` / `models.pyi` generated from it, its migrations, `demo.py` |
 | `tests/` | SQL shape tests (no DB), Postgres end-to-end tests, mypy + pyright stub checks |
 
@@ -229,16 +229,15 @@ async with db.transaction():
 ## The FFI boundary
 
 ```
-QuerySet ──(IR json + params list)──▶ Engine.run ──▶ planner (sea-query) ──▶ SeaORM ──▶ Postgres
-         ◀──(list[tuple] + prefetched rows, one pass)──────────────────────────────────┘
+QuerySet ──(IR json + params list)──▶ Engine.run ──▶ planner (sea-query) ──▶ driver ──▶ Postgres
+         ◀──(list[tuple] + prefetched rows, one pass)───────────────────────────────┘
 ```
 
 * The schema IR is sent once, at `connect()`. Query IR is JSON with literals in a
   separate positional `params` list, converted to SQL values by the column type they're
   compared with (`native/src/convert.rs`).
-* The IR talks about models, fields and relation paths only. Joins, `EXISTS`, aliases
-  and SeaORM types stay in `plan.rs`, so the engine can be swapped later as the plan
-  intends.
+* The IR talks about models, fields and relation paths only. Joins, `EXISTS` and
+  aliases stay in `plan.rs`; SQL text and driver types stay in `db/`.
 * Rows come back as tuples in schema field order. Python builds the instances
   (`_from_row`: `__new__` + `__dict__.update`).
 
@@ -268,16 +267,50 @@ per row, which can move into Rust later.
 8. `db.create_tables()` / `drop_tables()` stay as a development helper (idempotent
    `IF NOT EXISTS` DDL). Evolving databases use migrations: see [`schema.md`](schema.md).
 
+## Drivers and dialects
+
+```
+planner ──sea-query statement──▶ db::build(dialect) ──(SQL, [Value])──▶ Driver ──▶ database
+   └── checks orm_core::dialect::Capabilities
+```
+
+* **SQL building is per dialect** (sea-query has Postgres, MySQL and SQLite builders).
+  `orm_core::dialect` lists what each dialect can do (`RETURNING`, `ON CONFLICT`,
+  `ILIKE`, row-lock flavours, `UPDATE ... FROM (VALUES ...)`, savepoints). The planner
+  checks it, so a query needing a missing feature raises `QueryError` naming it (or is
+  emulated: `icontains` becomes `LOWER(x) LIKE ...` without `ILIKE`) instead of sending
+  SQL the database rejects. The same table is meant for build-time schema checks.
+* **Execution is per driver**, behind the traits in `native/src/db/mod.rs`: `Driver`
+  (a pool), `Executor` (run SQL with values, on the pool or in a transaction),
+  `Transaction` (commit, rollback, savepoints via `begin()`), `RowSet` (decode rows by
+  the schema's column types, straight into Python tuples). `db::connect` picks the
+  driver from the URL scheme. Adding a database means a dialect, its capabilities and
+  one driver; the planner and everything above stay as they are.
+* **Postgres** uses tokio-postgres with a deadpool pool: binary protocol, parameter
+  types stated in each `Parse` (taken from the value, which the planner typed by
+  column), statements prepared once per connection and cached, `TCP_NODELAY` on.
+  `sslmode` works as in libpq: `disable`; `prefer` (default) / `require` encrypt
+  without checking the certificate; `verify-ca` / `verify-full` check it against the
+  webpki roots (both also check the host name). A transaction that is dropped without
+  commit or rollback closes its connection rather than returning it to the pool.
+
+SeaORM was the engine until this point; only its sea-query and pool were in use (its
+entities, relations and loaders need Rust types compiled per schema, and its
+`find_also_related` / `load_many` are what `select_related` / `prefetch_related` already
+do). Replacing it with tokio-postgres made most operations 5–33% faster with TLS off (with
+TLS on, the TLS cost hides the difference)
+(`bench/engine_bench.py`, numbers in [`bench/RESULTS.md`](../bench/RESULTS.md#engine-seaorm-vs-tokio-postgres)).
+
 ## Not done yet
 
 * `values()` / `values_list()`, aggregates beyond `count()`, `annotate`, `distinct`,
   `in_bulk`.
 * `update_many(rows)`: a different value per row, keyed by primary key, in one
-  statement (undecided).
+  statement (`UPDATE ... FROM (VALUES ...)`, `CASE WHEN` where unsupported).
+* Drivers for MySQL and SQLite; schema checks against a dialect's capabilities.
 * Nested `prefetch_related` paths and `Prefetch(queryset=...)`.
 * Building instances in Rust (the remaining per-row cost), caching of compiled plans,
   chunking very large `IN (...)` prefetches.
-* `TCP_NODELAY`: `bench/ormcore` now carries a patched sqlx-core; `native/` does not use it yet.
 * `has_one`, many-to-many, composite keys, decimal / array column types. (UUID and JSON
   are done, see [`schema.md`](schema.md).)
 * A sync API.

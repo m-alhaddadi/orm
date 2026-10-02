@@ -1,7 +1,7 @@
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::PyErr;
-use sea_orm::{DbErr, RuntimeErr};
+use crate::db::{DbError, ErrorKind};
 
 create_exception!(_native, DatabaseError, PyException, "Error reported by the database or driver.");
 create_exception!(
@@ -19,23 +19,11 @@ create_exception!(
 create_exception!(_native, QueryError, PyValueError, "The query IR does not match the schema.");
 create_exception!(_native, SchemaError, PyValueError, "The schema file or IR is invalid.");
 
-/// SQLSTATE of a database-reported error.
-fn sqlstate(e: &DbErr) -> Option<String> {
-    match e {
-        DbErr::Exec(RuntimeErr::SqlxError(e)) | DbErr::Query(RuntimeErr::SqlxError(e)) => match e.as_ref() {
-            sea_orm::sqlx::Error::Database(d) => d.code().map(|c| c.into_owned()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-pub fn db_err(e: DbErr) -> PyErr {
-    // Class 23: integrity constraint violation.
-    match sqlstate(&e) {
-        Some(code) if code.starts_with("23") => IntegrityError::new_err(e.to_string()),
-        Some(code) if code == "55P03" => LockNotAvailable::new_err(e.to_string()),
-        _ => DatabaseError::new_err(e.to_string()),
+pub fn db_err(e: DbError) -> PyErr {
+    match e.kind {
+        ErrorKind::Integrity => IntegrityError::new_err(e.message),
+        ErrorKind::LockNotAvailable => LockNotAvailable::new_err(e.message),
+        ErrorKind::Other => DatabaseError::new_err(e.message),
     }
 }
 

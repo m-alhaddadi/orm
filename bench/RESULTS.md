@@ -464,3 +464,29 @@ iterations) is in `bench/results-<lang>-<transport>.json`. Run everything with
 | `pgx` | 0.50 (1.5×) | 19.29 (1.7×) | 385 (1.7×) |
 | `ormcore-cgo` | 0.62 (1.2×) | 34.84 (0.9×) | 602 (1.1×) |
 
+
+## Engine: SeaORM vs tokio-postgres
+
+Phase 1 replaced SeaORM (sqlx underneath) with our own driver layer on tokio-postgres.
+`bench/engine_bench.py` times the public Python API on the blog models (1000 posts, 10
+users), release builds, localhost TCP, `sslmode=disable`, best of two interleaved runs,
+median per run. Microseconds per operation.
+
+| case | SeaORM / sqlx | tokio-postgres | change |
+|---|---:|---:|---:|
+| get by pk | 593 | 399 | −33% |
+| read 50 | 805 | 645 | −20% |
+| read 1000 | 2671 | 2545 | −5% |
+| read 1000 + select_related | 5825 | 4813 | −17% |
+| 10 users + prefetch 1000 posts | 4321 | 3718 | −14% |
+| count with EXISTS filter | 744 | 551 | −26% |
+| insert 1 | 915 | 832 | −9% |
+| insert_many 50 | 1694 | 1724 | +2% |
+| update 100 rows | 1632 | 1248 | −24% |
+| transaction, 2 updates | 2348 | 2026 | −14% |
+| 10 concurrent gets | 2594 | 2243 | −14% |
+
+The machine (4-core VM) has a high floor: a bare `SELECT 1` through the whole stack
+takes ~210 µs. With the default `sslmode=prefer` both engines use TLS, which adds ~80 µs
+per query here and hides the difference: in a single TLS run the cases ranged from 9%
+slower to 8% faster, within this machine's noise.

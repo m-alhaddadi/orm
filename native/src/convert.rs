@@ -1,12 +1,11 @@
 //! Python <-> database value conversion, directed by the schema's column types.
 
-use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
+use chrono::{DateTime, FixedOffset};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
-use sea_orm::sea_query::Value;
-use sea_orm::{DbErr, QueryResult};
+use sea_query::Value;
 
 use orm_core::ir::ColType;
 
@@ -60,7 +59,7 @@ fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     })
 }
 
-fn json_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>> {
+pub fn json_to_py(py: Python<'_>, v: &serde_json::Value) -> PyResult<Py<PyAny>> {
     use serde_json::Value as J;
     Ok(match v {
         J::Null => py.None(),
@@ -145,46 +144,5 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>, ty: Option<ColType>) -> PyResult<Valu
                 )));
             }
         }
-    })
-}
-
-/// Reads column `idx` of `row` as a Python object.
-pub fn cell_to_py(py: Python<'_>, row: &QueryResult, idx: usize, ty: ColType) -> Result<Py<PyAny>, PyErr> {
-    fn get<T: sea_orm::TryGetable>(row: &QueryResult, idx: usize) -> PyResult<Option<T>> {
-        row.try_get_by_index::<Option<T>>(idx).map_err(crate::errors::db_err)
-    }
-    let obj = match ty {
-        ColType::BigInt => get::<i64>(row, idx)?.into_py_any(py)?,
-        ColType::Int => get::<i32>(row, idx)?.into_py_any(py)?,
-        ColType::Float => get::<f64>(row, idx)?.into_py_any(py)?,
-        ColType::Bool => get::<bool>(row, idx)?.into_py_any(py)?,
-        ColType::String | ColType::Text => get::<String>(row, idx)?.into_py_any(py)?,
-        // Postgres returns timestamptz in UTC; going through `DateTime<Utc>` reuses the
-        // `datetime.timezone.utc` singleton instead of building a tzinfo per row.
-        ColType::DateTime => get::<DateTime<Utc>>(row, idx)?.into_py_any(py)?,
-        ColType::Date => get::<NaiveDate>(row, idx)?.into_py_any(py)?,
-        ColType::Uuid => get::<uuid::Uuid>(row, idx)?.into_py_any(py)?,
-        ColType::Json => match get::<serde_json::Value>(row, idx)? {
-            Some(v) => json_to_py(py, &v)?,
-            None => py.None(),
-        },
-    };
-    Ok(obj)
-}
-
-/// Reads column `idx` of `row` as a bind parameter (used for prefetch keys).
-pub fn cell_to_value(row: &QueryResult, idx: usize, ty: ColType) -> Result<Value, DbErr> {
-    Ok(match ty {
-        ColType::BigInt => Value::BigInt(row.try_get_by_index(idx)?),
-        ColType::Int => Value::Int(row.try_get_by_index(idx)?),
-        ColType::Float => Value::Double(row.try_get_by_index(idx)?),
-        ColType::Bool => Value::Bool(row.try_get_by_index(idx)?),
-        ColType::String | ColType::Text => Value::String(row.try_get_by_index(idx)?),
-        ColType::DateTime => Value::ChronoDateTimeWithTimeZone(
-            row.try_get_by_index::<Option<DateTime<Utc>>>(idx)?.map(|d| d.fixed_offset()),
-        ),
-        ColType::Date => Value::ChronoDate(row.try_get_by_index(idx)?),
-        ColType::Uuid => Value::Uuid(row.try_get_by_index(idx)?),
-        ColType::Json => Value::Json(row.try_get_by_index::<Option<serde_json::Value>>(idx)?.map(Box::new)),
     })
 }

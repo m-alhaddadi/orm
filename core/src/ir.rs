@@ -2,7 +2,7 @@
 //!
 //! Frontends describe the schema once (at connect time) and then send one query IR
 //! document per operation. The IR speaks in models, fields and relation paths; it never
-//! mentions tables, joins or SeaORM. Literal values travel out of band as a positional
+//! mentions tables, joins or a database driver. Literal values travel out of band as a positional
 //! parameter list (`Param { i }`) so the document itself stays plain JSON.
 //!
 //! The schema half also carries what migrations need: indexes, constraints, triggers,

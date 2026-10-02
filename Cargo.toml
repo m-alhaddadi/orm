@@ -7,3 +7,10 @@ exclude = ["bench"]
 [profile.release]
 lto = "fat"
 codegen-units = 1
+
+# TLS crypto is unusably slow unoptimized; keep dev builds (maturin develop) fast.
+[profile.dev.package.ring]
+opt-level = 3
+
+[profile.dev.package.rustls]
+opt-level = 3

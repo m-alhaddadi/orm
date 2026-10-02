@@ -45,14 +45,15 @@ developer experience.
 
 ### MVP
 
-Do not build a full ORM engine initially. Use SeaORM as the execution engine.
+Do not build a full ORM engine initially. The MVP started on SeaORM as the execution
+engine; by the end of Phase 1 the planner and drivers are ours and SeaORM is gone:
 
 ```
-Schema DSL → Schema Compiler → ORM IR → Python API → PyO3 → SeaORM Adapter → Database
+Schema DSL → Schema Compiler → ORM IR → Python API → PyO3 → planner (sea-query) → driver → Database
 ```
 
-Later replace `ORM IR → SeaORM` with `ORM IR → Custom ORM Engine` without changing the
-user-facing API.
+sea-query stays as the SQL builder (one builder per dialect), and each database gets a
+driver behind one trait (`native/src/db/`); tokio-postgres for Postgres today.
 
 ---
 
@@ -60,7 +61,7 @@ user-facing API.
 
 ### Public API rule
 
-Never expose SeaORM concepts directly. The public API belongs to this project.
+Never expose engine or driver concepts directly. The public API belongs to this project.
 
 ```python
 User.where(User.email == email).first()     # yes
@@ -76,7 +77,7 @@ Entity.find().filter(Column.Email.eq(...))  # no
 Good data flow:
 
 ```
-Python → Rust API (one call) → SeaORM → Database → Rust objects → Python objects (batch)
+Python → Rust API (one call) → planner → driver → Database → Python objects (batch)
 ```
 
 Bad: `Python → Rust → Python` repeatedly; one FFI conversion per row.
@@ -136,9 +137,9 @@ extensions/
 
 ## ORM Intermediate Representation (IR)
 
-The IR must not mirror SeaORM. It represents universal ORM concepts: Entity, Field,
+The IR must not mirror any engine. It represents universal ORM concepts: Entity, Field,
 Relation, Query AST, Mutation AST, Transaction, Migration operations, Database
-capabilities. SeaORM is only an execution backend for the MVP.
+capabilities (`orm_core::dialect`).
 
 ---
 
@@ -198,7 +199,9 @@ once you count FFI and Python object materialization?
 3. Python API prototype — ✅ `python/orm`: Django-style managers and loading,
    SQLAlchemy-style typed expressions, relation-path filters (`User.posts.created_at`)
 4. PyO3 binding — ✅ `native/` (`orm._native`), one call per operation
-5. SeaORM adapter — ✅ IR → sea-query planner, executed on SeaORM's pool, transactions
+5. Engine — ✅ IR → sea-query planner; first on SeaORM's pool, now our own driver
+   layer (`native/src/db/`, tokio-postgres) with per-dialect capabilities, transactions,
+   savepoints, row and advisory locks
 6. PostgreSQL support — ✅ (only backend)
 
 Avoid initially: multiple databases, full migration engine, advanced ORM features,
@@ -225,8 +228,8 @@ multiple language bindings. Validate the architecture and API first.
 
 ### Later
 
-Node/Bun binding, more databases, introspection / drift detection, custom engine
-replacing SeaORM.
+Node/Bun binding, more databases (a dialect + a driver each), introspection / drift
+detection.
 
 ---
 

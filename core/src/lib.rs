@@ -10,6 +10,7 @@
 //! CLI are thin layers over these modules.
 
 pub mod codegen;
+pub mod dialect;
 pub mod dsl;
 pub mod ext;
 pub mod ir;
