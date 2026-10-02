@@ -1,7 +1,7 @@
-# Phase 0 — performance feasibility benchmark
+# Phase 0 — performance feasibility benchmark (Python, Node, Bun, Go)
 
-Can `Python (asyncio) → PyO3 → SeaORM → Postgres` compete with Django and SQLAlchemy once
-FFI and Python object materialization are counted? Results: [`RESULTS.md`](RESULTS.md).
+Can one Rust ORM core (SeaORM → Postgres), called from Python, Node, Bun and Go, compete with
+each language's own ORM? Results: [`RESULTS.md`](RESULTS.md).
 
 ## Layout
 

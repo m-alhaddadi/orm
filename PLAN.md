@@ -182,12 +182,14 @@ once you count FFI and Python object materialization?
   - SQLAlchemy 2.0 ORM
   - PyO3 + SeaORM (returning Python dicts, and `#[pyclass]` objects)
   - Pure Rust SeaORM (no Python, as a lower bound)
+  - Node and Bun (napi-rs addon vs Drizzle ORM) and Go (cgo vs GORM and pgx)
 - Also measure the "bad" pattern: N separate single-row calls across the FFI boundary.
 - Deliverable: `bench/RESULTS.md`.
-- Outcome: PyO3 + SeaORM is 2–4.5× faster than Django / SQLAlchemy async for reads and
-  bulk writes. sqlx's missing `TCP_NODELAY` (≈40 ms stall on large statements over TCP)
-  is fixed with a vendored one-line patch. A sync API is ~0.1–0.2 ms faster per small
-  query (no asyncio ↔ Tokio hand-off), so ship async as the primary API plus a sync API.
+- Outcome: one Rust core now runs from Python (PyO3), Node and Bun (napi-rs) and Go (cgo).
+  It is 2–4.5× faster than Django / SQLAlchemy, 1.2–4.8× faster than Drizzle except
+  even on large reads, and level with GORM (pgx is faster). sqlx's missing `TCP_NODELAY`
+  is fixed with a vendored patch. Sync calls skip the event-loop hand-off (Python ~115 µs,
+  JS ~40 µs per call), so ship async as the primary API plus a sync API.
 
 ### Phase 1 — First prototype
 

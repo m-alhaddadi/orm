@@ -6,7 +6,8 @@ from pathlib import Path
 
 ORDER = [
     "django-sync", "django-async", "django-async-dict", "sqla-asyncpg", "sqla-psycopg",
-    "ormcore-obj", "ormcore-dict", "ormcore-sync", "rust-only",
+    "drizzle-pg", "gorm", "pgx",
+    "ormcore-obj", "ormcore-dict", "ormcore-async", "ormcore-cgo", "ormcore-sync", "rust-only",
 ]
 OPS = [
     ("read", "Read N posts"),

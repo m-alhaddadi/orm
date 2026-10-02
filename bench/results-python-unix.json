@@ -1,0 +1,1033 @@
+{
+  "env": {
+    "python": "3.11.15",
+    "django": "5.2.17",
+    "sqlalchemy": "2.1.2",
+    "postgres": "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)",
+    "cpus": 4,
+    "platform": "Linux-6.18.44-fc-v51-x86_64-with-glibc2.39",
+    "transport": "unix"
+  },
+  "results": [
+    {
+      "contender": "django-async",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 792.3495,
+      "p95_us": 1258.561,
+      "mean_us": 848.9580870000001,
+      "us_per_row": 792.3495
+    },
+    {
+      "contender": "django-async",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 1381.028,
+      "p95_us": 2023.559,
+      "mean_us": 1486.6343466666667,
+      "us_per_row": 27.62056
+    },
+    {
+      "contender": "django-async",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 10252.1875,
+      "p95_us": 15667.824,
+      "mean_us": 11429.4748,
+      "us_per_row": 10.2521875
+    },
+    {
+      "contender": "django-async",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 1301.4935,
+      "p95_us": 1731.663,
+      "mean_us": 1355.137976,
+      "us_per_row": 1301.4935
+    },
+    {
+      "contender": "django-async",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 2159.511,
+      "p95_us": 2682.242,
+      "mean_us": 2206.74781,
+      "us_per_row": 43.19022
+    },
+    {
+      "contender": "django-async",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 18569.264,
+      "p95_us": 44265.799,
+      "mean_us": 21156.27992,
+      "us_per_row": 18.569264
+    },
+    {
+      "contender": "django-async",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 1328.6165,
+      "p95_us": 1854.952,
+      "mean_us": 1384.0431780000001,
+      "us_per_row": 1328.6165
+    },
+    {
+      "contender": "django-async",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 3954.899,
+      "p95_us": 4911.393,
+      "mean_us": 4026.314805,
+      "us_per_row": 79.09797999999999
+    },
+    {
+      "contender": "django-async",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 41944.788,
+      "p95_us": 95591.031,
+      "mean_us": 46523.84126666666,
+      "us_per_row": 41.944788
+    },
+    {
+      "contender": "django-async",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 1133.1945,
+      "p95_us": 1527.753,
+      "mean_us": 1167.750334,
+      "us_per_row": 1133.1945
+    },
+    {
+      "contender": "django-async",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 48789.315,
+      "p95_us": 64253.274,
+      "mean_us": 48834.87735,
+      "us_per_row": 975.7863000000001
+    },
+    {
+      "contender": "django-async",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 1122503.405,
+      "p95_us": 1137706.71,
+      "mean_us": 1041653.2613333333,
+      "us_per_row": 1122.503405
+    },
+    {
+      "contender": "django-async-dict",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 923.8915,
+      "p95_us": 1309.44,
+      "mean_us": 957.868961,
+      "us_per_row": 923.8915
+    },
+    {
+      "contender": "django-async-dict",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 1388.4725,
+      "p95_us": 2058.778,
+      "mean_us": 1493.6104766666665,
+      "us_per_row": 27.769450000000003
+    },
+    {
+      "contender": "django-async-dict",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 6835.748,
+      "p95_us": 8914.332,
+      "mean_us": 7062.99336,
+      "us_per_row": 6.835748
+    },
+    {
+      "contender": "django-async-dict",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 1345.205,
+      "p95_us": 1811.936,
+      "mean_us": 1393.447042,
+      "us_per_row": 1345.205
+    },
+    {
+      "contender": "django-async-dict",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 2024.02,
+      "p95_us": 2829.959,
+      "mean_us": 2160.50483,
+      "us_per_row": 40.4804
+    },
+    {
+      "contender": "django-async-dict",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 12239.9035,
+      "p95_us": 15553.118,
+      "mean_us": 12524.90572,
+      "us_per_row": 12.2399035
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 913.932,
+      "p95_us": 1511.733,
+      "mean_us": 991.546876,
+      "us_per_row": 913.932
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 1117.614,
+      "p95_us": 1898.43,
+      "mean_us": 1237.00123,
+      "us_per_row": 22.35228
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 7749.167,
+      "p95_us": 38183.188,
+      "mean_us": 10520.542099999999,
+      "us_per_row": 7.749167000000001
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 1124.2595,
+      "p95_us": 1598.307,
+      "mean_us": 1185.216283,
+      "us_per_row": 1124.2595
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 1757.4005,
+      "p95_us": 2390.274,
+      "mean_us": 1836.9742766666666,
+      "us_per_row": 35.14801
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 11322.3685,
+      "p95_us": 47008.141,
+      "mean_us": 16095.47978,
+      "us_per_row": 11.3223685
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 1546.967,
+      "p95_us": 2412.248,
+      "mean_us": 1697.642726,
+      "us_per_row": 1546.967
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 4710.0815,
+      "p95_us": 6096.783,
+      "mean_us": 4904.603265,
+      "us_per_row": 94.20163000000001
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 57146.666,
+      "p95_us": 116463.699,
+      "mean_us": 65839.38583333333,
+      "us_per_row": 57.146665999999996
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 1579.889,
+      "p95_us": 2338.675,
+      "mean_us": 1674.45736,
+      "us_per_row": 1579.889
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 72858.257,
+      "p95_us": 96305.619,
+      "mean_us": 72740.8707,
+      "us_per_row": 1457.16514
+    },
+    {
+      "contender": "sqla-asyncpg",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 1397307.396,
+      "p95_us": 1424122.9,
+      "mean_us": 1369080.346,
+      "us_per_row": 1397.307396
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 958.3265,
+      "p95_us": 1390.4,
+      "mean_us": 1028.263741,
+      "us_per_row": 958.3265
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 1304.5315,
+      "p95_us": 1835.237,
+      "mean_us": 1378.63219,
+      "us_per_row": 26.09063
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 7898.4405,
+      "p95_us": 37122.459,
+      "mean_us": 10296.63934,
+      "us_per_row": 7.8984404999999995
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 1205.383,
+      "p95_us": 1595.734,
+      "mean_us": 1285.718091,
+      "us_per_row": 1205.383
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 2107.8215,
+      "p95_us": 2499.996,
+      "mean_us": 2153.9936866666667,
+      "us_per_row": 42.15643
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 11570.9995,
+      "p95_us": 43709.466,
+      "mean_us": 14391.97754,
+      "us_per_row": 11.5709995
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 1666.886,
+      "p95_us": 2340.52,
+      "mean_us": 1729.11231,
+      "us_per_row": 1666.886
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 5579.4605,
+      "p95_us": 8805.472,
+      "mean_us": 6015.805075,
+      "us_per_row": 111.58921000000001
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 75151.0355,
+      "p95_us": 114757.431,
+      "mean_us": 82895.19396666667,
+      "us_per_row": 75.15103549999999
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 1733.336,
+      "p95_us": 2871.218,
+      "mean_us": 1887.147048,
+      "us_per_row": 1733.336
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 83405.6735,
+      "p95_us": 96940.402,
+      "mean_us": 83639.23685,
+      "us_per_row": 1668.11347
+    },
+    {
+      "contender": "sqla-psycopg",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 1515454.488,
+      "p95_us": 1646617.216,
+      "mean_us": 1537999.6496666668,
+      "us_per_row": 1515.4544879999999
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 323.186,
+      "p95_us": 548.47,
+      "mean_us": 358.282422,
+      "us_per_row": 323.186
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 488.866,
+      "p95_us": 878.643,
+      "mean_us": 562.9865866666667,
+      "us_per_row": 9.77732
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 2498.2995,
+      "p95_us": 4352.042,
+      "mean_us": 2667.74934,
+      "us_per_row": 2.4982995
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 525.315,
+      "p95_us": 744.675,
+      "mean_us": 552.960882,
+      "us_per_row": 525.315
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 807.263,
+      "p95_us": 1004.067,
+      "mean_us": 837.0721033333334,
+      "us_per_row": 16.14526
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 4160.7455,
+      "p95_us": 5915.343,
+      "mean_us": 4437.16096,
+      "us_per_row": 4.1607455
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 673.507,
+      "p95_us": 1105.267,
+      "mean_us": 731.18781,
+      "us_per_row": 673.507
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 1620.9865,
+      "p95_us": 2824.36,
+      "mean_us": 1726.042055,
+      "us_per_row": 32.41973
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 12771.999,
+      "p95_us": 16086.667,
+      "mean_us": 13446.637133333334,
+      "us_per_row": 12.771999
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 664.9795,
+      "p95_us": 1047.217,
+      "mean_us": 723.049402,
+      "us_per_row": 664.9795
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 32078.7565,
+      "p95_us": 46428.498,
+      "mean_us": 33766.7664,
+      "us_per_row": 641.57513
+    },
+    {
+      "contender": "ormcore-obj",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 653571.214,
+      "p95_us": 672689.424,
+      "mean_us": 656259.07,
+      "us_per_row": 653.571214
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 275.726,
+      "p95_us": 396.41,
+      "mean_us": 298.150755,
+      "us_per_row": 275.726
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 435.218,
+      "p95_us": 632.943,
+      "mean_us": 453.93394666666666,
+      "us_per_row": 8.704360000000001
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 2376.45,
+      "p95_us": 3417.356,
+      "mean_us": 2514.86956,
+      "us_per_row": 2.3764499999999997
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 499.514,
+      "p95_us": 1171.062,
+      "mean_us": 613.0110400000001,
+      "us_per_row": 499.514
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 858.669,
+      "p95_us": 1174.872,
+      "mean_us": 917.74279,
+      "us_per_row": 17.173379999999998
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 4587.195,
+      "p95_us": 8516.787,
+      "mean_us": 5107.0063,
+      "us_per_row": 4.5871949999999995
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 715.0535,
+      "p95_us": 1439.69,
+      "mean_us": 833.94506,
+      "us_per_row": 715.0535
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 1670.914,
+      "p95_us": 3314.137,
+      "mean_us": 1836.807665,
+      "us_per_row": 33.41828
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 13292.141,
+      "p95_us": 22096.056,
+      "mean_us": 14459.387866666668,
+      "us_per_row": 13.292140999999999
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 692.904,
+      "p95_us": 1208.53,
+      "mean_us": 764.5660379999999,
+      "us_per_row": 692.904
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 31269.5065,
+      "p95_us": 43908.765,
+      "mean_us": 31684.2871,
+      "us_per_row": 625.39013
+    },
+    {
+      "contender": "ormcore-dict",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 680888.854,
+      "p95_us": 681391.376,
+      "mean_us": 676421.326,
+      "us_per_row": 680.888854
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 195.434,
+      "p95_us": 297.012,
+      "mean_us": 238.571587,
+      "us_per_row": 195.434
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 232.505,
+      "p95_us": 430.67,
+      "mean_us": 277.2606666666667,
+      "us_per_row": 4.6501
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 2301.844,
+      "p95_us": 3146.594,
+      "mean_us": 2429.81966,
+      "us_per_row": 2.301844
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 282.0855,
+      "p95_us": 437.861,
+      "mean_us": 307.905413,
+      "us_per_row": 282.0855
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 486.2595,
+      "p95_us": 695.421,
+      "mean_us": 524.68761,
+      "us_per_row": 9.72519
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 4281.32,
+      "p95_us": 6526.489,
+      "mean_us": 4461.2727,
+      "us_per_row": 4.28132
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 490.6795,
+      "p95_us": 925.147,
+      "mean_us": 545.7456239999999,
+      "us_per_row": 490.6795
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 1334.832,
+      "p95_us": 2213.703,
+      "mean_us": 1439.36724,
+      "us_per_row": 26.696640000000002
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 13547.428,
+      "p95_us": 17278.873,
+      "mean_us": 14236.400666666666,
+      "us_per_row": 13.547428
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 553.255,
+      "p95_us": 1352.915,
+      "mean_us": 679.1146219999999,
+      "us_per_row": 553.255
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 24512.9215,
+      "p95_us": 73742.833,
+      "mean_us": 28266.7869,
+      "us_per_row": 490.25843000000003
+    },
+    {
+      "contender": "ormcore-sync",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 487711.639,
+      "p95_us": 530636.449,
+      "mean_us": 498649.23833333334,
+      "us_per_row": 487.71163900000005
+    },
+    {
+      "contender": "rust-only",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 135.1005,
+      "p95_us": 185.774,
+      "mean_us": 150.61219,
+      "us_per_row": 135.1005
+    },
+    {
+      "contender": "rust-only",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 197.6465,
+      "p95_us": 256.345,
+      "mean_us": 206.46122,
+      "us_per_row": 3.9529300000000003
+    },
+    {
+      "contender": "rust-only",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 1433.4505,
+      "p95_us": 1781.976,
+      "mean_us": 1464.88298,
+      "us_per_row": 1.4334505
+    },
+    {
+      "contender": "rust-only",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 203.7865,
+      "p95_us": 315.396,
+      "mean_us": 228.845198,
+      "us_per_row": 203.7865
+    },
+    {
+      "contender": "rust-only",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 376.6255,
+      "p95_us": 679.751,
+      "mean_us": 426.19885999999997,
+      "us_per_row": 7.532509999999999
+    },
+    {
+      "contender": "rust-only",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 3358.4675,
+      "p95_us": 5173.214,
+      "mean_us": 3635.46256,
+      "us_per_row": 3.3584675
+    },
+    {
+      "contender": "rust-only",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 291.762,
+      "p95_us": 552.306,
+      "mean_us": 353.510658,
+      "us_per_row": 291.762
+    },
+    {
+      "contender": "rust-only",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 1139.414,
+      "p95_us": 1715.522,
+      "mean_us": 1219.95054,
+      "us_per_row": 22.78828
+    },
+    {
+      "contender": "rust-only",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 12221.1905,
+      "p95_us": 16302.3,
+      "mean_us": 12728.9218,
+      "us_per_row": 12.2211905
+    },
+    {
+      "contender": "rust-only",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 334.3065,
+      "p95_us": 543.954,
+      "mean_us": 372.81996999999996,
+      "us_per_row": 334.3065
+    },
+    {
+      "contender": "rust-only",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 14900.5305,
+      "p95_us": 24789.989,
+      "mean_us": 15523.33825,
+      "us_per_row": 298.01061000000004
+    },
+    {
+      "contender": "rust-only",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 351973.157,
+      "p95_us": 356184.507,
+      "mean_us": 327402.24966666667,
+      "us_per_row": 351.973157
+    },
+    {
+      "contender": "django-sync",
+      "op": "read",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 426.123,
+      "p95_us": 659.96,
+      "mean_us": 460.383473,
+      "us_per_row": 426.123
+    },
+    {
+      "contender": "django-sync",
+      "op": "read",
+      "n": 50,
+      "iters": 300,
+      "median_us": 857.915,
+      "p95_us": 1161.593,
+      "mean_us": 906.4926700000001,
+      "us_per_row": 17.1583
+    },
+    {
+      "contender": "django-sync",
+      "op": "read",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 9718.0085,
+      "p95_us": 13323.647,
+      "mean_us": 10965.31994,
+      "us_per_row": 9.7180085
+    },
+    {
+      "contender": "django-sync",
+      "op": "read_join",
+      "n": 1,
+      "iters": 1000,
+      "median_us": 953.803,
+      "p95_us": 1227.445,
+      "mean_us": 946.5021899999999,
+      "us_per_row": 953.803
+    },
+    {
+      "contender": "django-sync",
+      "op": "read_join",
+      "n": 50,
+      "iters": 300,
+      "median_us": 1824.4165,
+      "p95_us": 2209.652,
+      "mean_us": 1874.5249199999998,
+      "us_per_row": 36.48833
+    },
+    {
+      "contender": "django-sync",
+      "op": "read_join",
+      "n": 1000,
+      "iters": 50,
+      "median_us": 18975.644,
+      "p95_us": 47321.988,
+      "mean_us": 21893.55904,
+      "us_per_row": 18.975644
+    },
+    {
+      "contender": "django-sync",
+      "op": "write_bulk",
+      "n": 1,
+      "iters": 500,
+      "median_us": 925.391,
+      "p95_us": 1484.34,
+      "mean_us": 981.687326,
+      "us_per_row": 925.391
+    },
+    {
+      "contender": "django-sync",
+      "op": "write_bulk",
+      "n": 50,
+      "iters": 200,
+      "median_us": 3987.1125,
+      "p95_us": 5178.001,
+      "mean_us": 4099.58815,
+      "us_per_row": 79.74225
+    },
+    {
+      "contender": "django-sync",
+      "op": "write_bulk",
+      "n": 1000,
+      "iters": 30,
+      "median_us": 43138.5835,
+      "p95_us": 77047.509,
+      "mean_us": 47949.409700000004,
+      "us_per_row": 43.1385835
+    },
+    {
+      "contender": "django-sync",
+      "op": "write_loop",
+      "n": 1,
+      "iters": 500,
+      "median_us": 642.896,
+      "p95_us": 1091.41,
+      "mean_us": 703.46479,
+      "us_per_row": 642.896
+    },
+    {
+      "contender": "django-sync",
+      "op": "write_loop",
+      "n": 50,
+      "iters": 20,
+      "median_us": 38431.955,
+      "p95_us": 48828.647,
+      "mean_us": 38670.39235,
+      "us_per_row": 768.6391
+    },
+    {
+      "contender": "django-sync",
+      "op": "write_loop",
+      "n": 1000,
+      "iters": 3,
+      "median_us": 801204.463,
+      "p95_us": 828317.651,
+      "mean_us": 806450.6296666666,
+      "us_per_row": 801.204463
+    }
+  ]
+}
