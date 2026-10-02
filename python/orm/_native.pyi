@@ -27,7 +27,13 @@ class Transaction:
 class Engine:
     def run(self, op_json: str, params: list[Any], tx: Transaction | None = None) -> Awaitable[Any]: ...
     def insert(
-        self, model: str, fields: list[str], rows: list[list[Any]], tx: Transaction | None = None
+        self,
+        model: str,
+        fields: list[str],
+        rows: list[list[Any]],
+        conflict: list[str] | None = None,
+        update: list[str] | None = None,
+        tx: Transaction | None = None,
     ) -> Awaitable[list[tuple[Any, ...]]]: ...
     def begin(self, tx: Transaction | None = None) -> Awaitable[Transaction]: ...
     def execute(self, sql: str, tx: Transaction | None = None) -> Awaitable[int]: ...

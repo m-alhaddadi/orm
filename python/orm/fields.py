@@ -81,19 +81,18 @@ class Field(Generic[T]):
         if obj is None:
             return ColumnRef(owner, (), self)
         # Only reached when the value is absent from the instance __dict__.
-        raise AttributeError(
-            f"{owner.__name__}.{self.name} has no value yet "
-            "(it is assigned by the database on save)"
-        )
+        raise AttributeError(f"{owner.__name__}.{self.name} was not loaded")
+
+    if TYPE_CHECKING:
+        # Instances are read-only. Declared for type checkers only: a runtime __set__
+        # would make this a data descriptor and turn every attribute read into a call.
+        def __set__(self, obj: object, value: Never) -> None: ...
 
     @property
     def has_server_value(self) -> bool:
         """True if the database fills the column when the insert leaves it out."""
-        return self.auto_increment or self.default_now or self.default is not MISSING
-
-    def python_default(self) -> Any:
-        d = self.default
-        return d() if callable(d) else d
+        literal = self.default is not MISSING and not callable(self.default)
+        return self.auto_increment or self.default_now or literal
 
     def ir(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "column": self.column, "type": self.type_name}
@@ -238,10 +237,11 @@ class BelongsTo(Relation[M, P]):
             f"{self.target_name} by {owner.__name__}.{self.via}"
         )
 
-    def __set__(self, obj: Model, value: M | None) -> None:
-        d = obj.__dict__
-        d[self.name] = value
-        d[self.via] = None if value is None else getattr(value, self.to, None)
+    def __set__(self, obj: Model, value: Never) -> None:
+        raise AttributeError(
+            f"{self.model.__name__}.{self.name} is read-only; write the key with "
+            f"`await obj.update({self.name}=...)`"
+        )
 
     def ir(self) -> dict[str, Any]:
         return {
@@ -287,8 +287,8 @@ class HasMany(Relation[MM, P]):
 
     def __set__(self, obj: Model, value: Never) -> None:
         raise AttributeError(
-            f"{self.model.__name__}.{self.name} is read-only; create related rows with "
-            f"{self.model.__name__.lower()}.{self.name}.create(...)"
+            f"{self.model.__name__}.{self.name} is read-only; insert related rows with "
+            f"`await {self.model.__name__.lower()}.{self.name}.insert(...)`"
         )
 
     def ir(self) -> dict[str, Any]:

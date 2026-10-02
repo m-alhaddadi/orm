@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import AsyncIterator, Generator, Iterable
+from collections.abc import AsyncIterator, Generator, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from .errors import QueryError
@@ -21,6 +21,7 @@ from .expr import (
     not_,
 )
 from .fields import BelongsTo, HasMany
+from .write import InsertMany, InsertOne, prepare_rows
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -199,7 +200,11 @@ class QuerySet(Generic[M]):
     async def _fetch(self) -> list[M]:
         params: list[Any] = []
         rows, prefetched = await self._run(self._select_ir("select", params), params)
-        return self._materialize(rows, prefetched)
+        objs = self._materialize(rows, prefetched)
+        if self._db is not None:  # instance writes go back to the same database
+            for o in objs:
+                o.__dict__["_db"] = self._db
+        return objs
 
     def _materialize(self, rows: list[tuple[Any, ...]], prefetched: dict[str, list[tuple[Any, ...]]]) -> list[M]:
         model = self._model
@@ -308,8 +313,12 @@ class QuerySet(Generic[M]):
         return b
 
     async def update(self, **values: Any) -> int:
-        """UPDATE matching rows; values may be expressions, e.g. ``views=Post.views + 1``.
-        Returns the number of rows updated."""
+        """``UPDATE`` every matching row; values may be expressions, e.g.
+        ``views=Post.views + 1``. Returns the number of rows updated."""
+        n: int = await self._update(values, returning=False)
+        return n
+
+    async def _update(self, values: dict[str, Any], *, returning: bool) -> Any:
         meta = self._model._meta
         params: list[Any] = []
         ir = self._mutation_ir("update", params)
@@ -324,39 +333,27 @@ class QuerySet(Generic[M]):
             node = value._ir(ctx) if isinstance(value, Expression) else ctx.param(value)
             assignments.append({"field": name, "value": node})
         if not assignments:
-            return 0
+            return [] if returning else 0
         ir["set"] = assignments
-        n: int = await self._run(ir, params)
-        return n
+        ir["returning"] = returning
+        return await self._run(ir, params)
 
     async def delete(self) -> int:
-        """DELETE matching rows. Returns the number of rows deleted."""
+        """``DELETE`` every matching row. Returns the number of rows deleted."""
         params: list[Any] = []
         n: int = await self._run(self._mutation_ir("delete", params), params)
         return n
 
-    async def create(self, **values: Any) -> M:
-        """Build an instance and INSERT it in one step."""
-        obj = self._model(**values)
-        await obj.save(using=self._db)
-        return obj
+    def insert(self, **values: Any) -> InsertOne[M]:
+        """``INSERT`` one row; ``await`` gives the new instance with database defaults
+        (id, timestamps) filled in. Chain ``.on_conflict(...)`` for an upsert."""
+        fields, rows, provided = prepare_rows(self._model, [values])
+        return InsertOne(self, fields, rows, provided)
 
-    async def bulk_create(self, objs: Iterable[M]) -> list[M]:
-        """INSERT all ``objs`` with one statement; fills in their primary keys and
-        database defaults."""
-        from .db import resolve
-
-        objs = list(objs)
-        if not objs:
-            return objs
-        meta = self._model._meta
-        for o in objs:
-            if type(o) is not self._model:
-                raise TypeError(f"bulk_create expects {meta.name} instances, got {type(o).__name__}")
-        rows = await resolve(self._db)._insert(meta.name, list(meta.field_names), [o._insert_row() for o in objs])
-        for o, r in zip(objs, rows):
-            o._apply_row(r)
-        return objs
+    def insert_many(self, rows: Iterable[Mapping[str, Any]]) -> InsertMany[M]:
+        """``INSERT`` many rows with one statement; ``await`` gives the new instances."""
+        fields, aligned, provided = prepare_rows(self._model, rows)
+        return InsertMany(self, fields, aligned, provided)
 
     def __repr__(self) -> str:
         parts = [f"filter{f!r}" for f in self._filters]
@@ -405,7 +402,14 @@ class RelatedSet(QuerySet[M]):
             return list(rows)
         return await super()._fetch()
 
-    async def create(self, **values: Any) -> M:
-        """Create a related row pointing at this instance."""
-        values[self._relation.via] = self._instance.__dict__[self._relation.from_]
-        return await super().create(**values)
+    def insert(self, **values: Any) -> InsertOne[M]:
+        """Insert a related row pointing at this instance."""
+        return super().insert(**values, **self._link())
+
+    def insert_many(self, rows: Iterable[Mapping[str, Any]]) -> InsertMany[M]:
+        """Insert related rows pointing at this instance."""
+        link = self._link()
+        return super().insert_many({**r, **link} for r in rows)
+
+    def _link(self) -> dict[str, Any]:
+        return {self._relation.via: self._instance.__dict__[self._relation.from_]}

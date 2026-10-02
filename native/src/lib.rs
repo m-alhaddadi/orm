@@ -65,7 +65,7 @@ impl PySchema {
         Ok(match Planner::plan(&self.inner, &op, &params)? {
             Plan::Select(p) => p.stmt.to_string(PostgresQueryBuilder),
             Plan::Count(s) | Plan::Exists(s) => s.to_string(PostgresQueryBuilder),
-            Plan::Update(s) => s.to_string(PostgresQueryBuilder),
+            Plan::Update(s, _) => s.to_string(PostgresQueryBuilder),
             Plan::Delete(s) => s.to_string(PostgresQueryBuilder),
         })
     }
@@ -214,7 +214,7 @@ impl Engine {
 impl Engine {
     /// Runs one query IR document. Returns, by operation:
     /// select -> `(rows, {relation: rows})`, count -> int, exists -> bool,
-    /// update / delete -> rows affected.
+    /// update / delete -> rows affected (update with `returning` -> rows).
     #[pyo3(signature = (op_json, params, tx = None))]
     fn run<'py>(
         &self,
@@ -255,9 +255,13 @@ impl Engine {
                     };
                     Python::attach(|py| b.into_py_any(py))
                 }
-                Plan::Update(s) => {
+                Plan::Update(s, None) => {
                     let n = conn.execute(build(&s)).await.map_err(db_err)?;
                     Python::attach(|py| n.into_py_any(py))
+                }
+                Plan::Update(s, Some(types)) => {
+                    let rows = conn.query_all(build(&s)).await.map_err(db_err)?;
+                    Python::attach(|py| rows_to_py(py, &rows, &types)?.into_py_any(py))
                 }
                 Plan::Delete(s) => {
                     let n = conn.execute(build(&s)).await.map_err(db_err)?;
@@ -268,16 +272,26 @@ impl Engine {
     }
 
     /// `INSERT ... RETURNING` every column; returns the inserted rows as tuples.
-    #[pyo3(signature = (model, fields, rows, tx = None))]
+    ///
+    /// With `conflict` (unique field names) rows hitting that constraint update the
+    /// `update` fields from the new row, or are skipped if `update` is None.
+    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, tx = None))]
+    #[allow(clippy::too_many_arguments)]
     fn insert<'py>(
         &self,
         py: Python<'py>,
         model: &str,
         fields: Vec<String>,
         rows: &Bound<'py, PyList>,
+        conflict: Option<Vec<String>>,
+        update: Option<Vec<String>>,
         tx: Option<&Bound<'py, Transaction>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let (stmt, types) = plan::plan_insert(&self.schema, model, &fields, rows)?;
+        let on_conflict = conflict.map(|target| match update {
+            Some(update) => plan::OnConflict::Update(target, update),
+            None => plan::OnConflict::Nothing(target),
+        });
+        let (stmt, types) = plan::plan_insert(&self.schema, model, &fields, rows, on_conflict)?;
         let conn = self.conn(tx);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let rows = conn.query_all(build(&stmt)).await.map_err(db_err)?;

@@ -2,15 +2,19 @@
 #
 # Static half of the generated module. Each model gets:
 #   * the model class: column descriptors (`User.email` is a ColumnRef[str] on the class,
-#     a str on an instance), relation descriptors and a typed constructor;
+#     a read-only str on an instance), relation descriptors and typed `update()`;
 #   * a path class (`_UserPath`): what a relation to the model evaluates to on the class
 #     side, so `User.posts.created_at` autocompletes and type-checks as ColumnRef[datetime];
-#   * a query set class (`UserQuerySet`): typed `create()` / `update()` keyword arguments.
+#   * `UserInsert` / `UserUpdate` TypedDicts: the row shapes accepted by insert / update;
+#   * a query set class (`UserQuerySet`): typed `insert()`, `insert_many()`, `update()`.
 
+from collections.abc import Iterable
 from datetime import datetime
-from typing import ClassVar
+from typing import ClassVar, NotRequired, TypedDict
 
-from orm import ColumnRef, Expression, Model, QuerySet, RelationPath
+from typing_extensions import Unpack
+
+from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath
 from orm import fields as f
 
 # -- User -------------------------------------------------------------------------------
@@ -26,14 +30,7 @@ class User(Model):
 
     objects: ClassVar[UserQuerySet]
 
-    def __init__(
-        self,
-        *,
-        id: int = ...,
-        email: str,
-        name: str,
-        created_at: datetime = ...,
-    ) -> None: ...
+    async def update(self, **values: Unpack[UserUpdate]) -> None: ...  # type: ignore[override]
 
 class _UserPath(RelationPath[User]):
     id: ColumnRef[int]
@@ -43,23 +40,22 @@ class _UserPath(RelationPath[User]):
     posts: _PostPath
     comments: _CommentPath
 
+class UserInsert(TypedDict):
+    id: NotRequired[int]
+    email: str
+    name: str
+    created_at: NotRequired[datetime]
+
+class UserUpdate(TypedDict, total=False):
+    id: int | Expression[int]
+    email: str | Expression[str]
+    name: str | Expression[str]
+    created_at: datetime | Expression[datetime]
+
 class UserQuerySet(QuerySet[User]):
-    async def create(  # type: ignore[override]
-        self,
-        *,
-        id: int = ...,
-        email: str,
-        name: str,
-        created_at: datetime = ...,
-    ) -> User: ...
-    async def update(  # type: ignore[override]
-        self,
-        *,
-        id: int | Expression[int] = ...,
-        email: str | Expression[str] = ...,
-        name: str | Expression[str] = ...,
-        created_at: datetime | Expression[datetime] = ...,
-    ) -> int: ...
+    def insert(self, **values: Unpack[UserInsert]) -> InsertOne[User]: ...  # type: ignore[override]
+    def insert_many(self, rows: Iterable[UserInsert]) -> InsertMany[User]: ...  # type: ignore[override]
+    async def update(self, **values: Unpack[UserUpdate]) -> int: ...  # type: ignore[override]
 
 # -- Post -------------------------------------------------------------------------------
 
@@ -77,18 +73,7 @@ class Post(Model):
 
     objects: ClassVar[PostQuerySet]
 
-    def __init__(
-        self,
-        *,
-        id: int = ...,
-        author_id: int = ...,
-        author: User = ...,
-        title: str,
-        body: str,
-        views: int = ...,
-        published: bool = ...,
-        created_at: datetime = ...,
-    ) -> None: ...
+    async def update(self, **values: Unpack[PostUpdate]) -> None: ...  # type: ignore[override]
 
 class _PostPath(RelationPath[Post]):
     id: ColumnRef[int]
@@ -101,31 +86,31 @@ class _PostPath(RelationPath[Post]):
     author: _UserPath
     comments: _CommentPath
 
+class PostInsert(TypedDict):
+    id: NotRequired[int]
+    # One of author_id / author is required (checked at runtime).
+    author_id: NotRequired[int]
+    author: NotRequired[User]
+    title: str
+    body: str
+    views: NotRequired[int]
+    published: NotRequired[bool]
+    created_at: NotRequired[datetime]
+
+class PostUpdate(TypedDict, total=False):
+    id: int | Expression[int]
+    author_id: int | Expression[int]
+    author: User
+    title: str | Expression[str]
+    body: str | Expression[str]
+    views: int | Expression[int]
+    published: bool | Expression[bool]
+    created_at: datetime | Expression[datetime]
+
 class PostQuerySet(QuerySet[Post]):
-    async def create(  # type: ignore[override]
-        self,
-        *,
-        id: int = ...,
-        author_id: int = ...,
-        author: User = ...,
-        title: str,
-        body: str,
-        views: int = ...,
-        published: bool = ...,
-        created_at: datetime = ...,
-    ) -> Post: ...
-    async def update(  # type: ignore[override]
-        self,
-        *,
-        id: int | Expression[int] = ...,
-        author_id: int | Expression[int] = ...,
-        author: User = ...,
-        title: str | Expression[str] = ...,
-        body: str | Expression[str] = ...,
-        views: int | Expression[int] = ...,
-        published: bool | Expression[bool] = ...,
-        created_at: datetime | Expression[datetime] = ...,
-    ) -> int: ...
+    def insert(self, **values: Unpack[PostInsert]) -> InsertOne[Post]: ...  # type: ignore[override]
+    def insert_many(self, rows: Iterable[PostInsert]) -> InsertMany[Post]: ...  # type: ignore[override]
+    async def update(self, **values: Unpack[PostUpdate]) -> int: ...  # type: ignore[override]
 
 # -- Comment ----------------------------------------------------------------------------
 
@@ -141,17 +126,7 @@ class Comment(Model):
 
     objects: ClassVar[CommentQuerySet]
 
-    def __init__(
-        self,
-        *,
-        id: int = ...,
-        post_id: int = ...,
-        post: Post = ...,
-        author_id: int | None = ...,
-        author: User | None = ...,
-        body: str,
-        created_at: datetime = ...,
-    ) -> None: ...
+    async def update(self, **values: Unpack[CommentUpdate]) -> None: ...  # type: ignore[override]
 
 class _CommentPath(RelationPath[Comment]):
     id: ColumnRef[int]
@@ -162,28 +137,41 @@ class _CommentPath(RelationPath[Comment]):
     post: _PostPath
     author: _UserPath
 
-class CommentQuerySet(QuerySet[Comment]):
-    async def create(  # type: ignore[override]
-        self,
-        *,
-        id: int = ...,
-        post_id: int = ...,
-        post: Post = ...,
-        author_id: int | None = ...,
-        author: User | None = ...,
-        body: str,
-        created_at: datetime = ...,
-    ) -> Comment: ...
-    async def update(  # type: ignore[override]
-        self,
-        *,
-        id: int | Expression[int] = ...,
-        post_id: int | Expression[int] = ...,
-        post: Post = ...,
-        author_id: int | None | Expression[int | None] = ...,
-        author: User | None = ...,
-        body: str | Expression[str] = ...,
-        created_at: datetime | Expression[datetime] = ...,
-    ) -> int: ...
+class CommentInsert(TypedDict):
+    id: NotRequired[int]
+    # One of post_id / post is required (checked at runtime).
+    post_id: NotRequired[int]
+    post: NotRequired[Post]
+    author_id: NotRequired[int | None]
+    author: NotRequired[User | None]
+    body: str
+    created_at: NotRequired[datetime]
 
-__all__ = ["User", "Post", "Comment", "UserQuerySet", "PostQuerySet", "CommentQuerySet"]
+class CommentUpdate(TypedDict, total=False):
+    id: int | Expression[int]
+    post_id: int | Expression[int]
+    post: Post
+    author_id: int | None | Expression[int | None]
+    author: User | None
+    body: str | Expression[str]
+    created_at: datetime | Expression[datetime]
+
+class CommentQuerySet(QuerySet[Comment]):
+    def insert(self, **values: Unpack[CommentInsert]) -> InsertOne[Comment]: ...  # type: ignore[override]
+    def insert_many(self, rows: Iterable[CommentInsert]) -> InsertMany[Comment]: ...  # type: ignore[override]
+    async def update(self, **values: Unpack[CommentUpdate]) -> int: ...  # type: ignore[override]
+
+__all__ = [
+    "User",
+    "Post",
+    "Comment",
+    "UserInsert",
+    "UserUpdate",
+    "PostInsert",
+    "PostUpdate",
+    "CommentInsert",
+    "CommentUpdate",
+    "UserQuerySet",
+    "PostQuerySet",
+    "CommentQuerySet",
+]

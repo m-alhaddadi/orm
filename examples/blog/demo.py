@@ -25,15 +25,19 @@ async def main(url: str) -> None:
     now = datetime.now(timezone.utc)
     yesterday = now - timedelta(days=1)
 
-    alice = await User.objects.create(email="alice@example.com", name="Alice")
-    bob = await User.objects.create(email="bob@example.com", name="Bob")
-    old, new = await Post.objects.bulk_create(
+    # Writes are explicit statements: INSERT ... RETURNING gives back the stored rows.
+    alice = await User.objects.insert(email="alice@example.com", name="Alice")
+    bob = await User.objects.insert(email="bob@example.com", name="Bob")
+    old, new = await Post.objects.insert_many(
         [
-            Post(author=alice, title="Hello", body="...", created_at=now - timedelta(days=3)),
-            Post(author=bob, title="Fresh", body="...", published=True),
+            {"author": alice, "title": "Hello", "body": "...", "created_at": now - timedelta(days=3)},
+            {"author": bob, "title": "Fresh", "body": "...", "published": True},
         ]
     )
-    await new.comments.create(body="first!", author=alice)
+    await new.comments.insert(body="first!", author=alice)
+    # Upsert on the unique email.
+    bob = await User.objects.insert(email="bob@example.com", name="Robert").on_conflict(User.email).do_update()
+    print("upserted:", bob)
 
     # Filters follow relations; to-many hops compile to EXISTS (no duplicate rows).
     q = User.objects.filter(User.posts.created_at < yesterday)
@@ -51,12 +55,11 @@ async def main(url: str) -> None:
     for u in await User.objects.prefetch_related(User.posts).order_by(User.name):
         print(u.name, [p.title for p in u.posts.cached])
 
-    # Updates with expressions, transactions.
+    # Set-based UPDATE, and a single-row update that refreshes the instance.
     await Post.objects.filter(Post.author_id == alice.id).update(views=Post.views + 1)
     async with db.transaction():
-        old.title = "Hello, world"
-        await old.save()
-    print(await Post.objects.order_by(Post.views.desc(), Post.id).first())
+        await old.update(title="Hello, world", views=Post.views + 10)
+    print(old)  # views=11: the database's value, read back with RETURNING
 
     await db.drop_tables()
     await db.close()

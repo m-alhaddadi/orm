@@ -35,8 +35,15 @@ class Database:
     async def _run(self, ir: dict[str, Any], params: list[Any]) -> Any:
         return await self._engine.run(json.dumps(ir), params, self._tx())
 
-    async def _insert(self, model: str, fields: list[str], rows: list[list[Any]]) -> list[tuple[Any, ...]]:
-        return await self._engine.insert(model, fields, rows, self._tx())
+    async def _insert(
+        self,
+        model: str,
+        fields: list[str],
+        rows: list[list[Any]],
+        conflict: list[str] | None = None,
+        update: list[str] | None = None,
+    ) -> list[tuple[Any, ...]]:
+        return await self._engine.insert(model, fields, rows, conflict, update, self._tx())
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:

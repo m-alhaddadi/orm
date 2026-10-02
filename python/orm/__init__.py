@@ -22,6 +22,7 @@ from .errors import (
 from .expr import ColumnRef, Condition, Expression, Ordering, RelationPath, and_, not_, or_
 from .model import Model, registry
 from .query import QuerySet, RelatedSet
+from .write import InsertMany, InsertOne, OnConflictMany, OnConflictOne
 
 __all__ = [
     "fields",
@@ -32,6 +33,10 @@ __all__ = [
     "registry",
     "QuerySet",
     "RelatedSet",
+    "InsertOne",
+    "InsertMany",
+    "OnConflictOne",
+    "OnConflictMany",
     "Expression",
     "ColumnRef",
     "RelationPath",

@@ -4,7 +4,7 @@ and pyright. Never executed."""
 from datetime import datetime, timedelta, timezone
 from typing import assert_type
 
-from blog.models import Comment, Post, User, UserQuerySet
+from blog.models import Comment, Post, PostInsert, User, UserQuerySet
 
 from orm import ColumnRef, Condition, RelatedSet
 
@@ -34,20 +34,33 @@ async def check() -> None:
     c = await Comment.objects.first()
     if c is not None:
         assert_type(c.author, User | None)
-
     assert_type(await User.objects.count(), int)
-    created = await User.objects.create(email="a@b.c", name="A")
-    assert_type(created, User)
-    await Post.objects.filter(Post.id == 1).update(views=Post.views + 1)
     async for p in Post.objects.order_by(Post.created_at.desc())[:10]:
         assert_type(p, Post)
+
+    # Writes are explicit statements.
+    alice = await User.objects.insert(email="a@b.c", name="A")
+    assert_type(alice, User)
+    rows: list[PostInsert] = [{"author": alice, "title": "t", "body": "b"}]
+    assert_type(await Post.objects.insert_many(rows), list[Post])
+    upserted = await User.objects.insert(email="a@b.c", name="A2").on_conflict(User.email).do_update()
+    assert_type(upserted, User)
+    skipped = await User.objects.insert(email="a@b.c", name="A").on_conflict(User.email).do_nothing()
+    assert_type(skipped, User | None)
+    assert_type(await Post.objects.filter(Post.id == 1).update(views=Post.views + 1), int)
+    await post.update(title="new", views=Post.views + 1)
+    await alice.posts.insert(title="t", body="b")
+    await post.delete()
 
 
 async def errors() -> None:
     User.email < 1  # E: ordering a str column against an int
     User.posts.nope  # E: no such column
     User.objects.filter(User.posts.views.like("x"))  # E: like on int column
-    await User.objects.create(email="a@b.c")  # E: missing name
+    await User.objects.insert(email="a@b.c")  # E: missing name
+    await User.objects.insert(email="a@b.c", name="A", nope=1)  # E: unknown field
     await Post.objects.update(views="many")  # E: wrong type
-    u = User(email="a", name="b")
+    u = await User.objects.get(User.id == 1)
+    u.name = "B"  # E: instances are read-only
+    await u.update(name=1)  # E: wrong type
     u.posts = []  # E: read-only relation

@@ -8,12 +8,11 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from . import _native
 from .errors import DoesNotExist, MultipleObjectsReturned
 from .expr import ColumnRef
-from .fields import MISSING, BelongsTo, Field, Relation
+from .fields import Field, Relation
 
 if TYPE_CHECKING:
     from typing_extensions import Self
 
-    from .db import Database
     from .query import QuerySet
 
 __all__ = ["Model", "ModelMeta", "Registry", "registry"]
@@ -103,9 +102,6 @@ class Model:
     DoesNotExist: ClassVar[type[DoesNotExist]] = DoesNotExist
     MultipleObjectsReturned: ClassVar[type[MultipleObjectsReturned]] = MultipleObjectsReturned
 
-    # Instances built from database rows skip __init__ and so read this class default.
-    _persisted: bool = True
-
     def __init_subclass__(cls, *, table: str | None = None, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         from .query import QuerySet
@@ -117,22 +113,12 @@ class Model:
             setattr(cls, base.__name__, type(base.__name__, (base,), ns))
         registry.register(cls)
 
-    def __init__(self, **values: Any) -> None:
-        meta = self._meta
-        d = self.__dict__
-        for name, field in meta.fields.items():
-            if name in values:
-                d[name] = values.pop(name)
-            elif field.default is not MISSING:
-                d[name] = field.python_default()
-            elif field.nullable:
-                d[name] = None
-        for name, value in values.items():
-            rel = meta.relations.get(name)
-            if not isinstance(rel, BelongsTo):
-                raise TypeError(f"{meta.name}() got an unexpected keyword argument {name!r}")
-            setattr(self, name, value)
-        d["_persisted"] = False
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        name = type(self).__name__
+        raise TypeError(
+            f"{name} instances come from the database; insert a row with "
+            f"`await {name}.objects.insert(...)`"
+        )
 
     @classmethod
     def _from_row(cls, row: tuple[Any, ...]) -> Self:
@@ -141,74 +127,48 @@ class Model:
         return obj
 
     def __setattr__(self, name: str, value: Any) -> None:
-        # Track assignments so save() only writes what changed. Reads stay plain
-        # __dict__ lookups; rows from the database bypass this entirely.
-        object.__setattr__(self, name, value)
-        meta = self._meta
-        if name in meta.fields:
-            self.__dict__.setdefault("_dirty", set()).add(name)
-        elif isinstance(rel := meta.relations.get(name), BelongsTo):
-            self.__dict__.setdefault("_dirty", set()).add(rel.via)
+        raise AttributeError(
+            f"{type(self).__name__} instances are read-only snapshots of a row; "
+            f"write with `await obj.update({name}=...)`"
+        )
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"{type(self).__name__} instances are read-only")
 
     @property
     def pk(self) -> Any:
         return self.__dict__.get(self._meta.pk.name)
 
-    # -- persistence ---------------------------------------------------------------------
+    # -- writes --------------------------------------------------------------------------
+    # Each method is one statement on this row (matched by primary key), run on the
+    # database the instance was read from.
 
-    def _sync_foreign_keys(self) -> None:
-        """Pick up keys of related objects that were unsaved when assigned."""
-        d = self.__dict__
-        for rel in self._meta.relations.values():
-            if isinstance(rel, BelongsTo) and d.get(rel.via) is None and d.get(rel.name) is not None:
-                d[rel.via] = getattr(d[rel.name], rel.to)
-                d.setdefault("_dirty", set()).add(rel.via)
-
-    def _insert_row(self) -> list[Any]:
-        self._sync_foreign_keys()
-        d = self.__dict__
-        row = []
-        for name, field in self._meta.fields.items():
-            if name in d:
-                row.append(d[name])
-            elif field.has_server_value:
-                row.append(_native.DEFAULT)
-            else:
-                raise ValueError(f"{self._meta.name}.{name} is required")
-        return row
+    def _row_query(self) -> QuerySet[Self]:
+        return type(self).objects.using(self.__dict__.get("_db")).filter(self._meta.pk_ref() == self.pk)
 
     def _apply_row(self, row: tuple[Any, ...]) -> None:
-        d = self.__dict__
-        d.update(zip(self._meta.field_names, row))
-        d["_persisted"] = True
-        d.pop("_dirty", None)
+        self.__dict__.update(zip(self._meta.field_names, row))
 
-    async def save(self, *, using: Database | None = None) -> None:
-        """INSERT a new instance (filling in database defaults), or UPDATE the fields
-        assigned since it was loaded or last saved."""
-        from .db import resolve
+    async def update(self, **values: Any) -> None:
+        """``UPDATE ... SET <values> WHERE pk = ... RETURNING *``.
 
-        db = resolve(using)
-        meta = self._meta
-        if not self._persisted:
-            rows = await db._insert(meta.name, list(meta.field_names), [self._insert_row()])
-            self._apply_row(rows[0])
+        Values may be expressions (``views=Post.views + 1``); the instance is refreshed
+        from the returned row, so it shows what the database stored.
+        """
+        if not values:
             return
-        self._sync_foreign_keys()
-        d = self.__dict__
-        dirty = d.get("_dirty", ())
-        values = {n: d[n] for n in meta.field_names if n in dirty and n != meta.pk.name}
-        if values:
-            await type(self).objects.using(db).filter(meta.pk_ref() == self.pk).update(**values)
-        d.pop("_dirty", None)
+        rows = await self._row_query()._update(values, returning=True)
+        if not rows:
+            raise self.DoesNotExist(f"{type(self).__name__} {self.pk!r} no longer exists")
+        self._apply_row(rows[0])
 
-    async def delete(self, *, using: Database | None = None) -> None:
-        await type(self).objects.using(using).filter(self._meta.pk_ref() == self.pk).delete()
-        self.__dict__["_persisted"] = False
+    async def delete(self) -> None:
+        """``DELETE ... WHERE pk = ...``. The instance keeps its last values."""
+        await self._row_query().delete()
 
-    async def refresh(self, *, using: Database | None = None) -> None:
+    async def refresh(self) -> None:
         """Reload column values from the database."""
-        fresh = await type(self).objects.using(using).get(self._meta.pk_ref() == self.pk)
+        fresh = await self._row_query().get()
         self._apply_row(tuple(fresh.__dict__[n] for n in self._meta.field_names))
 
     # -- dunder --------------------------------------------------------------------------

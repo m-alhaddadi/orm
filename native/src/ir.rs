@@ -176,6 +176,9 @@ pub struct Update {
     #[serde(default)]
     pub filters: Vec<Expr>,
     pub set: Vec<Assignment>,
+    /// Return the updated rows (every column) instead of a row count.
+    #[serde(default)]
+    pub returning: bool,
 }
 
 #[derive(Deserialize, Debug)]

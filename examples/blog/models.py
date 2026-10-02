@@ -43,8 +43,20 @@ class Comment(Model, table="comments"):
 
 
 # Typed per model in models.pyi; plain aliases at runtime so the names can be imported.
-UserQuerySet = QuerySet
-PostQuerySet = QuerySet
-CommentQuerySet = QuerySet
+UserQuerySet = PostQuerySet = CommentQuerySet = QuerySet
+UserInsert = UserUpdate = PostInsert = PostUpdate = CommentInsert = CommentUpdate = dict
 
-__all__ = ["User", "Post", "Comment", "UserQuerySet", "PostQuerySet", "CommentQuerySet"]
+__all__ = [
+    "User",
+    "Post",
+    "Comment",
+    "UserInsert",
+    "UserUpdate",
+    "PostInsert",
+    "PostUpdate",
+    "CommentInsert",
+    "CommentUpdate",
+    "UserQuerySet",
+    "PostQuerySet",
+    "CommentQuerySet",
+]

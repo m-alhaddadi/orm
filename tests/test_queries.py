@@ -14,21 +14,21 @@ LAST_WEEK = NOW - timedelta(days=7)
 
 
 async def seed():
-    alice = await User.objects.create(email="alice@example.com", name="Alice")
-    bob = await User.objects.create(email="bob@example.com", name="Bob")
-    carol = await User.objects.create(email="carol@example.com", name="Carol")
-    a1, a2, b1 = await Post.objects.bulk_create(
+    alice = await User.objects.insert(email="alice@example.com", name="Alice")
+    bob = await User.objects.insert(email="bob@example.com", name="Bob")
+    carol = await User.objects.insert(email="carol@example.com", name="Carol")
+    a1, a2, b1 = await Post.objects.insert_many(
         [
-            Post(author=alice, title="old draft", body="...", created_at=LAST_WEEK, views=5),
-            Post(author=alice, title="new post", body="...", published=True, views=50),
-            Post(author=bob, title="bob's old", body="...", created_at=LAST_WEEK, published=True, views=100),
+            {"author": alice, "title": "old draft", "body": "...", "created_at": LAST_WEEK, "views": 5},
+            {"author": alice, "title": "new post", "body": "...", "published": True, "views": 50},
+            {"author": bob, "title": "bob's old", "body": "...", "created_at": LAST_WEEK, "published": True, "views": 100},
         ]
     )
-    await Comment.objects.bulk_create(
+    await Comment.objects.insert_many(
         [
-            Comment(post=a2, author=bob, body="nice, 100% agree"),
-            Comment(post=a2, author=None, body="anonymous"),
-            Comment(post=b1, author=alice, body="hello"),
+            {"post": a2, "author": bob, "body": "nice, 100% agree"},
+            {"post": a2, "author": None, "body": "anonymous"},
+            {"post": b1, "author": alice, "body": "hello"},
         ]
     )
     return alice, bob, carol, (a1, a2, b1)
@@ -38,14 +38,71 @@ def names(users):
     return sorted(u.name for u in users)
 
 
-async def test_create_fills_server_defaults(clean):
-    u = await User.objects.create(email="x@example.com", name="X")
+async def test_insert_returns_row_with_server_defaults(clean):
+    u = await User.objects.insert(email="x@example.com", name="X")
     assert isinstance(u.id, int)
     assert u.created_at.tzinfo is not None
-    p = Post(author=u, title="t", body="b")
-    assert p.views == 0 and p.published is False  # Python-side literal defaults
-    await p.save()
-    assert p.id is not None and p.author_id == u.id
+    p = await Post.objects.insert(author=u, title="t", body="b")
+    assert p.author_id == u.id
+    assert p.views == 0 and p.published is False  # DDL defaults, read back via RETURNING
+
+
+async def test_insert_many_mixed_columns(clean):
+    u = await User.objects.insert(email="x@example.com", name="X")
+    posts = await Post.objects.insert_many(
+        [
+            {"author_id": u.id, "title": "a", "body": "b"},
+            {"author_id": u.id, "title": "c", "body": "d", "views": 7, "created_at": LAST_WEEK},
+        ]
+    )
+    assert [(p.title, p.views) for p in posts] == [("a", 0), ("c", 7)]
+    assert posts[1].created_at == LAST_WEEK and posts[0].created_at > LAST_WEEK
+    assert await Post.objects.insert_many([]) == []
+
+
+async def test_insert_validation(clean):
+    with pytest.raises(ValueError, match="User.name is required"):
+        User.objects.insert(email="x@example.com")
+    with pytest.raises(TypeError, match="no field 'nope'"):
+        User.objects.insert(email="x@example.com", name="X", nope=1)
+    with pytest.raises(TypeError, match="plain values"):
+        Post.objects.insert(author_id=1, title=Post.body, body="b")
+
+
+async def test_upsert(clean):
+    u = await User.objects.insert(email="a@example.com", name="A")
+    same = await User.objects.insert(email="a@example.com", name="A2").on_conflict(User.email).do_update()
+    assert (same.id, same.name, same.created_at) == (u.id, "A2", u.created_at)
+    skipped = await User.objects.insert(email="a@example.com", name="A3").on_conflict(User.email).do_nothing()
+    assert skipped is None
+    rows = await User.objects.insert_many(
+        [{"email": "a@example.com", "name": "A4"}, {"email": "b@example.com", "name": "B"}]
+    ).on_conflict(User.email).do_nothing()
+    assert [r.email for r in rows] == ["b@example.com"]
+    rows = await User.objects.insert_many(
+        [{"email": "a@example.com", "name": "A5"}, {"email": "b@example.com", "name": "B2"}]
+    ).on_conflict(User.email).do_update(User.name)
+    assert [r.name for r in rows] == ["A5", "B2"]
+    assert await User.objects.count() == 2
+
+
+async def test_unawaited_insert_warns(clean):
+    with pytest.warns(RuntimeWarning, match="never awaited"):
+        User.objects.insert(email="x@example.com", name="X")
+        import gc
+
+        gc.collect()
+    assert await User.objects.count() == 0
+
+
+async def test_instances_are_read_only(clean):
+    u = await User.objects.insert(email="x@example.com", name="X")
+    with pytest.raises(AttributeError, match=r"await obj.update\(name=...\)"):
+        u.name = "Y"
+    with pytest.raises(AttributeError, match="read-only"):
+        u.posts = []
+    with pytest.raises(TypeError, match="User.objects.insert"):
+        User(email="x", name="y")
 
 
 async def test_filter_across_to_many_autojoins(clean):
@@ -119,15 +176,17 @@ async def test_prefetch_related(clean):
     assert alice.posts.cached[0].author is alice  # reverse relation filled in
 
 
-async def test_related_set_queries_and_create(clean):
+async def test_related_set_queries_and_insert(clean):
     alice, *_ = await seed()
     with pytest.raises(orm.NotLoaded):
         alice.posts.cached  # noqa: B018
     assert len(await alice.posts) == 2
     assert await alice.posts.filter(Post.published).count() == 1
-    p = await alice.posts.create(title="via relation", body="b")
+    p = await alice.posts.insert(title="via relation", body="b")
     assert p.author_id == alice.id
-    assert await alice.posts.count() == 3
+    more = await alice.posts.insert_many([{"title": "x", "body": "y"}, {"title": "z", "body": "w"}])
+    assert {q.author_id for q in more} == {alice.id}
+    assert await alice.posts.count() == 5
 
 
 async def test_terminal_methods(clean):
@@ -153,62 +212,58 @@ async def test_update_and_delete(clean):
     assert n == 2
     assert sorted(p.views for p in await alice.posts) == [6, 51]
 
-    a1.title = "renamed"
-    await a1.save()
-    await a1.refresh()
-    assert a1.title == "renamed" and a1.views == 6
+    # Instance update writes only the given fields and refreshes from RETURNING, so
+    # a1 (still holding views=5 in memory) picks up the 6 from the bulk update above.
+    await a1.update(title="renamed")
+    assert (a1.title, a1.views) == ("renamed", 6)
+    await a1.update(views=Post.views * 10)
+    assert a1.views == 60
 
-    # Only assigned fields are written, so the concurrent views update above survives.
-    b1.author_id = alice.id
-    await b1.save()
+    await b1.update(author=alice)
+    assert b1.author_id == alice.id
     assert {p.title for p in await alice.posts} == {"renamed", "new post", "bob's old"}
-
-    unsaved = User(email="later@example.com", name="Later")
-    a2.author = unsaved
-    await unsaved.save()
-    await a2.save()  # picks up the key assigned after the relation was set
-    assert (await Post.objects.select_related(Post.author).get(Post.id == a2.id)).author.name == "Later"
 
     # ON DELETE SET NULL keeps Bob's comment, anonymised.
     await bob.delete()
     assert await Comment.objects.filter(Comment.author_id == None).count() == 2  # noqa: E711
-    # ON DELETE CASCADE removes Alice's posts and their comments.
+    with pytest.raises(User.DoesNotExist):
+        await bob.update(name="ghost")
+    assert await Post.objects.filter(Post.views > 90).delete() == 1  # b1
+    # ON DELETE CASCADE removes Alice's remaining posts and their comments.
     await alice.delete()
-    assert [p.title for p in await Post.objects] == ["new post"]
-    assert await Comment.objects.count() == 2
-    assert await Post.objects.filter(Post.views > 10).delete() == 1
+    assert await Post.objects.count() == 0
+    assert await Comment.objects.count() == 0
+
+    await carol.update(name="Caroline")
+    await carol.refresh()
+    assert carol.name == "Caroline"
 
 
 async def test_integrity_error(clean):
-    await User.objects.create(email="dup@example.com", name="A")
+    await User.objects.insert(email="dup@example.com", name="A")
     with pytest.raises(orm.IntegrityError):
-        await User.objects.create(email="dup@example.com", name="B")
-
-
-async def test_missing_required_field(clean):
-    with pytest.raises(ValueError, match="User.name is required"):
-        await User(email="x@example.com").save()
+        await User.objects.insert(email="dup@example.com", name="B")
 
 
 async def test_transactions(clean):
     db = orm.get_database()
     async with db.transaction():
-        await User.objects.create(email="in-tx@example.com", name="T")
+        await User.objects.insert(email="in-tx@example.com", name="T")
     assert await User.objects.count() == 1
 
     with pytest.raises(RuntimeError):
         async with db.transaction():
-            await User.objects.create(email="rolled-back@example.com", name="R")
+            await User.objects.insert(email="rolled-back@example.com", name="R")
             assert await User.objects.count() == 2  # visible inside the transaction
             raise RuntimeError
     assert await User.objects.count() == 1
 
     async with db.transaction():
-        await User.objects.create(email="outer@example.com", name="O")
+        await User.objects.insert(email="outer@example.com", name="O")
         with pytest.raises(orm.IntegrityError):
             async with db.transaction():  # savepoint
-                await User.objects.create(email="outer@example.com", name="dup")
-        await User.objects.create(email="after@example.com", name="A")
+                await User.objects.insert(email="outer@example.com", name="dup")
+        await User.objects.insert(email="after@example.com", name="A")
     assert await User.objects.count() == 3
 
 

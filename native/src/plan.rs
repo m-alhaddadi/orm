@@ -14,6 +14,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use sea_orm::sea_query::{
+    self,
     extension::postgres::PgExpr, Alias, DeleteStatement, Expr as SExpr, ExprTrait, InsertStatement,
     JoinType, LikeExpr, Order as SOrder, Query, SelectStatement, UpdateStatement,
 };
@@ -46,7 +47,8 @@ pub enum Plan {
     Select(SelectPlan),
     Count(SelectStatement),
     Exists(SelectStatement),
-    Update(UpdateStatement),
+    /// Column types of the returned rows when the update has `RETURNING`.
+    Update(UpdateStatement, Option<Vec<ColType>>),
     Delete(DeleteStatement),
 }
 
@@ -124,7 +126,10 @@ impl<'s, 'py> Planner<'s, 'py> {
             Operation::Select(q) => Plan::Select(Planner::new(schema, &q.model, params)?.select(q)?),
             Operation::Count(q) => Plan::Count(Planner::new(schema, &q.model, params)?.count(q)?),
             Operation::Exists(q) => Plan::Exists(Planner::new(schema, &q.model, params)?.exists(q)?),
-            Operation::Update(q) => Plan::Update(Planner::new(schema, &q.model, params)?.update(q)?),
+            Operation::Update(q) => {
+                let (stmt, types) = Planner::new(schema, &q.model, params)?.update(q)?;
+                Plan::Update(stmt, types)
+            }
             Operation::Delete(q) => Plan::Delete(Planner::new(schema, &q.model, params)?.delete(q)?),
         })
     }
@@ -491,7 +496,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(stmt)
     }
 
-    pub fn update(mut self, q: &Update) -> PyResult<UpdateStatement> {
+    pub fn update(mut self, q: &Update) -> PyResult<(UpdateStatement, Option<Vec<ColType>>)> {
         let root = self.schema.model(self.root);
         let mut stmt = Query::update();
         stmt.table(Alias::new(root.table()));
@@ -506,7 +511,11 @@ impl<'s, 'py> Planner<'s, 'py> {
         for w in self.apply_filters(&q.filters)? {
             stmt.and_where(w);
         }
-        Ok(stmt)
+        if !q.returning {
+            return Ok((stmt, None));
+        }
+        stmt.returning(Query::returning().columns(root.fields().iter().map(|f| Alias::new(&f.column))));
+        Ok((stmt, Some(root.fields().iter().map(|f| f.ty).collect())))
     }
 
     pub fn delete(mut self, q: &Delete) -> PyResult<DeleteStatement> {
@@ -520,7 +529,15 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 }
 
-/// `INSERT INTO <table> (<fields>) VALUES ... RETURNING <all columns>`.
+/// What an insert does with rows that hit a unique constraint.
+pub enum OnConflict {
+    /// `ON CONFLICT (<fields>) DO NOTHING`: such rows are skipped (and not returned).
+    Nothing(Vec<String>),
+    /// `ON CONFLICT (<fields>) DO UPDATE SET <col> = EXCLUDED.<col>, ...`.
+    Update(Vec<String>, Vec<String>),
+}
+
+/// `INSERT INTO <table> (<fields>) VALUES ... [ON CONFLICT ...] RETURNING <all columns>`.
 ///
 /// `rows` is a list of sequences aligned with `fields`; the `DEFAULT` marker becomes the
 /// SQL `DEFAULT` keyword.
@@ -529,6 +546,7 @@ pub fn plan_insert(
     model: &str,
     fields: &[String],
     rows: &Bound<'_, PyList>,
+    on_conflict: Option<OnConflict>,
 ) -> PyResult<(InsertStatement, Vec<ColType>)> {
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
     let cols = fields.iter().map(|f| m.field(f)).collect::<Result<Vec<_>, _>>().map_err(query_err)?;
@@ -556,6 +574,25 @@ pub fn plan_insert(
             }
             stmt.values(values).map_err(|e| query_err(e.to_string()))?;
         }
+    }
+    if let Some(oc) = on_conflict {
+        let columns = |names: &[String]| -> PyResult<Vec<Alias>> {
+            names
+                .iter()
+                .map(|n| m.field(n).map(|f| Alias::new(&f.column)))
+                .collect::<Result<_, _>>()
+                .map_err(query_err)
+        };
+        let clause = match oc {
+            OnConflict::Nothing(target) => sea_query::OnConflict::columns(columns(&target)?).do_nothing().to_owned(),
+            OnConflict::Update(target, update) => {
+                if update.is_empty() {
+                    return Err(query_err("on_conflict(...).do_update() has no columns to update".into()));
+                }
+                sea_query::OnConflict::columns(columns(&target)?).update_columns(columns(&update)?).to_owned()
+            }
+        };
+        stmt.on_conflict(clause);
     }
     stmt.returning(Query::returning().columns(m.fields().iter().map(|f| Alias::new(&f.column))));
     Ok((stmt, m.fields().iter().map(|f| f.ty).collect()))
