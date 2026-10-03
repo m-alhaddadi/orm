@@ -28,6 +28,7 @@ import {
   type ExistsQuery,
   type IR,
   type Many,
+  type NearestOf,
   type OuterOf,
   type ParamValues,
   type Source,
@@ -52,15 +53,27 @@ export type Simplify<T> = { [K in keyof T]: T[K] } & {};
 
 /** What a query's expressions may read: its own sources, to-many paths (in filters),
  * and columns of enclosing queries. */
-export type Allowed<S extends string> = S | Many | OuterOf<string>;
+export type Allowed<S extends string> = S | Many | OuterOf<string> | NearestOf<string>;
 /** Expressions allowed where rows must not repeat (ordering, `select()`, grouping). */
-export type AllowedOne<S extends string> = S | OuterOf<string>;
+export type AllowedOne<S extends string> = S | OuterOf<string> | NearestOf<string>;
 
 type ItemScope<I> = I extends Expression<unknown, infer S, unknown> ? S : I extends Ordering<infer S, unknown> ? S : never;
 type ItemParams<I> = I extends Expression<unknown, string, infer P> ? P : I extends Ordering<string, infer P> ? P : {};
 export type ScopesOf<C extends readonly unknown[]> = ItemScope<C[number]>;
 export type ParamsOfAll<C extends readonly unknown[]> = UnionToIntersection<{ [K in keyof C]: ItemParams<C[K]> }[number]>;
-export type OuterRefs<S extends string> = Extract<S, OuterOf<string>>;
+/** The `outer()` references among scopes `S` (a wide `^${string}`, which only comes
+ * from context-inferred type arguments, is none). */
+export type OuterRefs<S extends string, Own extends string> = S extends `^${infer R}`
+  ? string extends R
+    ? never
+    : S
+  : S extends `~${infer R}`
+    ? string extends R
+      ? never
+      : R extends Own
+        ? never
+        : OuterOf<R>
+    : never;
 
 /** `[]` when the query can run as is; otherwise an argument nobody can pass, whose name
  * says why. */
@@ -160,7 +173,7 @@ type InsertOptions<M extends ModelSpec> = DoNothing<M> | DoUpdate<M>;
 export class Prefetch<
   H extends readonly Hop[],
   Row = Last<H>["spec"]["row"],
-  A extends string | undefined = undefined,
+  const A extends string | undefined = undefined,
   S extends string = string,
   P = {},
 > {
@@ -372,7 +385,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   /** Keep rows matching all `conditions`. */
   filter<const C extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: C
-  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>>> {
+  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
     if (!conditions.length) {
       return this as never;
     }
@@ -382,7 +395,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   /** Drop rows matching all `conditions`. */
   exclude<const C extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: C
-  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>>> {
+  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
     if (!conditions.length) {
       return this as never;
     }
@@ -393,7 +406,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    * to-one relations are joined. */
   orderBy<const C extends readonly (Expression<unknown, AllowedOne<S>, unknown> | Ordering<AllowedOne<S>, unknown>)[]>(
     ...items: C
-  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>>> {
+  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
     return this.clone({ order: orderings(items) }) as never;
   }
 
@@ -469,7 +482,8 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   prefetchRelated<
     const C extends readonly (
       | RelationPath<ModelSpec, M["name"] | Many, readonly Hop[]>
-      | Prefetch<readonly Hop[], unknown, string | undefined, M["name"] | Many, unknown>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- `any`, not a contextual type the toAttr literal would widen to
+      | Prefetch<any, any, any, M["name"] | Many, any>
     )[],
   >(...relations: C): QuerySet<M, R & LoadAll<C>, S, P & PrefetchParams<C>, X> {
     const prefetch = [...this.state.prefetch];
@@ -522,7 +536,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     cte: Cte<N, C, ModelSpec | null>,
     on: On,
     options: { readonly outer?: boolean } = {},
-  ): QuerySet<M, R, S | N, P & ParamsOfAll<[On]>, X | OuterRefs<ScopesOf<[On]>>> {
+  ): QuerySet<M, R, S | N, P & ParamsOfAll<[On]>, X | OuterRefs<ScopesOf<[On]>, S | N>> {
     if (!isCte(cte)) {
       throw new TypeError(`join() takes a CTE, got ${String(cte)}`);
     }
@@ -558,7 +572,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    */
   select<const I extends SelectItems<M, S>>(
     items: I,
-  ): Select<M, Simplify<SelectRow<I>>, S, P & ItemsParams<I>, X | ItemsOuter<I>, CteColumnsOf<I>> {
+  ): Select<M, Simplify<SelectRow<I>>, S, P & ItemsParams<I>, X | ItemsOuter<I, S>, CteColumnsOf<I>> {
     return makeSelect(this as never, items) as never;
   }
 

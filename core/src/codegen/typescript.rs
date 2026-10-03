@@ -248,7 +248,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         writeln!(body, "export interface {name}Update {{").unwrap();
         for f in m.fields() {
             let t = value_type(f);
-            writeln!(body, "  {}?: {} | Expression<Compat<{t}>, {}, {{}}>;", camel(&f.name), input_type(f), quote(name)).unwrap();
+            writeln!(body, "  {}?: {} | Expression<Compat<{t}>, \"{name}\" | \"~{name}\", {{}}>;", camel(&f.name), input_type(f)).unwrap();
             if let Some(r) = belongs_to(m, &f.name) {
                 let null = if f.nullable { " | null" } else { "" };
                 writeln!(body, "  {}?: {}{null};", camel(&r.name), related_ref(schema, r)?).unwrap();

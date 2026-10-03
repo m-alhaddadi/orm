@@ -76,13 +76,17 @@ export class Cte<N extends string, C, M extends ModelSpec | null> implements Sou
   /** Column names: TypeScript name -> name in the CTE. */
   readonly columns: ReadonlyMap<string, string>;
   private readonly recursivePart: { cteIr(params: unknown[], ctes: Ctes): IR } | undefined;
+  private readonly distinct: boolean;
+  private readonly materialized: boolean | undefined;
 
   /** @internal */
   constructor(
     readonly name: N,
     private readonly query: QuerySet<ModelSpec, unknown, string, unknown, string> | Select<ModelSpec, object, string, unknown, string, unknown>,
-    private readonly options: CteOptions<N, C, unknown, string>,
+    options: CteOptions<N, C, unknown, string>,
   ) {
+    this.distinct = options.distinct ?? false;
+    this.materialized = options.materialized;
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
       throw new TypeError(`CTE name ${JSON.stringify(name)} must be an identifier`);
     }
@@ -129,12 +133,12 @@ export class Cte<N extends string, C, M extends ModelSpec | null> implements Sou
     const ir: IR = { name: this.name, query: this.query.cteIr(params, ctes) };
     if (this.recursivePart) {
       ir["recursive"] = this.recursivePart.cteIr(params, ctes);
-      if (this.options.distinct) {
+      if (this.distinct) {
         ir["distinct"] = true;
       }
     }
-    if (this.options.materialized !== undefined) {
-      ir["materialized"] = this.options.materialized;
+    if (this.materialized !== undefined) {
+      ir["materialized"] = this.materialized;
     }
     return ir;
   }
@@ -144,9 +148,9 @@ export class Cte<N extends string, C, M extends ModelSpec | null> implements Sou
    * slice it like any `select()`, run it, or use it in `in()`, `exists()` and
    * `asScalar()`.
    */
-  select<const I extends { readonly [key: string]: Expression<unknown, N | `^${string}`, unknown> }>(
+  select<const I extends { readonly [key: string]: Expression<unknown, N | `^${string}` | `~${string}`, unknown> }>(
     items: I,
-  ): Select<CteSpec<N>, Simplify<SelectRow<I>>, N, ItemsParams<I>, ItemsOuter<I>, CteColumnsOf<I>> {
+  ): Select<CteSpec<N>, Simplify<SelectRow<I>>, N, ItemsParams<I>, ItemsOuter<I, N>, CteColumnsOf<I>> {
     const base = this.query instanceof QuerySet ? this.query.meta : this.query.qs.meta;
     return makeSelect(new CteQuerySet(base, this as never) as never, items) as never;
   }

@@ -477,10 +477,10 @@ export type UserInsert = {
 };
 
 export interface UserUpdate {
-  id?: In<bigint> | Expression<Compat<bigint>, "User", {}>;
-  email?: In<string> | Expression<Compat<string>, "User", {}>;
-  name?: In<string> | Expression<Compat<string>, "User", {}>;
-  createdAt?: In<Date> | Expression<Compat<Date>, "User", {}>;
+  id?: In<bigint> | Expression<Compat<bigint>, "User" | "~User", {}>;
+  email?: In<string> | Expression<Compat<string>, "User" | "~User", {}>;
+  name?: In<string> | Expression<Compat<string>, "User" | "~User", {}>;
+  createdAt?: In<Date> | Expression<Compat<Date>, "User" | "~User", {}>;
 }
 
 export interface UserUpdateRow {
@@ -544,12 +544,12 @@ export type ProfileInsert = {
 );
 
 export interface ProfileUpdate {
-  id?: In<bigint> | Expression<Compat<bigint>, "Profile", {}>;
-  userId?: In<bigint> | Expression<Compat<bigint>, "Profile", {}>;
+  id?: In<bigint> | Expression<Compat<bigint>, "Profile" | "~Profile", {}>;
+  userId?: In<bigint> | Expression<Compat<bigint>, "Profile" | "~Profile", {}>;
   user?: { readonly id: In<bigint> };
-  role?: In<Role> | Expression<Compat<Role>, "Profile", {}>;
-  balance?: In<Decimal> | Expression<Compat<Decimal>, "Profile", {}>;
-  links?: In<string[]> | Expression<Compat<string[]>, "Profile", {}>;
+  role?: In<Role> | Expression<Compat<Role>, "Profile" | "~Profile", {}>;
+  balance?: In<Decimal> | Expression<Compat<Decimal>, "Profile" | "~Profile", {}>;
+  links?: In<string[]> | Expression<Compat<string[]>, "Profile" | "~Profile", {}>;
 }
 
 export interface ProfileUpdateRow {
@@ -621,14 +621,14 @@ export type PostInsert = {
 );
 
 export interface PostUpdate {
-  id?: In<bigint> | Expression<Compat<bigint>, "Post", {}>;
-  authorId?: In<bigint> | Expression<Compat<bigint>, "Post", {}>;
+  id?: In<bigint> | Expression<Compat<bigint>, "Post" | "~Post", {}>;
+  authorId?: In<bigint> | Expression<Compat<bigint>, "Post" | "~Post", {}>;
   author?: { readonly id: In<bigint> };
-  title?: In<string> | Expression<Compat<string>, "Post", {}>;
-  body?: In<string> | Expression<Compat<string>, "Post", {}>;
-  views?: In<number> | Expression<Compat<number>, "Post", {}>;
-  published?: In<boolean> | Expression<Compat<boolean>, "Post", {}>;
-  createdAt?: In<Date> | Expression<Compat<Date>, "Post", {}>;
+  title?: In<string> | Expression<Compat<string>, "Post" | "~Post", {}>;
+  body?: In<string> | Expression<Compat<string>, "Post" | "~Post", {}>;
+  views?: In<number> | Expression<Compat<number>, "Post" | "~Post", {}>;
+  published?: In<boolean> | Expression<Compat<boolean>, "Post" | "~Post", {}>;
+  createdAt?: In<Date> | Expression<Compat<Date>, "Post" | "~Post", {}>;
 }
 
 export interface PostUpdateRow {
@@ -701,13 +701,13 @@ export type CommentInsert = {
 );
 
 export interface CommentUpdate {
-  id?: In<bigint> | Expression<Compat<bigint>, "Comment", {}>;
-  postId?: In<bigint> | Expression<Compat<bigint>, "Comment", {}>;
+  id?: In<bigint> | Expression<Compat<bigint>, "Comment" | "~Comment", {}>;
+  postId?: In<bigint> | Expression<Compat<bigint>, "Comment" | "~Comment", {}>;
   post?: { readonly id: In<bigint> };
-  authorId?: In<bigint | null> | Expression<Compat<bigint | null>, "Comment", {}>;
+  authorId?: In<bigint | null> | Expression<Compat<bigint | null>, "Comment" | "~Comment", {}>;
   author?: { readonly id: In<bigint> } | null;
-  body?: In<string> | Expression<Compat<string>, "Comment", {}>;
-  createdAt?: In<Date> | Expression<Compat<Date>, "Comment", {}>;
+  body?: In<string> | Expression<Compat<string>, "Comment" | "~Comment", {}>;
+  createdAt?: In<Date> | Expression<Compat<Date>, "Comment" | "~Comment", {}>;
 }
 
 export interface CommentUpdateRow {
@@ -770,9 +770,9 @@ export type TagInsert = {
 };
 
 export interface TagUpdate {
-  id?: In<bigint> | Expression<Compat<bigint>, "Tag", {}>;
-  name?: In<string> | Expression<Compat<string>, "Tag", {}>;
-  priority?: In<Priority> | Expression<Compat<Priority>, "Tag", {}>;
+  id?: In<bigint> | Expression<Compat<bigint>, "Tag" | "~Tag", {}>;
+  name?: In<string> | Expression<Compat<string>, "Tag" | "~Tag", {}>;
+  priority?: In<Priority> | Expression<Compat<Priority>, "Tag" | "~Tag", {}>;
 }
 
 export interface TagUpdateRow {
@@ -831,10 +831,10 @@ export type PostTagInsert = {
 );
 
 export interface PostTagUpdate {
-  id?: In<bigint> | Expression<Compat<bigint>, "PostTag", {}>;
-  postId?: In<bigint> | Expression<Compat<bigint>, "PostTag", {}>;
+  id?: In<bigint> | Expression<Compat<bigint>, "PostTag" | "~PostTag", {}>;
+  postId?: In<bigint> | Expression<Compat<bigint>, "PostTag" | "~PostTag", {}>;
   post?: { readonly id: In<bigint> };
-  tagId?: In<bigint> | Expression<Compat<bigint>, "PostTag", {}>;
+  tagId?: In<bigint> | Expression<Compat<bigint>, "PostTag" | "~PostTag", {}>;
   tag?: { readonly id: In<bigint> };
 }
 

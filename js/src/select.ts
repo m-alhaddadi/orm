@@ -64,7 +64,9 @@ export type ItemsParams<I> = UnionToIntersection<
   { [K in keyof I]: I[K] extends Expression<unknown, string, infer P> ? P : {} }[keyof I]
 >;
 
-export type ItemsOuter<I> = { [K in keyof I]: I[K] extends Expression<unknown, infer S, unknown> ? OuterRefs<S> : never }[keyof I];
+export type ItemsOuter<I, Own extends string> = {
+  [K in keyof I]: I[K] extends Expression<unknown, infer S, unknown> ? OuterRefs<S, Own> : never;
+}[keyof I];
 
 /** The columns of a CTE made from a `select()`: a selected model gives its fields. */
 export type CteColumnsOf<I> = UnionToIntersection<
@@ -120,19 +122,19 @@ export class Select<M extends ModelSpec, Row extends object, S extends string, P
 
   filter<const Cs extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: Cs
-  ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>>, C> {
+  ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>, S>, C> {
     return this.with(this.qs.filter(...(conditions as unknown as never[])) as never);
   }
 
   exclude<const Cs extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: Cs
-  ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>>, C> {
+  ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>, S>, C> {
     return this.with(this.qs.exclude(...(conditions as unknown as never[])) as never);
   }
 
   orderBy<const Cs extends readonly (Expression<unknown, AllowedOne<S>, unknown> | Ordering<AllowedOne<S>, unknown>)[]>(
     ...items: Cs
-  ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>>, C> {
+  ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>, S>, C> {
     return this.with(this.qs.orderBy(...(items as unknown as never[])) as never);
   }
 
@@ -161,7 +163,7 @@ export class Select<M extends ModelSpec, Row extends object, S extends string, P
    * itself (`groupBy(Post)`) groups by its primary key. */
   groupBy<const Cs extends readonly (Expression<unknown, AllowedOne<S>, unknown> | ModelClass<M>)[]>(
     ...exprs: Cs
-  ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>>, C> {
+  ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>, S>, C> {
     const out = exprs.map((e) => {
       const meta = modelMeta(e);
       if (meta) {
@@ -181,7 +183,7 @@ export class Select<M extends ModelSpec, Row extends object, S extends string, P
   /** Keep groups matching all `conditions`: `having(func.count().gt(2))`. */
   having<const Cs extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: Cs
-  ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>>, C> {
+  ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>, S>, C> {
     if (!conditions.length) {
       return this as never;
     }

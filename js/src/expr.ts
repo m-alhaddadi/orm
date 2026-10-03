@@ -26,8 +26,11 @@ export type IR = { [key: string]: unknown };
 export type Many = "*many";
 /** `^User`: a column of an enclosing `User` query (`outer(User.id)`). */
 export type OuterOf<S extends string> = `^${S}`;
-/** The scopes an `outer()` reference turns into one query up. */
-export type ResolveOuter<X extends string> = X extends `^${infer R}` ? R : never;
+/** `~User`: a column of the nearest `User` query, this one or an enclosing one: what an
+ * `outer(User.id)` reference becomes one query up (`exists()`, `in()`, `asScalar()`). */
+export type NearestOf<S extends string> = `~${S}`;
+/** The scopes `outer()` references turn into one query up. */
+export type ResolveOuter<X extends string> = X extends `^${infer R}` ? NearestOf<R> : never;
 
 /** Values of numeric columns compare and combine with each other. */
 type Numeric = number | bigint | Decimal;
