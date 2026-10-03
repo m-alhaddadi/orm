@@ -21,10 +21,10 @@
   },
   "scripts": {
     "build:native": "node scripts/build-native.mjs",
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/typing/tsconfig.json --noEmit",
     "test": "npm run build && node --expose-gc --test --test-concurrency=1 \"dist/test/**/*.test.js\"",
-    "test:bun": "bun test test/"
+    "test:bun": "bun test ./test/"
   },
   "dependencies": {
     "decimal.js": "^10.4.3"

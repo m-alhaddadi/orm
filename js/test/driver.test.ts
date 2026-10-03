@@ -72,7 +72,8 @@ test("verify-full rejects an untrusted certificate", async (t) => {
 });
 
 test("an abandoned transaction is rolled back", async (t) => {
-  const gc = (globalThis as { gc?: () => void }).gc;
+  const g = globalThis as { gc?: () => void; Bun?: { gc(sync: boolean): void } };
+  const gc = g.gc ?? (g.Bun ? () => g.Bun!.gc(true) : undefined);
   if (!gc) {
     t.skip("needs node --expose-gc");
     return;

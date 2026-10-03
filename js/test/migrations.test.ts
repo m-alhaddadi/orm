@@ -2,7 +2,7 @@
  * database of their own (migrations create and drop extensions, which are per database). */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -11,7 +11,8 @@ import { DatabaseError, IntegrityError, MigrationError, Migrations, Migrator, Re
 import { main as cli } from "../src/cli.js";
 import { DATABASE_URL } from "./helpers.js";
 
-const ROOT = join(import.meta.dirname, "..", "..", "..");
+// the repository root: from test/ (Bun) or dist/test/ (Node)
+const ROOT = [join(import.meta.dirname, "..", ".."), join(import.meta.dirname, "..", "..", "..")].find((d) => existsSync(join(d, "examples")))!;
 
 const V1 = `
 model Author {
