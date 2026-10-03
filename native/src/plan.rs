@@ -784,6 +784,7 @@ impl<'s, 'py> Planner<'s, 'py> {
 
     /// `EXISTS (SELECT 1 FROM <target> AS tN WHERE tN.to = <scope>.from AND <body>)`
     /// (through the join table for a many-to-many relation).
+    /// TODO: skip a hop whose keys line up with the next one (see `ensure_join`).
     fn exists_via(
         &mut self,
         hop: &str,
@@ -1403,6 +1404,16 @@ impl<'s, 'py> Planner<'s, 'py> {
     // -- joins (select_related / order_by) ----------------------------------------------
 
     /// Adds LEFT JOINs for every prefix of `path`; returns (alias, model) of the last hop.
+    ///
+    /// TODO: shortcut joins. In `A -r1-> B -r2-> C` with `r2.from == r1.to` (e.g.
+    /// `Order.shop.config`, where `ShopConfig.shop_id` is the key and a FK to `Shop.id`),
+    /// B can be skipped and C linked as `C.r2.to = A.r1.from`
+    /// (`shop_configs.shop_id = orders.shop_id`), when nothing else of B is read
+    /// (reading `B.<r1.to>` itself resolves to `A.<r1.from>`) and `r1` or `r2` is a FK, so
+    /// B's row is known to exist. Same for `exists_via`. Postgres doesn't do this itself:
+    /// it derives `orders.shop_id = shop_configs.shop_id` for inner joins but still joins
+    /// `shops` (it doesn't trust FKs for join removal), and for LEFT JOINs it derives
+    /// nothing. `select_related` of B must keep the join.
     fn ensure_join(&mut self, path: &[String], why: &str) -> PyResult<(String, usize)> {
         let (mut alias, mut model) = (self.root_alias().to_owned(), self.root);
         for i in 0..path.len() {
