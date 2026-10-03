@@ -60,7 +60,13 @@ export class TransactionRequired extends ORMError {
   override name = "TransactionRequired";
 }
 
+/** The migrations directory and the database's migration history disagree. */
+export class MigrationError extends ORMError {
+  override name = "MigrationError";
+}
+
 const KINDS: Record<string, new (message: string) => Error> = {
+  MigrationError,
   DatabaseError,
   IntegrityError,
   LockNotAvailable,

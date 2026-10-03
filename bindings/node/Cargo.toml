@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 orm-core = { path = "../../core" }
 orm-engine = { path = "../../engine" }
+orm-cli = { path = "../../cli" }
 napi = { version = "3", default-features = false, features = ["napi8", "tokio_rt", "serde-json"] }
 napi-derive = "3"
 sea-query = { version = "1.0", features = ["backend-postgres", "with-chrono", "with-json", "with-uuid", "with-bigdecimal", "postgres-array", "thread-safe", "hashable-value"] }

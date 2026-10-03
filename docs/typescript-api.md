@@ -43,7 +43,7 @@ npm run typecheck           # tsc over the package, the typing checks and the ex
 
 ## Models: the generated module
 
-`orm generate typescript schema.prisma -o models.ts --import orm` (or `npx orm generate`)
+`npx orm generate [-o models.ts] [--import orm]` (or `orm generate typescript ...`)
 writes one module with the compiled schema and a type for everything:
 
 * `User`: the row type (an instance). Its fields are read-only and camelCase
@@ -238,12 +238,12 @@ Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,
 
 ## Migrations and the CLI
 
-`npx orm` has the same commands as `python -m orm`: `check`, `generate`, `makemigrations
-[--check]`, `sqlmigrate`, `migrate`, `rollback` and `showmigrations`. The paths come from
-`--schema` / `--dir`, or from the `"orm"` key of `package.json`. The database URL comes
-from `--url` or `ORM_DATABASE_URL`. Migration files and their SHA-256 checksums are the
-Python package's, so either tool can apply them. `Migrations` and `Migrator` are the
-programmatic API.
+`npx orm` is the one `orm` command line (Rust, `cli/`), run through the addon: the same
+program as `python -m orm` and the standalone `orm` binary, with the same commands
+(`check`, `generate`, `makemigrations [--check]`, `sqlmigrate`, `migrate`, `rollback`,
+`showmigrations`; see [`schema.md`](schema.md#migrations)). Under `npx`, `generate` writes
+TypeScript and `package.json`'s `"orm"` key is read first. `Migrations` and `Migrator`
+are the programmatic API; they call the same Rust migrator (`engine/src/migrate.rs`).
 
 ## Decisions
 

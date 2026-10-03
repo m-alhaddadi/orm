@@ -350,7 +350,8 @@ comparisons, so queries on extension-typed columns look like any other.
 
 ```bash
 python -m orm generate                   # models.py + models.pyi next to the schema (or -o path)
-orm generate python schema.prisma -o app/models.py
+npx orm generate                         # models.ts
+orm generate python -o app/models.py     # the standalone binary: say which language
 ```
 
 `models.py` embeds the compiled IR and builds the classes with `orm.define()`, so no
@@ -359,7 +360,7 @@ typed classes, relation paths (`User.posts.created_at` is `ColumnRef[datetime]`)
 insert / update `TypedDict`s and query sets (see [`python-api.md`](python-api.md)).
 `tests/test_migrations.py` checks that the committed blog module is up to date.
 Without generation, `orm.load("schema.prisma")` returns the same classes at runtime.
-TypeScript generation will come with the JS binding.
+TypeScript: see [`typescript-api.md`](typescript-api.md).
 
 ## Migrations
 
@@ -371,13 +372,19 @@ python -m orm sqlmigrate 2 [--down]
 python -m orm migrate [target]               # apply pending migrations
 python -m orm rollback [--steps N | --to 0002_x | --to zero]
 python -m orm showmigrations
-
-orm makemigrations schema.prisma --dir migrations # the same files, without Python
-orm sqlmigrate 2 --dir migrations
 ```
 
-Settings come from flags (`--schema`, `--dir`, `--url`) or `[tool.orm]` in
-`pyproject.toml` (`schema`, `migrations`), and the URL from `ORM_DATABASE_URL`. This
+There is one command line, written in Rust (`cli/`): `python -m orm`, `npx orm` and the
+standalone `orm` binary (`cargo install --path cli`) all run it, through the Python
+extension, the Node addon or on their own, so they take the same arguments, write the
+same files and apply migrations the same way. The bindings only change the defaults:
+the name in `--help`, the configuration file read first, and the language `generate`
+writes (the binary needs `python` / `typescript`, or an `-o` path that tells).
+
+Settings come from flags (`--schema`, `--dir`, `--url`), else `[tool.orm]` in
+`pyproject.toml` or the `"orm"` key of `package.json` (`schema`, `migrations`), and the
+URL from `ORM_DATABASE_URL`. Exit codes: 0 success, 1 failure (including
+`makemigrations --check` finding changes), 2 bad usage. This
 repository's `pyproject.toml` points at the blog example; its first migration is
 [`examples/blog/migrations/0001_initial`](../examples/blog/migrations/0001_initial/up.sql).
 

@@ -12,6 +12,7 @@
 mod convert;
 mod js;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use napi::bindgen_prelude::{PromiseRaw, ToNapiValue};
@@ -26,6 +27,7 @@ use orm_core::{migrate, schema};
 use orm_engine::db::{self, DbError, Driver, ErrorKind, Executor, RowSet};
 use orm_engine::exec::{self, Conflict, Fetched, Outcome};
 use orm_engine::plan::{Output, Planner};
+use orm_engine::migrate as engine_migrate;
 use orm_engine::{parse_op, Error};
 
 // -- errors ---------------------------------------------------------------------------------
@@ -46,6 +48,7 @@ fn engine_err(e: Error) -> napi::Error {
     match e {
         Error::Query(m) => tagged("QueryError", m),
         Error::Schema(m) => tagged("SchemaError", m),
+        Error::Migration(m) => tagged("MigrationError", m),
         Error::Db(e) => tagged(db_kind(&e), e),
         Error::Value(m) => tagged("TypeError", m),
         Error::Binding(e) => tagged("TypeError", e),
@@ -553,6 +556,51 @@ impl Engine {
         self.script(env, statements, tx)
     }
 
+    /// The migrations of `dir` and whether they are applied: JSON
+    /// `[{name, path, applied, appliedAt}]` (see `orm_engine::migrate`).
+    #[napi]
+    pub fn migration_status<'env>(&self, env: &'env Env, dir: String) -> napi::Result<PromiseRaw<'env, String>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let out = engine_migrate::status(&*driver, Path::new(&dir)).await.map_err(engine_err)?;
+            let rows: Vec<_> = out
+                .into_iter()
+                .map(|s| serde_json::json!({"name": s.migration.name, "path": s.migration.path, "applied": s.applied, "appliedAt": s.applied_at}))
+                .collect();
+            Ok(serde_json::Value::Array(rows).to_string())
+        })
+    }
+
+    /// Applies pending migrations (up to `target`); the names applied.
+    #[napi]
+    pub fn migrate_up<'env>(&self, env: &'env Env, dir: String, target: Option<String>) -> napi::Result<PromiseRaw<'env, Vec<String>>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let done = engine_migrate::upgrade(&*driver, Path::new(&dir), target.as_deref()).await.map_err(engine_err)?;
+            Ok(done.into_iter().map(|m| m.name).collect())
+        })
+    }
+
+    /// Reverts the last `steps` migrations, or every one after `target`; the names reverted.
+    #[napi]
+    pub fn migrate_down<'env>(
+        &self,
+        env: &'env Env,
+        dir: String,
+        steps: u32,
+        target: Option<String>,
+    ) -> napi::Result<PromiseRaw<'env, Vec<String>>> {
+        let driver = self.driver.clone();
+        let down = match target {
+            Some(t) => engine_migrate::Down::To(t),
+            None => engine_migrate::Down::Steps(steps as usize),
+        };
+        env.spawn_future(async move {
+            let done = engine_migrate::downgrade(&*driver, Path::new(&dir), down).await.map_err(engine_err)?;
+            Ok(done.into_iter().map(|m| m.name).collect())
+        })
+    }
+
     #[napi]
     pub fn close<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
         let driver = self.driver.clone();
@@ -591,6 +639,27 @@ pub fn compile_schema(source: String, path: Option<String>) -> napi::Result<Stri
     let ir = orm_core::dsl::compile(&source, path.as_deref().map(std::path::Path::new)).map_err(schema_err)?;
     let (ir, _) = orm_core::dsl::check(ir).map_err(schema_err)?;
     serde_json::to_string(&ir).map_err(schema_err)
+}
+
+/// `npx orm`: the `orm` command line (`orm_cli`). Resolves to the exit code; output
+/// goes to the process's stdout / stderr.
+#[napi]
+pub fn cli<'env>(env: &'env Env, argv: Vec<String>) -> napi::Result<PromiseRaw<'env, i32>> {
+    env.spawn_future(async move { Ok(orm_cli::run(&argv, orm_cli::Host::Node).await) })
+}
+
+/// Migration folders of `dir` in order: `[[name, path]]`.
+#[napi]
+pub fn list_migrations(dir: String) -> napi::Result<Vec<Vec<String>>> {
+    let all = engine_migrate::list(Path::new(&dir)).map_err(engine_err)?;
+    Ok(all.into_iter().map(|m| vec![m.name, m.path.to_string_lossy().into_owned()]).collect())
+}
+
+/// A migration folder by name or number: `[name, path]`.
+#[napi]
+pub fn find_migration(dir: String, name: String) -> napi::Result<Vec<String>> {
+    let m = engine_migrate::find(Path::new(&dir), &name).map_err(engine_err)?;
+    Ok(vec![m.name, m.path.to_string_lossy().into_owned()])
 }
 
 #[napi]

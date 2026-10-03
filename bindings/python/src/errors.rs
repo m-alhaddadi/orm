@@ -19,6 +19,12 @@ create_exception!(
 );
 create_exception!(_native, QueryError, PyValueError, "The query IR does not match the schema.");
 create_exception!(_native, SchemaError, PyValueError, "The schema file or IR is invalid.");
+create_exception!(
+    _native,
+    MigrationError,
+    PyException,
+    "The migrations directory and the database's migration history disagree."
+);
 
 pub fn db_err(e: DbError) -> PyErr {
     match e.kind {
@@ -42,6 +48,7 @@ pub fn engine_err(e: Error) -> PyErr {
     match e {
         Error::Query(m) => QueryError::new_err(m),
         Error::Schema(m) => SchemaError::new_err(m),
+        Error::Migration(m) => MigrationError::new_err(m),
         Error::Db(e) => db_err(e),
         Error::Value(m) => PyTypeError::new_err(m),
         Error::Binding(e) => match e.downcast::<PyErr>() {

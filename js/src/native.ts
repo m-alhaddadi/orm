@@ -104,6 +104,9 @@ export interface NativeEngine {
   execute(sql: string, tx: NativeTransaction | null): Promise<number>;
   fetchText(sql: string, tx: NativeTransaction | null): Promise<(string | null)[][]>;
   executeScript(statements: string[], tx: NativeTransaction | null): Promise<void>;
+  migrationStatus(dir: string): Promise<string>;
+  migrateUp(dir: string, target: string | null): Promise<string[]>;
+  migrateDown(dir: string, steps: number, target: string | null): Promise<string[]>;
   createTables(): Promise<void>;
   dropTables(): Promise<void>;
   close(): Promise<void>;
@@ -116,6 +119,9 @@ interface Addon {
   compileSchemaFile(path: string): string;
   generateTypescript(path: string, runtime?: string | null): string;
   setDecimalClass(ctor: unknown): void;
+  cli(argv: string[]): Promise<number>;
+  listMigrations(dir: string): string[][];
+  findMigration(dir: string, name: string): string[];
 }
 
 function load(): Addon {

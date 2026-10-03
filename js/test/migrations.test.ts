@@ -8,8 +8,17 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 
 import { DatabaseError, IntegrityError, MigrationError, Migrations, Migrator, Registry, SchemaError, connect, loads, type Database } from "../src/index.js";
-import { main as cli } from "../src/cli.js";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { DATABASE_URL } from "./helpers.js";
+
+// `npx orm` as a process of its own: src/cli.ts (Bun) or dist/src/cli.js (Node)
+const CLI = [".js", ".ts"].map((ext) => fileURLToPath(new URL(`../src/cli${ext}`, import.meta.url))).find(existsSync)!;
+
+function cli(args: string[], cwd?: string): { code: number; out: string; err: string } {
+  const r = spawnSync(process.execPath, [CLI, ...args], { cwd, encoding: "utf8", env: { ...process.env, ORM_DATABASE_URL: "" } });
+  return { code: r.status ?? -1, out: r.stdout, err: r.stderr };
+}
 
 // the repository root: from test/ (Bun) or dist/test/ (Node)
 const ROOT = [join(import.meta.dirname, "..", ".."), join(import.meta.dirname, "..", "..", "..")].find((d) => existsSync(join(d, "examples")))!;
@@ -131,31 +140,33 @@ test("the generated models are current", async () => {
   assert.equal(readFileSync(join(ROOT, "js/test/blog/models.ts"), "utf8"), native().generateTypescript(schema, "../../src/index.js"));
 });
 
-test("the CLI", async () => {
+test("the CLI", () => {
   const dir = tmp();
   writeFileSync(join(dir, "schema.prisma"), V1);
-  const cwd = process.cwd();
-  process.chdir(dir);
-  try {
-    const out: string[] = [];
-    const err: string[] = [];
-    const run = (...args: string[]) => cli(args, (l) => out.push(l), (l) => err.push(l));
-    assert.equal(await run("check"), 0);
-    assert.equal(await run("generate", "-o", "app/models.ts"), 0);
-    assert.ok(readFileSync(join(dir, "app/models.ts"), "utf8").includes("export interface BookSpec"));
-    assert.equal(await run("makemigrations", "--check"), 1);
-    assert.equal(await run("makemigrations"), 0);
-    assert.ok(out.some((l) => l.startsWith("Created ")));
-    assert.equal(await run("makemigrations", "--check"), 0);
-    assert.equal(await run("sqlmigrate", "1"), 0);
-    assert.ok(out.some((l) => l.includes('CREATE TABLE "books"')));
-    assert.equal(await run("nope"), 2);
-    writeFileSync(join(dir, "schema.prisma"), "model X {");
-    assert.equal(await run("check"), 1);
-    assert.ok(err.some((l) => l.includes("schema.prisma:1:1: model X is not closed")));
-  } finally {
-    process.chdir(cwd);
-  }
+  const run = (...args: string[]) => cli(args, dir);
+  assert.equal(run("check").code, 0);
+  assert.equal(run("generate", "-o", "app/models.ts").code, 0);
+  assert.ok(readFileSync(join(dir, "app/models.ts"), "utf8").includes("export interface BookSpec"));
+  assert.equal(run("generate").code, 0); // TypeScript by default under npx orm
+  assert.ok(existsSync(join(dir, "models.ts")));
+  assert.equal(run("makemigrations", "--check").code, 1);
+  const made = run("makemigrations");
+  assert.equal(made.code, 0);
+  assert.match(made.out, /^Created /);
+  assert.equal(run("makemigrations", "--check").code, 0);
+  const sql = run("sqlmigrate", "1");
+  assert.equal(sql.code, 0);
+  assert.ok(sql.out.includes('CREATE TABLE "books"'));
+  assert.equal(run("nope").code, 2);
+  assert.match(run("--help").out, /^usage: npx orm /);
+  assert.equal(run("migrate").code, 2); // no database URL
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ orm: { schema: "db/schema.prisma", migrations: "db/migrations" } }));
+  assert.match(run("check").err, /db\/schema.prisma/);
+  writeFileSync(join(dir, "package.json"), "{}");
+  writeFileSync(join(dir, "schema.prisma"), "model X {");
+  const bad = run("check");
+  assert.equal(bad.code, 1);
+  assert.ok(bad.err.includes("schema.prisma:1:1: model X is not closed"));
 });
 
 // -- against a database -----------------------------------------------------------------------------
@@ -254,13 +265,10 @@ test("the CLI against a database", async () => {
   const dir = tmp();
   writeFileSync(join(dir, "schema.prisma"), V1);
   await database(models(V1));
-  const out: string[] = [];
-  const run = (...args: string[]) => cli(["--schema", join(dir, "schema.prisma"), "--dir", join(dir, "migrations"), "--url", MIGRATIONS_URL, ...args], (l) => out.push(l), () => {});
-  assert.equal(await run("makemigrations"), 0);
-  assert.equal(await run("migrate"), 0);
-  assert.ok(out.includes("Applied 0001_initial"));
-  assert.equal(await run("showmigrations"), 0);
-  assert.ok(out.some((l) => l.startsWith("[x] 0001_initial")));
-  assert.equal(await run("rollback", "--to", "zero"), 0);
-  assert.ok(out.includes("Reverted 0001_initial"));
+  const run = (...args: string[]) => cli(["--schema", join(dir, "schema.prisma"), "--dir", join(dir, "migrations"), "--url", MIGRATIONS_URL, ...args]);
+  assert.equal(run("makemigrations").code, 0);
+  assert.deepEqual(run("migrate"), { code: 0, out: "Applied 0001_initial\n", err: "" });
+  assert.match(run("showmigrations").out, /^\[x\] 0001_initial {2}\(/);
+  assert.equal(run("migrate").out, "Nothing to apply.\n");
+  assert.deepEqual(run("rollback", "--to", "zero"), { code: 0, out: "Reverted 0001_initial\n", err: "" });
 });

@@ -1,5 +1,5 @@
 //! The ORM engine shared by the language bindings: query IR → SQL (`plan`), database
-//! drivers (`db`), and running plans (`exec`).
+//! drivers (`db`), running plans (`exec`) and migrations (`migrate`).
 //!
 //! Bindings send the schema once and then one IR document per operation, with its
 //! literal values in a separate list in their own representation ([`Params`]). They
@@ -9,6 +9,7 @@
 pub mod db;
 pub mod error;
 pub mod exec;
+pub mod migrate;
 pub mod params;
 pub mod plan;
 

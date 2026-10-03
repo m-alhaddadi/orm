@@ -21,7 +21,8 @@ automatically: each relation hop becomes a correlated `EXISTS`.
 |---|---|
 | `python/orm/` | Python package: `expr.py` (expressions, `func`, `outer` / `exists`, windows → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet, `Prefetch`), `select.py` (`select()`, `Row`), `cte.py` (CTEs), `write.py` (insert / update / delete statements), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
 | `core/` | Rust crate `orm-core`, no binding code: schema language, IR (`ir.rs`), extensions, migrations, code generation, the `orm` CLI (see [`schema.md`](schema.md)) |
-| `engine/` | Rust crate `orm-engine`, shared by both bindings: `plan.rs` (IR → sea-query statements), `db/` (drivers: `mod.rs` traits, `postgres.rs`), `exec.rs` (running plans, prefetch, `update_many`), `params.rs` (the values a binding passes in) |
+| `engine/` | Rust crate `orm-engine`, shared by both bindings: `plan.rs` (IR → sea-query statements), `db/` (drivers: `mod.rs` traits, `postgres.rs`), `exec.rs` (running plans, prefetch, `update_many`), `migrate.rs` (applying migrations), `params.rs` (the values a binding passes in) |
+| `cli/` | Rust crate `orm-cli`: the `orm` command line, run as the `orm` binary, `python -m orm` and `npx orm` |
 | `bindings/python/` | Rust crate `orm._native` (PyO3) on top of `orm-engine`: `build.rs` (rows → instances and `Row`s), `convert.rs` (Python ↔ values), `lib.rs` |
 | `bindings/node/`, `js/` | The TypeScript package on the same engine: [`typescript-api.md`](typescript-api.md) |
 | `examples/blog/` | `schema.prisma`, the `models.py` / `models.pyi` generated from it, its migrations, `demo.py` |

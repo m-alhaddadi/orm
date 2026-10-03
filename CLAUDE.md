@@ -20,6 +20,6 @@ npm test && npm run test:bun && npm run typecheck
 
 Regenerate the example models after changing code generation:
 `cd examples/blog && python -m orm generate`, and for TypeScript
-`orm generate typescript examples/blog/schema.prisma -o examples/blog/models.ts --import orm`
+`cargo run -q -p orm-cli -- --schema examples/blog/schema.prisma generate typescript`
 and the same with `-o js/test/blog/models.ts --import ../../src/index.js`
 (a test checks both are current).

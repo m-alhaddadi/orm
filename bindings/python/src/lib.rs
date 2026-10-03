@@ -10,6 +10,7 @@ mod errors;
 
 use orm_core::{ir, migrate, schema};
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
@@ -23,6 +24,7 @@ use orm_core::dialect::{Dialect, Target};
 use orm_engine::db::{self, Driver, Executor};
 use orm_engine::exec::{self, Conflict, Outcome};
 use orm_engine::plan::Planner;
+use orm_engine::migrate as engine_migrate;
 use orm_engine::parse_op;
 
 /// Marker for "use the column's server default" in insert rows.
@@ -400,6 +402,45 @@ impl Engine {
         self.run_script(py, statements, tx)
     }
 
+    /// `[(name, applied, applied_at)]` for the migrations of `dir` (see `orm_engine::migrate`).
+    fn migration_status<'py>(&self, py: Python<'py>, dir: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let out = engine_migrate::status(&*driver, &dir).await.map_err(engine_err)?;
+            Ok(out.into_iter().map(|s| (s.migration.name, s.applied, s.applied_at)).collect::<Vec<_>>())
+        })
+    }
+
+    /// Applies pending migrations (up to `target`); the names applied.
+    #[pyo3(signature = (dir, target = None))]
+    fn migrate_up<'py>(&self, py: Python<'py>, dir: PathBuf, target: Option<String>) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let done = engine_migrate::upgrade(&*driver, &dir, target.as_deref()).await.map_err(engine_err)?;
+            Ok(done.into_iter().map(|m| m.name).collect::<Vec<_>>())
+        })
+    }
+
+    /// Reverts the last `steps` migrations, or every one after `target`; the names reverted.
+    #[pyo3(signature = (dir, steps = 1, target = None))]
+    fn migrate_down<'py>(
+        &self,
+        py: Python<'py>,
+        dir: PathBuf,
+        steps: usize,
+        target: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        let down = match target {
+            Some(t) => engine_migrate::Down::To(t),
+            None => engine_migrate::Down::Steps(steps),
+        };
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let done = engine_migrate::downgrade(&*driver, &dir, down).await.map_err(engine_err)?;
+            Ok(done.into_iter().map(|m| m.name).collect::<Vec<_>>())
+        })
+    }
+
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let driver = self.driver.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -462,6 +503,27 @@ fn generate_python(path: &str) -> PyResult<(String, String)> {
     Ok((g.module, g.stub))
 }
 
+/// `python -m orm`: the `orm` command line (`orm_cli`), on its own runtime with the GIL
+/// released. Gives the exit code; output goes to the process's stdout / stderr.
+#[pyfunction]
+fn cli(py: Python<'_>, argv: Vec<String>) -> i32 {
+    py.detach(|| orm_cli::run_blocking(&argv, orm_cli::Host::Python))
+}
+
+/// Migration folders of `dir` in order: `[(name, path)]`.
+#[pyfunction]
+fn list_migrations(dir: PathBuf) -> PyResult<Vec<(String, PathBuf)>> {
+    let all = engine_migrate::list(&dir).map_err(engine_err)?;
+    Ok(all.into_iter().map(|m| (m.name, m.path)).collect())
+}
+
+/// A migration folder by name or number: `(name, path)`.
+#[pyfunction]
+fn find_migration(dir: PathBuf, name: &str) -> PyResult<(String, PathBuf)> {
+    let m = engine_migrate::find(&dir, name).map_err(engine_err)?;
+    Ok((m.name, m.path))
+}
+
 /// `engine = await connect(url, schema, max_connections=10)`
 ///
 /// `disable` switches capabilities off (`"ilike"`, `"update_from_values"`, ...), so the
@@ -491,6 +553,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compile_schema, m)?)?;
     m.add_function(wrap_pyfunction!(compile_schema_file, m)?)?;
     m.add_function(wrap_pyfunction!(generate_python, m)?)?;
+    m.add_function(wrap_pyfunction!(cli, m)?)?;
+    m.add_function(wrap_pyfunction!(list_migrations, m)?)?;
+    m.add_function(wrap_pyfunction!(find_migration, m)?)?;
     m.add_class::<PySchema>()?;
     m.add_class::<Engine>()?;
     m.add_class::<Transaction>()?;
@@ -500,5 +565,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("LockNotAvailable", py.get_type::<errors::LockNotAvailable>())?;
     m.add("QueryError", py.get_type::<errors::QueryError>())?;
     m.add("SchemaError", py.get_type::<errors::SchemaError>())?;
+    m.add("MigrationError", py.get_type::<errors::MigrationError>())?;
     Ok(())
 }

@@ -11,28 +11,23 @@
  *     snapshot.json   the database schema after up.sql
  * ```
  *
- * Generating a migration (the Rust core) diffs the schema against the newest
- * `snapshot.json`, so it needs no database. The runner records applied migrations with
- * a checksum and refuses to continue if an applied file changed.
+ * Generating a migration (`core/src/migrate`) diffs the schema against the newest
+ * `snapshot.json`, so it needs no database. Applying and reverting
+ * (`engine/src/migrate.rs`) records each migration with a checksum and refuses to
+ * continue if an applied file changed. Both are the Rust code the `orm` command line and
+ * the Python package run too.
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Database } from "./db.js";
-import { ORMError } from "./errors.js";
+import { MigrationError } from "./errors.js";
 import { Registry } from "./model.js";
-import { call, native, type NativeSchema } from "./native.js";
+import { call, native, wait, type NativeSchema } from "./native.js";
 
-const TABLE = "orm_migrations";
-/** Arbitrary constant: the advisory lock serializing concurrent migrators (the Python
- * package's too). */
-const LOCK_ID = 0x6f726d6d;
-
-export class MigrationError extends ORMError {
-  override name = "MigrationError";
-}
+export { MigrationError };
 
 export interface Step {
   readonly summary: string;
@@ -82,8 +77,6 @@ function nativeSchema(schema: SchemaSource): NativeSchema {
   return schema;
 }
 
-const lit = (text: string) => `'${text.replaceAll("'", "''")}'`;
-
 /** A migrations directory and the schema it migrates to. */
 export class Migrations {
   constructor(
@@ -96,27 +89,13 @@ export class Migrations {
   }
 
   all(): Migration[] {
-    if (!existsSync(this.directory) || !statSync(this.directory).isDirectory()) {
-      return [];
-    }
-    const found = readdirSync(this.directory)
-      .sort()
-      .filter((n) => /^\d{4}_/.test(n) && existsSync(join(this.directory, n, "up.sql")))
-      .map((n) => new Migration(n, join(this.directory, n)));
-    const numbers = found.map((m) => m.name.slice(0, 4));
-    const dupes = [...new Set(numbers.filter((n, i) => numbers.indexOf(n) !== i))].sort();
-    if (dupes.length) {
-      throw new MigrationError(`several migrations share the number(s) ${dupes.join(", ")}; renumber them`);
-    }
-    return found;
+    return call(() => native().listMigrations(this.directory)).map(([name, path]) => new Migration(name!, path!));
   }
 
+  /** A migration by folder name or number (`"3"`, `"0003_add_tags"`). */
   get(name: string): Migration {
-    const m = this.all().find((m) => m.name === name || m.name.slice(0, 4) === name.padStart(4, "0"));
-    if (!m) {
-      throw new MigrationError(`no migration ${JSON.stringify(name)} in ${this.directory}`);
-    }
-    return m;
+    const [found, path] = call(() => native().findMigration(this.directory, name));
+    return new Migration(found!, path!);
   }
 
   /** What the next migration would contain (no `up` steps if the schema is unchanged). */
@@ -138,107 +117,42 @@ export interface Status {
   readonly appliedAt: string | null;
 }
 
-/** Applies and reverts the migrations of a directory on a database. */
+/**
+ * Applies and reverts the migrations of a directory on a database. Each migration runs
+ * in its own transaction (on a connection of the pool, not in the caller's transaction)
+ * together with its `orm_migrations` row, under an advisory lock: a failing migration
+ * leaves the database at the previous one, and concurrent migrators apply each
+ * migration once.
+ */
 export class Migrator {
   constructor(
     readonly db: Database,
     readonly migrations: Migrations,
   ) {}
 
-  private async ensureTable(): Promise<void> {
-    await this.db.execute(
-      `CREATE TABLE IF NOT EXISTS ${TABLE} (name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`,
-    );
+  private get dir(): string {
+    return this.migrations.directory;
   }
 
-  private async applied(): Promise<Map<string, [string, string]>> {
-    const rows = await this.db.fetchText(`SELECT name, checksum, applied_at::text FROM ${TABLE} ORDER BY name`);
-    return new Map(rows.map((r) => [r[0]!, [r[1]!, r[2]!]]));
-  }
-
-  private async locked(): Promise<void> {
-    await this.db.execute(`SELECT pg_advisory_xact_lock(${LOCK_ID})`);
+  private named(names: readonly string[]): Migration[] {
+    return names.map((n) => new Migration(n, join(this.dir, n)));
   }
 
   async status(): Promise<Status[]> {
-    await this.ensureTable();
-    const applied = await this.applied();
-    const out = this.migrations.all().map((m) => ({ migration: m, applied: applied.has(m.name), appliedAt: applied.get(m.name)?.[1] ?? null }));
-    const known = new Set(out.map((s) => s.migration.name));
-    const unknown = [...applied.keys()].filter((n) => !known.has(n)).sort();
-    if (unknown.length) {
-      throw new MigrationError(`the database has migrations missing from the directory: ${unknown.join(", ")}`);
-    }
-    return out;
+    const json = await wait(() => this.db.engine.migrationStatus(this.dir));
+    const rows = JSON.parse(json) as { name: string; path: string; applied: boolean; appliedAt: string | null }[];
+    return rows.map((r) => ({ migration: new Migration(r.name, r.path), applied: r.applied, appliedAt: r.appliedAt }));
   }
 
-  private verify(statuses: Status[], applied: Map<string, [string, string]>): void {
-    let pending: string | undefined;
-    for (const s of statuses) {
-      if (!s.applied) {
-        pending ??= s.migration.name;
-      } else if (pending) {
-        throw new MigrationError(
-          `${s.migration.name} is applied but the earlier ${pending} is not; renumber the unapplied migration after the applied ones`,
-        );
-      } else if (applied.get(s.migration.name)![0] !== s.migration.checksum) {
-        throw new MigrationError(`${s.migration.name}/up.sql changed after it was applied`);
-      }
-    }
-  }
-
-  /**
-   * Applies pending migrations up to and including `target` (default: all). Each runs in
-   * its own transaction together with its bookkeeping row, so a failing migration leaves
-   * the database at the previous one.
-   */
+  /** Applies pending migrations up to and including `target` (default: all). */
   async upgrade(target?: string): Promise<Migration[]> {
-    const statuses = await this.status();
-    this.verify(statuses, await this.applied());
-    let pending = statuses.filter((s) => !s.applied).map((s) => s.migration);
-    if (target !== undefined) {
-      const stop = this.migrations.get(target).name;
-      pending = pending.filter((m) => m.name <= stop);
-    }
-    const done: Migration[] = [];
-    for (const m of pending) {
-      const ran = await this.db.transaction(async () => {
-        await this.locked();
-        if ((await this.applied()).has(m.name)) {
-          return false; // applied concurrently
-        }
-        await this.db.execute(m.upSql);
-        await this.db.execute(`INSERT INTO ${TABLE} (name, checksum) VALUES (${lit(m.name)}, ${lit(m.checksum)})`);
-        return true;
-      });
-      if (ran) {
-        done.push(m);
-      }
-    }
-    return done;
+    return this.named(await wait(() => this.db.engine.migrateUp(this.dir, target ?? null)));
   }
 
-  /** Reverts the last `steps` applied migrations, or every one after `target` (`"zero"`
-   * reverts all). */
+  /** Reverts the last `steps` applied migrations (default 1), or every one after
+   * `target` (`"zero"` reverts all). */
   async downgrade(options: { readonly steps?: number; readonly target?: string } = {}): Promise<Migration[]> {
-    const applied = (await this.status()).filter((s) => s.applied).map((s) => s.migration);
-    let revert: Migration[];
-    if (options.target !== undefined) {
-      const keep = options.target === "zero" ? "" : this.migrations.get(options.target).name;
-      revert = applied.filter((m) => m.name > keep);
-    } else {
-      const steps = options.steps ?? 1;
-      revert = steps > 0 ? applied.slice(-steps) : [];
-    }
-    const done: Migration[] = [];
-    for (const m of revert.reverse()) {
-      await this.db.transaction(async () => {
-        await this.locked();
-        await this.db.execute(m.downSql);
-        await this.db.execute(`DELETE FROM ${TABLE} WHERE name = ${lit(m.name)}`);
-      });
-      done.push(m);
-    }
-    return done;
+    const steps = Math.max(0, options.steps ?? 1);
+    return this.named(await wait(() => this.db.engine.migrateDown(this.dir, steps, options.target ?? null)));
   }
 }

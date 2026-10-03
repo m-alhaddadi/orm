@@ -9,6 +9,8 @@ pub enum Error {
     Query(String),
     /// The schema file or IR is invalid.
     Schema(String),
+    /// The migrations directory and the database's migration history disagree.
+    Migration(String),
     /// Reported by the database or the driver.
     Db(DbError),
     /// A parameter value of the wrong type for its column (a `TypeError`).
@@ -31,7 +33,7 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Query(m) | Error::Schema(m) | Error::Value(m) => f.write_str(m),
+            Error::Query(m) | Error::Schema(m) | Error::Migration(m) | Error::Value(m) => f.write_str(m),
             Error::Db(e) => write!(f, "{e}"),
             Error::Binding(e) => write!(f, "{e}"),
         }
