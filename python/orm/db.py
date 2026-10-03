@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -97,20 +96,21 @@ class Database:
         """
         if self.url.startswith("sqlite://"):
             raise QueryError("sqlite does not support advisory locks")
-        if self._tx() is None:
+        tx = self._tx()
+        if tx is None:
             raise TransactionRequired(
                 "db.lock() outside a transaction would release the lock at once; "
                 "run it inside `async with db.transaction():`"
             )
         if isinstance(key, bool) or not isinstance(key, (int, str)):
             raise TypeError(f"lock key must be an int or a str, got {key!r}")
+        name = None
         if isinstance(key, str):
-            key = int.from_bytes(hashlib.blake2b(key.encode(), digest_size=8).digest(), "big", signed=True)
+            name = key.encode()
+            key = 0
         if not -(2**63) <= key < 2**63:
             raise ValueError("lock key must fit in 64 bits")
-        fn = "pg_" + ("try_" if nowait else "") + "advisory_xact_lock" + ("" if exclusive else "_shared")
-        rows = await self._fetch_text(f"SELECT {fn}({int(key)})::text")
-        return not nowait or rows[0][0] == "true"
+        return await self._engine.advisory_lock(int(key), name, bool(exclusive), bool(nowait), tx)
 
     async def execute(self, sql: str) -> int:
         """Run raw SQL (one or more statements); returns the number of rows affected."""

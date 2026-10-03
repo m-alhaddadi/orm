@@ -513,6 +513,22 @@ impl Engine {
         })
     }
 
+    /// Advisory lock on a validated integer key or UTF-8 name, returning a boolean.
+    #[napi]
+    pub fn advisory_lock<'env>(
+        &self, env: &'env Env, key: String, name: Option<napi::bindgen_prelude::Buffer>,
+        exclusive: bool, nowait: bool, tx: &Transaction,
+    ) -> napi::Result<PromiseRaw<'env, bool>> {
+        let key = match name {
+            Some(name) => orm_engine::advisory::key(&name),
+            None => key.parse::<i64>().map_err(|_| tagged("TypeError", "lock key must fit in 64 bits"))?,
+        };
+        let conn = self.conn(Some(tx));
+        env.spawn_future(async move {
+            conn.advisory_lock(key, exclusive, nowait).await.map_err(|e| tagged(db_kind(&e), e))
+        })
+    }
+
     /// Raw SQL escape hatch (one or more statements); gives the rows affected.
     #[napi]
     pub fn execute<'env>(&self, env: &'env Env, sql: String, tx: Option<&Transaction>) -> napi::Result<PromiseRaw<'env, f64>> {

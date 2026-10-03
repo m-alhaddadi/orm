@@ -2,7 +2,6 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import { blake2b } from "./blake2b.js";
 import { NotConnected, QueryError, TransactionRequired } from "./errors.js";
 import type { IR } from "./expr.js";
 import { registry as defaultRegistry, type Registry } from "./model.js";
@@ -83,8 +82,10 @@ export class Database {
       );
     }
     let k: bigint;
+    let name: Buffer | null = null;
     if (typeof key === "string") {
-      k = BigInt.asIntN(64, BigInt("0x" + Buffer.from(blake2b(new TextEncoder().encode(key), 8)).toString("hex")));
+      name = Buffer.from(new TextEncoder().encode(key));
+      k = 0n;
     } else if (typeof key === "bigint" || Number.isSafeInteger(key)) {
       k = BigInt(key);
       if (k !== BigInt.asIntN(64, k)) {
@@ -94,9 +95,7 @@ export class Database {
       throw new TypeError(`lock key must be an integer or a string, got ${String(key)}`);
     }
     const { exclusive = true, nowait = false } = options;
-    const fn = "pg_" + (nowait ? "try_" : "") + "advisory_xact_lock" + (exclusive ? "" : "_shared");
-    const rows = await this.fetchText(`SELECT ${fn}(${k})::text`);
-    return !nowait || rows[0]?.[0] === "true";
+    return wait(() => this.engine.advisoryLock(String(k), name, Boolean(exclusive), Boolean(nowait), this.tx()!));
   }
 
   /** Runs raw SQL (one or more statements); gives the number of rows affected. */

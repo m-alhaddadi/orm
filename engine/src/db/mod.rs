@@ -97,6 +97,13 @@ pub trait Executor: Send + Sync {
     fn batch(&self, sql: String) -> BoxFuture<'_, DbResult<u64>>;
     /// A query whose columns are all read as text (tooling such as the migration runner).
     fn query_text(&self, sql: String) -> BoxFuture<'_, DbResult<Vec<Vec<Option<String>>>>>;
+    /// A single advisory-lock result, without materializing text rows in the binding.
+    fn advisory_lock(&self, key: i64, exclusive: bool, nowait: bool) -> BoxFuture<'_, DbResult<bool>> {
+        Box::pin(async move {
+            let rows = self.query_text(crate::advisory::sql(key, exclusive, nowait)).await?;
+            Ok(!nowait || rows.first().and_then(|r| r.first()).and_then(|v| v.as_deref()) == Some("true"))
+        })
+    }
     /// A transaction, or a savepoint when called on a transaction.
     fn begin(&self) -> BoxFuture<'_, DbResult<Arc<dyn Transaction>>>;
 }

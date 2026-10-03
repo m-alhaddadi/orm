@@ -6,6 +6,7 @@
 //! plan synchronously, run the plan on the async runtime, and build their objects from
 //! the decoded rows ([`db::Cell`]) in one pass.
 
+pub mod advisory;
 pub mod db;
 pub mod error;
 pub mod exec;

@@ -347,6 +347,18 @@ impl Engine {
         })
     }
 
+    /// Advisory lock on a validated integer key or UTF-8 name, returning a boolean.
+    fn advisory_lock<'py>(
+        &self, py: Python<'py>, key: i64, name: Option<&[u8]>,
+        exclusive: bool, nowait: bool, tx: &Bound<'py, Transaction>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = name.map(orm_engine::advisory::key).unwrap_or(key);
+        let conn = self.conn(Some(tx));
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            conn.advisory_lock(key, exclusive, nowait).await.map_err(db_err)
+        })
+    }
+
     /// Raw SQL escape hatch (one or more statements); returns rows affected.
     #[pyo3(signature = (sql, tx = None))]
     fn execute<'py>(

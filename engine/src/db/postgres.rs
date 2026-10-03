@@ -434,6 +434,16 @@ impl PgTx {
 }
 
 impl Executor for PgTx {
+    fn advisory_lock(&self, key: i64, exclusive: bool, nowait: bool) -> BoxFuture<'_, DbResult<bool>> {
+        Box::pin(async move {
+            let sql = crate::advisory::sql(key, exclusive, nowait);
+            self.with(|c| Box::pin(async move {
+                let messages = simple(c, &sql).await?;
+                Ok(!nowait || messages.iter().any(|m| matches!(m,
+                    SimpleQueryMessage::Row(r) if r.get(0) == Some("true"))))
+            })).await
+        })
+    }
     fn query(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RowSet>>> {
         Box::pin(async move { self.with(|c| Box::pin(async move { query(c, &sql, &args).await })).await })
     }
