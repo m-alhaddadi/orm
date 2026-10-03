@@ -7,6 +7,7 @@ import pytest
 from blog.models import Comment, Post, User
 
 import orm
+from conftest import DATABASE_URL
 from orm import Prefetch, QueryError, exists, func, outer, window
 
 NOW = datetime.now(timezone.utc)
@@ -448,3 +449,56 @@ async def test_correlated_in_subquery(clean):
     commented = Comment.objects.filter(Comment.author_id == outer(User.id)).select(Comment.post_id)
     rows = await User.objects.filter(exists(Post.objects.filter(Post.id.in_(commented)))).order_by(User.id)
     assert [u.name for u in rows] == ["Alice", "Bob"]
+
+
+# -- prefetch over many parents: keys split across queries ----------------------------------------
+
+
+@pytest.fixture
+async def small_params(clean):
+    """A second connection whose statements take at most 5 parameters, so prefetches
+    split their keys after a few parents."""
+    db = await orm.connect(DATABASE_URL, max_connections=2, default=False, _disable=("max_params=5",))
+    yield db
+    await db.close()
+
+
+async def test_max_params_option_is_checked(clean):
+    with pytest.raises(orm.QueryError, match="invalid"):
+        await orm.connect(DATABASE_URL, default=False, _disable=("max_params=abc",))
+
+
+async def test_prefetch_splits_keys(small_params):
+    db = small_params
+    users = await User.objects.insert_many([{"email": f"u{i}@x.io", "name": f"u{i}"} for i in range(12)])
+    posts = await Post.objects.insert_many(
+        [{"author": u, "title": f"{u.name}-{j}", "body": "", "views": j} for u in users for j in range(3)]
+    )
+    await Comment.objects.insert_many([{"post": p, "body": f"on {p.title}"} for p in posts[::2]])
+
+    def shape(us):
+        return [[(p.title, [c.body for c in p.comments.cached]) for p in u.posts.cached] for u in us]
+
+    qs = User.objects.prefetch_related(User.posts.comments).order_by(User.id)
+    assert shape(await qs.using(db)) == shape(await qs)
+    assert sum(len(u.posts.cached) for u in await qs.using(db)) == 36
+
+    # A slice per parent still holds: each parent's rows stay in one query.
+    top = Prefetch(User.posts, Post.objects.filter(Post.views >= 0).order_by(Post.views.desc())[:2], to_attr="top")
+    got = await User.objects.prefetch_related(top).order_by(User.id).using(db)
+    assert [[p.views for p in u.top] for u in got] == [[2, 1]] * 12
+
+    # To-one, with repeated keys.
+    cs = await Comment.objects.prefetch_related(Comment.post.author).order_by(Comment.id).using(db)
+    names = {u.id: u.name for u in users}
+    assert [c.post.author.name for c in cs] == [names[p.author_id] for p in posts[::2]]
+
+
+async def test_prefetch_beyond_the_parameter_limit(clean):
+    # 70 000 parents: more keys than Postgres takes parameters in one statement.
+    db = orm.get_database()
+    await db.execute("INSERT INTO users (email, name) SELECT 'u' || g || '@x.io', 'u' FROM generate_series(1, 70000) g")
+    await db.execute("INSERT INTO posts (author_id, title, body) SELECT id, 't', '' FROM users WHERE id % 10000 = 0")
+    users = await User.objects.prefetch_related(User.posts)
+    assert len(users) == 70000
+    assert sum(len(u.posts.cached) for u in users) == 7

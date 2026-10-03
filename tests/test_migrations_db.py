@@ -1,6 +1,11 @@
-"""Migrations and extension types against Postgres."""
+"""Migrations and extension types against Postgres.
+
+These run in a database of their own: migrations create and drop extensions, which
+are per database, and the blog tables of the other tests depend on some of them.
+"""
 
 import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from conftest import DATABASE_URL
@@ -19,11 +24,30 @@ def v2() -> Registry:
     return models(V2)
 
 
-async def connect(reg: Registry) -> orm.Database:
+_url = urlsplit(DATABASE_URL)
+MIGRATIONS_DB = _url.path.lstrip("/") + "_migrations"
+MIGRATIONS_URL = urlunsplit(_url._replace(path="/" + MIGRATIONS_DB))
+
+
+@pytest.fixture(scope="module", autouse=True)
+async def migrations_database():
+    """Creates the database these tests use, once."""
     try:
-        return await orm.connect(DATABASE_URL, max_connections=2, default=False, registry=reg)
+        admin = await orm.connect(DATABASE_URL, max_connections=1, default=False, registry=Registry())
     except orm.DatabaseError as e:
         pytest.skip(f"Postgres not reachable at {DATABASE_URL}: {e}")
+    try:
+        if not await admin._fetch_text(f"SELECT 1 FROM pg_database WHERE datname = '{MIGRATIONS_DB}'"):
+            await admin.execute(f'CREATE DATABASE "{MIGRATIONS_DB}"')
+    finally:
+        await admin.close()
+
+
+async def connect(reg: Registry) -> orm.Database:
+    try:
+        return await orm.connect(MIGRATIONS_URL, max_connections=2, default=False, registry=reg)
+    except orm.DatabaseError as e:
+        pytest.skip(f"Postgres not reachable at {MIGRATIONS_URL}: {e}")
 
 
 async def reset(db: orm.Database) -> None:
