@@ -40,10 +40,11 @@ from .expr import (
     not_,
     or_,
     outer,
+    param,
     window,
 )
 from .model import Model, Registry, define, load, loads, registry
-from .query import ManyRelatedSet, Prefetch, QuerySet, RelatedSet
+from .query import ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet
 from .cte import Cte, CteColumn
 from .select import Row, Select
 from .write import Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update, UpdateMany
@@ -63,6 +64,8 @@ __all__ = [
     "RelatedSet",
     "ManyRelatedSet",
     "Prefetch",
+    "Prepared",
+    "param",
     "Cte",
     "CteColumn",
     "Select",

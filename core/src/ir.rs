@@ -686,9 +686,9 @@ pub struct Select {
     #[serde(default)]
     pub order: Vec<Order>,
     #[serde(default)]
-    pub limit: Option<u64>,
+    pub limit: Option<Count>,
     #[serde(default)]
-    pub offset: Option<u64>,
+    pub offset: Option<Count>,
     /// To-one relation paths loaded with LEFT JOINs in the same statement.
     #[serde(default)]
     pub select_related: Vec<Vec<String>>,
@@ -712,6 +712,21 @@ pub struct Select {
     pub distinct: bool,
     #[serde(default)]
     pub distinct_on: Vec<Expr>,
+}
+
+/// A row count (`LIMIT` / `OFFSET`): a number, or a parameter holding one, so one IR
+/// document serves every page.
+#[derive(Deserialize, Debug, Clone, Copy)]
+#[serde(untagged)]
+pub enum Count {
+    Value(u64),
+    Param(ParamRef),
+}
+
+#[derive(Deserialize, Debug, Clone, Copy)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum ParamRef {
+    Param { i: usize },
 }
 
 #[derive(Deserialize, Debug, Clone, Copy)]

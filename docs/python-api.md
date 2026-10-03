@@ -229,6 +229,45 @@ Each batch is `WHERE <filters> AND id > <last id> ORDER BY id LIMIT n` (keyset p
 `OFFSET`), so memory stays flat and every batch is an index range scan. `select_related`,
 `prefetch_related` and `lock()` apply per batch; `order_by` and slicing are rejected.
 
+### Prepared queries
+
+A query the app runs over and over with different values (a lookup per request) can be
+built once and then only bound per call. `orm.param("name")` marks a value to supply
+on each call:
+
+```python
+# module level: the query set, its IR and the IR's JSON are built once
+post_by_id = Post.objects.select_related(Post.author).filter(Post.id == orm.param("id")).prepare()
+latest = (Post.objects.filter(Post.author_id == orm.param("user"))
+          .order_by(Post.created_at.desc())
+          .limit(orm.param("n")).offset(orm.param("skip")).prepare())
+
+post = await post_by_id.get(id=post_id)         # also .first() .count() .exists()
+posts = await latest(user=me.id, n=20, skip=40) # the rows
+latest.params                                   # frozenset({'user', 'n', 'skip'})
+```
+
+A call copies the stored parameter list, fills in the values and hands the stored IR
+JSON to the engine. It skips building the query set, the expression tree, the IR and
+its JSON: −22% on `get` by primary key and −13% to −31% on a 50-row read with two filters
+(`bench/RESULTS.md`, "Prepared queries"). Rust still plans each call, and Postgres
+reuses the statement, which is prepared once per connection.
+
+* A `param()` stands for one value: in comparisons and arithmetic, `like` / `contains`
+  / `startswith` / `endswith` (the pattern is escaped when the value is bound),
+  `has()`, `limit()` and `offset()`, and in filters of `Prefetch` query sets.
+* Values can't be `None`: whether a comparison is `= $1` or `IS NULL` is fixed when the
+  query is built, so write `is_null()` into the query instead.
+* `in_(param(...))` is rejected, because the number of values is part of the query. A
+  query set limited by a `param()` can't be sliced; use `limit()` / `offset()`.
+* A `param()` outside a prepared query raises `QueryError`. Calls with a missing or
+  unknown name raise `TypeError`.
+* Prepared queries read. Inserts and updates already send their rows to Rust without an
+  IR, so there is nothing to prepare.
+
+`LIMIT` and `OFFSET` are parameters in the IR for every query, not only prepared ones:
+`qs[10:20]` and `qs[30:40]` are the same IR document and the same SQL text.
+
 ## Columns and aggregates: `select()`
 
 `select()` is the one way to read anything other than whole instances. It replaces
@@ -536,8 +575,8 @@ QuerySet ──(IR json + params list)──▶ Engine.run ──▶ planner (se
          ◀──(list[tuple] + prefetched rows, one pass)───────────────────────────────┘
 ```
 
-* The schema IR is sent once, at `connect()`. Query IR is JSON with literals in a
-  separate positional `params` list, converted to SQL values by the column type they're
+* The schema IR is sent once, at `connect()`. Query IR is JSON with literals (and
+  `LIMIT` / `OFFSET`) in a separate positional `params` list, converted to SQL values by the column type they're
   compared with (`native/src/convert.rs`).
 * The IR talks about models, fields and relation paths only. Joins, `EXISTS` and
   aliases stay in `plan.rs`; SQL text and driver types stay in `db/`.

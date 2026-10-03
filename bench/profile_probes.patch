@@ -1,0 +1,134 @@
+diff --git a/native/src/lib.rs b/native/src/lib.rs
+index 1519d8a..adeea95 100644
+--- a/native/src/lib.rs
++++ b/native/src/lib.rs
+@@ -700,6 +700,112 @@ fn connect<'py>(
+     })
+ }
+ 
++
++// ---- TEMP PROFILING PROBES (not committed) ----
++#[pyfunction]
++fn _probe_plan(schema: &Bound<'_, PySchema>, op_json: &str, params: Vec<Bound<'_, PyAny>>, n: usize) -> PyResult<(f64, f64, f64)> {
++    let s = schema.get().inner.clone();
++    let t = Target::new(Dialect::Postgres);
++    let (mut a, mut b, mut c) = (0u128, 0u128, 0u128);
++    for _ in 0..n {
++        let t0 = std::time::Instant::now();
++        let op = parse_op(op_json)?;
++        let t1 = std::time::Instant::now();
++        let plan = Planner::plan(&s, t, &op, &params)?;
++        let t2 = std::time::Instant::now();
++        let built = match &plan { Plan::Select(p) => db::build(Dialect::Postgres, &p.stmt), Plan::Count(x) | Plan::Exists(x) => db::build(Dialect::Postgres, x), _ => unreachable!() };
++        std::hint::black_box(&built);
++        let t3 = std::time::Instant::now();
++        a += (t1 - t0).as_nanos(); b += (t2 - t1).as_nanos(); c += (t3 - t2).as_nanos();
++    }
++    let n = n as f64;
++    Ok((a as f64 / n / 1e3, b as f64 / n / 1e3, c as f64 / n / 1e3))
++}
++#[pyfunction]
++fn _probe_noop_async(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
++    pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(()) })
++}
++#[pyfunction]
++fn _probe_noop_sync() {}
++#[pyfunction]
++fn _probe_select1_sync(py: Python<'_>, engine: &Bound<'_, Engine>, sql: String) -> PyResult<usize> {
++    let conn = engine.borrow().conn(None);
++    py.detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(async move { conn.query(sql, vec![]).await.map(|r| r.len()).map_err(db_err) }))
++}
++#[pyfunction]
++fn _probe_select1_async<'py>(py: Python<'py>, engine: &Bound<'py, Engine>, sql: String) -> PyResult<Bound<'py, PyAny>> {
++    let conn = engine.borrow().conn(None);
++    pyo3_async_runtimes::tokio::future_into_py(py, async move { conn.query(sql, vec![]).await.map(|r| r.len()).map_err(db_err) })
++}
++#[pyfunction]
++fn _probe_rust_loop(py: Python<'_>, engine: &Bound<'_, Engine>, sql: String, n: usize) -> PyResult<f64> {
++    let conn = engine.borrow().conn(None);
++    py.detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(async move {
++        let t = std::time::Instant::now();
++        for _ in 0..n { conn.query(sql.clone(), vec![]).await.map_err(db_err)?; }
++        Ok(t.elapsed().as_nanos() as f64 / n as f64 / 1e3)
++    }))
++}
++
++#[pyfunction]
++fn _probe_efd_noop(fd: i32) {
++    pyo3_async_runtimes::tokio::get_runtime().spawn(async move { efd_signal(fd) });
++}
++fn efd_signal(fd: i32) {
++    use std::io::Write;
++    use std::os::fd::{FromRawFd, IntoRawFd};
++    let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
++    let _ = f.write_all(&1u64.to_ne_bytes());
++    let _ = f.into_raw_fd();
++}
++static EFD_SLOT: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
++#[pyfunction]
++fn _probe_efd_select(engine: &Bound<'_, Engine>, sql: String, fd: i32) {
++    let conn = engine.borrow().conn(None);
++    pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
++        let n = conn.query(sql, vec![]).await.map(|r| r.len()).unwrap_or(0);
++        *EFD_SLOT.lock().unwrap() = Some(n);
++        efd_signal(fd)
++    });
++}
++#[pyfunction]
++fn _probe_efd_take() -> Option<usize> { EFD_SLOT.lock().unwrap().take() }
++
++type CacheEntry = (String, Vec<sea_query::Value>, Vec<ValueType>, usize);
++static PLAN_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, CacheEntry>>> = std::sync::Mutex::new(None);
++/// Upper bound of a plan cache: keyed by the IR JSON, reuses SQL + args (params converted but ignored).
++#[pyfunction]
++#[pyo3(signature = (engine, op_json, params, db = None))]
++fn _probe_run_cached<'py>(py: Python<'py>, engine: &Bound<'py, Engine>, op_json: &str, params: Vec<Bound<'py, PyAny>>, db: Option<Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyAny>> {
++    let e = engine.borrow();
++    let hit = PLAN_CACHE.lock().unwrap().get_or_insert_with(Default::default).get(op_json).cloned();
++    let (sql, args, types, model) = match hit {
++        Some(h) => {
++            for p in &params { std::hint::black_box(convert::py_to_value(p, None)?); }
++            h
++        }
++        None => {
++            let op = parse_op(op_json)?;
++            let Plan::Select(p) = Planner::plan(&e.schema, e.target, &op, &params)? else { unreachable!() };
++            let plan::Output::Instances { model, .. } = p.output else { unreachable!() };
++            let (sql, args) = db::build(e.target.dialect, &p.stmt);
++            let entry = (sql, args, p.types.clone(), model);
++            PLAN_CACHE.lock().unwrap().as_mut().unwrap().insert(op_json.to_owned(), entry.clone());
++            entry
++        }
++    };
++    let conn = e.conn(None);
++    let classes = e.classes.clone();
++    let db = db.map(Bound::unbind);
++    pyo3_async_runtimes::tokio::future_into_py(py, async move {
++        let rows = conn.query(sql, args).await.map_err(db_err)?;
++        Python::attach(|py| {
++            let db = db.map(|d| d.into_bound(py));
++            Builder::new(py, &classes, db.as_ref()).model_rows(model, rows.as_ref(), &types).map(|l| l.unbind())
++        })
++    })
++}
++
+ #[pymodule]
+ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+     let py = m.py();
+@@ -707,6 +813,16 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+     m.add_function(wrap_pyfunction!(compile_schema, m)?)?;
+     m.add_function(wrap_pyfunction!(compile_schema_file, m)?)?;
+     m.add_function(wrap_pyfunction!(generate_python, m)?)?;
++    m.add_function(wrap_pyfunction!(_probe_plan, m)?)?;
++    m.add_function(wrap_pyfunction!(_probe_noop_async, m)?)?;
++    m.add_function(wrap_pyfunction!(_probe_noop_sync, m)?)?;
++    m.add_function(wrap_pyfunction!(_probe_select1_sync, m)?)?;
++    m.add_function(wrap_pyfunction!(_probe_select1_async, m)?)?;
++    m.add_function(wrap_pyfunction!(_probe_rust_loop, m)?)?;
++    m.add_function(wrap_pyfunction!(_probe_efd_noop, m)?)?;
++    m.add_function(wrap_pyfunction!(_probe_efd_select, m)?)?;
++    m.add_function(wrap_pyfunction!(_probe_efd_take, m)?)?;
++    m.add_function(wrap_pyfunction!(_probe_run_cached, m)?)?;
+     m.add_class::<PySchema>()?;
+     m.add_class::<Engine>()?;
+     m.add_class::<Transaction>()?;

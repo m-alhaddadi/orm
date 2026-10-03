@@ -522,3 +522,86 @@ inside the spread of either build; building the IR and planning costs ~15 µs in
 `count with EXISTS filter` swings between ~450 and ~750 µs on this machine within one
 build.
 
+
+## Where a query's time goes
+
+`bench/profile_query.py` (with the probes in `bench/profile_probes.patch`, which are not
+part of the shipped module) times each stage of one query on the blog models: release
+build, localhost TCP, `sslmode=disable`, 4-vCPU VM, Postgres on the same host. Medians,
+µs. Runs vary by ±10–15% on this machine; the shares are stable.
+
+### `get by pk` today, ~300–340 µs (asyncio)
+
+| stage | measured alone | inside the real loop |
+|---|---:|---:|
+| Python: query set, IR dicts, `json.dumps` | 12 | 32–38 |
+| Rust: parse IR, plan, render SQL (+ creating the future) | 4 | 25 |
+| asyncio ↔ Tokio hand-off (`future_into_py`) | 120 | ~110 |
+| Postgres round trip (prepared statement, cached per connection) | 82–94 | 82–94 |
+| decode row, build the instance, coroutine layers | — | ~40 |
+
+Stages cost 3–5× more inside the loop than alone: between two queries the CPU runs the
+Tokio worker and the Postgres backend, so the Python and planner code runs on cold
+caches. Estimates below use the in-loop numbers.
+
+### The hand-off is the largest cost we control
+
+| | asyncio | uvloop |
+|---|---:|---:|
+| no-op async call, `future_into_py` (today) | 120 | 64 |
+| no-op async call, eventfd completion (prototype) | 50 | 44 |
+| `SELECT 1`, Rust loop with no Python | 82 | 87 |
+| `SELECT 1`, blocking call from Python | 79 | 81 |
+| `SELECT 1`, async, `future_into_py` (today) | 181 | 122 |
+| `SELECT 1`, async, eventfd completion (prototype) | 103 | 101 |
+
+`future_into_py` finishes the asyncio future from the Tokio thread. That thread has to
+take the GIL from the event loop thread and then wake it through the loop's self-pipe,
+which costs several thread wake-ups. In the prototype the Tokio task writes to an
+eventfd that the loop watches (`loop.add_reader`), and the loop picks up the result on
+its own thread. With that change an async call costs the same as a blocking one.
+uvloop by itself also removes about half of the cost.
+
+### Plan cache: measured A/B
+
+`_probe_run_cached` stores the SQL, arguments and output shape under the IR JSON key,
+which is the upper bound of a Rust-side plan cache. A "prepared query" builds the IR
+once and reuses it. Interleaved runs:
+
+| | get by pk, asyncio | read 50 + 2 filters, asyncio | get by pk, uvloop | read 50 + 2 filters, uvloop |
+|---|---:|---:|---:|---:|
+| today, end to end | 343 | 518 | 201 | 400 |
+| prepared query (IR built once) | 229 | 383 | 154 | 274 |
+| prepared query + Rust plan cache | 206 | 324 | 137 | 227 |
+
+The Rust plan cache alone saves 17–58 µs per query (7–15%): parse, plan and render
+take 4 µs in a microbenchmark, but more on cold caches. Skipping the Python IR build
+saves more than that (65–135 µs). Postgres already caches its own plans, because
+statements are prepared once per connection.
+
+### Schema JSON at runtime: a startup cost only
+
+| schema | `json.loads` | `define()` (Python classes) | `json.dumps` | Rust parse + index |
+|---|---:|---:|---:|---:|
+| blog, 6 models, 9 KB | 0.06–0.18 ms | 0.65–0.85 ms | 0.12–0.17 ms | 0.12–0.14 ms |
+| 204 models, 277 KB | 1.2–1.5 ms | 9.9–10.5 ms | 2.4 ms | 1.2–1.5 ms |
+
+This cost is paid once per process. Queries never touch the JSON: `Schema::from_ir`
+indexes models, fields and relations into hash maps, and the planner reads those.
+Creating the Python classes costs more than parsing the JSON. Compiling the schema into
+Rust would save about 5 ms of startup on a 200-model schema and nothing per query.
+
+### Prepared queries
+
+`qs.prepare()` (built once, values bound per call) against the same query built per
+call. The two variants alternate (21 rounds of 200 calls each), release build, same
+machine. Median, µs.
+
+| case | asyncio | prepared | uvloop | prepared |
+|---|---:|---:|---:|---:|
+| get by pk | 305 | 239 (−22%) | 214 | 166 (−22%) |
+| read 50 + 2 filters | 498 | 344 (−31%) | 306 | 266 (−13%) |
+
+`bench/engine_bench.py` now has prepared cases. Sequential runs of it on this machine
+swing by ±20% (an unchanged "read 50" went from 313 to 509 µs between runs), so the
+table above uses alternating runs.

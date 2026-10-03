@@ -16,7 +16,10 @@ from .expr import (
     Expression,
     IRContext,
     Ordering,
+    Param,
     RelationPath,
+    SlotParams,
+    _Slot,
     _Ctes,
     and_,
     as_condition,
@@ -26,7 +29,7 @@ from .fields import HasMany, ManyToMany
 from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, prepare_rows, assignments
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from typing_extensions import Self
 
@@ -43,7 +46,7 @@ T4 = TypeVar("T4")
 T5 = TypeVar("T5")
 T6 = TypeVar("T6")
 
-__all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prefetch"]
+__all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prefetch", "Prepared"]
 
 # Ids per query in in_bulk(), well below Postgres' 65535 parameters.
 IN_BULK_CHUNK = 10_000
@@ -157,8 +160,8 @@ class QuerySet(Generic[M]):
         self._model = model
         self._filters: tuple[Condition, ...] = ()
         self._order: tuple[Ordering, ...] = ()
-        self._limit: int | None = None
-        self._offset: int | None = None
+        self._limit: int | Param | None = None
+        self._offset: int | Param | None = None
         self._related: tuple[tuple[str, ...], ...] = ()
         self._prefetch: tuple[Prefetch[Any], ...] = ()
         self._lock: dict[str, bool] | None = None
@@ -199,13 +202,17 @@ class QuerySet(Generic[M]):
         return self._clone(_order=order)
 
     def limit(self, n: int | None) -> Self:
+        """At most ``n`` rows; ``n`` may be a :func:`orm.param` in a prepared query."""
         return self._clone(_limit=n)
 
     def offset(self, n: int | None) -> Self:
-        return self._clone(_offset=n or None)
+        """Skip ``n`` rows; ``n`` may be a :func:`orm.param` in a prepared query."""
+        return self._clone(_offset=n if isinstance(n, Param) else n or None)
 
     def __getitem__(self, s: slice) -> Self:
         """``qs[10:20]`` is ``qs.offset(10).limit(10)``."""
+        if isinstance(self._limit, Param) or isinstance(self._offset, Param):
+            raise QueryError("a query set limited by param() can't be sliced; use limit() and offset()")
         if not isinstance(s, slice):
             raise TypeError(
                 "query sets can only be sliced; use `await qs.offset(i).first()` for one row"
@@ -459,9 +466,9 @@ class QuerySet(Generic[M]):
         if self._order:
             ir["order"] = [o._ir(ctx) for o in self._order]
         if self._limit is not None:
-            ir["limit"] = self._limit
+            ir["limit"] = self._limit._ir(ctx) if isinstance(self._limit, Param) else ctx.param(self._limit)
         if self._offset is not None:
-            ir["offset"] = self._offset
+            ir["offset"] = self._offset._ir(ctx) if isinstance(self._offset, Param) else ctx.param(self._offset)
         top = outer is None and ctes is None
         if self._related and op == "select" and top:
             ir["select_related"] = [list(p) for p in self._related]
@@ -501,6 +508,16 @@ class QuerySet(Generic[M]):
 
     def _native(self) -> Any:
         return self._model._meta.registry.native()
+
+    def prepare(self) -> Prepared[M]:
+        """This query compiled once, to run many times with :func:`orm.param` values::
+
+            by_author = Post.objects.filter(Post.author_id == orm.param("author")).prepare()
+            posts = await by_author(author=3)
+
+        Each call skips building the query (the expression tree, the IR and its JSON) and
+        only binds the values. Build it once, e.g. at module level, and reuse it."""
+        return Prepared(self)
 
     def sql(self) -> str:
         """The SELECT this query set runs, with parameters inlined (for debugging)."""
@@ -638,9 +655,118 @@ class QuerySet(Generic[M]):
         parts = [f"filter{f!r}" for f in self._filters]
         if self._order:
             parts.append(f"order_by{self._order!r}")
-        if self._limit is not None or self._offset is not None:
+        if isinstance(self._limit, Param) or isinstance(self._offset, Param):
+            parts += [f"{k}({v!r})" for k, v in (("offset", self._offset), ("limit", self._limit)) if v is not None]
+        elif self._limit is not None or self._offset is not None:
             parts.append(f"[{self._offset or 0}:{'' if self._limit is None else (self._offset or 0) + self._limit}]")
         return f"<{type(self).__name__} {self._model.__name__}{' ' if parts else ''}{'.'.join(parts)}>"
+
+
+class _Compiled:
+    """One statement of a prepared query: its IR as JSON and its parameters, with the
+    :func:`orm.param` slots to fill per call."""
+
+    __slots__ = ("json", "params", "slots", "names")
+
+    def __init__(self, ir: IR, params: SlotParams) -> None:
+        self.json = json.dumps(ir)
+        self.params = list(params)
+        self.slots = [(i, p.name, p.transform) for i, p in enumerate(params) if isinstance(p, _Slot)]
+        self.names = frozenset(name for _, name, _ in self.slots)
+
+    def bind(self, values: Mapping[str, Any], known: frozenset[str]) -> list[Any]:
+        if missing := self.names - values.keys():
+            raise TypeError(f"missing values for {', '.join(sorted(missing))}")
+        if unknown := values.keys() - known:
+            raise TypeError(f"the prepared query has no param {', '.join(sorted(unknown))}")
+        params = self.params.copy()
+        for i, name, transform in self.slots:
+            v = values[name]
+            if v is None:
+                raise ValueError(f"param({name!r}) can't be None; compare with None (IS NULL) in the query itself")
+            params[i] = v if transform is None else transform(v)
+        return params
+
+
+class Prepared(Generic[M]):
+    """A query set compiled by :meth:`QuerySet.prepare`. Await a call to get the rows
+    (``await q(author=3)``), or use :meth:`get`, :meth:`first`, :meth:`count` and
+    :meth:`exists`; each takes the :func:`orm.param` values as keywords."""
+
+    __slots__ = ("_qs", "_compiled", "_names")
+
+    def __init__(self, qs: QuerySet[M]) -> None:
+        self._qs = qs
+        self._compiled: dict[str, _Compiled] = {}
+        self._names = self._statement("select").names
+
+    def _statement(self, kind: str) -> _Compiled:
+        c = self._compiled.get(kind)
+        if c is None:
+            qs = self._qs
+            op = "select"
+            if kind == "get":
+                qs = qs.limit(2)
+            elif kind == "first":
+                qs = qs._clone(_order=qs._default_order())
+                qs = qs.limit(1) if isinstance(qs._limit, Param) else qs[:1]
+            elif kind in ("count", "exists"):
+                op = kind
+            params = SlotParams()
+            c = self._compiled[kind] = _Compiled(qs._select_ir(op, params), params)
+        return c
+
+    def _start(self, kind: str, values: Mapping[str, Any]) -> Awaitable[Any]:
+        """Starts the statement; the engine's awaitable comes back as is, without a
+        coroutine around it."""
+        from .db import resolve
+
+        c = self._statement(kind)
+        params = c.bind(values, self._names)
+        qs = self._qs
+        if qs._lock is not None:
+            qs._check_lock()
+        db = resolve(qs._db)
+        return db._engine.run(c.json, params, db._tx(), None, qs._db)
+
+    def __call__(self, **values: Any) -> Awaitable[list[M]]:
+        """The rows, like awaiting the query set."""
+        return self._start("select", values)
+
+    async def get(self, **values: Any) -> M:
+        objs: list[M] = await self._start("get", values)
+        model = self._qs.model
+        if not objs:
+            raise model.DoesNotExist(f"no {model.__name__} matches the query")
+        if len(objs) > 1:
+            raise model.MultipleObjectsReturned(f"more than one {model.__name__} matches the query")
+        return objs[0]
+
+    async def first(self, **values: Any) -> M | None:
+        objs: list[M] = await self._start("first", values)
+        return objs[0] if objs else None
+
+    async def count(self, **values: Any) -> int:
+        n: int = await self._start("count", values)
+        return n
+
+    async def exists(self, **values: Any) -> bool:
+        b: bool = await self._start("exists", values)
+        return b
+
+    def sql(self, **values: Any) -> str:
+        """The SELECT for these values, parameters inlined (for debugging)."""
+        c = self._statement("select")
+        sql: str = self._qs._native().sql(c.json, c.bind(values, self._names))
+        return sql
+
+    @property
+    def params(self) -> frozenset[str]:
+        """The names of the values each call takes."""
+        return self._names
+
+    def __repr__(self) -> str:
+        return f"<Prepared {self._qs!r}>"
 
 
 class RelatedSet(QuerySet[M]):
