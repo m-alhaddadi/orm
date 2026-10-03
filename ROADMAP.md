@@ -32,4 +32,4 @@ LEFT JOIN shop_configs j2 ON j2.shop_id = orders.shop_id
 Why not leave it to Postgres: for inner joins it derives `orders.shop_id =
 shop_configs.shop_id` but still joins `shops`, since it doesn't trust FKs for join
 removal; for LEFT JOINs it derives nothing. Where: `ensure_join` and `exists_via` in
-`native/src/plan.rs` (marked TODO).
+`engine/src/plan.rs` (marked TODO).

@@ -53,7 +53,7 @@ Schema DSL → Schema Compiler → ORM IR → Python API → PyO3 → planner (s
 ```
 
 sea-query stays as the SQL builder (one builder per dialect), and each database gets a
-driver behind one trait (`native/src/db/`); tokio-postgres for Postgres today.
+driver behind one trait (`engine/src/db/`); tokio-postgres for Postgres today.
 
 ---
 
@@ -153,6 +153,11 @@ capabilities (`orm_core::dialect`).
 Requirements: Pythonic API, type hints, IDE autocomplete, async support, native
 exceptions.
 
+## TypeScript Support
+
+`TypeScript API (js/) → N-API (bindings/node, napi-rs) → orm-engine` — Node 20+ and Bun.
+The same schema and engine as Python; see [`docs/typescript-api.md`](docs/typescript-api.md).
+
 ## Code Generation
 
 Optional. Used for model definitions, type hints (`.pyi`), IDE support. Not required for
@@ -163,7 +168,7 @@ execution — the runtime stays in Rust.
 ## Decisions
 
 1. **Async only.** The Python API is async (asyncio), bridged to Tokio via
-   `pyo3-async-runtimes`; JS will be async too. No sync API: it would double every
+   `pyo3-async-runtimes`; the TypeScript API is async too. No sync API: it would double every
    terminal method (Django's `get` / `aget` split) for one benefit, skipping the
    asyncio ↔ Tokio hand-off (~115 µs per call in Phase 0). If that cost matters, make the
    bridge cheaper (complete the Python future from Tokio directly) instead.
@@ -205,9 +210,9 @@ once you count FFI and Python object materialization?
    SQLAlchemy-style typed expressions, relation-path filters (`User.posts.created_at`), subqueries
    (`exists()`, scalar, `outer()`), window functions, CTEs (recursive, subqueries in
    `FROM`), nested / filtered / per-parent-sliced prefetch, instances built in Rust
-4. PyO3 binding — ✅ `native/` (`orm._native`), one call per operation
+4. PyO3 binding — ✅ `bindings/python/` (`orm._native`), one call per operation
 5. Engine — ✅ IR → sea-query planner; first on SeaORM's pool, now our own driver
-   layer (`native/src/db/`, tokio-postgres) with per-dialect capabilities, transactions,
+   layer (`engine/src/db/`, tokio-postgres) with per-dialect capabilities, transactions,
    savepoints, row and advisory locks
 6. PostgreSQL support — ✅ (only backend)
 
@@ -282,19 +287,23 @@ prebuilt wheel, and one engine binary per language. If startup matters, skip the
 string to Rust directly (−2.4 ms at 200 models), and generate class bodies statically
 instead of calling `define()` at import (the larger cost, ~10 ms).
 
-### Next: JS / TypeScript binding (deferred)
+### JS / TypeScript binding  ✅ first cut, see [`docs/typescript-api.md`](docs/typescript-api.md)
 
-1. Split the engine out of the Python binding: `engine/` (`orm-engine`: planner + drivers,
-   neutral parameter values, typed row accessors) with thin `bindings/python` (PyO3) and
-   `bindings/node` (napi-rs; Node, Bun, Deno). No behaviour change; Python tests guard it.
-2. TypeScript codegen from the same schema and the same API shape: methods instead of
-   operators (`.eq() .lt()`), `select({ name: expr })` object rows, `AsyncLocalStorage`
-   for the current transaction. Tests on Node and Bun, `tsc` type checks, a benchmark
-   against Drizzle and Prisma.
+1. ✅ The engine is split out of the Python binding: `engine/` (`orm-engine`: planner,
+   drivers, plan execution, neutral parameter values `Params` and result cells `Cell`),
+   with thin `bindings/python` (PyO3) and `bindings/node` (napi-rs).
+2. ✅ TypeScript code generation from the same schema (`orm generate typescript`) and
+   the `js/` package with the Python API's features: methods instead of operators
+   (`.eq() .lt()`), `select({ name: expr })` object rows, `AsyncLocalStorage` for the
+   current transaction, prepared queries, CTEs, windows, migrations and the CLI.
+   Tests on Node and Bun, `tsc` type checks (`npm run typecheck`).
 
-Open questions: camelCase field names in TS (recommended); `BigInt` columns as `number`
-with an error past 2^53 (recommended) vs `bigint`; `Date` for timestamps (ms precision)
-vs waiting for `Temporal`; `await qs` (recommended, like Python) vs `.execute()`.
+Decided: camelCase field names; `BigInt` columns as `bigint` and `Decimal` as
+decimal.js (Prisma's choice); `Date` for timestamps (millisecond precision); query sets
+are lazy and run only through explicit terminal methods (`.all()`, `.first()`, ...),
+not `await qs`.
+
+Next: a benchmark against Drizzle and Prisma; Deno.
 
 ### Later
 

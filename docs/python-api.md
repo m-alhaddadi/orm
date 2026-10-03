@@ -21,7 +21,9 @@ automatically: each relation hop becomes a correlated `EXISTS`.
 |---|---|
 | `python/orm/` | Python package: `expr.py` (expressions, `func`, `outer` / `exists`, windows → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet, `Prefetch`), `select.py` (`select()`, `Row`), `cte.py` (CTEs), `write.py` (insert / update / delete statements), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
 | `core/` | Rust crate `orm-core`, no binding code: schema language, IR (`ir.rs`), extensions, migrations, code generation, the `orm` CLI (see [`schema.md`](schema.md)) |
-| `native/` | Rust crate `orm._native` (PyO3) on top of `orm-core`: `plan.rs` (IR → sea-query statements), `db/` (drivers: `mod.rs` traits, `postgres.rs`), `build.rs` (rows → instances and `Row`s), `convert.rs` (Python ↔ values), `lib.rs` |
+| `engine/` | Rust crate `orm-engine`, shared by both bindings: `plan.rs` (IR → sea-query statements), `db/` (drivers: `mod.rs` traits, `postgres.rs`), `exec.rs` (running plans, prefetch, `update_many`), `params.rs` (the values a binding passes in) |
+| `bindings/python/` | Rust crate `orm._native` (PyO3) on top of `orm-engine`: `build.rs` (rows → instances and `Row`s), `convert.rs` (Python ↔ values), `lib.rs` |
+| `bindings/node/`, `js/` | The TypeScript package on the same engine: [`typescript-api.md`](typescript-api.md) |
 | `examples/blog/` | `schema.prisma`, the `models.py` / `models.pyi` generated from it, its migrations, `demo.py` |
 | `tests/` | SQL shape tests (no DB), Postgres end-to-end tests, mypy + pyright stub checks |
 
@@ -577,10 +579,10 @@ QuerySet ──(IR json + params list)──▶ Engine.run ──▶ planner (se
 
 * The schema IR is sent once, at `connect()`. Query IR is JSON with literals (and
   `LIMIT` / `OFFSET`) in a separate positional `params` list, converted to SQL values by the column type they're
-  compared with (`native/src/convert.rs`).
+  compared with (`bindings/python/src/convert.rs`).
 * The IR talks about models, fields and relation paths only. Joins, `EXISTS` and
   aliases stay in `plan.rs`; SQL text and driver types stay in `db/`.
-* Rust builds the result objects (`native/src/build.rs`). `Schema` holds each model's
+* Rust builds the result objects (`bindings/python/src/build.rs`). `Schema` holds each model's
   class (passed by `Registry.native()`), and an instance is made as `cls.__new__(cls)`
   would make it, its fields written straight into its `__dict__`: no Python code runs per
   row. `select_related` objects, prefetched lists, the reverse to-one (`post.author`)
@@ -630,7 +632,7 @@ planner ──sea-query statement──▶ db::build(dialect) ──(SQL, [Value
   SQL the database rejects. The same table is meant for build-time schema checks.
   `orm.connect(url, _disable=("ilike", "update_from_values"))` switches capabilities off,
   so the tests run those fallback paths on Postgres.
-* **Execution is per driver**, behind the traits in `native/src/db/mod.rs`: `Driver`
+* **Execution is per driver**, behind the traits in `engine/src/db/mod.rs`: `Driver`
   (a pool), `Executor` (run SQL with values, on the pool or in a transaction),
   `Transaction` (commit, rollback, savepoints via `begin()`), `RowSet` (decode rows by
   the schema's column types, straight into Python tuples). `db::connect` picks the
