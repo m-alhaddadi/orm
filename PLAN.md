@@ -252,7 +252,7 @@ vs waiting for `Temporal`; `await qs` (recommended, like Python) vs `.execute()`
 ### Later
 
 More databases (a dialect + a driver each), introspection / drift
-detection.
+detection. Unscheduled improvements are listed in [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
