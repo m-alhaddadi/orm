@@ -267,11 +267,11 @@ impl RowSet for ChainedRows {
     fn len(&self) -> usize {
         self.len
     }
-    fn cell(&self, py: Python<'_>, row: usize, col: usize, ty: ColType) -> PyResult<Py<PyAny>> {
+    fn cell(&self, py: Python<'_>, row: usize, col: usize, ty: ValueType) -> PyResult<Py<PyAny>> {
         let (p, r) = self.locate(row);
         p.cell(py, r, col, ty)
     }
-    fn value(&self, row: usize, col: usize, ty: ColType) -> DbResult<sea_query::Value> {
+    fn value(&self, row: usize, col: usize, ty: ValueType) -> DbResult<sea_query::Value> {
         let (p, r) = self.locate(row);
         p.value(r, col, ty)
     }
