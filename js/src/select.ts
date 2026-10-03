@@ -80,13 +80,8 @@ export type CteColumnsOf<I> = UnionToIntersection<
 >;
 
 /** The value of the only column of row type `R` (`never` if it has several). */
-export type OnlyValue<R> = keyof R extends infer K
-  ? K extends keyof R
-    ? [Exclude<keyof R, K>] extends [never]
-      ? R[K]
-      : never
-    : never
-  : never;
+export type OnlyValue<R> = OnlyKey<R, keyof R>;
+type OnlyKey<R, K extends keyof R> = K extends unknown ? ([Exclude<keyof R, K>] extends [never] ? R[K] : never) : never;
 
 type OneColumn<R> = [OnlyValue<R>] extends [never] ? [error: "this needs a select() of exactly one column"] : [];
 
@@ -100,7 +95,7 @@ export class Select<M extends ModelSpec, Row extends object, S extends string, P
   /** @internal */
   declare readonly "~exists"?: [X, P];
   /** @internal */
-  declare readonly "~column"?: [OnlyValue<Row>, ResolveOuter<X>, P];
+  declare readonly "~column"?: [OnlyValue<Row>] extends [never] ? "not one column" : [OnlyValue<Row>, ResolveOuter<X>, P];
 
   /** @internal */
   constructor(
