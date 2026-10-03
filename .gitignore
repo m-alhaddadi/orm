@@ -5,3 +5,4 @@ __pycache__/
 bench/log-*.txt
 node_modules/
 *.node
+js/dist/
