@@ -235,6 +235,61 @@ multiple language bindings. Validate the architecture and API first.
   lock) is in Python for now; `sqlx::migrate` is the candidate for a shared Rust one.
   SeaORM's and Refinery's tools were not used (see the doc).
 
+### Performance plan  (measured, see "Where a query's time goes" in [`bench/RESULTS.md`](bench/RESULTS.md))
+
+`get by pk` takes ~300–340 µs on asyncio. Of that, ~110 µs is the asyncio ↔ Tokio
+hand-off, ~90 µs is Postgres, ~60 µs is building and planning the query, and ~40 µs is
+building the result. Below, in order of gain per unit of work. The estimates use the
+in-loop measurements, on this 4-vCPU VM with Postgres on the same host.
+
+1. **Finish async calls without taking the GIL on Tokio's thread** (−75 µs per call,
+   −25% on `get`, −4% on a 1000-row read). Tokio pushes the finished result onto a
+   queue and writes an eventfd. The event loop watches that eventfd with
+   `loop.add_reader`, drains the queue on its own thread and builds the Python objects
+   there. Prototype: async `SELECT 1` drops from 181 to 103 µs, the same as a blocking
+   call. Runtime cost: one fd and one queue per event loop, no per-call cost. Several
+   results that finish together cost one wake-up, so concurrent queries should gain
+   more (not measured). Work: about 300 lines across Rust and `db.py`. Use a pipe or
+   socketpair where eventfd isn't available. Keep `future_into_py` for loops without
+   `add_reader` (the Windows Proactor loop). Cancellation needs care. This is decision
+   1's "make the bridge cheaper".
+2. **Recommend uvloop** (−40% on `get` today, no code). Document it and run the
+   benchmarks on both loops. Item 1 still helps on uvloop, by −20 µs.
+3. **Prepared queries** (−65 to −135 µs per call, −25% to −35%). For example
+   `q = Post.objects.filter(Post.id == orm.param("id")).limit(2).prepare()`, then
+   `await q.get(id=5)`. The IR is built and planned once, and each call only binds
+   values. Runtime cost: none per call, and memory only for queries users keep. Work:
+   named parameters in the IR, plus a Rust-side handle that holds the plan (it needs
+   item 4's binding recipe).
+4. **Cache compiled plans in Rust, keyed by the IR JSON** (−17 to −58 µs, −7% to −15%).
+   It helps every query without API changes. Each query still builds its IR in Python
+   and serializes it, and the cache skips parsing, planning and rendering. Runtime
+   cost: hashing the key (~0.2 µs for 150 bytes), ~1–2 KB per distinct query shape
+   (bounded LRU, e.g. 1024 entries ≈ 2 MB), one lock per engine (uncontended under the
+   GIL). Prerequisite: plans must not hold parameter values. Today
+   `Planner::value` converts each parameter in place (`py_to_value` at `Expr::Param`),
+   so the planner has to emit placeholders plus a binding recipe (parameter index,
+   value type, write cast) and bind at execution. Limits and offsets are literals in
+   the IR, so every page offset is a new cache entry and a new prepared statement.
+   Make them parameters, and send `IN` lists as one array parameter (`= ANY($1)`), so
+   one shape covers every length and the Postgres statement cache stops churning.
+   Prefetch and `update_many` plans go through the same refactor.
+5. **Cheaper result building** (estimated −4% to −9% on 1000-row reads, needs a
+   prototype). Building instances costs ~0.65 µs per row (1000 rows: 750 µs fetch,
+   ~700 µs build) with no Python code per row. Options: pre-sized or shared-key
+   instance dicts, cached tzinfo and enum lookups, lazy decoding of wide text columns.
+6. **Python micro-costs** (−3 to −5 µs per query). `_clone` through `copy.copy`
+   (1.3 µs faster with an explicit slot copy, 2–3 clones per query), and fewer
+   coroutine layers between `get()` and `engine.run`.
+
+Not worth it: **compiling the schema into Rust.** JSON is parsed once at startup:
+0.4 ms for the blog schema and ~5 ms for 200 models. Queries never read it, so the
+per-query gain is zero. The cost would be a native build per schema, no single
+prebuilt wheel, and one engine binary per language. If startup matters, skip the
+`json.loads` → `define()` → `json.dumps` round trip by handing the generated JSON
+string to Rust directly (−2.4 ms at 200 models), and generate class bodies statically
+instead of calling `define()` at import (the larger cost, ~10 ms).
+
 ### Next: JS / TypeScript binding (deferred)
 
 1. Split the engine out of the Python binding: `engine/` (`orm-engine`: planner + drivers,
