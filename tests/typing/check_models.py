@@ -13,6 +13,7 @@ from orm import (
     Condition,
     ManyRelatedSet,
     Prefetch,
+    Prepared,
     RelatedSet,
     Row,
     Window,
@@ -21,6 +22,7 @@ from orm import (
     exists,
     func,
     outer,
+    param,
     window,
 )
 from orm import get_database as orm_db
@@ -139,6 +141,14 @@ async def check() -> None:
     assert_type(await post.tags.remove(1), int)
     assert_type(await post.tags.insert(name="go"), Tag)
     assert_type(await Post.objects.prefetch_related(Post.tags), list[Post])
+
+    # Prepared queries keep the model type.
+    by_author = Post.objects.filter(Post.author_id == param("a")).limit(param("n")).prepare()
+    assert_type(by_author, Prepared[Post])
+    assert_type(await by_author(a=1, n=10), list[Post])
+    assert_type(await by_author.get(a=1, n=10), Post)
+    assert_type(await by_author.first(a=1, n=10), Post | None)
+    assert_type(await by_author.count(a=1, n=10), int)
 
 
 async def errors() -> None:

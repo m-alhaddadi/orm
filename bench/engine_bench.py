@@ -70,9 +70,14 @@ async def main() -> None:
             await Post.objects.filter(Post.id == 1).update(views=Post.views + 1)
             await Post.objects.filter(Post.id == 2).update(views=Post.views + 1)
 
+    get_by_pk = Post.objects.filter(Post.id == orm.param("id")).prepare()
+    read_page = Post.objects.order_by(Post.id).limit(orm.param("n")).prepare()
+
     cases = {
         "get by pk": (lambda: Post.objects.get(Post.id == 500), 200),
+        "get by pk, prepared": (lambda: get_by_pk.get(id=500), 200),
         "read 50": (lambda: Post.objects.order_by(Post.id)[:50], 100),
+        "read 50, prepared": (lambda: read_page(n=50), 100),
         "read 1000": (lambda: Post.objects.all(), 20),
         "read 1000 + select_related": (lambda: Post.objects.select_related(Post.author), 20),
         "10 users + prefetch 1000 posts": (lambda: User.objects.prefetch_related(User.posts), 20),

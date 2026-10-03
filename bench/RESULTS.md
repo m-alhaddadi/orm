@@ -590,3 +590,18 @@ This cost is paid once per process. Queries never touch the JSON: `Schema::from_
 indexes models, fields and relations into hash maps, and the planner reads those.
 Creating the Python classes costs more than parsing the JSON. Compiling the schema into
 Rust would save about 5 ms of startup on a 200-model schema and nothing per query.
+
+### Prepared queries
+
+`qs.prepare()` (built once, values bound per call) against the same query built per
+call. The two variants alternate (21 rounds of 200 calls each), release build, same
+machine. Median, µs.
+
+| case | asyncio | prepared | uvloop | prepared |
+|---|---:|---:|---:|---:|
+| get by pk | 305 | 239 (−22%) | 214 | 166 (−22%) |
+| read 50 + 2 filters | 498 | 344 (−31%) | 306 | 266 (−13%) |
+
+`bench/engine_bench.py` now has prepared cases. Sequential runs of it on this machine
+swing by ±20% (an unchanged "read 50" went from 313 to 509 µs between runs), so the
+table above uses alternating runs.

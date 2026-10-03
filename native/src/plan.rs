@@ -25,7 +25,7 @@ use sea_query::{
 use crate::convert::py_to_value;
 use crate::errors::query_err;
 use orm_core::ir::{
-    ArithOp, Assignment, CmpOp, ColType, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Operation, Order,
+    ArithOp, Assignment, CmpOp, ColType, Count, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Operation, Order, ParamRef,
     Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType,
 };
 use orm_core::dialect::{Capabilities, Target};
@@ -1468,10 +1468,10 @@ impl<'s, 'py> Planner<'s, 'py> {
             stmt.order_by_expr(e?, if o.desc { SOrder::Desc } else { SOrder::Asc });
         }
         if let Some(n) = q.limit {
-            stmt.limit(n);
+            stmt.limit(count(self.params, n)?);
         }
         if let Some(n) = q.offset {
-            stmt.offset(n);
+            stmt.offset(count(self.params, n)?);
         }
         if let Some((name, true)) = &self.recursive {
             if !<[String]>::contains(&self.joined, name) {
@@ -1674,7 +1674,13 @@ fn plan_prefetch<'py>(
     let mut q = node.query.clone();
     let pk_order = Order { expr: Expr::Col { path: vec![], name: cm.pk_field().name.clone() }, desc: false };
     let sliced = q.limit.is_some() || q.offset.is_some();
-    let slice = sliced.then(|| (q.offset.unwrap_or(0), q.limit));
+    let slice = match sliced {
+        false => None,
+        true => Some((
+            q.offset.map(|n| count(params, n)).transpose()?.unwrap_or(0),
+            q.limit.map(|n| count(params, n)).transpose()?,
+        )),
+    };
     let mut window_order = vec![];
     if sliced {
         window_order = std::mem::take(&mut q.order);
@@ -1756,6 +1762,17 @@ fn plan_prefetch<'py>(
         output: plan.output,
         children: plan.prefetch,
     })
+}
+
+/// The value of a `LIMIT` / `OFFSET`.
+fn count(params: &[Bound<'_, PyAny>], c: Count) -> PyResult<u64> {
+    match c {
+        Count::Value(n) => Ok(n),
+        Count::Param(ParamRef::Param { i }) => {
+            let p = params.get(i).ok_or_else(|| query_err(format!("parameter {i} out of range")))?;
+            p.extract::<u64>().map_err(|_| query_err(format!("LIMIT and OFFSET take a non-negative integer, got {p}")))
+        }
+    }
 }
 
 /// `FOR UPDATE | FOR SHARE [OF <root>] [NOWAIT | SKIP LOCKED]`. `OF` limits the lock to

@@ -255,25 +255,17 @@ in-loop measurements, on this 4-vCPU VM with Postgres on the same host.
    1's "make the bridge cheaper".
 2. **Recommend uvloop** (−40% on `get` today, no code). Document it and run the
    benchmarks on both loops. Item 1 still helps on uvloop, by −20 µs.
-3. **Prepared queries** (−65 to −135 µs per call, −25% to −35%). For example
-   `q = Post.objects.filter(Post.id == orm.param("id")).limit(2).prepare()`, then
-   `await q.get(id=5)`. The IR is built and planned once, and each call only binds
-   values. Runtime cost: none per call, and memory only for queries users keep. Work:
-   named parameters in the IR, plus a Rust-side handle that holds the plan (it needs
-   item 4's binding recipe).
-4. **Cache compiled plans in Rust, keyed by the IR JSON** (−17 to −58 µs, −7% to −15%).
-   It helps every query without API changes. Each query still builds its IR in Python
-   and serializes it, and the cache skips parsing, planning and rendering. Runtime
-   cost: hashing the key (~0.2 µs for 150 bytes), ~1–2 KB per distinct query shape
-   (bounded LRU, e.g. 1024 entries ≈ 2 MB), one lock per engine (uncontended under the
-   GIL). Prerequisite: plans must not hold parameter values. Today
-   `Planner::value` converts each parameter in place (`py_to_value` at `Expr::Param`),
-   so the planner has to emit placeholders plus a binding recipe (parameter index,
-   value type, write cast) and bind at execution. Limits and offsets are literals in
-   the IR, so every page offset is a new cache entry and a new prepared statement.
-   Make them parameters, and send `IN` lists as one array parameter (`= ANY($1)`), so
-   one shape covers every length and the Postgres statement cache stops churning.
-   Prefetch and `update_many` plans go through the same refactor.
+3. **Prepared queries** ✅ done: `qs.prepare()` with `orm.param("name")` placeholders,
+   and `LIMIT` / `OFFSET` as IR parameters (see [`docs/python-api.md`](docs/python-api.md)).
+   The IR and its JSON are built once, and each call binds values. Rust still plans
+   each call. Measured −22% on `get` and −13% to −31% on a filtered 50-row read. No
+   per-call runtime cost.
+4. ~~**Rust-side plan cache keyed by the IR JSON**~~ — rejected. It would save
+   −17 to −58 µs, but needs the planner to emit placeholders plus a binding recipe instead
+   of converting values while planning, and an LRU with its memory and invalidation
+   costs. Prepared queries already get most of the gain for the queries that repeat.
+   (sea-query already sends `LIMIT` / `OFFSET` as bound parameters, so page offsets
+   never churned the Postgres statement cache.)
 5. **Cheaper result building** (estimated −4% to −9% on 1000-row reads, needs a
    prototype). Building instances costs ~0.65 µs per row (1000 rows: 750 µs fetch,
    ~700 µs build) with no Python code per row. Options: pre-sized or shared-key

@@ -10,10 +10,12 @@ dictionaries consumed by the native engine (see ``core/src/ir.rs``).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, Unpack, overload
+
+from .errors import QueryError
 
 if TYPE_CHECKING:
     from .cte import Cte
@@ -35,6 +37,8 @@ __all__ = [
     "Condition",
     "Ordering",
     "Literal",
+    "Param",
+    "param",
     "Excluded",
     "excluded",
     "Func",
@@ -181,6 +185,8 @@ class Expression(Node, Generic[T]):
 
         if isinstance(values, Select):
             return InSelect(self, values, neg=False)
+        if isinstance(values, Param):
+            raise TypeError("in_() can't take a param(); the number of values is part of the query")
         values = list(values)
         if not values:
             return Const(False)
@@ -191,6 +197,8 @@ class Expression(Node, Generic[T]):
 
         if isinstance(values, Select):
             return InSelect(self, values, neg=True)
+        if isinstance(values, Param):
+            raise TypeError("not_in() can't take a param(); the number of values is part of the query")
         values = list(values)
         if not values:
             return Const(True)
@@ -214,21 +222,23 @@ class Expression(Node, Generic[T]):
         return Like(self, pattern, ci=True)
 
     def contains(self: Expression[str] | Expression[str | None], text: str) -> Condition:
-        return Like(self, f"%{_escape_like(text)}%", ci=False)
+        return Like(self, _pattern(text, _contains), ci=False)
 
     def icontains(self: Expression[str] | Expression[str | None], text: str) -> Condition:
-        return Like(self, f"%{_escape_like(text)}%", ci=True)
+        return Like(self, _pattern(text, _contains), ci=True)
 
     def startswith(self: Expression[str] | Expression[str | None], text: str) -> Condition:
-        return Like(self, f"{_escape_like(text)}%", ci=False)
+        return Like(self, _pattern(text, _startswith), ci=False)
 
     def endswith(self: Expression[str] | Expression[str | None], text: str) -> Condition:
-        return Like(self, f"%{_escape_like(text)}", ci=False)
+        return Like(self, _pattern(text, _endswith), ci=False)
 
     # Arrays ---------------------------------------------------------------------------------
 
     def has(self: Expression[list[E]] | Expression[list[E] | None], value: E) -> Condition:
         """Array columns: ``value`` is one of the elements (``col @> ARRAY[value]``)."""
+        if isinstance(value, Param):
+            return Comparison("contains", self, _Bound(value, _one_element))
         return Comparison("contains", self, Literal([value]))
 
     def has_all(self: Expression[list[E]] | Expression[list[E] | None], values: Iterable[E]) -> Condition:
@@ -296,6 +306,40 @@ def _escape_like(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _contains(text: str) -> str:
+    return f"%{_escape_like(text)}%"
+
+
+def _startswith(text: str) -> str:
+    return f"{_escape_like(text)}%"
+
+
+def _endswith(text: str) -> str:
+    return f"%{_escape_like(text)}"
+
+
+def _one_element(value: Any) -> list[Any]:
+    return [value]
+
+
+def _pattern(text: Any, make: Callable[[str], str]) -> Any:
+    """The LIKE pattern for ``text``, or for a :func:`param` once its value is known."""
+    return _Bound(text, make) if isinstance(text, Param) else make(text)
+
+
+class _Bound(Expression[Any]):
+    """A :func:`param` whose value goes through ``transform`` when bound."""
+
+    __slots__ = ("param", "transform")
+
+    def __init__(self, param: Param, transform: Callable[[Any], Any]) -> None:
+        self.param = param
+        self.transform = transform
+
+    def _ir(self, ctx: IRContext) -> IR:
+        return self.param._slot(ctx.params, self.transform)
+
+
 class Literal(Expression[Any]):
     __slots__ = ("value",)
 
@@ -307,6 +351,62 @@ class Literal(Expression[Any]):
 
     def __repr__(self) -> str:
         return repr(self.value)
+
+
+class _Slot:
+    """A placeholder in a prepared query's parameter list, filled in per call:
+    ``transform`` turns the call's value into the parameter (a LIKE pattern, ...)."""
+
+    __slots__ = ("name", "transform")
+
+    def __init__(self, name: str, transform: Callable[[Any], Any] | None = None) -> None:
+        self.name = name
+        self.transform = transform
+
+    def __repr__(self) -> str:
+        return f"param({self.name!r})"
+
+
+class SlotParams(list[Any]):
+    """The parameter list of a query compiled by ``prepare()``: the only one that
+    accepts :func:`param` placeholders."""
+
+    __slots__ = ()
+
+
+class Param(Expression[Any]):
+    """A value supplied when a prepared query runs; see :func:`param`."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        if not name.isidentifier():
+            raise ValueError(f"param() takes an identifier, got {name!r}")
+        self.name = name
+
+    def _slot(self, ctx_params: list[Any], transform: Callable[[Any], Any] | None = None) -> IR:
+        if not isinstance(ctx_params, SlotParams):
+            raise QueryError(f"{self!r} is a placeholder of a prepared query; call .prepare() on the query set")
+        ctx_params.append(_Slot(self.name, transform))
+        return {"t": "param", "i": len(ctx_params) - 1}
+
+    def _ir(self, ctx: IRContext) -> IR:
+        return self._slot(ctx.params)
+
+    def __repr__(self) -> str:
+        return f"param({self.name!r})"
+
+
+def param(name: str) -> Any:
+    """A placeholder for a value given each time a prepared query runs::
+
+        by_author = Post.objects.filter(Post.author_id == param("author")).limit(param("n")).prepare()
+        posts = await by_author(author=3, n=10)
+
+    It stands for a value in comparisons, arithmetic, ``like`` / ``contains`` / ...,
+    ``has()``, ``limit()`` and ``offset()``. Typed as ``Any`` so it fits wherever a
+    value does."""
+    return Param(name)
 
 
 class ColumnRef(Expression[T]):
@@ -910,7 +1010,7 @@ class IsNull(Condition):
 class Like(Condition):
     __slots__ = ("item", "pattern", "ci", "neg")
 
-    def __init__(self, item: Node, pattern: str, ci: bool, neg: bool = False) -> None:
+    def __init__(self, item: Node, pattern: Any, ci: bool, neg: bool = False) -> None:
         self.item = item
         self.pattern = pattern
         self.ci = ci
@@ -920,7 +1020,7 @@ class Like(Condition):
         return {
             "t": "like",
             "item": self.item._ir(ctx),
-            "pattern": ctx.param(self.pattern),
+            "pattern": self.pattern._ir(ctx) if isinstance(self.pattern, Node) else ctx.param(self.pattern),
             "ci": self.ci,
             "neg": self.neg,
         }
