@@ -599,3 +599,13 @@ pub fn compile_schema_file(path: String) -> napi::Result<String> {
     let (ir, _) = orm_core::dsl::check(ir).map_err(schema_err)?;
     serde_json::to_string(&ir).map_err(schema_err)
 }
+
+/// `models.ts` source for a schema file; the runtime is imported from `runtime`.
+#[napi]
+pub fn generate_typescript(path: String, runtime: Option<String>) -> napi::Result<String> {
+    let p = std::path::Path::new(&path);
+    let (ir, schema) =
+        orm_core::dsl::check(orm_core::dsl::compile_file(p).map_err(schema_err)?).map_err(schema_err)?;
+    let source = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    orm_core::codegen::typescript::generate(&ir, &schema, &source, runtime.as_deref().unwrap_or("orm")).map_err(schema_err)
+}

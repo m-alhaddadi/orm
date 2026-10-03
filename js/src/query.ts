@@ -21,7 +21,9 @@ import {
   Slot,
   SlotParams,
   and,
+  exists,
   not,
+  outer,
   type CteLike,
   type ExistsQuery,
   type IR,
@@ -34,7 +36,7 @@ import {
 import { NotLoaded, QueryError, TransactionRequired } from "./errors.js";
 import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
 import { DB, RELATED, registerQueries, type ModelClass, type ModelMeta } from "./model.js";
-import { call, type NativeReturned, type NativeSelect } from "./native.js";
+import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
 import { assignments, prepareRows, prepareUpdateRows } from "./write.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
 import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./select.js";
@@ -167,8 +169,8 @@ export class Prefetch<
   readonly toAttr: string | undefined;
 
   constructor(path: RelationPath<ModelSpec, S, H>);
-  constructor(path: RelationPath<ModelSpec, S, H>, options: { readonly toAttr: A & string });
-  constructor(path: RelationPath<ModelSpec, S, H>, queryset: QuerySet<Last<H>["spec"], Row, string, P, never>, options?: { readonly toAttr: A & string });
+  constructor(path: RelationPath<ModelSpec, S, H>, options: { readonly toAttr: A });
+  constructor(path: RelationPath<ModelSpec, S, H>, queryset: QuerySet<Last<H>["spec"], Row, string, P, never>, options?: { readonly toAttr: A });
   constructor(
     readonly path: RelationPath<ModelSpec, S, H>,
     queryset?: QuerySet<ModelSpec, unknown, string, unknown, never> | { readonly toAttr: string },
@@ -287,8 +289,8 @@ export interface QueryState {
   readonly prefetch: readonly Prefetch<readonly Hop[], unknown, string | undefined, string, unknown>[];
   readonly lock: { exclusive: boolean; nowait: boolean; skip_locked: boolean } | undefined;
   readonly db: Database | undefined;
-  readonly from: Cte<string, object, ModelSpec | null> | undefined;
-  readonly joins: readonly [Cte<string, object, ModelSpec | null>, Node, boolean][];
+  readonly from: Cte<string, unknown, ModelSpec | null> | undefined;
+  readonly joins: readonly [Cte<string, unknown, ModelSpec | null>, Node, boolean][];
 }
 
 const EMPTY: QueryState = {
@@ -509,14 +511,14 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     name: N,
     options: CteOptions<N, M["data"], P, X> = {},
   ): Cte<N, M["data"], M> {
-    return makeCte(name, this, options) as never;
+    return makeCte(name, this as never, options as never) as never;
   }
 
   /**
    * `JOIN <cte> ON <on>` (`LEFT JOIN` with `outer`): the CTE's columns (`cte.c.<name>`)
    * come along with each row, for filters, ordering and `select()`.
    */
-  join<N extends string, C extends object, const On extends Expression<boolean | null, Allowed<S | N>, unknown>>(
+  join<N extends string, C, const On extends Expression<boolean | null, Allowed<S | N>, unknown>>(
     cte: Cte<N, C, ModelSpec | null>,
     on: On,
     options: { readonly outer?: boolean } = {},
@@ -534,7 +536,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    * Reads the rows from `cte` instead of the model's table (a subquery in `FROM`). The
    * CTE must have the model's columns; its other columns are `cte.c.<name>`.
    */
-  from<N extends string>(cte: Cte<N, object, M>): QuerySet<M, R, S | N, P, X> {
+  from<N extends string>(cte: Cte<N, unknown, M>): QuerySet<M, R, S | N, P, X> {
     if (!isCte(cte)) {
       throw new TypeError(`from() takes a CTE, got ${String(cte)}`);
     }
@@ -557,7 +559,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   select<const I extends SelectItems<M, S>>(
     items: I,
   ): Select<M, Simplify<SelectRow<I>>, S, P & ItemsParams<I>, X | ItemsOuter<I>, CteColumnsOf<I>> {
-    return makeSelect(this, items) as never;
+    return makeSelect(this as never, items) as never;
   }
 
   // -- batches --------------------------------------------------------------------------------
@@ -779,7 +781,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   async get<const C extends readonly Expression<boolean | null, Allowed<S>, {}>[]>(
     ...conditions: C & ([X] extends [never] ? ([keyof P] extends [never] ? unknown : never) : never)
   ): Promise<R> {
-    const objs = await (this.filter(...conditions) as QuerySet<M, R>).limit(2).fetch();
+    const objs = await (this.filter(...(conditions as unknown as never[])) as unknown as QuerySet<M, R>).limit(2).fetch();
     return one(this.meta, objs);
   }
 
@@ -977,8 +979,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   }
 }
 
-async function db_wait(db: Database, f: (tx: ReturnType<Database["tx"]>) => Promise<unknown>): Promise<unknown> {
-  const { wait } = await import("./native.js");
+function db_wait(db: Database, f: (tx: ReturnType<Database["tx"]>) => Promise<unknown>): Promise<unknown> {
   return wait(() => f(db.tx()));
 }
 
@@ -1379,20 +1380,17 @@ function makeManyRelatedSet(rel: RelationMeta, instance: object): ManyRelatedSet
   const tcol = join.column(join.fieldByIr.get(rel.through!.target)!);
   const to = target.column(target.fieldByIr.get(rel.to)!);
   const key = inst[owner.fieldByIr.get(rel.from)!.name];
-  const { exists, outer } = expr;
   const cond = exists(join.objects.filter(source.eq(key as never) as never, tcol.eq(outer(to) as never) as never) as never);
   const qs = new ManyRelatedSet<ModelSpec>(target, { ...EMPTY, filters: [cond] });
   Object.assign(qs, { relation: rel, instance: inst });
   return qs;
 }
 
-import * as expr from "./expr.js";
-
 registerQueries((meta) => new QuerySet(meta), makeRelatedSet, makeManyRelatedSet);
 
 // -- CTE / select hooks (cte.ts and select.ts register themselves) ---------------------------------
 
-export interface CteOptions<N extends string, C extends object, P, X extends string> {
+export interface CteOptions<N extends string, C, P, X extends string> {
   /** The recursive part, built from the CTE itself (`WITH RECURSIVE`). */
   readonly recursive?: (self: CteSelf<N, C>) => Subquery & CteQuery<P, X>;
   /** `UNION` instead of `UNION ALL` between the parts. */
@@ -1408,9 +1406,9 @@ export interface CteQuery<P, X extends string> {
   cteIr(params: unknown[], ctes: Ctes): IR;
 }
 
-let makeCte: (name: string, query: QuerySet<ModelSpec, unknown, string, unknown, string> | Select<ModelSpec, object, string, unknown, string, object>, options: CteOptions<string, object, unknown, string>) => Cte<string, object, ModelSpec | null>;
-let makeSelect: (qs: QuerySet<ModelSpec, unknown, string, unknown, string>, items: object) => Select<ModelSpec, object, string, unknown, string, object>;
-let isCte: (x: unknown) => x is Cte<string, object, ModelSpec | null>;
+let makeCte: (name: string, query: QuerySet<ModelSpec, unknown, string, unknown, string> | Select<ModelSpec, object, string, unknown, string, unknown>, options: CteOptions<string, unknown, unknown, string>) => Cte<string, unknown, ModelSpec | null>;
+let makeSelect: (qs: QuerySet<ModelSpec, unknown, string, unknown, string>, items: object) => Select<ModelSpec, object, string, unknown, string, unknown>;
+let isCte: (x: unknown) => x is Cte<string, unknown, ModelSpec | null>;
 
 /** @internal */
 export function registerCte(make: typeof makeCte, check: typeof isCte): void {

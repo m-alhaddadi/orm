@@ -304,25 +304,25 @@ export abstract class Expression<T, S extends string = never, P = {}> extends No
 
   add<N extends string>(value: ParamRef<N>): Expression<T, S, P & ParamValues<N, In<NonNullable<T>>>>;
   add<S2 extends string = never, P2 = {}>(value: Operand<NonNullable<T>, S2, P2>): Expression<T, S | S2, P & P2>;
-  add(value: unknown): Expression<T, string, unknown> {
+  add(value: unknown): unknown {
     return new Arith("add", this, wrap(value));
   }
 
   sub<N extends string>(value: ParamRef<N>): Expression<T, S, P & ParamValues<N, In<NonNullable<T>>>>;
   sub<S2 extends string = never, P2 = {}>(value: Operand<NonNullable<T>, S2, P2>): Expression<T, S | S2, P & P2>;
-  sub(value: unknown): Expression<T, string, unknown> {
+  sub(value: unknown): unknown {
     return new Arith("sub", this, wrap(value));
   }
 
   mul<N extends string>(value: ParamRef<N>): Expression<T, S, P & ParamValues<N, In<NonNullable<T>>>>;
   mul<S2 extends string = never, P2 = {}>(value: Operand<NonNullable<T>, S2, P2>): Expression<T, S | S2, P & P2>;
-  mul(value: unknown): Expression<T, string, unknown> {
+  mul(value: unknown): unknown {
     return new Arith("mul", this, wrap(value));
   }
 
   div<N extends string>(value: ParamRef<N>): Expression<T, S, P & ParamValues<N, In<NonNullable<T>>>>;
   div<S2 extends string = never, P2 = {}>(value: Operand<NonNullable<T>, S2, P2>): Expression<T, S | S2, P & P2>;
-  div(value: unknown): Expression<T, string, unknown> {
+  div(value: unknown): unknown {
     return new Arith("div", this, wrap(value));
   }
 
@@ -341,11 +341,11 @@ export abstract class Expression<T, S extends string = never, P = {}> extends No
  * `not()`. */
 export abstract class Condition<S extends string = never, P = {}> extends Expression<boolean, S, P> {
   and<S2 extends string = never, P2 = {}>(other: Expression<boolean | null, S2, P2>): Condition<S | S2, P & P2> {
-    return and(this, other);
+    return and(this, other) as never;
   }
 
   or<S2 extends string = never, P2 = {}>(other: Expression<boolean | null, S2, P2>): Condition<S | S2, P & P2> {
-    return or(this, other);
+    return or(this, other) as never;
   }
 
   not(): Condition<S, P> {
@@ -492,7 +492,7 @@ export class Column<T, S extends string = never> extends Expression<T, S, {}> {
     return { t: "col", path: [...this.path], name: this.field.ir };
   }
 
-  toString(): string {
+  override toString(): string {
     return this.label;
   }
 }
@@ -562,7 +562,7 @@ export class ScalarSubquery<T, S extends string, P> extends Expression<T, S, P> 
 }
 
 /** `EXISTS (<query>)`: true when the query has a row. */
-class Exists extends Condition<string, unknown> {
+class Exists extends Condition<any, any> {
   constructor(readonly query: Subquery) {
     super();
   }
@@ -665,8 +665,8 @@ export class WindowFunc<T, S extends string = never, P = {}> {
     window: WindowDef<S2, P2>,
     extend?: WindowExtend<S3, P3>,
   ): Window<T, S | S2 | S3, P & P2 & P3>;
-  over(a?: never, b?: never): Window<T, string, unknown> {
-    return this.func.over(a, b);
+  over(a?: unknown, b?: unknown): unknown {
+    return (this.func.over as (a?: unknown, b?: unknown) => unknown).call(this.func, a, b);
   }
 }
 
@@ -809,23 +809,25 @@ type SumOf<T> = [NonNullable<T>] extends [number | bigint] ? (number extends Non
  * subquery: `func.count(User.posts)` is each user's number of posts. Over the model's
  * own columns, aggregates summarize the rows of each `groupBy()` group (or all rows).
  */
-export const func = {
+class Functions {
   /** `COUNT(*)` without argument, `COUNT(expr)` (non-null values), or the rows of a
    * relation: `func.count(User.posts)`. */
-  count<S extends string = never, P = {}>(
-    what?: Expression<unknown, S, P> | RelationPath<ModelSpec, S, readonly Hop[]>,
+  count(): Func<bigint>;
+  count<S extends string, P>(
+    what: Expression<unknown, S, P> | RelationPath<ModelSpec, S, readonly Hop[]>,
     options?: { readonly distinct?: boolean },
-  ): Func<bigint, Exclude<S, Many>, P> {
+  ): Func<bigint, Exclude<S, Many>, P>;
+  count(what?: unknown, options?: { readonly distinct?: boolean }): Func<bigint, string, unknown> {
     if (what instanceof RelationPath) {
       return new Func("count", [], what);
     }
-    return new Func("count", what === undefined ? [] : [wrap(what)], undefined, options?.distinct ?? false);
-  },
+    return new Func("count", what === undefined ? [] : [wrap(what)], undefined, options?.distinct ?? false) as never;
+  }
 
   /** `SUM`; integer sums come back as `bigint` (cast to bigint). */
   sum<T extends Num | null, S extends string, P>(expr: AnyExpr<T, S, P>, options?: { readonly distinct?: boolean }): Func<SumOf<T> | null, Exclude<S, Many>, P> {
     return new Func("sum", [expr], undefined, options?.distinct ?? false);
-  },
+  }
 
   /** `AVG`: a number, or a `Decimal` for decimal columns (exact). */
   avg<T extends Num | null, S extends string, P>(
@@ -833,36 +835,36 @@ export const func = {
     options?: { readonly distinct?: boolean },
   ): Func<([NonNullable<T>] extends [Decimal] ? Decimal : number) | null, Exclude<S, Many>, P> {
     return new Func("avg", [expr], undefined, options?.distinct ?? false);
-  },
+  }
 
   min<T, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T | null, Exclude<S, Many>, P> {
     return new Func("min", [expr]);
-  },
+  }
 
   max<T, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T | null, Exclude<S, Many>, P> {
     return new Func("max", [expr]);
-  },
+  }
 
   lower<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
     return new Func("lower", [expr]);
-  },
+  }
 
   upper<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
     return new Func("upper", [expr]);
-  },
+  }
 
   length<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<number | Extract<T, null>, S, P> {
     return new Func("length", [expr]);
-  },
+  }
 
   /** The number of elements of an array. */
   cardinality<T extends readonly unknown[] | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<number | Extract<T, null>, S, P> {
     return new Func("cardinality", [expr]);
-  },
+  }
 
   abs<T extends Num | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
     return new Func("abs", [expr]);
-  },
+  }
 
   /** The first non-null of `expr` and `fallback`. */
   coalesce<T, S extends string, P, S2 extends string = never, P2 = {}>(
@@ -870,64 +872,66 @@ export const func = {
     fallback: Operand<NonNullable<T>, S2, P2>,
   ): Func<NonNullable<T> | Extract<typeof fallback, null>, S | S2, P & P2> {
     return new Func("coalesce", [expr, wrap(fallback)]);
-  },
+  }
 
   now(): Func<Date> {
     return new Func("now");
-  },
+  }
 
   // Window functions: only valid with .over(...).
 
   /** 1, 2, 3, ... in the window's order. */
   rowNumber(): WindowFunc<bigint> {
     return new WindowFunc("row_number");
-  },
+  }
 
   /** Rank with gaps: ties share a rank, the next rank skips (1, 1, 3). */
   rank(): WindowFunc<bigint> {
     return new WindowFunc("rank");
-  },
+  }
 
   /** Rank without gaps (1, 1, 2). */
   denseRank(): WindowFunc<bigint> {
     return new WindowFunc("dense_rank");
-  },
+  }
 
   percentRank(): WindowFunc<number> {
     return new WindowFunc("percent_rank");
-  },
+  }
 
   cumeDist(): WindowFunc<number> {
     return new WindowFunc("cume_dist");
-  },
+  }
 
   /** The bucket (1..buckets) of the row when the window is split evenly. */
   ntile(buckets: number): WindowFunc<number> {
     return new WindowFunc("ntile", [new Int(buckets)]);
-  },
+  }
 
   /** `expr` on the row `offset` rows before this one, `fallback` if none. */
   lag<T, S extends string, P>(expr: AnyExpr<T, S, P>, offset = 1, fallback?: In<NonNullable<T>>): WindowFunc<T | null, S, P> {
     return new WindowFunc("lag", fallback === undefined ? [expr, new Int(offset)] : [expr, new Int(offset), wrap(fallback)]);
-  },
+  }
 
   /** `expr` on the row `offset` rows after this one, `fallback` if none. */
   lead<T, S extends string, P>(expr: AnyExpr<T, S, P>, offset = 1, fallback?: In<NonNullable<T>>): WindowFunc<T | null, S, P> {
     return new WindowFunc("lead", fallback === undefined ? [expr, new Int(offset)] : [expr, new Int(offset), wrap(fallback)]);
-  },
+  }
 
   firstValue<T, S extends string, P>(expr: AnyExpr<T, S, P>): WindowFunc<T, S, P> {
     return new WindowFunc("first_value", [expr]);
-  },
+  }
 
   lastValue<T, S extends string, P>(expr: AnyExpr<T, S, P>): WindowFunc<T, S, P> {
     return new WindowFunc("last_value", [expr]);
-  },
+  }
 
   nthValue<T, S extends string, P>(expr: AnyExpr<T, S, P>, n: number): WindowFunc<T | null, S, P> {
     return new WindowFunc("nth_value", [expr, new Int(n)]);
-  },
-};
+  }
+}
+
+export const func = new Functions();
 
 // -- relation paths ---------------------------------------------------------------------------
 
@@ -983,7 +987,7 @@ export class Ordering<S extends string = never, P = {}> {
 
 // -- conditions ---------------------------------------------------------------------------------
 
-class Comparison extends Condition<string, unknown> {
+class Comparison extends Condition<any, any> {
   constructor(
     readonly op: string,
     readonly left: Node,
@@ -997,7 +1001,7 @@ class Comparison extends Condition<string, unknown> {
   }
 }
 
-class Arith extends Expression<unknown, string, unknown> {
+class Arith extends Expression<any, any, any> {
   constructor(
     readonly op: string,
     readonly left: Node,
@@ -1011,7 +1015,7 @@ class Arith extends Expression<unknown, string, unknown> {
   }
 }
 
-class InSelect extends Condition<string, unknown> {
+class InSelect extends Condition<any, any> {
   constructor(
     readonly item: Node,
     readonly query: Subquery,
@@ -1025,7 +1029,7 @@ class InSelect extends Condition<string, unknown> {
   }
 }
 
-class InList extends Condition<string, unknown> {
+class InList extends Condition<any, any> {
   constructor(
     readonly item: Node,
     readonly values: Node[],
@@ -1039,7 +1043,7 @@ class InList extends Condition<string, unknown> {
   }
 }
 
-class IsNull extends Condition<string, unknown> {
+class IsNull extends Condition<any, any> {
   constructor(
     readonly item: Node,
     readonly neg: boolean,
@@ -1052,7 +1056,7 @@ class IsNull extends Condition<string, unknown> {
   }
 }
 
-class Like extends Condition<string, unknown> {
+class Like extends Condition<any, any> {
   constructor(
     readonly item: Node,
     readonly pattern: string | Bound | ParamRef<string>,
@@ -1078,7 +1082,7 @@ class Const extends Condition<never, {}> {
   }
 }
 
-class BoolOp extends Condition<string, unknown> {
+class BoolOp extends Condition<any, any> {
   constructor(
     readonly op: "and" | "or",
     readonly items: Node[],
@@ -1091,7 +1095,7 @@ class BoolOp extends Condition<string, unknown> {
   }
 }
 
-class Not extends Condition<string, unknown> {
+class Not extends Condition<any, any> {
   constructor(readonly item: Node) {
     super();
   }

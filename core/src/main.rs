@@ -4,6 +4,7 @@
 //! orm check <schema.prisma>
 //! orm compile <schema.prisma> [-o ir.json]
 //! orm generate python <schema.prisma> [-o models.py]          (also writes models.pyi)
+//! orm generate typescript <schema.prisma> [-o models.ts] [--import orm]
 //! orm makemigrations <schema.prisma> [--dir migrations] [--name N] [--empty] [--check]
 //! orm sqlmigrate <migration> [--dir migrations] [--down]
 //! ```
@@ -20,6 +21,7 @@ const USAGE: &str = "usage:
   orm check <schema.prisma>
   orm compile <schema.prisma> [-o ir.json]
   orm generate python <schema.prisma> [-o models.py]
+  orm generate typescript <schema.prisma> [-o models.ts] [--import orm]
   orm makemigrations <schema.prisma> [--dir migrations] [--name N] [--empty] [--check]
   orm sqlmigrate <migration> [--dir migrations] [--down]";
 
@@ -88,25 +90,40 @@ fn run(raw: Vec<String>) -> Result<ExitCode, String> {
             }
         }
         "generate" => {
-            args.check(&["-o", "--out"], 2)?;
-            if args.positional[0] != "python" {
-                return Err(format!("unknown target {}; available: python", args.positional[0]));
-            }
+            args.check(&["-o", "--out", "--import"], 2)?;
             let schema_path = &args.positional[1];
-            let (ir, schema) = load(schema_path)?;
-            let out = match args.opt(&["-o", "--out"]) {
-                Some(o) => PathBuf::from(o),
-                None => Path::new(schema_path).with_file_name("models.py"),
-            };
             let source = Path::new(schema_path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let g = codegen::python::generate(&ir, &schema, &source)?;
-            if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+            let write = |path: &Path, text: &str| -> Result<(), String> {
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+                }
+                std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+            };
+            match args.positional[0].as_str() {
+                "python" => {
+                    let (ir, schema) = load(schema_path)?;
+                    let out = match args.opt(&["-o", "--out"]) {
+                        Some(o) => PathBuf::from(o),
+                        None => Path::new(schema_path).with_file_name("models.py"),
+                    };
+                    let g = codegen::python::generate(&ir, &schema, &source)?;
+                    write(&out, &g.module)?;
+                    let stub = out.with_extension("pyi");
+                    write(&stub, &g.stub)?;
+                    println!("wrote {} and {}", out.display(), stub.display());
+                }
+                "typescript" => {
+                    let (ir, schema) = load(schema_path)?;
+                    let out = match args.opt(&["-o", "--out"]) {
+                        Some(o) => PathBuf::from(o),
+                        None => Path::new(schema_path).with_file_name("models.ts"),
+                    };
+                    let runtime = args.opt(&["--import"]).unwrap_or("orm");
+                    write(&out, &codegen::typescript::generate(&ir, &schema, &source, runtime)?)?;
+                    println!("wrote {}", out.display());
+                }
+                other => return Err(format!("unknown target {other}; available: python, typescript")),
             }
-            std::fs::write(&out, g.module).map_err(|e| format!("{}: {e}", out.display()))?;
-            let stub = out.with_extension("pyi");
-            std::fs::write(&stub, g.stub).map_err(|e| format!("{}: {e}", stub.display()))?;
-            println!("wrote {} and {}", out.display(), stub.display());
         }
         "makemigrations" => {
             args.check(&["--dir", "--name", "--empty", "--check"], 1)?;

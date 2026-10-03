@@ -32,6 +32,7 @@ export type IRField = {
   default?: unknown;
   default_now?: boolean;
   default_sql?: string;
+  [key: string]: unknown;
 };
 
 export type IRRelation = {
@@ -42,10 +43,11 @@ export type IRRelation = {
   to: string;
   foreign_key?: boolean;
   through?: { model: string; source: string; target: string };
+  [key: string]: unknown;
 };
 
-export type IRModel = { name: string; table: string; fields: IRField[]; relations?: IRRelation[] };
-export type IREnum = { name: string; storage?: string; values: { name: string; value: string | number }[] };
+export type IRModel = { name: string; table: string; fields: IRField[]; relations?: IRRelation[]; [key: string]: unknown };
+export type IREnum = { name: string; storage?: string; values: { name: string; value: string | number }[]; [key: string]: unknown };
 export type SchemaIR = { models: IRModel[]; enums?: IREnum[]; [key: string]: unknown };
 
 /** A model, as the types see it: the generated `UserModel` adds its columns and

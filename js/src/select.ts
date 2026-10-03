@@ -17,7 +17,7 @@
 
 import { Builder } from "./build.js";
 import type { Database } from "./db.js";
-import { DoesNotExist, MultipleObjectsReturned, QueryError } from "./errors.js";
+import { DoesNotExist, MultipleObjectsReturned, QueryError, TransactionRequired } from "./errors.js";
 import {
   Column,
   Expression,
@@ -94,7 +94,7 @@ type OneColumn<R> = [OnlyValue<R>] extends [never] ? [error: "this needs a selec
  *
  * `C` is the columns a CTE made from it has.
  */
-export class Select<M extends ModelSpec, Row extends object, S extends string, P, X extends string, C extends object = Row> {
+export class Select<M extends ModelSpec, Row extends object, S extends string, P, X extends string, C = Row> {
   /** @internal */
   declare readonly "~exists"?: [X, P];
   /** @internal */
@@ -121,19 +121,19 @@ export class Select<M extends ModelSpec, Row extends object, S extends string, P
   filter<const Cs extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: Cs
   ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>>, C> {
-    return this.with(this.qs.filter(...(conditions as never[])) as never);
+    return this.with(this.qs.filter(...(conditions as unknown as never[])) as never);
   }
 
   exclude<const Cs extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: Cs
   ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>>, C> {
-    return this.with(this.qs.exclude(...(conditions as never[])) as never);
+    return this.with(this.qs.exclude(...(conditions as unknown as never[])) as never);
   }
 
   orderBy<const Cs extends readonly (Expression<unknown, AllowedOne<S>, unknown> | Ordering<AllowedOne<S>, unknown>)[]>(
     ...items: Cs
   ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>>, C> {
-    return this.with(this.qs.orderBy(...(items as never[])) as never);
+    return this.with(this.qs.orderBy(...(items as unknown as never[])) as never);
   }
 
   limit<N extends string>(n: ParamRef<N>): Select<M, Row, S, P & ParamValues<N, number | bigint>, X, C>;
@@ -269,14 +269,11 @@ export class Select<M extends ModelSpec, Row extends object, S extends string, P
   private async rows(sel: Select<M, Row, S, P, X, C> = this): Promise<Row[]> {
     const params: unknown[] = [];
     const ir = sel.ir(params);
-    if (sel.qs.state.lock) {
-      // the same check as a query set's
-      await sel.qs.slice(0).limit(0).count().catch(() => undefined);
-    }
     const db = sel.qs.db();
     if (sel.qs.state.lock && db.tx() === null) {
-      const { TransactionRequired } = await import("./errors.js");
-      throw new TransactionRequired("lock() outside a transaction would release the locks as soon as the query ends; run it inside `db.transaction(...)`");
+      throw new TransactionRequired(
+        "lock() outside a transaction would release the locks as soon as the query ends; run it inside `db.transaction(...)`",
+      );
     }
     const res = (await db.run(ir, params)) as NativeSelect;
     return new Builder(db.registry, sel.qs.state.db).select(res, this.items.map(([k]) => k)) as Row[];
@@ -339,7 +336,7 @@ export class Select<M extends ModelSpec, Row extends object, S extends string, P
 }
 
 /** @internal */
-export function makeSelect(qs: QuerySet<ModelSpec, unknown, string, unknown, string>, items: object): Select<ModelSpec, object, string, unknown, string, object> {
+export function makeSelect(qs: QuerySet<ModelSpec, unknown, string, unknown, string>, items: object): Select<ModelSpec, object, string, unknown, string, unknown> {
   const entries = Object.entries(items);
   if (!entries.length) {
     throw new TypeError("select() needs at least one column");

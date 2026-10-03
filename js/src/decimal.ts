@@ -4,7 +4,4 @@
  * `number` or decimal text.
  */
 
-import DecimalJs from "decimal.js";
-
-export const Decimal = DecimalJs;
-export type Decimal = DecimalJs;
+export { Decimal } from "decimal.js";
