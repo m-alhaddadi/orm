@@ -605,3 +605,307 @@ machine. Median, µs.
 `bench/engine_bench.py` now has prepared cases. Sequential runs of it on this machine
 swing by ±20% (an unchanged "read 50" went from 313 to 509 µs between runs), so the
 table above uses alternating runs.
+
+
+## Current Rust engine versus SeaORM — 2026-10-03
+
+Direct Rust comparison of the current `orm-engine` against unmodified SeaORM
+2.0.4 / SQLx 0.9.0. This measures the current planner and database driver,
+separately from the older SeaORM-based `ormcore` prototype above.
+
+Environment: macOS ARM64, Rust 1.97.0, release build with LTO, isolated PostgreSQL
+18.6 (Homebrew), localhost TCP with TLS disabled. Each ORM has one pooled
+connection and runs on the same current-thread Tokio runtime. PostgreSQL uses
+default durability settings.
+
+Median batch-average latency in **µs per operation**; lower is better.
+“Speed ratio” is SeaORM latency divided by our direct-IR latency.
+
+| Case | SeaORM | Our direct IR + planner | Our JSON parse + planner | Speed ratio |
+|---|---:|---:|---:|---:|
+| get by pk | 70.87 | 37.26 | 37.89 | 1.90× |
+| read 50 | 95.46 | 55.63 | 56.39 | 1.72× |
+| read 1000 | 383.33 | 306.26 | 306.49 | 1.25× |
+| filtered count | 105.76 | 62.26 | 63.98 | 1.70× |
+| update 100 | 138.94 | 106.32 | 107.40 | 1.31× |
+
+Our engine had lower median latency in all five measured cases: **1.25–1.90×**
+the operation rate implied by SeaORM's latency in this sequential workload.
+Skipping JSON parsing reduced median latency by only **0.23–1.73 µs** in these
+cases. These results do not demonstrate a benefit from generated Rust entities
+or precompiled SQL; neither is implemented in this comparison.
+
+Method: 1,000 seeded rows with two integer fields, a title, and a 200-byte body.
+Both implementations bind query values and decode every selected field into
+exactly the same owned Rust model. The harness asserts complete result equality
+and expected counts before timing. Each contender receives 30 warm-up calls,
+followed by 15 batches of 20–150 operations; contender order rotates each round.
+Connections, schema compilation, and seeding are outside timing. Query building,
+planning, execution, result allocation, and result destruction are inside timing.
+The direct-IR path clones a typed operation template for each call; the JSON path
+parses a prepared JSON string per call, without timing JSON serialization.
+
+The update case sets `views = 0` on 100 rows and returns the affected-row count.
+Its batch averages varied considerably: SeaORM **135.49–191.44 µs**, direct IR
+**101.14–157.68 µs**, and JSON IR **103.96–159.57 µs**. The primary-key case also
+had a SeaORM outlier of **145.24 µs** versus its **70.87 µs** median. Reported
+values are medians of batch averages, not per-request tail latencies.
+
+Scope: warm-cache sequential operations against a local database. The comparison
+includes different drivers (`tokio-postgres` versus SQLx), so it cannot attribute
+the difference to the planner alone. It does not cover joins, prefetching,
+inserts, concurrent load, remote databases, or production workloads.
+
+Harness and methodology: [rust-compare/README.md](rust-compare/README.md).
+Raw batch measurements: [rust-compare/results.json](rust-compare/results.json).
+
+
+### Completed verification — three independent runs
+
+Completed two additional release runs against the isolated PostgreSQL instance,
+with a fresh table and seed data for each run. The initial measurements above
+and their raw JSON remain unchanged. All three runs completed all five cases
+and all correctness assertions: **63,450 timed operations** in total, plus
+untimed warm-up and validation calls.
+
+The verification runs additionally assert the exact seeded ID, title, body,
+and view count of every returned row. For each of the three update paths, the
+harness resets `views = id`, runs the update, and independently checks that
+exactly IDs 1–100 have `views = 0` while IDs 101–1000 retain their original views.
+These checks and resets are outside timing.
+
+The following latency values are the **median of the three run medians**, in
+µs per operation. The final column gives the range of SeaORM/direct-IR latency
+ratios across those runs, rather than a confidence interval.
+
+| Case | SeaORM | Our direct IR + planner | Our JSON parse + planner | Speed ratio across runs |
+|---|---:|---:|---:|---:|
+| get by pk | 71.45 | 37.26 | 37.89 | 1.90–1.92× |
+| read 50 | 95.36 | 55.63 | 56.13 | 1.70–1.72× |
+| read 1000 | 387.77 | 305.26 | 305.16 | 1.25–1.30× |
+| filtered count | 102.63 | 62.64 | 63.29 | 1.63–1.70× |
+| update 100 | 140.14 | 107.13 | 107.40 | 1.22–1.31× |
+
+Our direct Rust path had lower median latency in **every case in every run**.
+The observed speed ratios span **1.22–1.92×**. The 100-row update remained the
+most variable case: run medians were 138.94, 179.91, and 140.14 µs for SeaORM,
+and 106.32, 147.15, and 107.13 µs for direct IR. Both implementations slowed
+in the same repeat run; the measurements do not isolate the cause. Read timing
+was steadier. The small direct-IR versus JSON differences include measurement
+noise; JSON was marginally faster in some cases in the last run.
+
+Validation completed: release compilation, Rust formatting check, Clippy on
+the benchmark crate with warnings treated as errors, report whitespace check,
+and all runtime result/state assertions in both verification runs. There were
+no benchmark failures. The same workload and driver limitations stated above
+still apply; these checks do not establish a universal performance ranking.
+
+Additional raw measurements:
+[repeat 1](rust-compare/results-repeat-1.json),
+[repeat 2](rust-compare/results-repeat-2.json).
+The harness accepts `ORM_BENCH_OUT` to preserve each run in a separate file.
+
+
+### Diesel added — 2026-10-03
+
+Expanded the Rust comparison with **Diesel 2.3.13 / diesel-async 0.9.2**, using
+its typed query DSL and `AsyncPgConnection`. Diesel uses a deadpool pool limited
+to one connection, with fast recycling. Both Diesel's async adapter and our
+engine use `tokio-postgres`; SeaORM uses SQLx. All contenders run in the same
+process, on the same current-thread Tokio runtime, against the same isolated
+PostgreSQL 18.6 server and seeded data. This tests Diesel's async adapter,
+not its synchronous libpq connection implementation.
+
+Ran the complete expanded comparison **three times**, recreating and seeding
+the table for each run. Four contenders now rotate through **16 batches** per
+case, giving each contender each execution-order position four times.
+The three runs contain **90,240 timed operations**, plus warm-up and validation.
+All contenders decode reads into the identical owned Rust model; Diesel derives
+`Queryable` on the same struct used by SeaORM and our engine. All read-result,
+expected-field, affected-row-count, and independent update-state checks passed.
+
+Latencies below are the **median of the three run medians**, in µs per operation.
+These are fresh measurements for all contenders, not Diesel measurements merged
+with the earlier three-contender timings. Lower is better.
+
+| Case | SeaORM | Our direct IR + planner | Our JSON parse + planner | Diesel async |
+|---|---:|---:|---:|---:|
+| get by pk | 71.58 | 37.35 | 38.08 | 36.47 |
+| read 50 | 95.77 | 55.74 | 56.01 | 55.60 |
+| read 1000 | 388.76 | 302.57 | 302.05 | 262.08 |
+| filtered count | 102.48 | 62.43 | 62.75 | 61.48 |
+| update 100 | 185.15 | 152.52 | 152.69 | 191.00 |
+
+**Measured outcome:** Diesel and our engine are close for primary-key lookup,
+50-row reads, and the filtered count. Across runs, Diesel's latency was about
+2–4% lower for lookup, within 0.4% of our engine for 50-row reads, and about
+1–4% lower for count. Those small differences should not be treated as a broad
+performance advantage.
+
+For 1,000-row reads, Diesel was consistently faster: its latency was **13–15%
+lower**, equivalent to about **1.15–1.18×** our operation rate in this sequential
+workload. For the 100-row update, our direct-IR path was consistently faster:
+its latency was **20–26% lower**, equivalent to about **1.25–1.36×** Diesel's
+operation rate. Our engine continued to have lower median latency than SeaORM
+in every case in every run.
+
+Write timings remain variable. Diesel's update run medians were **191.00,
+193.51, and 144.45 µs**; our direct-IR medians were **152.52, 155.28, and
+106.21 µs**. These results therefore support a workload-specific comparison,
+not a universal winner. They do not isolate SQL generation, model decoding,
+connection-pool behavior, or driver overhead, and still exclude joins, inserts,
+concurrent load, remote databases, and production workloads.
+
+Validation: release compilation, formatting, benchmark Clippy with warnings
+treated as errors, report whitespace checks, and all runtime assertions passed.
+Earlier report sections and raw measurement files were preserved.
+
+Raw expanded-comparison results:
+[run 1](rust-compare/results-diesel-1.json),
+[run 2](rust-compare/results-diesel-2.json),
+[run 3](rust-compare/results-diesel-3.json).
+Implementation: [rust-compare/src/main.rs](rust-compare/src/main.rs).
+Adapter reference: [diesel-async documentation](https://docs.rs/diesel-async/latest/diesel_async/).
+
+
+### Diesel investigation and pool-setting correction — 2026-10-03
+
+**Correction to the preceding comparisons:** SeaORM was using its default
+`test_before_acquire = true`, which performs a connection-health ping for each
+pool checkout. Our engine and Diesel used fast recycling. The reported timings
+remain measurements of those configurations, but their speed ratios also
+include this health-check difference and overstate the advantage attributable
+to ORM/driver implementation alone. The historical “SeaORM / sqlx” driver-swap
+measurements were full-stack measurements through SeaORM and the Python API;
+they did not establish a ranking against raw SQLx. Earlier sections and raw
+files have been preserved; use the controlled results below for this distinction.
+
+Both libraries document the default ping behavior:
+[SeaORM ConnectOptions](https://docs.rs/sea-orm/latest/sea_orm/struct.ConnectOptions.html),
+[SQLx PoolOptions](https://docs.rs/sqlx/latest/sqlx/pool/struct.PoolOptions.html).
+
+#### Full ORM comparison with matched health-check settings
+
+Repeated all five cases three times with SeaORM's per-checkout ping disabled,
+matching the fast-recycling policy of our engine and Diesel. Pool size, database,
+query results, runtime, correctness checks, and rotating batch order remain as
+in the expanded comparison. This is another **90,240 timed operations**.
+Values are medians of three run medians, in µs per operation.
+
+| Case | SeaORM, fast checkout | Our direct IR + planner | Our JSON parse + planner | Diesel async |
+|---|---:|---:|---:|---:|
+| get by pk | 56.53 | 37.04 | 37.74 | 35.52 |
+| read 50 | 78.11 | 55.21 | 55.18 | 55.09 |
+| read 1000 | 362.57 | 303.32 | 303.12 | 262.96 |
+| filtered count | 90.76 | 62.23 | 62.29 | 61.59 |
+| update 100 | 171.26 | 151.65 | 151.75 | 188.52 |
+
+Our engine still had lower median latency than SeaORM in all five cases in each
+matched run. The ratios are smaller than with default health checks: primary-key
+lookup is about 1.5×, rather than the earlier 1.9×. Diesel remains faster for
+1,000-row reads, small reads/counts remain close, and our update remains faster
+than Diesel. This correction does not reverse those workload-specific outcomes.
+
+Matched-setting raw results:
+[run 1](rust-compare/results-matched-1.json),
+[run 2](rust-compare/results-matched-2.json),
+[run 3](rust-compare/results-matched-3.json).
+Set `ORM_BENCH_SEA_FAST=1` in the original harness to select this configuration;
+the output now records `seaorm_test_before_acquire` explicitly.
+
+#### Read-path diagnosis, including raw SQLx
+
+Added [src/bin/diagnose.rs](rust-compare/src/bin/diagnose.rs) to separate planner
+cost, runtime cell decoding, raw-row buffering, and checkout pings. Nine variants
+read identical seeded rows into the same owned Rust model, with one pooled
+connection per variant. Raw SQLx uses `query_as` with a typed `FromRow` that reads
+columns by index; it does not use the compile-time `query!` macro. The prebuilt
+SQL variants bind the same limit and use cached prepared statements.
+
+Each variant passes full expected-row equality checks. Eighteen batches rotate
+execution order, so each variant occupies each position twice. Three clean runs
+measure **160,380 database operations**, plus warm-up and separate CPU tests.
+The first diagnostic pass overlapped compilation and is retained only as
+`results-diagnose-calibration.json`; it is excluded from these results. Clean
+runs started after compilation and Clippy finished, and ran sequentially.
+
+Median of three run medians, in µs per operation:
+
+| Read path | 1 row | 50 rows | 1,000 rows |
+|---|---:|---:|---:|
+| Our direct IR + planner | 40.53 | 61.48 | 305.36 |
+| Our driver, prebuilt SQL | 38.72 | 59.43 | 298.88 |
+| tokio-postgres, typed buffered rows | 38.32 | 59.12 | 296.52 |
+| tokio-postgres, typed streamed rows (prototype) | 38.25 | 58.78 | 247.84 |
+| Diesel async | 39.42 | 61.03 | 253.14 |
+| Raw SQLx, default health checks | 74.86 | 99.69 | 335.67 |
+| Raw SQLx, fast checkout | 57.65 | 83.17 | 314.18 |
+| SeaORM, default health checks | 77.11 | 101.58 | 385.02 |
+| SeaORM, fast checkout | 60.06 | 83.92 | 369.80 |
+
+For these ordered 1,000-row reads, Diesel has lower latency than both our
+current engine and the raw SQLx `query_as` path, even after matching health-check
+settings. Raw SQLx is substantially closer to our engine than SeaORM is. This is
+not a general ranking across SQLx APIs or production workloads.
+
+The default health checks add about 16–21 µs in this read-only diagnostic when
+comparing run-level aggregate medians. This accounts for part of the earlier
+gap; other driver and ORM costs remain. Ordered one-row reads here are a
+separate query from the primary-key lookup in the full comparison, so their
+absolute timings should not be merged.
+
+#### What we can learn from Diesel
+
+Source inspection of diesel-async 0.9.2 shows that its PostgreSQL
+`load_prepared` calls `query_raw`, wraps each arriving row, and maps the stream
+through `U::build_from_row` before collecting the final models. Our PostgreSQL
+`query` first calls `Client::query` to collect a `Vec<Row>` and returns a boxed
+`RowSet`; the caller then builds a second vector of models through runtime
+`Cell` conversion. Diesel's `Queryable` supplies the result shape and field
+conversions through Rust types.
+
+Relevant source:
+[Diesel async row-to-model mapping](https://docs.rs/diesel-async/latest/src/diesel_async/run_query_dsl/mod.rs.html),
+[Diesel async PostgreSQL execution](https://docs.rs/diesel-async/latest/src/diesel_async/pg/mod.rs.html),
+[our PostgreSQL driver](../engine/src/db/postgres.rs).
+
+The controlled buffered-versus-streamed tokio-postgres pair uses the same pool,
+SQL, prepared-statement cache, row decoder, capacity for the final model vector,
+and owned result type. Only collection of the intermediate raw rows changes.
+At 1,000 rows, its median drops from **296.52 to 247.84 µs**: **48.68 µs / 16.4%**
+lower latency. The streamed prototype is close to Diesel's **253.14 µs**. This
+supports streaming directly into final results as the strongest measured
+opportunity. The experiment does not separate reduced buffering/allocation from
+changes in when decoding work happens while receiving rows.
+
+The separate CPU-only test repeatedly decodes already fetched 1,000-row sets,
+including model allocation and destruction, without database I/O. Runtime
+`RowSet::cell` decoding takes **56.11 µs** versus **48.18 µs** for typed
+`tokio_postgres::Row::try_get`: a smaller **7.93 µs** difference. This identifies
+an opportunity for a reusable decoder chosen from the output schema, while
+retaining support for dynamic models and extension types.
+
+Skipping our planner entirely changes the diagnostic median from **305.36 to
+298.88 µs**, only **6.48 µs**. Precompiling every query is therefore a lower
+priority for this workload. Diesel also has a typed query identity for cached
+prepared statements; our engine already caches prepared statements by SQL and
+parameter types. Inspection of this diesel-async version shows that it still
+renders SQL before the cache lookup, so its result should not be explained as
+all SQL having been precompiled at build time.
+
+**Recommended implementation order:** prototype an internal query/row-consumer
+API that materializes final results from the incoming stream; keep the buffered
+path available where prefetching or consumers require a row set. Then measure
+a reusable schema-driven decoder. A generated typed Rust decoder can be an
+additional native-Rust optimization. These prototypes validate a direction;
+the current production engine has not been replaced by the diagnostic path.
+
+Release builds, formatting, Clippy with warnings treated as errors, result/state
+assertions, and report whitespace checks passed. These diagnostics cover simple
+sequential local reads, not joins, transactions, inserts, concurrency, remote
+latency, or every SQLx execution API.
+
+Diagnostic raw results:
+[run 1](rust-compare/results-diagnose-1.json),
+[run 2](rust-compare/results-diagnose-2.json),
+[run 3](rust-compare/results-diagnose-3.json).
