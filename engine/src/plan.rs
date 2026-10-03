@@ -14,16 +14,14 @@
 //!   FROM tags t2 JOIN post_tags t3 ON t3.tag_id = t2.id WHERE t3.post_id = posts.id
 //!   AND ...)`, and its prefetch selects the join row's key next to each tag.
 
-use pyo3::prelude::*;
-use pyo3::types::PyList;
 use sea_query::{
     self,
     extension::postgres::PgExpr, Alias, IntoIden, DeleteStatement, Expr as SExpr, ExprTrait, InsertStatement,
     JoinType, LikeExpr, LockBehavior, LockType, Order as SOrder, Query, SelectStatement, UpdateStatement,
 };
 
-use crate::convert::py_to_value;
-use crate::errors::query_err;
+use crate::error::{query_err, Error, Result};
+use crate::params::Params;
 use orm_core::ir::{
     ArithOp, Assignment, CmpOp, ColType, Count, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Operation, Order, ParamRef,
     Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType,
@@ -107,6 +105,8 @@ pub enum Plan {
     Update(UpdateStatement, Option<(usize, Vec<ValueType>)>),
     /// The model and column types of the returned rows when the delete has `RETURNING`.
     Delete(DeleteStatement, Option<(usize, Vec<ValueType>)>),
+    /// `INSERT ... RETURNING`: the model and column types of the returned rows.
+    Insert(InsertStatement, (usize, Vec<ValueType>)),
 }
 
 /// What a bound value is compared with or assigned to: its type drives the conversion
@@ -306,11 +306,11 @@ fn frame_bound(b: Option<i64>, start: bool) -> String {
 
 /// The columns of each CTE in `ctes`, as models without tables (indexed after the
 /// schema's models), so queries can read them like tables.
-pub fn derive_ctes(schema: &Schema, target: Target, ctes: &[Cte], params: &[Bound<'_, PyAny>]) -> PyResult<Vec<Model>> {
+pub fn derive_ctes(schema: &Schema, target: Target, ctes: &[Cte], params: &dyn Params) -> Result<Vec<Model>> {
     let mut virt: Vec<Model> = vec![];
     for cte in ctes {
         if schema.model_idx(&cte.name).is_ok() || virt.iter().any(|m| m.ir.name == cte.name) {
-            return Err(query_err(format!("CTE name {:?} is already taken", cte.name)));
+            return Err(Error::query(format!("CTE name {:?} is already taken", cte.name)));
         }
         let q = &cte.query;
         let p = Planner::new(schema, &virt, target, &q.model, q.from.as_deref(), params, vec![], 0)?;
@@ -329,7 +329,7 @@ pub fn derive_ctes(schema: &Schema, target: Target, ctes: &[Cte], params: &[Boun
                     match item {
                         SelectItem::Model => model_fields(&mut fields),
                         SelectItem::Expr { expr, name } => {
-                            let name = name.as_deref().ok_or_else(|| query_err("CTE columns need names".into()))?;
+                            let name = name.as_deref().ok_or_else(|| Error::query("CTE columns need names"))?;
                             let vt = p.expr_type(expr)?;
                             let mut f = FieldIr::plain(name, vt.ty);
                             (f.array, f.enum_idx) = (vt.array, vt.enum_idx);
@@ -345,11 +345,11 @@ pub fn derive_ctes(schema: &Schema, target: Target, ctes: &[Cte], params: &[Boun
     Ok(virt)
 }
 
-pub struct Planner<'s, 'py> {
+pub struct Planner<'s> {
     schema: &'s Schema,
     /// The statement's CTEs, as models (see `derive_ctes`).
     virt: &'s [Model],
-    params: &'s [Bound<'py, PyAny>],
+    params: &'s dyn Params,
     root: usize,
     /// What the root rows are read from: the model's table, or a CTE.
     source: String,
@@ -377,7 +377,7 @@ pub struct Planner<'s, 'py> {
     caps: Capabilities,
 }
 
-impl<'s, 'py> Planner<'s, 'py> {
+impl<'s> Planner<'s> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         schema: &'s Schema,
@@ -385,10 +385,10 @@ impl<'s, 'py> Planner<'s, 'py> {
         target: Target,
         model: &str,
         from: Option<&str>,
-        params: &'s [Bound<'py, PyAny>],
+        params: &'s dyn Params,
         outer: Vec<(String, usize)>,
         next_alias: usize,
-    ) -> PyResult<Self> {
+    ) -> Result<Self> {
         let mut p = Planner {
             schema,
             virt,
@@ -413,11 +413,11 @@ impl<'s, 'py> Planner<'s, 'py> {
             Some(cte) => {
                 let cols = p.model(p.model_idx(cte)?);
                 if p.root >= schema.models.len() || cols.ir.name != cte {
-                    return Err(query_err(format!("{cte:?} is not a CTE")));
+                    return Err(Error::query(format!("{cte:?} is not a CTE")));
                 }
                 for f in p.model(p.root).fields() {
                     if cols.field(&f.name).is_err() {
-                        return Err(query_err(format!(
+                        return Err(Error::query(format!(
                             "CTE {cte:?} has no column {:?}: build it from a query of {} (or a select() including it)",
                             f.name,
                             p.model(p.root).ir.name
@@ -433,7 +433,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(p)
     }
 
-    pub fn plan(schema: &'s Schema, target: Target, op: &Operation, params: &'s [Bound<'py, PyAny>]) -> PyResult<Plan> {
+    pub fn plan(schema: &'s Schema, target: Target, op: &Operation, params: &'s dyn Params) -> Result<Plan> {
         Ok(match op {
             Operation::Select(q) => Plan::Select(plan_select(schema, target, q, params)?),
             Operation::Count(q) | Operation::Exists(q) => {
@@ -480,7 +480,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
     }
 
-    fn model_idx(&self, name: &str) -> PyResult<usize> {
+    fn model_idx(&self, name: &str) -> Result<usize> {
         match self.schema.model_idx(name) {
             Ok(i) => Ok(i),
             Err(e) => match self.virt.iter().position(|m| m.ir.name == name) {
@@ -490,7 +490,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
     }
 
-    fn walk(&self, root: usize, path: &[String]) -> PyResult<usize> {
+    fn walk(&self, root: usize, path: &[String]) -> Result<usize> {
         let mut cur = root;
         for hop in path {
             cur = self.model(cur).relation(hop).map_err(query_err)?.1;
@@ -499,7 +499,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     /// `QueryError` unless the dialect supports `feature`.
-    fn require(&self, supported: bool, feature: &str) -> PyResult<()> {
+    fn require(&self, supported: bool, feature: &str) -> Result<()> {
         self.target.require(supported, feature).map_err(query_err)
     }
 
@@ -517,22 +517,22 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     /// Takes note of what `q` declares for its expressions: joined CTEs, named windows.
-    fn enter(&mut self, q: &Select) -> PyResult<()> {
+    fn enter(&mut self, q: &Select) -> Result<()> {
         self.joined.clear();
         for j in &q.joins {
             let idx = self.model_idx(&j.cte)?;
             if idx < self.schema.models.len() {
-                return Err(query_err(format!("join() takes a CTE, {:?} is a model", j.cte)));
+                return Err(Error::query(format!("join() takes a CTE, {:?} is a model", j.cte)));
             }
             if j.cte == self.source || <[String]>::contains(&self.joined, &j.cte) {
-                return Err(query_err(format!("CTE {:?} is read twice by one query", j.cte)));
+                return Err(Error::query(format!("CTE {:?} is read twice by one query", j.cte)));
             }
             self.joined.push(j.cte.clone());
         }
         self.windows = q.windows.iter().map(|w| w.name.clone()).collect();
         for w in &self.windows {
             if w.is_empty() || !w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-                return Err(query_err(format!("invalid window name {w:?}")));
+                return Err(Error::query(format!("invalid window name {w:?}")));
             }
         }
         Ok(())
@@ -541,7 +541,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     /// `WINDOW <name> AS (...)` for the query's named windows. sea-query holds one per
     /// statement and writes it after `ORDER BY` / `LIMIT` / `FOR ...`, where Postgres
     /// rejects it, so those combinations raise until the SQL builder changes.
-    fn declare_windows(&mut self, q: &Select, stmt: &mut SelectStatement) -> PyResult<()> {
+    fn declare_windows(&mut self, q: &Select, stmt: &mut SelectStatement) -> Result<()> {
         let w = match q.windows.as_slice() {
             [] => return Ok(()),
             [w] => w,
@@ -572,8 +572,8 @@ impl<'s, 'py> Planner<'s, 'py> {
             spec.order_by_expr(e, if o.desc { SOrder::Desc } else { SOrder::Asc });
         }
         if let Some(f) = &w.frame {
-            let bound = |b: Option<i64>, start: bool| -> PyResult<sea_query::Frame> {
-                let n = |v: i64| u32::try_from(v.unsigned_abs()).map_err(|_| query_err("frame bound too large".into()));
+            let bound = |b: Option<i64>, start: bool| -> Result<sea_query::Frame> {
+                let n = |v: i64| u32::try_from(v.unsigned_abs()).map_err(|_| Error::query("frame bound too large"));
                 Ok(match b {
                     None if start => sea_query::Frame::UnboundedPreceding,
                     None => sea_query::Frame::UnboundedFollowing,
@@ -596,9 +596,9 @@ impl<'s, 'py> Planner<'s, 'py> {
 
     /// A planner for a subquery: it sees this query's root (and the ones enclosing it)
     /// through `outer()`.
-    fn child(&self, q: &Select) -> PyResult<Planner<'s, 'py>> {
+    fn child(&self, q: &Select) -> Result<Planner<'s>> {
         if !q.with.is_empty() {
-            return Err(query_err("a subquery can't declare CTEs; declare them on the outermost query".into()));
+            return Err(Error::query("a subquery can't declare CTEs; declare them on the outermost query"));
         }
         let mut outer = self.outer.clone();
         outer.push((self.root_alias().to_owned(), self.root));
@@ -606,9 +606,9 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     /// The statement of a subquery. For `EXISTS` a query without columns selects `1`.
-    fn subselect(&mut self, q: &Select, exists: bool) -> PyResult<SelectStatement> {
+    fn subselect(&mut self, q: &Select, exists: bool) -> Result<SelectStatement> {
         if q.lock.is_some() {
-            return Err(query_err("a subquery can't lock rows".into()));
+            return Err(Error::query("a subquery can't lock rows"));
         }
         let mut child = self.child(q)?;
         let stmt = if exists && q.columns.is_none() { child.sliced_inner(q)? } else { child.build_select(q)?.stmt };
@@ -617,15 +617,15 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     /// The single column of a subquery used as a value.
-    fn one_column<'q>(q: &'q Select, what: &str) -> PyResult<&'q Expr> {
+    fn one_column<'q>(q: &'q Select, what: &str) -> Result<&'q Expr> {
         match q.columns.as_deref() {
             Some([SelectItem::Expr { expr, .. }]) => Ok(expr),
-            _ => Err(query_err(format!("{what} takes a query that selects exactly one column"))),
+            _ => Err(Error::query(format!("{what} takes a query that selects exactly one column"))),
         }
     }
 
     /// `WITH [RECURSIVE] <name> (<columns>) AS (...), ...` for this statement's CTEs.
-    fn with_clause(&mut self, ctes: &[Cte]) -> PyResult<Option<sea_query::WithClause>> {
+    fn with_clause(&mut self, ctes: &[Cte]) -> Result<Option<sea_query::WithClause>> {
         if ctes.is_empty() {
             return Ok(None);
         }
@@ -653,9 +653,9 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     /// A CTE's query: its columns as stored (no `read_sql`), named after the CTE's columns.
-    fn cte_body(&mut self, q: &Select, recursive: Option<&str>) -> PyResult<SelectStatement> {
+    fn cte_body(&mut self, q: &Select, recursive: Option<&str>) -> Result<SelectStatement> {
         if !q.with.is_empty() || !q.prefetch.is_empty() || !q.select_related.is_empty() || q.lock.is_some() {
-            return Err(query_err("a CTE's query can't declare CTEs, prefetch, select_related or lock".into()));
+            return Err(Error::query("a CTE's query can't declare CTEs, prefetch, select_related or lock"));
         }
         let mut p =
             Planner::new(self.schema, self.virt, self.target, &q.model, q.from.as_deref(), self.params, vec![], self.next_alias)?;
@@ -666,7 +666,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         if let Some(r) = recursive {
             let base = self.model(self.model_idx(r)?).fields().len();
             if plan.types.len() != base {
-                return Err(query_err(format!(
+                return Err(Error::query(format!(
                     "the recursive part of CTE {r:?} has {} columns, its first part {base}",
                     plan.types.len()
                 )));
@@ -678,7 +678,7 @@ impl<'s, 'py> Planner<'s, 'py> {
 
     /// A column of a CTE: the one this query reads, or (in its recursive part) the CTE
     /// being defined.
-    fn cte_col(&mut self, cte: &str, name: &str) -> PyResult<(String, &'s FieldIr)> {
+    fn cte_col(&mut self, cte: &str, name: &str) -> Result<(String, &'s FieldIr)> {
         let f = self.model(self.model_idx(cte)?).field(name).map_err(query_err)?;
         if cte == self.source {
             return Ok((self.root_alias().to_owned(), f));
@@ -692,14 +692,14 @@ impl<'s, 'py> Planner<'s, 'py> {
                 return Ok((cte.to_owned(), f));
             }
         }
-        Err(query_err(format!(
+        Err(Error::query(format!(
             "{cte}.c.{name} is only available in queries reading {cte} (from_({cte}), join({cte}, ...) or {cte}.select(...))"
         )))
     }
 
     // -- filters ------------------------------------------------------------------------
 
-    fn apply_filters(&mut self, filters: &[Expr]) -> PyResult<Vec<SExpr>> {
+    fn apply_filters(&mut self, filters: &[Expr]) -> Result<Vec<SExpr>> {
         filters.iter().map(|f| self.cond(f)).collect()
     }
 
@@ -748,7 +748,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         rel: &RelationIr,
         target: usize,
         prefix: &str,
-    ) -> PyResult<String> {
+    ) -> Result<String> {
         let from_col = &self.model(src.1).field(&rel.from).map_err(query_err)?.column;
         let tm = self.model(target);
         let to_col = &tm.field(&rel.to).map_err(query_err)?.column;
@@ -788,8 +788,8 @@ impl<'s, 'py> Planner<'s, 'py> {
     fn exists_via(
         &mut self,
         hop: &str,
-        body: impl FnOnce(&mut Self) -> PyResult<SExpr>,
-    ) -> PyResult<SExpr> {
+        body: impl FnOnce(&mut Self) -> Result<SExpr>,
+    ) -> Result<SExpr> {
         let cur = self.scope();
         let cur_model = self.model(cur.model);
         let (rel, target) = cur_model.relation(hop).map_err(query_err)?;
@@ -808,7 +808,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(SExpr::exists(sub))
     }
 
-    fn cond(&mut self, e: &Expr) -> PyResult<SExpr> {
+    fn cond(&mut self, e: &Expr) -> Result<SExpr> {
         match e {
             Expr::And { items } | Expr::Or { items } => {
                 let is_and = matches!(e, Expr::And { .. });
@@ -826,7 +826,7 @@ impl<'s, 'py> Planner<'s, 'py> {
                 }
                 for (hop, members) in groups {
                     parts.push(self.exists_via(hop, |p| {
-                        let inner = members.iter().map(|m| p.cond(m)).collect::<PyResult<Vec<_>>>()?;
+                        let inner = members.iter().map(|m| p.cond(m)).collect::<Result<Vec<_>>>()?;
                         Ok(fold(inner, is_and))
                     })?);
                 }
@@ -841,7 +841,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
     }
 
-    fn leaf(&mut self, e: &Expr) -> PyResult<SExpr> {
+    fn leaf(&mut self, e: &Expr) -> Result<SExpr> {
         Ok(match e {
             Expr::Cmp { op, l, r } => {
                 let hint = self.hint_of(l).or(self.hint_of(r));
@@ -862,7 +862,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             Expr::In { item, values, neg } => {
                 let hint = self.hint_of(item);
                 let item = self.value(item, hint)?;
-                let values = values.iter().map(|v| self.value(v, hint)).collect::<PyResult<Vec<_>>>()?;
+                let values = values.iter().map(|v| self.value(v, hint)).collect::<Result<Vec<_>>>()?;
                 if *neg {
                     item.is_not_in(values)
                 } else {
@@ -891,8 +891,8 @@ impl<'s, 'py> Planner<'s, 'py> {
             Expr::Like { item, pattern, ci, neg } => {
                 let item = self.value(item, Hint::default())?;
                 let text = match pattern.as_ref() {
-                    Expr::Param { i } => self.param(*i)?.extract::<String>()?,
-                    _ => return Err(query_err("LIKE pattern must be a string parameter".into())),
+                    Expr::Param { i } => self.params.text(self.param(*i)?)?,
+                    _ => return Err(Error::query("LIKE pattern must be a string parameter")),
                 };
                 if *ci && !self.caps.ilike {
                     // LOWER(x) LIKE LOWER(pattern), for databases without ILIKE.
@@ -914,13 +914,18 @@ impl<'s, 'py> Planner<'s, 'py> {
 
     // -- value expressions --------------------------------------------------------------
 
-    fn param(&self, i: usize) -> PyResult<&Bound<'py, PyAny>> {
-        self.params.get(i).ok_or_else(|| query_err(format!("parameter {i} out of range")))
+    /// `i`, checked against the parameter list.
+    fn param(&self, i: usize) -> Result<usize> {
+        if i < self.params.len() {
+            Ok(i)
+        } else {
+            Err(Error::query(format!("parameter {i} out of range")))
+        }
     }
 
-    fn outer_field(&self, depth: usize, name: &str) -> PyResult<(&str, &'s FieldIr)> {
+    fn outer_field(&self, depth: usize, name: &str) -> Result<(&str, &'s FieldIr)> {
         if depth == 0 || depth > self.outer.len() {
-            return Err(query_err(format!("outer() column {name:?} has no enclosing query at that depth")));
+            return Err(Error::query(format!("outer() column {name:?} has no enclosing query at that depth")));
         }
         let (alias, model) = &self.outer[self.outer.len() - depth];
         Ok((alias, self.model(*model).field(name).map_err(query_err)?))
@@ -953,20 +958,20 @@ impl<'s, 'py> Planner<'s, 'py> {
         }
     }
 
-    fn resolve(&self, path: &[String], name: &str) -> PyResult<SExpr> {
+    fn resolve(&self, path: &[String], name: &str) -> Result<SExpr> {
         let (alias, column) = self.resolve_parts(path, name)?;
         Ok(col(&alias, &column))
     }
 
-    fn value(&mut self, e: &Expr, hint: Hint<'s>) -> PyResult<SExpr> {
+    fn value(&mut self, e: &Expr, hint: Hint<'s>) -> Result<SExpr> {
         Ok(match e {
             Expr::Col { path, name } => self.resolve(path, name)?,
-            Expr::Param { i } => bind(py_to_value(self.param(*i)?, hint.ty)?, hint.field),
+            Expr::Param { i } => bind(self.params.value(self.param(*i)?, hint.ty)?, hint.field),
             Expr::Const { value } => SExpr::val(*value),
             Expr::Int { value } => SExpr::cust(value.to_string()),
             Expr::Excluded { name } => {
                 if !self.allow_excluded {
-                    return Err(query_err("excluded() can only be used in on_conflict(...).do_update()".into()));
+                    return Err(Error::query("excluded() can only be used in on_conflict(...).do_update()"));
                 }
                 let f = self.model(self.root).field(name).map_err(query_err)?;
                 col("excluded", &f.column)
@@ -1007,7 +1012,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     // -- functions ----------------------------------------------------------------------
 
     /// The column type of an expression's result, which decodes it.
-    fn expr_type(&self, e: &Expr) -> PyResult<ValueType> {
+    fn expr_type(&self, e: &Expr) -> Result<ValueType> {
         let scalar = ValueType::scalar;
         Ok(match e {
             Expr::Col { path, name } => {
@@ -1028,7 +1033,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             Expr::Func { name, args, .. } => {
                 let first = || match args.first() {
                     Some(a) => self.expr_type(a),
-                    None => Err(query_err(format!("{name}() needs an argument"))),
+                    None => Err(Error::query(format!("{name}() needs an argument"))),
                 };
                 match name.as_str() {
                     "count" | "row_number" | "rank" | "dense_rank" => scalar(ColType::BigInt),
@@ -1060,9 +1065,9 @@ impl<'s, 'py> Planner<'s, 'py> {
             | Expr::InSelect { .. }
             | Expr::Exists { .. } => scalar(ColType::Bool),
             Expr::Param { .. } => {
-                return Err(query_err("select() takes columns and expressions, not plain values".into()))
+                return Err(Error::query("select() takes columns and expressions, not plain values"))
             }
-            Expr::Excluded { .. } => return Err(query_err("excluded() is only valid in do_update()".into())),
+            Expr::Excluded { .. } => return Err(Error::query("excluded() is only valid in do_update()")),
         })
     }
 
@@ -1070,12 +1075,12 @@ impl<'s, 'py> Planner<'s, 'py> {
     /// the current scope is computed per row, in a correlated subquery over those
     /// relations: `func.count(User.posts)` is `(SELECT COUNT(*) FROM posts WHERE
     /// posts.author_id = users.id)`, never a JOIN that would multiply rows.
-    fn func(&mut self, name: &str, args: &[Expr], rel: Option<&[String]>, distinct: bool) -> PyResult<SExpr> {
+    fn func(&mut self, name: &str, args: &[Expr], rel: Option<&[String]>, distinct: bool) -> Result<SExpr> {
         if WINDOW_FUNCS.contains(&name) {
-            return Err(query_err(format!("{name}() is a window function: add .over(...)")));
+            return Err(Error::query(format!("{name}() is a window function: add .over(...)")));
         }
         if !is_aggregate(name) && !SCALAR_FUNCS.contains(&name) {
-            return Err(query_err(format!("unknown function {name}()")));
+            return Err(Error::query(format!("unknown function {name}()")));
         }
         if is_aggregate(name) {
             let base = self.scope().path.clone();
@@ -1090,14 +1095,14 @@ impl<'s, 'py> Planner<'s, 'py> {
             };
             if let Some(path) = below.first().map(|p| p.to_vec()) {
                 if below.iter().any(|p| *p != path.as_slice()) {
-                    return Err(query_err(format!(
+                    return Err(Error::query(format!(
                         "{name}() over relations needs all its columns on one relation path"
                     )));
                 }
                 return self.aggregate_subquery(name, args, &path, rel.is_some(), distinct);
             }
             if rel.is_none() && args.is_empty() && name != "count" {
-                return Err(query_err(format!("{name}() needs an argument")));
+                return Err(Error::query(format!("{name}() needs an argument")));
             }
         }
         self.call(name, args, distinct)
@@ -1111,7 +1116,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         partition_by: &[Expr],
         order_by: &[Order],
         frame: &Option<Frame>,
-    ) -> PyResult<SExpr> {
+    ) -> Result<SExpr> {
         if !self.allow_window {
             return Err(query_err(
                 "window functions can only be used in select() and order_by(), not in filters, \
@@ -1120,20 +1125,20 @@ impl<'s, 'py> Planner<'s, 'py> {
             ));
         }
         let Expr::Func { name, args, rel, distinct } = func else {
-            return Err(query_err("over() applies to a function".into()));
+            return Err(Error::query("over() applies to a function"));
         };
         if rel.is_some() || !(is_aggregate(name) || WINDOW_FUNCS.contains(&name.as_str())) {
-            return Err(query_err(format!("{name}() can't be used as a window function")));
+            return Err(Error::query(format!("{name}() can't be used as a window function")));
         }
         let (call, cast) = self.call_parts(name, args, *distinct)?;
         let mut exprs = vec![call];
         let mut clauses = vec![];
         if let Some(b) = base {
             if !self.windows.iter().any(|w| w == b) {
-                return Err(query_err(format!("window {b:?} is not declared by this query")));
+                return Err(Error::query(format!("window {b:?} is not declared by this query")));
             }
             if !partition_by.is_empty() {
-                return Err(query_err("over(window) can't add partition_by: it comes from the window".into()));
+                return Err(Error::query("over(window) can't add partition_by: it comes from the window"));
             }
             clauses.push(b.to_owned());
         }
@@ -1174,7 +1179,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     /// The SQL call itself, arguments planned in the current scope.
-    fn call(&mut self, name: &str, args: &[Expr], distinct: bool) -> PyResult<SExpr> {
+    fn call(&mut self, name: &str, args: &[Expr], distinct: bool) -> Result<SExpr> {
         let (e, cast) = self.call_parts(name, args, distinct)?;
         Ok(match cast {
             Some(ty) => SExpr::cust_with_expr(format!("CAST($1 AS {ty})"), e),
@@ -1183,20 +1188,20 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     /// The call, and the type its result is cast to (outside a window's `OVER`).
-    fn call_parts(&mut self, name: &str, args: &[Expr], distinct: bool) -> PyResult<(SExpr, Option<&'static str>)> {
+    fn call_parts(&mut self, name: &str, args: &[Expr], distinct: bool) -> Result<(SExpr, Option<&'static str>)> {
         let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
         let hint = Hint { ty: hint.ty, field: None };
-        let planned = args.iter().map(|a| self.value(a, hint)).collect::<PyResult<Vec<_>>>()?;
+        let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>()?;
         let d = if distinct { "DISTINCT " } else { "" };
         let n = planned.len();
-        let call = |sql: &str, planned: Vec<SExpr>| -> PyResult<SExpr> {
+        let call = |sql: &str, planned: Vec<SExpr>| -> Result<SExpr> {
             let slots = (1..=planned.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
             Ok(SExpr::cust_with_exprs(format!("{sql}({slots})"), planned))
         };
-        let one = |tpl: &str, planned: Vec<SExpr>| -> PyResult<SExpr> {
+        let one = |tpl: &str, planned: Vec<SExpr>| -> Result<SExpr> {
             match <[SExpr; 1]>::try_from(planned) {
                 Ok([a]) => Ok(SExpr::cust_with_expr(tpl.to_owned(), a)),
-                Err(_) => Err(query_err(format!("{name}() takes one argument"))),
+                Err(_) => Err(Error::query(format!("{name}() takes one argument"))),
             }
         };
         let mut cast = None;
@@ -1232,7 +1237,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             "ntile" | "first_value" | "last_value" => one(&format!("{}($1)", name.to_uppercase()), planned)?,
             "lag" | "lead" if (1..=3).contains(&n) => call(&name.to_uppercase(), planned)?,
             "nth_value" if n == 2 => call("NTH_VALUE", planned)?,
-            _ => return Err(query_err(format!("wrong arguments for {name}()"))),
+            _ => return Err(Error::query(format!("wrong arguments for {name}()"))),
         };
         Ok((e, cast))
     }
@@ -1245,7 +1250,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         path: &[String],
         count_rows: bool,
         distinct: bool,
-    ) -> PyResult<SExpr> {
+    ) -> Result<SExpr> {
         let base = self.scope().path.clone();
         let hops = &path[base.len()..];
         let mut sub = Query::select();
@@ -1267,13 +1272,13 @@ impl<'s, 'py> Planner<'s, 'py> {
 
     /// `select(...)` columns. In a CTE (`cte`), columns are named after the CTE's columns
     /// and the model's are stored as they are (`read_sql` applies when they are read).
-    fn select_columns(&mut self, q: &Select, items: &[SelectItem], cte: bool) -> PyResult<SelectPlan> {
+    fn select_columns(&mut self, q: &Select, items: &[SelectItem], cte: bool) -> Result<SelectPlan> {
         self.enter(q)?;
         if !q.select_related.is_empty() || !q.prefetch.is_empty() {
-            return Err(query_err("select() can't be combined with select_related / prefetch_related".into()));
+            return Err(Error::query("select() can't be combined with select_related / prefetch_related"));
         }
         if items.is_empty() {
-            return Err(query_err("select() needs at least one column".into()));
+            return Err(Error::query("select() needs at least one column"));
         }
         let root = self.model(self.root);
         let alias = self.root_alias().to_owned();
@@ -1286,7 +1291,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             match item {
                 SelectItem::Model => {
                     if self.root >= self.schema.models.len() {
-                        return Err(query_err("a CTE without a model has no model to select".into()));
+                        return Err(Error::query("a CTE without a model has no model to select"));
                     }
                     for f in root.fields() {
                         if cte {
@@ -1322,7 +1327,7 @@ impl<'s, 'py> Planner<'s, 'py> {
                     }
                     match (cte, name) {
                         (true, Some(n)) => stmt.expr_as(e, Alias::new(n)),
-                        (true, None) => return Err(query_err("CTE columns need names".into())),
+                        (true, None) => return Err(Error::query("CTE columns need names")),
                         (false, _) => stmt.expr(e),
                     };
                     shape.push(None);
@@ -1343,7 +1348,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             let mut cols = vec![];
             for e in &q.distinct_on {
                 let Expr::Col { path, name } = e else {
-                    return Err(query_err("distinct(on=...) takes columns".into()));
+                    return Err(Error::query("distinct(on=...) takes columns"));
                 };
                 self.join_paths(e, "distinct(on=...)")?;
                 let (alias, column) = self.resolve_parts(path, name)?;
@@ -1369,12 +1374,12 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     /// LEFT JOINs for the to-one paths `e` reads outside aggregates.
-    fn join_paths(&mut self, e: &Expr, why: &str) -> PyResult<()> {
+    fn join_paths(&mut self, e: &Expr, why: &str) -> Result<()> {
         let (mut paths, mut has_not) = (vec![], false);
         col_paths(e, &mut paths, &mut has_not);
         for p in paths.into_iter().filter(|p| !p.is_empty()) {
             self.ensure_join(p, why).map_err(|_| {
-                query_err(format!(
+                Error::query(format!(
                     "{why} can follow only to-one relations, {} goes through a to-many one: \
                      aggregate it instead, e.g. func.count(...)",
                     p.join(".")
@@ -1384,7 +1389,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(())
     }
 
-    fn resolve_parts(&self, path: &[String], name: &str) -> PyResult<(String, String)> {
+    fn resolve_parts(&self, path: &[String], name: &str) -> Result<(String, String)> {
         let s = self
             .scopes
             .iter()
@@ -1392,7 +1397,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             .chain(self.joins.iter().map(|(s, _)| s))
             .find(|s| s.path == path)
             .ok_or_else(|| {
-                query_err(format!(
+                Error::query(format!(
                     "{}.{name} is not reachable here: one comparison can follow only one relation path",
                     path.join(".")
                 ))
@@ -1414,7 +1419,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     /// it derives `orders.shop_id = shop_configs.shop_id` for inner joins but still joins
     /// `shops` (it doesn't trust FKs for join removal), and for LEFT JOINs it derives
     /// nothing. `select_related` of B must keep the join.
-    fn ensure_join(&mut self, path: &[String], why: &str) -> PyResult<(String, usize)> {
+    fn ensure_join(&mut self, path: &[String], why: &str) -> Result<(String, usize)> {
         let (mut alias, mut model) = (self.root_alias().to_owned(), self.root);
         for i in 0..path.len() {
             let prefix = &path[..=i];
@@ -1425,7 +1430,7 @@ impl<'s, 'py> Planner<'s, 'py> {
             let m = self.model(model);
             let (rel, target) = m.relation(&path[i]).map_err(query_err)?;
             if rel.kind != RelKind::One {
-                return Err(query_err(format!(
+                return Err(Error::query(format!(
                     "{why} can only follow to-one relations; {} is to-many",
                     prefix.join(".")
                 )));
@@ -1452,7 +1457,7 @@ impl<'s, 'py> Planner<'s, 'py> {
     }
 
     /// `FROM <source>`, filters, ordering (when `order`) and slicing.
-    fn base_select(&mut self, q: &Select, stmt: &mut SelectStatement, order: bool) -> PyResult<()> {
+    fn base_select(&mut self, q: &Select, stmt: &mut SelectStatement, order: bool) -> Result<()> {
         let alias = self.root_alias().to_owned();
         if alias == self.source {
             stmt.from(Alias::new(&self.source));
@@ -1492,9 +1497,9 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(())
     }
 
-    fn apply_lock(&self, stmt: &mut SelectStatement, lock: Lock) -> PyResult<()> {
+    fn apply_lock(&self, stmt: &mut SelectStatement, lock: Lock) -> Result<()> {
         if self.source != self.model(self.root).table() {
-            return Err(query_err("lock() can't be used on a query reading a CTE".into()));
+            return Err(Error::query("lock() can't be used on a query reading a CTE"));
         }
         let c = self.caps;
         if lock.exclusive {
@@ -1513,15 +1518,15 @@ impl<'s, 'py> Planner<'s, 'py> {
 
     /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
     /// columns.
-    fn build_select(&mut self, q: &Select) -> PyResult<SelectPlan> {
+    fn build_select(&mut self, q: &Select) -> Result<SelectPlan> {
         if let Some(items) = &q.columns {
             return self.select_columns(q, items, false);
         }
         if !q.group_by.is_empty() || !q.having.is_empty() || q.distinct || !q.distinct_on.is_empty() {
-            return Err(query_err("group_by / having / distinct need select(...)".into()));
+            return Err(Error::query("group_by / having / distinct need select(...)"));
         }
         if self.root >= self.schema.models.len() {
-            return Err(query_err("a CTE without a model is read with select(...)".into()));
+            return Err(Error::query("a CTE without a model is read with select(...)"));
         }
         self.enter(q)?;
         let root = self.model(self.root);
@@ -1537,13 +1542,13 @@ impl<'s, 'py> Planner<'s, 'py> {
             let (alias, model) = self.ensure_join(path, "select_related")?;
             let m = self.model(model);
             let parent = match path.len() {
-                0 => return Err(query_err("select_related needs a relation".into())),
+                0 => return Err(Error::query("select_related needs a relation")),
                 1 => None,
                 n => Some(
                     q.select_related
                         .iter()
                         .position(|p| p.as_slice() == &path[..n - 1])
-                        .ok_or_else(|| query_err("select_related paths must list their prefixes first".into()))?,
+                        .ok_or_else(|| Error::query("select_related paths must list their prefixes first"))?,
                 ),
             };
             joins.push(JoinShape {
@@ -1562,7 +1567,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         self.declare_windows(q, &mut stmt)?;
         self.apply_joins(&mut stmt);
         if q.order.iter().any(|o| has_window(&o.expr)) && q.lock.is_some() {
-            return Err(query_err("lock() can't be used with window functions".into()));
+            return Err(Error::query("lock() can't be used with window functions"));
         }
         if let Some(lock) = q.lock {
             self.apply_lock(&mut stmt, lock)?;
@@ -1574,7 +1579,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(SelectPlan { stmt, types, output: Output::Instances { model: self.root, joins }, prefetch })
     }
 
-    fn sliced_inner(&mut self, q: &Select) -> PyResult<SelectStatement> {
+    fn sliced_inner(&mut self, q: &Select) -> Result<SelectStatement> {
         self.enter(q)?;
         let mut inner = Query::select();
         inner.expr(SExpr::val(1));
@@ -1583,7 +1588,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(inner)
     }
 
-    pub fn count(&mut self, q: &Select) -> PyResult<SelectStatement> {
+    pub fn count(&mut self, q: &Select) -> Result<SelectStatement> {
         no_lock(q, "count")?;
         let mut stmt = Query::select();
         if q.limit.is_some() || q.offset.is_some() {
@@ -1598,7 +1603,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(stmt)
     }
 
-    pub fn exists(&mut self, q: &Select) -> PyResult<SelectStatement> {
+    pub fn exists(&mut self, q: &Select) -> Result<SelectStatement> {
         no_lock(q, "exists")?;
         let mut inner = self.sliced_inner(q)?;
         if q.limit.is_none() {
@@ -1609,12 +1614,12 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok(stmt)
     }
 
-    pub fn update(&mut self, q: &Update) -> PyResult<(UpdateStatement, Option<Vec<ValueType>>)> {
+    pub fn update(&mut self, q: &Update) -> Result<(UpdateStatement, Option<Vec<ValueType>>)> {
         let root = self.model(self.root);
         let mut stmt = Query::update();
         stmt.table(Alias::new(root.table()));
         if q.set.is_empty() {
-            return Err(query_err("update() needs at least one field".into()));
+            return Err(Error::query("update() needs at least one field"));
         }
         for a in &q.set {
             let f = root.field(&a.field).map_err(query_err)?;
@@ -1632,7 +1637,7 @@ impl<'s, 'py> Planner<'s, 'py> {
         Ok((stmt, Some(root.fields().iter().map(|f| f.value_type()).collect())))
     }
 
-    pub fn delete(&mut self, q: &Delete) -> PyResult<(DeleteStatement, Option<Vec<ValueType>>)> {
+    pub fn delete(&mut self, q: &Delete) -> Result<(DeleteStatement, Option<Vec<ValueType>>)> {
         let root = self.model(self.root);
         let mut stmt = Query::delete();
         stmt.from_table(Alias::new(root.table()));
@@ -1649,7 +1654,7 @@ impl<'s, 'py> Planner<'s, 'py> {
 }
 
 /// A top-level SELECT with its `WITH` clause.
-pub fn plan_select<'py>(schema: &Schema, target: Target, q: &Select, params: &[Bound<'py, PyAny>]) -> PyResult<SelectPlan> {
+pub fn plan_select(schema: &Schema, target: Target, q: &Select, params: &dyn Params) -> Result<SelectPlan> {
     let virt = derive_ctes(schema, target, &q.with, params)?;
     let mut p = Planner::new(schema, &virt, target, &q.model, q.from.as_deref(), params, vec![], 0)?;
     let mut plan = p.build_select(q)?;
@@ -1662,24 +1667,24 @@ pub fn plan_select<'py>(schema: &Schema, target: Target, q: &Select, params: &[B
 /// The query loading `node` (a relation of `parent`) for a set of parent keys. A slice
 /// applies per parent: `ROW_NUMBER() OVER (PARTITION BY <key> ORDER BY ...)` numbers
 /// the related rows and the outer query keeps the slice.
-fn plan_prefetch<'py>(
+fn plan_prefetch(
     schema: &Schema,
     target: Target,
-    params: &[Bound<'py, PyAny>],
+    params: &dyn Params,
     parent: usize,
     node: &Prefetch,
-) -> PyResult<PrefetchPlan> {
+) -> Result<PrefetchPlan> {
     let pm = schema.model(parent);
     let (rel, child) = pm.relation(&node.relation).map_err(query_err)?;
     let cm = schema.model(child);
     if node.query.model != cm.ir.name {
-        return Err(query_err(format!(
+        return Err(Error::query(format!(
             "the query prefetching {}.{} must be over {}, not {}",
             pm.ir.name, node.relation, cm.ir.name, node.query.model
         )));
     }
     if node.query.columns.is_some() || node.query.lock.is_some() {
-        return Err(query_err("a prefetch query can't select columns or lock rows".into()));
+        return Err(Error::query("a prefetch query can't select columns or lock rows"));
     }
     let many = rel.kind == RelKind::Many;
     let mut q = node.query.clone();
@@ -1776,12 +1781,14 @@ fn plan_prefetch<'py>(
 }
 
 /// The value of a `LIMIT` / `OFFSET`.
-fn count(params: &[Bound<'_, PyAny>], c: Count) -> PyResult<u64> {
+fn count(params: &dyn Params, c: Count) -> Result<u64> {
     match c {
         Count::Value(n) => Ok(n),
         Count::Param(ParamRef::Param { i }) => {
-            let p = params.get(i).ok_or_else(|| query_err(format!("parameter {i} out of range")))?;
-            p.extract::<u64>().map_err(|_| query_err(format!("LIMIT and OFFSET take a non-negative integer, got {p}")))
+            if i >= params.len() {
+                return Err(Error::query(format!("parameter {i} out of range")));
+            }
+            params.count(i)
         }
     }
 }
@@ -1799,9 +1806,9 @@ fn apply_lock(stmt: &mut SelectStatement, lock: Lock, of: Option<&str>) {
     };
 }
 
-fn no_lock(q: &Select, what: &str) -> PyResult<()> {
+fn no_lock(q: &Select, what: &str) -> Result<()> {
     match q.lock {
-        Some(_) => Err(query_err(format!("{what}() can't lock rows; lock() applies to reading rows"))),
+        Some(_) => Err(Error::query(format!("{what}() can't lock rows; lock() applies to reading rows"))),
         None => Ok(()),
     }
 }
@@ -1818,42 +1825,37 @@ pub enum OnConflict {
 
 /// `INSERT INTO <table> (<fields>) VALUES ... [ON CONFLICT ...] RETURNING <all columns>`.
 ///
-/// `rows` is a list of sequences aligned with `fields`; the `DEFAULT` marker becomes the
-/// SQL `DEFAULT` keyword.
-pub fn plan_insert<'py>(
+/// `rows` hold a value per field (converted by `field_types`); `None` is the SQL
+/// `DEFAULT` keyword.
+pub fn plan_insert(
     schema: &Schema,
     target: Target,
     model: &str,
     fields: &[String],
-    rows: &Bound<'py, PyList>,
+    rows: Vec<Vec<Option<sea_query::Value>>>,
     on_conflict: Option<OnConflict>,
-    params: &[Bound<'py, PyAny>],
-) -> PyResult<(InsertStatement, Vec<ValueType>)> {
+    params: &dyn Params,
+) -> Result<(InsertStatement, Vec<ValueType>)> {
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
-    let cols = fields.iter().map(|f| m.field(f)).collect::<Result<Vec<_>, _>>().map_err(query_err)?;
+    let cols = fields.iter().map(|f| m.field(f)).collect::<std::result::Result<Vec<_>, _>>().map_err(query_err)?;
     let mut stmt = Query::insert();
     stmt.into_table(Alias::new(m.table()));
     if cols.is_empty() {
         if rows.len() != 1 {
-            return Err(query_err("rows without explicit values must be inserted one at a time".into()));
+            return Err(Error::query("rows without explicit values must be inserted one at a time"));
         }
         stmt.or_default_values();
     } else {
         stmt.columns(cols.iter().map(|c| Alias::new(&c.column)));
-        for row in rows.iter() {
-            let mut values = Vec::with_capacity(cols.len());
-            for (c, item) in cols.iter().zip(row.try_iter()?) {
-                let item = item?;
-                values.push(if item.is_instance_of::<crate::DefaultMarker>() {
-                    SExpr::cust("DEFAULT")
-                } else {
-                    bind(py_to_value(&item, Some(c.value_type()))?, Some(c))
-                });
+        for row in rows {
+            if row.len() != cols.len() {
+                return Err(Error::query("insert row length does not match fields"));
             }
-            if values.len() != cols.len() {
-                return Err(query_err("insert row length does not match fields".into()));
-            }
-            stmt.values(values).map_err(|e| query_err(e.to_string()))?;
+            let values = cols.iter().zip(row).map(|(c, item)| match item {
+                None => SExpr::cust("DEFAULT"),
+                Some(v) => bind(v, Some(c)),
+            });
+            stmt.values(values.collect::<Vec<_>>()).map_err(|e| query_err(e.to_string()))?;
         }
     }
     let caps = target.caps;
@@ -1861,18 +1863,18 @@ pub fn plan_insert<'py>(
     require(caps.returning, "insert ... RETURNING")?;
     if let Some(oc) = on_conflict {
         require(caps.on_conflict, "insert(...).on_conflict()")?;
-        let columns = |names: &[String]| -> PyResult<Vec<Alias>> {
+        let columns = |names: &[String]| -> Result<Vec<Alias>> {
             names
                 .iter()
                 .map(|n| m.field(n).map(|f| Alias::new(&f.column)))
-                .collect::<Result<_, _>>()
+                .collect::<std::result::Result<_, _>>()
                 .map_err(query_err)
         };
         let clause = match oc {
             OnConflict::Nothing(conflict) => sea_query::OnConflict::columns(columns(&conflict)?).do_nothing().to_owned(),
             OnConflict::Update(conflict, update, set) => {
                 if update.is_empty() && set.is_empty() {
-                    return Err(query_err("on_conflict(...).do_update() has no columns to update".into()));
+                    return Err(Error::query("on_conflict(...).do_update() has no columns to update"));
                 }
                 let mut clause = sea_query::OnConflict::columns(columns(&conflict)?);
                 clause.update_columns(columns(&update)?);
@@ -1906,7 +1908,7 @@ pub fn plan_insert<'py>(
 /// otherwise it uses `SET title = CASE WHEN posts.id = $1 THEN $2 ... END ... WHERE
 /// posts.id IN (...)`. `filters` (planned against `params`) further restrict the rows.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_update_many<'py>(
+pub fn plan_update_many(
     schema: &Schema,
     target: Target,
     model: &str,
@@ -1914,16 +1916,16 @@ pub fn plan_update_many<'py>(
     rows: &[Vec<sea_query::Value>],
     chunk_rows: usize,
     filters: &[Expr],
-    params: &[Bound<'py, PyAny>],
+    params: &dyn Params,
     returning: bool,
-) -> PyResult<(Vec<UpdateStatement>, Option<Vec<ValueType>>)> {
+) -> Result<(Vec<UpdateStatement>, Option<Vec<ValueType>>)> {
     let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
     let m = schema.model(planner.root);
     let table = m.table().to_owned();
-    let cols = fields.iter().map(|f| m.field(f)).collect::<Result<Vec<_>, _>>().map_err(query_err)?;
+    let cols = fields.iter().map(|f| m.field(f)).collect::<std::result::Result<Vec<_>, _>>().map_err(query_err)?;
     match cols.first() {
         Some(pk) if pk.primary_key && cols.len() > 1 => {}
-        _ => return Err(query_err("update_many needs the primary key followed by the fields to set".into())),
+        _ => return Err(Error::query("update_many needs the primary key followed by the fields to set")),
     }
     if returning {
         planner.require(planner.caps.returning, "update_many().returning()")?;

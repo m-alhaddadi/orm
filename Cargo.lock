@@ -614,7 +614,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "orm-native"
+name = "orm-engine"
 version = "0.1.0"
 dependencies = [
  "bigdecimal",
@@ -622,8 +622,6 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "orm-core",
- "pyo3",
- "pyo3-async-runtimes",
  "rustls",
  "sea-query",
  "serde",
@@ -633,6 +631,21 @@ dependencies = [
  "tokio-postgres-rustls",
  "uuid",
  "webpki-roots",
+]
+
+[[package]]
+name = "orm-python"
+version = "0.1.0"
+dependencies = [
+ "bigdecimal",
+ "chrono",
+ "orm-core",
+ "orm-engine",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "sea-query",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

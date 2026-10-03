@@ -6,9 +6,7 @@
 
 mod build;
 mod convert;
-mod db;
 mod errors;
-mod plan;
 
 use orm_core::{ir, migrate, schema};
 
@@ -18,12 +16,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
 
-use crate::build::{Builder, Classes, Fetched};
-use crate::db::{DbResult, Driver, Executor, RowSet};
-use crate::errors::{db_err, query_err, schema_err};
-use crate::plan::{Plan, Planner, SelectPlan};
+use crate::build::{Builder, Classes};
+use crate::convert::{py_to_value, PyParams};
+use crate::errors::{db_err, engine_err, query_err, schema_err};
 use orm_core::dialect::{Dialect, Target};
-use orm_core::ir::{Operation, ValueType};
+use orm_engine::db::{self, Driver, Executor};
+use orm_engine::exec::{self, Conflict, Outcome};
+use orm_engine::plan::Planner;
+use orm_engine::parse_op;
 
 /// Marker for "use the column's server default" in insert rows.
 #[pyclass(frozen, module = "orm._native", name = "_Default")]
@@ -36,14 +36,37 @@ impl DefaultMarker {
     }
 }
 
-fn parse_op(op_json: &str) -> PyResult<Operation> {
-    serde_json::from_str(op_json).map_err(|e| query_err(format!("invalid query IR: {e}")))
+/// `rows` (sequences aligned with `fields`) as bind values of the fields' types; the
+/// `DEFAULT` marker (when `defaults`) becomes `None`.
+fn convert_rows(
+    schema: &schema::Schema,
+    model: &str,
+    fields: &[String],
+    rows: &Bound<'_, PyList>,
+    defaults: bool,
+) -> PyResult<Vec<Vec<Option<sea_query::Value>>>> {
+    let types = exec::field_types(schema, model, fields).map_err(engine_err)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows.iter() {
+        let mut values = Vec::with_capacity(types.len());
+        for item in row.try_iter()? {
+            let item = item?;
+            let ty = types.get(values.len()).copied();
+            values.push(if defaults && item.is_instance_of::<DefaultMarker>() {
+                None
+            } else {
+                Some(py_to_value(&item, ty)?)
+            });
+        }
+        if values.len() != types.len() {
+            return Err(query_err("row length does not match fields".into()));
+        }
+        out.push(values);
+    }
+    Ok(out)
 }
 
-/// `update_many`'s statements: `rows` (sequences aligned with `fields`, primary key
-/// first) converted by column type and split so no statement exceeds the dialect's
-/// parameter limit, or
-/// `batch_size` rows.
+/// `update_many`'s statements (see `orm_engine::exec::plan_update_many`).
 #[allow(clippy::too_many_arguments)]
 fn update_many_plan<'py>(
     schema: &schema::Schema,
@@ -55,30 +78,15 @@ fn update_many_plan<'py>(
     params: &[Bound<'py, PyAny>],
     returning: bool,
     batch_size: Option<usize>,
-) -> PyResult<(Vec<sea_query::UpdateStatement>, Option<Vec<ValueType>>)> {
-    let m = schema.model(schema.model_idx(model).map_err(query_err)?);
-    let types = fields.iter().map(|f| m.field(f).map(|f| f.value_type())).collect::<Result<Vec<_>, _>>().map_err(query_err)?;
-    let mut values = Vec::with_capacity(rows.len());
-    for row in rows.iter() {
-        let row = row
-            .try_iter()?
-            .zip(&types)
-            .map(|(item, ty)| convert::py_to_value(&item?, Some(*ty)))
-            .collect::<PyResult<Vec<_>>>()?;
-        if row.len() != fields.len() {
-            return Err(query_err("update_many row length does not match fields".into()));
-        }
-        values.push(row);
-    }
+) -> PyResult<(Vec<sea_query::UpdateStatement>, exec::UpdateMany)> {
+    let values = convert_rows(schema, model, fields, rows, false)?
+        .into_iter()
+        .map(|r| r.into_iter().map(|v| v.expect("no DEFAULT in update_many")).collect())
+        .collect();
     let filters: Vec<ir::Expr> =
         serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
-    let per_row = if target.caps.update_from_values { fields.len() } else { 2 * fields.len() - 1 };
-    // Leave room for the filters' parameters.
-    let mut chunk = target.caps.max_params.saturating_sub(params.len()) / per_row.max(1);
-    if let Some(n) = batch_size {
-        chunk = chunk.min(n);
-    }
-    plan::plan_update_many(schema, target, model, fields, &values, chunk, &filters, params, returning)
+    exec::plan_update_many(schema, target, model, fields, values, &filters, &PyParams(params), returning, batch_size)
+        .map_err(engine_err)
 }
 
 /// The compiled schema. Usable without a connection, e.g. to render SQL.
@@ -106,14 +114,10 @@ impl PySchema {
 
     /// SQL for an operation with parameters inlined. For debugging and tests only.
     fn sql(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<String> {
-        let op = parse_op(op_json)?;
-        let d = Dialect::Postgres;
-        Ok(match Planner::plan(&self.inner, Target::new(d), &op, &params)? {
-            Plan::Select(p) => db::to_string(d, &p.stmt),
-            Plan::Count(s) | Plan::Exists(s) => db::to_string(d, &s),
-            Plan::Update(s, _) => db::to_string(d, &s),
-            Plan::Delete(s, _) => db::to_string(d, &s),
-        })
+        let op = parse_op(op_json).map_err(engine_err)?;
+        let target = Target::new(Dialect::Postgres);
+        let plan = Planner::plan(&self.inner, target, &op, &PyParams(&params)).map_err(engine_err)?;
+        Ok(exec::sql(target, &plan))
     }
 
     /// The SQL of `update_many` (one statement per batch), parameters inlined. For
@@ -176,136 +180,6 @@ impl PySchema {
     }
 }
 
-struct Selected {
-    rows: Box<dyn RowSet>,
-    plan: SelectPlan,
-    prefetched: Vec<Fetched>,
-}
-
-async fn run_select(conn: &dyn Executor, target: Target, mut plan: SelectPlan) -> DbResult<Selected> {
-    let (sql, args) = db::build(target.dialect, &plan.stmt);
-    let rows = conn.query(sql, args).await?;
-    let prefetched = run_prefetch(conn, target, rows.as_ref(), std::mem::take(&mut plan.prefetch)).await?;
-    Ok(Selected { rows, plan, prefetched })
-}
-
-/// Runs each prefetch query for the keys in `parent`, then the prefetches nested in it.
-///
-/// Each key is one bound parameter, so keys beyond the dialect's parameter limit (less
-/// what the query binds itself) go to further queries. The chunks split the parents,
-/// never one parent's rows, so ordering and slices per parent hold.
-fn run_prefetch<'a>(
-    conn: &'a dyn Executor,
-    target: Target,
-    parent: &'a dyn RowSet,
-    plans: Vec<plan::PrefetchPlan>,
-) -> db::BoxFuture<'a, DbResult<Vec<Fetched>>> {
-    Box::pin(async move {
-        let mut out = Vec::with_capacity(plans.len());
-        for mut p in plans {
-            let null = convert::null_of(Some(p.key_type));
-            let mut seen = std::collections::HashSet::new();
-            let mut keys = vec![];
-            for i in 0..parent.len() {
-                let k = parent.value(i, p.key_pos, p.key_type)?;
-                if k != null && seen.insert(k.clone()) {
-                    keys.push(k);
-                }
-            }
-            let rows = match keys.first() {
-                None => Box::new(EmptyRows) as Box<dyn RowSet>,
-                Some(k) => {
-                    let own = db::build(target.dialect, &p.statement(vec![k.clone()])).1.len() - 1;
-                    let chunk = target.caps.max_params.saturating_sub(own).max(1);
-                    let mut parts = Vec::with_capacity(keys.len().div_ceil(chunk));
-                    for keys in keys.chunks(chunk) {
-                        let (sql, args) = db::build(target.dialect, &p.statement(keys.to_vec()));
-                        parts.push(conn.query(sql, args).await?);
-                    }
-                    if parts.len() == 1 {
-                        parts.pop().expect("one part")
-                    } else {
-                        Box::new(ChainedRows::new(parts))
-                    }
-                }
-            };
-            let nested = std::mem::take(&mut p.children);
-            let children = run_prefetch(conn, target, rows.as_ref(), nested).await?;
-            out.push(Fetched { plan: p, rows, children });
-        }
-        Ok(out)
-    })
-}
-
-/// The rows of several statements as one set (a prefetch split into several queries).
-struct ChainedRows {
-    parts: Vec<Box<dyn RowSet>>,
-    /// Index of each part's first row.
-    starts: Vec<usize>,
-    len: usize,
-}
-
-impl ChainedRows {
-    fn new(parts: Vec<Box<dyn RowSet>>) -> Self {
-        let mut starts = Vec::with_capacity(parts.len());
-        let mut len = 0;
-        for p in &parts {
-            starts.push(len);
-            len += p.len();
-        }
-        ChainedRows { parts, starts, len }
-    }
-
-    /// The part holding `row`, and the row's index in it.
-    fn locate(&self, row: usize) -> (&dyn RowSet, usize) {
-        let i = self.starts.partition_point(|&s| s <= row) - 1;
-        (self.parts[i].as_ref(), row - self.starts[i])
-    }
-}
-
-impl RowSet for ChainedRows {
-    fn len(&self) -> usize {
-        self.len
-    }
-    fn cell(&self, py: Python<'_>, row: usize, col: usize, ty: ValueType) -> PyResult<Py<PyAny>> {
-        let (p, r) = self.locate(row);
-        p.cell(py, r, col, ty)
-    }
-    fn value(&self, row: usize, col: usize, ty: ValueType) -> DbResult<sea_query::Value> {
-        let (p, r) = self.locate(row);
-        p.value(r, col, ty)
-    }
-    fn get_i64(&self, row: usize, col: usize) -> DbResult<i64> {
-        let (p, r) = self.locate(row);
-        p.get_i64(r, col)
-    }
-    fn get_bool(&self, row: usize, col: usize) -> DbResult<bool> {
-        let (p, r) = self.locate(row);
-        p.get_bool(r, col)
-    }
-}
-
-/// The result of a prefetch with no keys: no query runs.
-struct EmptyRows;
-
-impl RowSet for EmptyRows {
-    fn len(&self) -> usize {
-        0
-    }
-    fn cell(&self, _: Python<'_>, _: usize, _: usize, _: ValueType) -> PyResult<Py<PyAny>> {
-        Err(db_err(db::DbError::other("no rows")))
-    }
-    fn value(&self, _: usize, _: usize, _: ValueType) -> DbResult<sea_query::Value> {
-        Err(db::DbError::other("no rows"))
-    }
-    fn get_i64(&self, _: usize, _: usize) -> DbResult<i64> {
-        Err(db::DbError::other("no rows"))
-    }
-    fn get_bool(&self, _: usize, _: usize) -> DbResult<bool> {
-        Err(db::DbError::other("no rows"))
-    }
-}
-
 /// A database transaction (or savepoint, when nested).
 #[pyclass(frozen, module = "orm._native")]
 struct Transaction {
@@ -350,22 +224,9 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let conn = self.conn(tx);
-        let own_tx = tx.is_none();
+        let in_tx = tx.is_some();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            if !own_tx {
-                for s in statements {
-                    conn.batch(s).await.map_err(db_err)?;
-                }
-                return Ok(());
-            }
-            let tx = conn.begin().await.map_err(db_err)?;
-            for s in statements {
-                if let Err(e) = tx.batch(s).await {
-                    let _ = tx.rollback().await;
-                    return Err(db_err(e));
-                }
-            }
-            tx.commit().await.map_err(db_err)
+            exec::run_script(conn, statements, in_tx).await.map_err(engine_err)
         })
     }
 }
@@ -387,48 +248,16 @@ impl Engine {
         row_cls: Option<Bound<'py, PyAny>>,
         db: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let op = parse_op(op_json)?;
-        let d = self.target.dialect;
+        let op = parse_op(op_json).map_err(engine_err)?;
         let target = self.target;
-        let plan = Planner::plan(&self.schema, self.target, &op, &params)?;
+        let plan = Planner::plan(&self.schema, target, &op, &PyParams(&params)).map_err(engine_err)?;
         let conn = self.conn(tx);
         let classes = self.classes.clone();
         let row_cls = row_cls.map(Bound::unbind);
         let db = db.map(Bound::unbind);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let conn = conn.as_ref();
-            match plan {
-                Plan::Select(p) => {
-                    let s = run_select(conn, target, p).await.map_err(db_err)?;
-                    Python::attach(|py| {
-                        let db = db.map(|d| d.into_bound(py));
-                        let row_cls = row_cls.map(|c| c.into_bound(py));
-                        let b = Builder::new(py, &classes, db.as_ref());
-                        let out = b.select(&s.plan.output, s.rows.as_ref(), &s.plan.types, &s.prefetched, row_cls.as_ref())?;
-                        Ok(out.unbind().into_any())
-                    })
-                }
-                Plan::Count(s) => {
-                    let (sql, args) = db::build(d, &s);
-                    let rows = conn.query(sql, args).await.map_err(db_err)?;
-                    let n = if rows.len() == 0 { 0 } else { rows.get_i64(0, 0).map_err(db_err)? };
-                    Python::attach(|py| n.into_py_any(py))
-                }
-                Plan::Exists(s) => {
-                    let (sql, args) = db::build(d, &s);
-                    let rows = conn.query(sql, args).await.map_err(db_err)?;
-                    let b = rows.len() > 0 && rows.get_bool(0, 0).map_err(db_err)?;
-                    Python::attach(|py| b.into_py_any(py))
-                }
-                Plan::Update(s, types) => {
-                    let (sql, args) = db::build(d, &s);
-                    count_or_rows(conn, sql, args, types, &classes, db).await
-                }
-                Plan::Delete(s, types) => {
-                    let (sql, args) = db::build(d, &s);
-                    count_or_rows(conn, sql, args, types, &classes, db).await
-                }
-            }
+            let out = exec::run(conn.as_ref(), target, plan).await.map_err(engine_err)?;
+            Python::attach(|py| outcome_to_py(py, out, &classes, db, row_cls))
         })
     }
 
@@ -453,26 +282,24 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
         db: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let model_idx = self.schema.model_idx(model).map_err(query_err)?;
         let set: Vec<ir::Assignment> = match set {
             Some(json) => serde_json::from_str(json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
             None => vec![],
         };
-        let on_conflict = conflict.map(|target| match update {
-            Some(update) => plan::OnConflict::Update(target, update, set),
-            None => plan::OnConflict::Nothing(target),
+        let conflict = conflict.map(|target| match update {
+            Some(update) => Conflict::Update { target, update, set },
+            None => Conflict::Nothing { target },
         });
-        let (stmt, types) = plan::plan_insert(&self.schema, self.target, model, &fields, rows, on_conflict, &params)?;
-        let (sql, args) = db::build(self.target.dialect, &stmt);
+        let values = convert_rows(&self.schema, model, &fields, rows, true)?;
+        let plan = exec::plan_insert(&self.schema, self.target, model, &fields, values, conflict, &PyParams(&params))
+            .map_err(engine_err)?;
+        let target = self.target;
         let conn = self.conn(tx);
         let classes = self.classes.clone();
         let db = db.map(Bound::unbind);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let rows = conn.query(sql, args).await.map_err(db_err)?;
-            Python::attach(|py| {
-                let db = db.map(|d| d.into_bound(py));
-                Builder::new(py, &classes, db.as_ref()).model_rows(model_idx, rows.as_ref(), &types).map(|l| l.unbind())
-            })
+            let out = exec::run(conn.as_ref(), target, plan).await.map_err(engine_err)?;
+            Python::attach(|py| outcome_to_py(py, out, &classes, db, None))
         })
     }
 
@@ -495,60 +322,16 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
         db: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let model_idx = self.schema.model_idx(model).map_err(query_err)?;
         let classes = self.classes.clone();
         let db = db.map(Bound::unbind);
-        let (stmts, types) = update_many_plan(
+        let (_, um) = update_many_plan(
             &self.schema, self.target, model, &fields, rows, filters_json, &params, returning, batch_size,
         )?;
-        let d = self.target.dialect;
-        let built: Vec<_> = stmts.iter().map(|s| db::build(d, s)).collect();
         let conn = self.conn(tx);
-        let own_tx = tx.is_none() && built.len() > 1;
+        let own_tx = tx.is_none();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let tx = if own_tx { Some(conn.begin().await.map_err(db_err)?) } else { None };
-            let exec: &dyn Executor = match &tx {
-                Some(t) => t.as_ref(),
-                None => conn.as_ref(),
-            };
-            let mut count = 0u64;
-            let mut fetched = vec![];
-            let mut failed = None;
-            for (sql, args) in built {
-                let r = match &types {
-                    None => exec.execute(sql, args).await.map(|n| count += n),
-                    Some(_) => exec.query(sql, args).await.map(|rows| fetched.push(rows)),
-                };
-                if let Err(e) = r {
-                    failed = Some(e);
-                    break;
-                }
-            }
-            if let Some(t) = tx {
-                match failed {
-                    None => t.commit().await.map_err(db_err)?,
-                    Some(_) => {
-                        let _ = t.rollback().await;
-                    }
-                }
-            }
-            if let Some(e) = failed {
-                return Err(db_err(e));
-            }
-            Python::attach(|py| match &types {
-                None => count.into_py_any(py),
-                Some(types) => {
-                    let db = db.map(|d| d.into_bound(py));
-                    let b = Builder::new(py, &classes, db.as_ref());
-                    let all = PyList::empty(py);
-                    for rows in &fetched {
-                        for r in b.model_rows(model_idx, rows.as_ref(), types)?.iter() {
-                            all.append(r)?;
-                        }
-                    }
-                    all.into_py_any(py)
-                }
-            })
+            let out = exec::run_update_many(conn.as_ref(), um, own_tx).await.map_err(engine_err)?;
+            Python::attach(|py| outcome_to_py(py, out, &classes, db, None))
         })
     }
 
@@ -626,27 +409,28 @@ impl Engine {
     }
 }
 
-/// An UPDATE / DELETE: the row count, or the rows when it has `RETURNING`.
-async fn count_or_rows(
-    conn: &dyn Executor,
-    sql: String,
-    args: Vec<sea_query::Value>,
-    returning: Option<(usize, Vec<ValueType>)>,
+/// The Python result of an operation: instances (prefetched relations attached) or
+/// `row_cls` rows for a select, an int for a count or a write without `RETURNING`, a bool
+/// for exists, instances for rows a write returned. Instances get `db` as `_db`.
+fn outcome_to_py(
+    py: Python<'_>,
+    out: Outcome,
     classes: &Classes,
     db: Option<Py<PyAny>>,
+    row_cls: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    match returning {
-        None => {
-            let n = conn.execute(sql, args).await.map_err(db_err)?;
-            Python::attach(|py| n.into_py_any(py))
+    let db = db.map(|d| d.into_bound(py));
+    let b = Builder::new(py, classes, db.as_ref());
+    match out {
+        Outcome::Select(s) => {
+            let row_cls = row_cls.map(|c| c.into_bound(py));
+            let out = b.select(&s.plan.output, s.rows.as_ref(), &s.plan.types, &s.prefetched, row_cls.as_ref())?;
+            Ok(out.unbind().into_any())
         }
-        Some((model, types)) => {
-            let rows = conn.query(sql, args).await.map_err(db_err)?;
-            Python::attach(|py| {
-                let db = db.map(|d| d.into_bound(py));
-                Builder::new(py, classes, db.as_ref()).model_rows(model, rows.as_ref(), &types)?.into_py_any(py)
-            })
-        }
+        Outcome::Count(n) => n.into_py_any(py),
+        Outcome::Exists(v) => v.into_py_any(py),
+        Outcome::Affected(n) => n.into_py_any(py),
+        Outcome::Rows { model, rows, types } => b.model_rows(model, rows.as_ref(), &types)?.into_py_any(py),
     }
 }
 
