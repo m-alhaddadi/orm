@@ -21,11 +21,13 @@ function and a selected model after the model (``post``).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Generator
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, TypeVarTuple, Unpack, cast
 
+from ._cache import cached
 from .errors import DoesNotExist, MultipleObjectsReturned, QueryError
 from .expr import ColumnRef, ConditionLike, Expression, Func, IRContext, Labeled, Ordering, ScalarSubquery, _Ctes, and_
 
@@ -109,9 +111,10 @@ def _column_name(item: Any, i: int) -> str:
 
 class Select(Generic[Unpack[Ts]]):
     """A query returning rows of chosen columns. Built by ``QuerySet.select(...)``;
-    every method returns a new ``Select``, and nothing runs until it is awaited."""
+    every method returns a new ``Select``, and nothing runs until it is awaited. Awaiting
+    the same ``Select`` again gives the same rows without querying again."""
 
-    __slots__ = ("_qs", "_items", "_names", "_group", "_having", "_distinct", "_distinct_on")
+    __slots__ = ("_qs", "_items", "_names", "_group", "_having", "_distinct", "_distinct_on", "_result")
 
     def __init__(self, qs: QuerySet[Any], items: tuple[Any, ...]) -> None:
         if not items:
@@ -135,11 +138,13 @@ class Select(Generic[Unpack[Ts]]):
         self._having: tuple[Any, ...] = ()
         self._distinct = False
         self._distinct_on: tuple[ColumnRef[Any], ...] = ()
+        self._result: asyncio.Task[list[Any]] | None = None
 
     def _clone(self, **changes: Any) -> Self:
         new = object.__new__(type(self))
         for k in self.__slots__:
             setattr(new, k, changes.get(k, getattr(self, k)))
+        new._result = None
         return new
 
     # -- building (the WHERE / ORDER BY / LIMIT part goes to the query set) ---------------
@@ -271,10 +276,10 @@ class Select(Generic[Unpack[Ts]]):
         return rows
 
     def __await__(self) -> Generator[Any, None, list[Row[Unpack[Ts]]]]:
-        return self._rows().__await__()
+        return cached(self, self._rows).__await__()
 
     async def __aiter__(self) -> AsyncIterator[Row[Unpack[Ts]]]:
-        for row in await self._rows():
+        for row in await self:
             yield row
 
     async def first(self) -> Row[Unpack[Ts]] | None:

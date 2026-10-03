@@ -16,6 +16,7 @@ import {
   func,
   getDatabase,
   not,
+  param,
 } from "../src/index.js";
 import { Comment, Post, User } from "./blog/models.js";
 import { DATABASE_URL, LAST_WEEK, YESTERDAY, collect, names, otherDatabase, seed, useDatabase } from "./helpers.js";
@@ -30,6 +31,40 @@ test("insert returns the row with server defaults", async () => {
   assert.equal(p.authorId, u.id);
   assert.equal(p.views, 0);
   assert.equal(p.published, false); // DDL defaults, read back via RETURNING
+});
+
+test("await runs a query set once; all() queries afresh", async () => {
+  await User.objects.insert({ email: "a@x.io", name: "A" });
+  const qs = User.objects.filter(User.name.ne("Z"));
+  const first = await qs;
+  await User.objects.insert({ email: "b@x.io", name: "B" });
+  // the same query set gives its first rows again, without a query; a copy each time
+  const again = await qs;
+  assert.deepEqual(again.map((u) => u.name), ["A"]);
+  assert.notEqual(again, first);
+  assert.equal(again[0], first[0]);
+  const seen: string[] = [];
+  for await (const u of qs) {
+    seen.push(u.name);
+  }
+  assert.deepEqual(seen, ["A"]);
+  // builders and all() query again; so does Model.objects, which lives with the model
+  assert.equal((await qs.all()).length, 2);
+  assert.equal((await qs.orderBy(User.name)).length, 2);
+  assert.equal((await User.objects).length, 2);
+  await User.objects.insert({ email: "c@x.io", name: "C" });
+  assert.equal((await User.objects).length, 3);
+  // concurrent awaits share one run
+  const fresh = User.objects.filter(User.name.ne("Z"));
+  const [a, b] = await Promise.all([fresh, fresh]);
+  assert.equal(a.length, 3);
+  assert.equal(a[0], b[0]);
+  const sel = User.objects.select({ name: User.name }).orderBy(User.name);
+  assert.deepEqual(await sel, await sel);
+  // a failed run isn't kept: awaiting again retries
+  const bad = User.objects.filter(User.id.eq(param("id")));
+  await assert.rejects(Promise.resolve(bad as never), QueryError);
+  await assert.rejects(Promise.resolve(bad as never), QueryError);
 });
 
 test("insertMany with mixed columns", async () => {

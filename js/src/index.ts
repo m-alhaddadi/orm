@@ -10,7 +10,7 @@
  * import { User } from "./models.js";
  *
  * await connect("postgres://...");
- * const users = await User.objects.filter(User.posts.createdAt.lt(yesterday)).all();
+ * const users = await User.objects.filter(User.posts.createdAt.lt(yesterday));
  * ```
  */
 

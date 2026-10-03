@@ -44,7 +44,9 @@ import {
   type CteOptions,
   type OuterRefs,
   type ParamsOfAll,
+  type Awaitable,
   type Runnable,
+  cachedRows,
   type ScopesOf,
   type UnionToIntersection,
 } from "./query.js";
@@ -276,14 +278,23 @@ export class Select<M extends ModelSpec, Row extends object, S extends string, P
     return new Builder(db.registry, sel.qs.state.db).select(res, this.items.map(([k]) => k)) as Row[];
   }
 
-  /** The rows. */
+  /** The rows, queried afresh (unlike `await sel`, which reuses its first result). */
   all(...check: Runnable<P, X>): Promise<Row[]> {
     void check;
     return this.rows();
   }
 
+  /** `await sel`: the rows, queried on the first `await` and reused by later ones. */
+  then<A = Row[], B = never>(
+    this: Select<M, Row, S, P, X, C> & Awaitable<P, X>,
+    onfulfilled?: ((rows: Row[]) => A | PromiseLike<A>) | null,
+    onrejected?: ((reason: unknown) => B | PromiseLike<B>) | null,
+  ): Promise<A | B> {
+    return cachedRows(this, () => this.rows()).then(onfulfilled, onrejected);
+  }
+
   async *[Symbol.asyncIterator](): AsyncGenerator<Row, void, undefined> {
-    yield* await this.rows();
+    yield* await cachedRows(this, () => this.rows());
   }
 
   /** The first row (by `orderBy`; unordered otherwise), or `null`. */

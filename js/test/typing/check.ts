@@ -167,6 +167,29 @@ export async function subqueries() {
   Post.id.in(User.objects.select({ a: User.id, b: User.name }));
 }
 
+export async function awaiting() {
+  const posts = await Post.objects.filter(Post.published);
+  same<typeof posts, Post[]>();
+  const cs = await Comment.objects.selectRelated(Comment.post.author);
+  same<(typeof cs)[number]["post"]["author"]["name"], string>();
+  const rows = await Post.objects.select({ id: Post.id, n: func.count(Post.comments) });
+  same<typeof rows, { id: bigint; n: bigint }[]>();
+  const mine = await user.posts.filter(Post.views.gt(1));
+  same<typeof mine, Post[]>();
+  for await (const p of Post.objects.orderBy(Post.id)) {
+    same<typeof p, Post>();
+  }
+  // returned from an async function, a query set resolves to its rows
+  const later = async () => Post.objects.filter(Post.published);
+  same<Awaited<ReturnType<typeof later>>, Post[]>();
+  // @ts-expect-error a query with param() placeholders runs through prepare()
+  await Post.objects.filter(Post.id.eq(param("id")));
+  // @ts-expect-error a query reading outer() columns runs only inside another query
+  await Post.objects.filter(Post.authorId.eq(outer(User.id)));
+  // @ts-expect-error the same for select()
+  await Post.objects.filter(Post.authorId.eq(outer(User.id))).select({ id: Post.id });
+}
+
 export async function ctes() {
   const totals = Post.objects.select({ authorId: Post.authorId, n: func.count() }).groupBy(Post.authorId).cte("totals");
   const rows = await User.objects.join(totals, totals.c.authorId.eq(User.id)).select({ name: User.name, n: totals.c.n }).all();

@@ -14,10 +14,10 @@ import { Post, User } from "./models.js";
 await connect("postgres://postgres:postgres@localhost/orm_test");
 const yesterday = new Date(Date.now() - 86_400_000);
 
-const users = await User.objects.filter(User.posts.createdAt.lt(yesterday)).all();
+const users = await User.objects.filter(User.posts.createdAt.lt(yesterday));
 const rows = await User.objects
-  .select({ name: User.name, posts: func.count(User.posts), popular: exists(Post.objects.filter(Post.authorId.eq(outer(User.id)), Post.published)) })
-  .all(); // { name: string; posts: bigint; popular: boolean }[]
+  .select({ name: User.name, posts: func.count(User.posts), popular: exists(Post.objects.filter(Post.authorId.eq(outer(User.id)), Post.published)) });
+// { name: string; posts: bigint; popular: boolean }[]
 ```
 
 [`examples/blog/demo.ts`](../examples/blog/demo.ts) is a runnable tour, and it mirrors `demo.py`.
@@ -78,11 +78,14 @@ at runtime, but untyped.
 
 ## Queries
 
-Query sets are lazy and immutable. Nothing runs until a terminal method is called:
+Query sets are lazy and immutable: building one never touches the database. Awaiting
+one runs it (a query set is a *thenable*, like Prisma's and Drizzle's queries, and like
+`await qs` in Python), and so do the terminal methods:
 
 | Method | Gives |
 |---|---|
-| `.all()` | `Promise<R[]>` |
+| `await qs` / `for await (const u of qs)` | `R[]`, cached per query set (below) |
+| `.all()` | `Promise<R[]>`, always a fresh query |
 | `.first()` / `.last()` | `Promise<R \| null>` |
 | `.get(...conditions)` | `Promise<R>`; throws `User.DoesNotExist` / `User.MultipleObjectsReturned` |
 | `.count()` / `.exists()` | `Promise<number>` / `Promise<boolean>` |
@@ -90,8 +93,18 @@ Query sets are lazy and immutable. Nothing runs until a terminal method is calle
 | `.batches(size)` / `.iterate(size)` | async generators that walk the primary key (keyset pagination) |
 | `.sql()` | the SQL with values inlined, for reading |
 
-A query set is deliberately not a thenable: building one never touches the database, and
-every place a query runs carries a terminal method.
+**The result cache.** A query set runs on its first `await`; awaiting the same query set
+again gives the same rows (a new array each time) without another query, and concurrent
+awaits share one run, as with Django's result cache. Every builder returns a new query
+set with an empty cache, and `.all()` always queries, so `await qs.all()` is the way to
+re-read. A failed run isn't cached. `User.objects` itself lives as long as the model, so
+`await User.objects` queries every time. Writes don't clear caches: re-read with a new
+query set or `.all()`. `select()` caches the same way.
+
+Awaiting a query set that can't run on its own (`param()` placeholders, `outer()`
+references) is a type error. One thing to keep in mind with thenables: an `async` function
+that *returns* a query set resolves it, so its caller gets rows. Return it from a plain
+function to pass the query on.
 
 The builders are `filter(...)`, `exclude(...)`, `orderBy(...)`, `limit(n)`, `offset(n)`,
 `slice(start, end)`, `selectRelated(...)`, `prefetchRelated(...)`, `lock(...)`,
@@ -132,7 +145,7 @@ separate calls are independent. `exclude()` is `NOT EXISTS`.
   sets a custom query (filtered, nested, or sliced per parent) and a typed target
   attribute (`u.top: Post[]`).
 
-Related sets: `user.posts.all()`, `.filter()`, `.count()`, and `.insert({...})`, where the
+Related sets: `await user.posts`, `.filter()`, `.count()`, and `.insert({...})`, where the
 key is filled in. Many-to-many sets also have `post.tags.add(tag, ...)`, `.remove()`,
 `.clear()` and `.set([...])`.
 
@@ -158,7 +171,8 @@ nullable relation becomes nullable.
 Other `Select` methods:
 
 * `.groupBy(...)`, `.having(...)`, `.distinct()` and `.orderBy(...)`.
-* The terminals `.all()`, `.first()`, `.one()`, `.scalar()` and `.scalars()`.
+* `await sel` (cached, like a query set) and the terminals `.all()`, `.first()`, `.one()`,
+  `.scalar()` and `.scalars()`.
   `scalar()` and `scalars()` type-check only for one column.
 
 ## Subqueries
@@ -183,10 +197,10 @@ can share. A window function that has no `.over()` is a type error.
 
 ```ts
 const totals = Post.objects.select({ authorId: Post.authorId, n: func.count() }).groupBy(Post.authorId).cte("totals");
-await User.objects.join(totals, totals.c.authorId.eq(User.id)).select({ name: User.name, n: totals.c.n }).all();
+await User.objects.join(totals, totals.c.authorId.eq(User.id)).select({ name: User.name, n: totals.c.n });
 
 const ranked = Post.objects.select({ post: Post, rank: func.rowNumber().over({ orderBy: Post.views }) }).cte("ranked");
-await Post.objects.from(ranked).filter(ranked.c.rank.lte(3)).all();
+await Post.objects.from(ranked).filter(ranked.c.rank.lte(3));
 
 const chain = User.objects.filter(User.id.eq(1)).cte("chain", { recursive: (c) => User.objects.filter(User.id.eq(c.c.id.add(1))) });
 ```
@@ -247,8 +261,8 @@ are the programmatic API; they call the same Rust migrator (`engine/src/migrate.
 
 ## Decisions
 
-* **Explicit terminal methods** (`.all()` rather than `await qs`), so it is always
-  visible where a query runs.
+* **Awaitable query sets** (`await qs`), as in Python, Prisma and Drizzle, with a result
+  cache so one query set queries once; `.all()` is the explicit fresh query.
 * **`bigint` and decimal.js**, following Prisma. `BigInt` keys never lose precision, and
   decimals stay exact on the wire.
 * **`Date` for timestamps.** It gives millisecond precision. Temporal can replace it once

@@ -300,8 +300,8 @@ instead of calling `define()` at import (the larger cost, ~10 ms).
 
 Decided: camelCase field names; `BigInt` columns as `bigint` and `Decimal` as
 decimal.js (Prisma's choice); `Date` for timestamps (millisecond precision); query sets
-are lazy and run only through explicit terminal methods (`.all()`, `.first()`, ...),
-not `await qs`.
+are lazy thenables (`await qs`, like Python), with a per-query-set result cache so
+awaiting one twice queries once; `.all()` always queries.
 
 Next: a benchmark against Drizzle and Prisma; Deno.
 

@@ -68,7 +68,11 @@ The descriptors behave differently on the class and on an instance:
 
 ## Queries
 
-Builders return a new immutable `QuerySet`. Awaiting it runs the query:
+Builders return a new immutable `QuerySet`. Awaiting it runs the query. Awaiting the
+same query set again gives the same rows without querying again (a new list each time;
+concurrent awaits share one run): the result cache, as in Django. Builders and `.all()`
+return new query sets, so `await qs.all()` re-reads; `await User.objects` always
+queries, since `User.objects` lives as long as the class. `select()` caches the same way.
 
 ```python
 await User.objects.filter(cond, cond2)        # list[User]; conditions AND-ed

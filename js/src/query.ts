@@ -83,6 +83,41 @@ export type Runnable<P, X extends string> = [X] extends [never]
     : [error: "this query has param() placeholders: run it through .prepare()"]
   : [error: "this query reads outer() columns: use it inside exists(), in() or asScalar()"];
 
+/** The `this` of `then()`: awaiting a query that can't run on its own is a type error
+ * (TS1320) that names what is missing. */
+export type Awaitable<P, X extends string> = [X] extends [never]
+  ? [keyof P] extends [never]
+    ? unknown
+    : { readonly "~await": "this query has param() placeholders: run it through .prepare()" }
+  : { readonly "~await": "this query reads outer() columns: use it inside exists(), in() or asScalar()" };
+
+/**
+ * The result cache: the rows of each query set's (and `select()`'s) first `await`.
+ * Later awaits, concurrent ones included, share that run and get a copy of its rows.
+ * Builders return new query sets with empty caches, and `.all()` always queries; a
+ * failed run isn't kept, so awaiting again retries. `Model.objects` lives as long as
+ * the model, so it never caches.
+ */
+const results = new WeakMap<object, Promise<readonly unknown[]>>();
+
+/** @internal */
+export async function cachedRows<T>(owner: object, fetch: () => Promise<T[]>, enabled = true): Promise<T[]> {
+  if (!enabled) {
+    return fetch();
+  }
+  let run = results.get(owner) as Promise<readonly T[]> | undefined;
+  if (run === undefined) {
+    run = fetch();
+    results.set(owner, run);
+    run.catch(() => {
+      if (results.get(owner) === run) {
+        results.delete(owner);
+      }
+    });
+  }
+  return [...(await run)];
+}
+
 type Last<H extends readonly Hop[]> = H extends readonly [...unknown[], infer L extends Hop] ? L : never;
 
 type Wrap<K extends HopKind, T, Plain extends boolean> = K extends "one"
@@ -762,14 +797,31 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return new Builder(db.registry, this.state.db).select(res) as R[];
   }
 
-  /** The rows. */
+  /** The rows, queried afresh (unlike `await qs`, which reuses its first result). */
   all(...check: Runnable<P, X>): Promise<R[]> {
     void check;
     return this.fetch();
   }
 
+  /**
+   * `await qs`: the rows. The query runs on the first `await` of this query set; later
+   * ones give the same rows again (see {@link cachedRows}). Nothing runs before.
+   */
+  then<A = R[], B = never>(
+    this: QuerySet<M, R, S, P, X> & Awaitable<P, X>,
+    onfulfilled?: ((rows: R[]) => A | PromiseLike<A>) | null,
+    onrejected?: ((reason: unknown) => B | PromiseLike<B>) | null,
+  ): Promise<A | B> {
+    return this.fromCache().then(onfulfilled, onrejected);
+  }
+
+  /** @internal */
+  fromCache(): Promise<R[]> {
+    return cachedRows(this, () => this.fetch(), this !== (this.meta.objects as unknown));
+  }
+
   async *[Symbol.asyncIterator](): AsyncGenerator<R, void, undefined> {
-    yield* await this.fetch();
+    yield* await this.fromCache();
   }
 
   private defaultOrder(): readonly Ordering<string, unknown>[] {

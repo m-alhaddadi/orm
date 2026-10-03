@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Unpack, overload
 
+from ._cache import cached
 from .errors import QueryError, TransactionRequired
 from .expr import (
     IR,
@@ -144,6 +146,9 @@ class QuerySet(Generic[M]):
     the query set is awaited (``await User.objects.filter(...)`` gives a list) or a
     terminal coroutine (``first``, ``get``, ``count``, ``update``, ...) is awaited.
 
+    Awaiting the same query set again gives the same rows without querying again (the
+    result cache, see ``_cache.py``); ``await qs.all()`` queries afresh.
+
     Filters are expressions over the model's columns and relation paths::
 
         await User.objects.filter(User.posts.created_at < yesterday)
@@ -154,7 +159,7 @@ class QuerySet(Generic[M]):
     ``exclude(User.posts.published == False)`` keeps users with no unpublished post.
     """
 
-    __slots__ = ("_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db", "_from", "_joins")
+    __slots__ = ("_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db", "_from", "_joins", "_result")
 
     def __init__(self, model: type[M]) -> None:
         self._model = model
@@ -168,6 +173,7 @@ class QuerySet(Generic[M]):
         self._db: Database | None = None
         self._from: Cte | None = None
         self._joins: tuple[tuple[Cte, Condition, bool], ...] = ()
+        self._result: asyncio.Task[list[M]] | None = None
 
     @property
     def model(self) -> type[M]:
@@ -175,6 +181,7 @@ class QuerySet(Generic[M]):
 
     def _clone(self, **changes: Any) -> Self:
         new = copy.copy(self)
+        new._result = None
         for k, v in changes.items():
             setattr(new, k, v)
         return new
@@ -554,10 +561,10 @@ class QuerySet(Generic[M]):
                 )
 
     def __await__(self) -> Generator[Any, None, list[M]]:
-        return self._fetch().__await__()
+        return cached(self, self._fetch, enabled=self is not self._model.__dict__.get("objects")).__await__()
 
     async def __aiter__(self) -> AsyncIterator[M]:
-        for obj in await self._fetch():
+        for obj in await self:
             yield obj
 
     async def first(self) -> M | None:

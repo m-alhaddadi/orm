@@ -35,11 +35,12 @@ async function main(url: string): Promise<void> {
   bob = await User.objects.insert({ email: "bob@example.com", name: "Robert" }, { onConflict: User.email, doUpdate: true });
   console.log("upserted:", bob);
 
-  // Query sets are lazy: nothing runs until a terminal method (all, first, get, count, ...).
+  // Query sets are lazy: nothing runs until one is awaited (or a terminal method such as
+  // first, get or count runs). Awaiting the same query set again reuses its rows.
   // Filters follow relations; to-many hops compile to EXISTS (no duplicate rows).
   const q = User.objects.filter(User.posts.createdAt.lt(yesterday));
   console.log(q.sql());
-  console.log("posted before yesterday:", (await q.all()).map((u) => u.name));
+  console.log("posted before yesterday:", (await q).map((u) => u.name));
 
   // Conditions in one filter() call must match the same post.
   console.log(
@@ -49,10 +50,10 @@ async function main(url: string): Promise<void> {
 
   // Eager loading: JOIN for to-one, one extra IN query for to-many. The row types say
   // what was loaded: c.post.author is a User here, c.author a User or null.
-  for (const c of await Comment.objects.selectRelated(Comment.post.author, Comment.author).all()) {
+  for (const c of await Comment.objects.selectRelated(Comment.post.author, Comment.author)) {
     console.log(`${c.author?.name ?? "?"} on ${c.post.author.name}'s ${JSON.stringify(c.post.title)}: ${c.body}`);
   }
-  for (const u of await User.objects.prefetchRelated(User.posts).orderBy(User.name).all()) {
+  for (const u of await User.objects.prefetchRelated(User.posts).orderBy(User.name)) {
     console.log(u.name, u.posts.cached.map((p) => p.title));
   }
 
@@ -63,8 +64,7 @@ async function main(url: string): Promise<void> {
       posts: func.count(User.posts),
       popular: exists(Post.objects.filter(Post.authorId.eq(outer(User.id)), Post.published)),
     })
-    .orderBy(User.name)
-    .all();
+    .orderBy(User.name);
   console.log(stats); // { name: string; posts: bigint; popular: boolean }[]
 
   // Prepared queries: param() placeholders, values checked against their columns.
