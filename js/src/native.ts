@@ -114,6 +114,7 @@ interface Addon {
   connect(url: string, schema: NativeSchema, maxConnections: number, disable: string[]): Promise<NativeEngine>;
   compileSchema(source: string, path?: string | null): string;
   compileSchemaFile(path: string): string;
+  generateTypescript(path: string, runtime?: string | null): string;
   setDecimalClass(ctor: unknown): void;
 }
 

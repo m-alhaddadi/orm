@@ -16,7 +16,7 @@ function where(qs: { sql(): string }): string {
 }
 
 const count = (s: string, part: string) => s.split(part).length - 1;
-const native = () => Post.meta.registry.native();
+const native = () => Post._meta.registry.native();
 
 test("a to-many filter is EXISTS", () => {
   assert.equal(

@@ -1035,7 +1035,7 @@ function one<R>(meta: ModelMeta, objs: R[]): R {
 
 /** The model object a value is, if any. */
 function modelOf(x: unknown): boolean {
-  return (x as { meta?: { model?: unknown } }).meta?.model === x;
+  return (x as { _meta?: { model?: unknown } })._meta?.model === x;
 }
 
 // -- prepared queries -------------------------------------------------------------------------------

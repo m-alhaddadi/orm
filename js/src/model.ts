@@ -55,7 +55,8 @@ export type SchemaIR = { models: IRModel[]; enums?: IREnum[]; [key: string]: unk
 export interface ModelClass<M extends ModelSpec> {
   /** The root query set of the model. */
   readonly objects: QuerySet<M>;
-  readonly meta: ModelMeta;
+  /** Schema information about the model. */
+  readonly _meta: ModelMeta;
   /** `get()` found no row; `instanceof User.DoesNotExist`. */
   readonly DoesNotExist: new (message: string) => DoesNotExist;
   readonly MultipleObjectsReturned: new (message: string) => MultipleObjectsReturned;
@@ -82,7 +83,7 @@ export interface Instance<M extends ModelSpec> {
 
 type Row = Record<PropertyKey, unknown> & { [RELATED]?: Record<string, unknown>; [DB]?: Database | undefined };
 
-/** Schema information about one model (`User.meta`). */
+/** Schema information about one model (`User._meta`). */
 export class ModelMeta implements Source {
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
@@ -145,7 +146,7 @@ export class ModelMeta implements Source {
     const model = Object.create(this.pathProto) as Record<PropertyKey, unknown>;
     model[PATH] = { root: this, path: [], names: [], target: ir.name } satisfies PathState;
     const name = ir.name;
-    model["meta"] = this;
+    model["_meta"] = this;
     model["DoesNotExist"] = { [`${name}.DoesNotExist`]: class extends DoesNotExist {} }[`${name}.DoesNotExist`];
     model["MultipleObjectsReturned"] = {
       [`${name}.MultipleObjectsReturned`]: class extends MultipleObjectsReturned {},
@@ -263,7 +264,7 @@ export class ModelMeta implements Source {
 
 /** Names the runtime gives meaning to on models / instances. */
 const RESERVED = new Set([
-  "objects", "meta", "DoesNotExist", "MultipleObjectsReturned", // models
+  "objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", // models
   "pk", "update", "delete", "refresh", "toJSON", "constructor", "toString", "then", // instances
 ]);
 
@@ -509,6 +510,6 @@ export function loads(source: string, options: { readonly registry?: Registry } 
 
 /** The metadata of a model object, if `x` is one. */
 export function modelMeta(x: unknown): ModelMeta | undefined {
-  const meta = (x as { meta?: unknown } | null)?.meta;
+  const meta = (x as { _meta?: unknown } | null)?._meta;
   return meta instanceof ModelMeta && meta.model === x ? meta : undefined;
 }

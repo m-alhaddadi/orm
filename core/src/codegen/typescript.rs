@@ -57,7 +57,7 @@ pub fn camel(name: &str) -> String {
 
 /// Names the runtime gives meaning to on models and instances.
 const RESERVED: [&str; 12] =
-    ["objects", "meta", "DoesNotExist", "MultipleObjectsReturned", "pk", "update", "delete", "refresh", "toJSON", "constructor", "toString", "then"];
+    ["objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "pk", "update", "delete", "refresh", "toJSON", "constructor", "toString", "then"];
 
 fn element_type(f: &FieldIr) -> String {
     if let Some(h) = f.hints.get("typescript") {
