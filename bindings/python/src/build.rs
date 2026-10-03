@@ -11,10 +11,13 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple, PyType};
 
-use crate::db::RowSet;
-use crate::plan::{JoinShape, Output, PrefetchPlan};
+use crate::convert::cell_to_py;
+use crate::errors::db_err;
 use orm_core::ir::ValueType;
 use orm_core::schema::Schema;
+use orm_engine::db::{Cell, RowSet};
+use orm_engine::exec::Fetched;
+use orm_engine::plan::{JoinShape, Output};
 
 struct ModelClass {
     cls: Py<PyType>,
@@ -72,13 +75,6 @@ impl Classes {
     }
 }
 
-/// A related set fetched for parent rows, and the sets fetched for its own rows.
-pub struct Fetched {
-    pub plan: PrefetchPlan,
-    pub rows: Box<dyn RowSet>,
-    pub children: Vec<Fetched>,
-}
-
 pub struct Builder<'a, 'py> {
     py: Python<'py>,
     classes: &'a Classes,
@@ -118,7 +114,7 @@ impl<'a, 'py> Builder<'a, 'py> {
     /// One cell, enum values as their members (values the enum doesn't know stay as
     /// they are).
     fn cell(&self, rows: &dyn RowSet, r: usize, c: usize, ty: ValueType) -> PyResult<Py<PyAny>> {
-        let v = rows.cell(self.py, r, c, ty)?;
+        let v = raw_cell(self.py, rows, r, c, ty)?;
         let Some(members) = ty.enum_idx.and_then(|i| self.classes.enums.get(i as usize)).and_then(Option::as_ref) else {
             return Ok(v);
         };
@@ -156,8 +152,8 @@ impl<'a, 'py> Builder<'a, 'py> {
             related.clear();
             for j in joins {
                 // A LEFT JOIN without a match yields NULLs, including the primary key.
-                let pk = rows.cell(self.py, r, j.start + j.pk_pos, types[j.start + j.pk_pos])?;
-                let child = if pk.is_none(self.py) { None } else { Some(self.instance(j.model, rows, r, j.start, types)?) };
+                let pk = rows.cell(r, j.start + j.pk_pos, types[j.start + j.pk_pos]).map_err(db_err)?;
+                let child = if pk == Cell::Null { None } else { Some(self.instance(j.model, rows, r, j.start, types)?) };
                 let parent = match j.parent {
                     None => Some(&root),
                     Some(p) => related[p].as_ref(),
@@ -238,7 +234,7 @@ impl<'a, 'py> Builder<'a, 'py> {
         let key_type = p.types[p.child_key_pos];
         let groups = PyDict::new(py);
         for (i, c) in children.iter().enumerate() {
-            let key = f.rows.cell(py, i, p.child_key_pos, key_type)?;
+            let key = raw_cell(py, f.rows.as_ref(), i, p.child_key_pos, key_type)?;
             if p.many {
                 match groups.get_item(&key)? {
                     Some(list) => list.cast_into::<PyList>()?.append(&c.obj)?,
@@ -250,7 +246,7 @@ impl<'a, 'py> Builder<'a, 'py> {
         }
         let attr = PyString::intern(py, &p.attr);
         for (i, parent) in parents.iter().enumerate() {
-            let key = parent_rows.cell(py, i, p.key_pos, p.key_type)?;
+            let key = raw_cell(py, parent_rows, i, p.key_pos, p.key_type)?;
             let found = if key.is_none(py) { None } else { groups.get_item(&key)? };
             if !p.many {
                 if let (Some(back), Some(child)) = (&p.back, &found) {
@@ -282,4 +278,9 @@ impl<'a, 'py> Builder<'a, 'py> {
         }
         Ok(())
     }
+}
+
+/// One cell as a Python value, enum values as stored.
+fn raw_cell(py: Python<'_>, rows: &dyn RowSet, r: usize, c: usize, ty: ValueType) -> PyResult<Py<PyAny>> {
+    cell_to_py(py, rows.cell(r, c, ty).map_err(db_err)?)
 }

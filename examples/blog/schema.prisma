@@ -1,5 +1,5 @@
 // Source of truth for examples/blog. models.py / models.pyi next to this file are
-// generated from it:  python -m orm generate   (or: orm generate python ...)
+// generated from it:  python -m orm generate   (models.ts: npx orm generate)
 
 datasource db {
   provider = "postgresql"

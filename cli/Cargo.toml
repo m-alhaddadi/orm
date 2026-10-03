@@ -1,0 +1,20 @@
+[package]
+name = "orm-cli"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The `orm` command line: one implementation, run as the `orm` binary, `python -m orm` and `npx orm`."
+
+[lib]
+name = "orm_cli"
+
+[[bin]]
+name = "orm"
+path = "src/main.rs"
+
+[dependencies]
+orm-core = { path = "../core" }
+orm-engine = { path = "../engine" }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread"] }

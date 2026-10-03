@@ -32,11 +32,15 @@ LEFT JOIN shop_configs j2 ON j2.shop_id = orders.shop_id
 Why not leave it to Postgres: for inner joins it derives `orders.shop_id =
 shop_configs.shop_id` but still joins `shops`, since it doesn't trust FKs for join
 removal; for LEFT JOINs it derives nothing. Where: `ensure_join` and `exists_via` in
-`native/src/plan.rs` (marked TODO).
+`engine/src/plan.rs` (marked TODO).
 
 ## JS / TypeScript
 
-The binding plan is in [`PLAN.md`](PLAN.md#next-js--typescript-binding-deferred). The
+Status: a first binding shipped ([`docs/typescript-api.md`](docs/typescript-api.md),
+[`PLAN.md`](PLAN.md)). It mirrors the Python API (class instances, `selectRelated` /
+`prefetchRelated`, `AsyncLocalStorage` transactions, awaitable query sets) with types
+that follow the query; it already settles camelCase fields and the value mapping
+(`bigint`, decimal.js, `Date`). The items below are proposals on top of it. The
 Python API is Django / SQLAlchemy-shaped; ported as is (operators → `.eq()`), it would
 feel foreign next to Prisma, Drizzle and Kysely. Keep the IR and its semantics shared
 and give TS its own frontend. Items marked *(also Python)* are gaps in the shared

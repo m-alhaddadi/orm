@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "mypy>=1.11", "pyright"]
 
 [tool.maturin]
-manifest-path = "native/Cargo.toml"
+manifest-path = "bindings/python/Cargo.toml"
 python-source = "python"
 module-name = "orm._native"
 features = ["pyo3/extension-module"]

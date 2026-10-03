@@ -1,0 +1,14 @@
+{
+  "name": "orm-blog-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "tsx demo.ts"
+  },
+  "dependencies": {
+    "orm": "file:../../js"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

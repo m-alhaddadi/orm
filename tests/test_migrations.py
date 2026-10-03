@@ -157,7 +157,7 @@ def test_generated_blog_module_is_current():
     assert (ROOT / "examples/blog/models.pyi").read_text() == stub, "run `python -m orm generate`"
 
 
-def test_cli(tmp_path, capsys, monkeypatch):
+def test_cli(tmp_path, capfd, monkeypatch):
     (tmp_path / "schema.prisma").write_text(V1)
     monkeypatch.chdir(tmp_path)
     assert cli(["check"]) == 0
@@ -165,10 +165,10 @@ def test_cli(tmp_path, capsys, monkeypatch):
     assert "class Book(Model):" in (tmp_path / "app/models.pyi").read_text()
     assert cli(["makemigrations", "--check"]) == 1
     assert cli(["makemigrations"]) == 0
-    assert "Created " in capsys.readouterr().out
+    assert "Created " in capfd.readouterr().out
     assert cli(["makemigrations", "--check"]) == 0
     assert cli(["sqlmigrate", "1"]) == 0
-    assert 'CREATE TABLE "books"' in capsys.readouterr().out
+    assert 'CREATE TABLE "books"' in capfd.readouterr().out
     (tmp_path / "schema.prisma").write_text("model X {")
     assert cli(["check"]) == 1
-    assert "schema.prisma:1:1: model X is not closed" in capsys.readouterr().err
+    assert "schema.prisma:1:1: model X is not closed" in capfd.readouterr().err

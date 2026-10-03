@@ -17,17 +17,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Object, Pool, RecyclingMethod};
-use pyo3::prelude::*;
-use pyo3::IntoPyObjectExt;
 use sea_query::{ArrayType, Value};
 use tokio::sync::Mutex;
 use tokio_postgres::types::{to_sql_checked, FromSql, IsNull, Kind, ToSql, Type};
 use tokio_postgres::{NoTls, Row, SimpleQueryMessage, Statement};
 
-use super::{numeric, BoxFuture, DbError, DbResult, Driver, ErrorKind, Executor, RowSet, Transaction};
-use crate::convert::{decimal_to_py, json_to_py};
+use super::{numeric, BoxFuture, Cell, DbError, DbResult, Driver, ErrorKind, Executor, RowSet, Transaction};
 use orm_core::dialect::Dialect;
 use orm_core::ir::{ColType, ValueType};
 
@@ -199,10 +196,6 @@ fn get<'a, T: FromSql<'a>>(row: &'a Row, idx: usize) -> DbResult<Option<T>> {
     row.try_get::<_, Option<T>>(idx).map_err(|e| DbError::other(format!("column {idx}: {e}")))
 }
 
-fn to_py_err(e: DbError) -> PyErr {
-    crate::errors::db_err(e)
-}
-
 /// Text, or the label of a database enum (sent as its text).
 struct Text<'a>(&'a str);
 
@@ -229,67 +222,44 @@ impl<'a> FromSql<'a> for Numeric {
     }
 }
 
-fn opt_py<T: for<'py> pyo3::IntoPyObject<'py>>(py: Python<'_>, v: Option<T>) -> PyResult<Py<PyAny>> {
-    match v {
-        Some(v) => v.into_py_any(py),
-        None => Ok(py.None()),
-    }
+fn opt<'a, T: FromSql<'a>>(row: &'a Row, idx: usize, f: impl Fn(T) -> Cell<'a>) -> DbResult<Cell<'a>> {
+    Ok(get::<T>(row, idx)?.map(f).unwrap_or(Cell::Null))
 }
 
-/// An array cell as a list, each element converted by `f`.
-fn list<'a, T: FromSql<'a>>(
-    py: Python<'_>,
-    row: &'a Row,
-    idx: usize,
-    f: impl Fn(Python<'_>, T) -> PyResult<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
-    let Some(items) = get::<Vec<Option<T>>>(row, idx).map_err(to_py_err)? else { return Ok(py.None()) };
-    let out = pyo3::types::PyList::empty(py);
-    for item in items {
-        out.append(match item {
-            Some(v) => f(py, v)?,
-            None => py.None(),
-        })?;
-    }
-    out.into_py_any(py)
+/// An array cell, each element converted by `f`.
+fn list<'a, T: FromSql<'a>>(row: &'a Row, idx: usize, f: impl Fn(T) -> Cell<'a>) -> DbResult<Cell<'a>> {
+    let Some(items) = get::<Vec<Option<T>>>(row, idx)? else { return Ok(Cell::Null) };
+    Ok(Cell::Array(items.into_iter().map(|v| v.map(&f).unwrap_or(Cell::Null)).collect()))
 }
 
-fn cell_to_py(py: Python<'_>, row: &Row, idx: usize, ty: ValueType) -> PyResult<Py<PyAny>> {
-    let g = |e| to_py_err(e);
+fn cell(row: &Row, idx: usize, ty: ValueType) -> DbResult<Cell<'_>> {
     if ty.array {
         return match ty.ty {
-            ColType::BigInt => list::<i64>(py, row, idx, |py, v| v.into_py_any(py)),
-            ColType::Int => list::<i32>(py, row, idx, |py, v| v.into_py_any(py)),
-            ColType::Float => list::<f64>(py, row, idx, |py, v| v.into_py_any(py)),
-            ColType::Bool => list::<bool>(py, row, idx, |py, v| v.into_py_any(py)),
-            ColType::String | ColType::Text => list::<Text>(py, row, idx, |py, v| v.0.into_py_any(py)),
-            ColType::DateTime => list::<DateTime<Utc>>(py, row, idx, |py, v| v.into_py_any(py)),
-            ColType::Date => list::<NaiveDate>(py, row, idx, |py, v| v.into_py_any(py)),
-            ColType::Uuid => list::<uuid::Uuid>(py, row, idx, |py, v| v.into_py_any(py)),
-            ColType::Json => list::<serde_json::Value>(py, row, idx, |py, v| json_to_py(py, &v)),
-            ColType::Decimal => list::<Numeric>(py, row, idx, |py, v| decimal_to_py(py, &v.0)),
+            ColType::BigInt => list(row, idx, Cell::BigInt),
+            ColType::Int => list(row, idx, Cell::Int),
+            ColType::Float => list(row, idx, Cell::Float),
+            ColType::Bool => list(row, idx, Cell::Bool),
+            ColType::String | ColType::Text => list(row, idx, |t: Text<'_>| Cell::Text(t.0)),
+            ColType::DateTime => list(row, idx, Cell::DateTime),
+            ColType::Date => list(row, idx, Cell::Date),
+            ColType::Uuid => list(row, idx, Cell::Uuid),
+            ColType::Json => list(row, idx, Cell::Json),
+            ColType::Decimal => list(row, idx, |n: Numeric| Cell::Decimal(n.0)),
         };
     }
-    Ok(match ty.ty {
-        ColType::BigInt => opt_py(py, get::<i64>(row, idx).map_err(g)?)?,
-        ColType::Int => opt_py(py, get::<i32>(row, idx).map_err(g)?)?,
-        ColType::Float => opt_py(py, get::<f64>(row, idx).map_err(g)?)?,
-        ColType::Bool => opt_py(py, get::<bool>(row, idx).map_err(g)?)?,
-        ColType::String | ColType::Text => opt_py(py, get::<Text>(row, idx).map_err(g)?.map(|t| t.0))?,
-        // timestamptz is UTC on the wire; `DateTime<Utc>` reuses the
-        // `datetime.timezone.utc` singleton instead of building a tzinfo per row.
-        ColType::DateTime => opt_py(py, get::<DateTime<Utc>>(row, idx).map_err(g)?)?,
-        ColType::Date => opt_py(py, get::<NaiveDate>(row, idx).map_err(g)?)?,
-        ColType::Uuid => opt_py(py, get::<uuid::Uuid>(row, idx).map_err(g)?)?,
-        ColType::Json => match get::<serde_json::Value>(row, idx).map_err(g)? {
-            Some(v) => json_to_py(py, &v)?,
-            None => py.None(),
-        },
-        ColType::Decimal => match get::<Numeric>(row, idx).map_err(g)? {
-            Some(n) => decimal_to_py(py, &n.0)?,
-            None => py.None(),
-        },
-    })
+    match ty.ty {
+        ColType::BigInt => opt(row, idx, Cell::BigInt),
+        ColType::Int => opt(row, idx, Cell::Int),
+        ColType::Float => opt(row, idx, Cell::Float),
+        ColType::Bool => opt(row, idx, Cell::Bool),
+        ColType::String | ColType::Text => opt(row, idx, |t: Text<'_>| Cell::Text(t.0)),
+        // timestamptz is UTC on the wire.
+        ColType::DateTime => opt(row, idx, Cell::DateTime),
+        ColType::Date => opt(row, idx, Cell::Date),
+        ColType::Uuid => opt(row, idx, Cell::Uuid),
+        ColType::Json => opt(row, idx, Cell::Json),
+        ColType::Decimal => opt(row, idx, |n: Numeric| Cell::Decimal(n.0)),
+    }
 }
 
 impl RowSet for PgRows {
@@ -297,8 +267,8 @@ impl RowSet for PgRows {
         self.0.len()
     }
 
-    fn cell(&self, py: Python<'_>, row: usize, col: usize, ty: ValueType) -> PyResult<Py<PyAny>> {
-        cell_to_py(py, &self.0[row], col, ty)
+    fn cell(&self, row: usize, col: usize, ty: ValueType) -> DbResult<Cell<'_>> {
+        cell(&self.0[row], col, ty)
     }
 
     fn value(&self, row: usize, col: usize, ty: ValueType) -> DbResult<Value> {

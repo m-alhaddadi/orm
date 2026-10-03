@@ -108,6 +108,36 @@ async def test_instances_are_read_only(clean):
         User(email="x", name="y")
 
 
+async def test_result_cache(clean):
+    await User.objects.insert(email="a@example.com", name="A")
+    qs = User.objects.filter(User.name != "Z")
+    first = await qs
+    await User.objects.insert(email="b@example.com", name="B")
+    # The same query set gives its first rows again, without a query; a copy each time.
+    again = await qs
+    assert names(again) == ["A"] and again == first and again is not first
+    assert [u.name async for u in qs] == ["A"]
+    # Builders and all() are new query sets: they query again. So does Model.objects.
+    assert names(await qs.all()) == names(await qs.order_by(User.name)) == ["A", "B"]
+    assert len(await User.objects) == 2
+    await User.objects.insert(email="c@example.com", name="C")
+    assert len(await User.objects) == 3
+    # Concurrent awaits share one run.
+    fresh = User.objects.filter(User.name != "Z")
+    a, b = await asyncio.gather(fresh, fresh)
+    assert names(a) == names(b) == ["A", "B", "C"] and fresh._result is not None
+    rows = User.objects.select(User.name)
+    assert await rows == await rows
+    # A failed run isn't kept.
+    bad = User.objects.filter(User.id == orm.param("id"))
+    with pytest.raises(orm.QueryError):
+        await bad
+    failed = bad._result
+    with pytest.raises(orm.QueryError):
+        await bad
+    assert bad._result is not failed
+
+
 async def test_filter_across_to_many_autojoins(clean):
     await seed()
     # The motivating example: users with a post created before yesterday.

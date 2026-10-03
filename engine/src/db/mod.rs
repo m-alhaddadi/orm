@@ -13,7 +13,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use pyo3::prelude::*;
+use chrono::{DateTime, NaiveDate, Utc};
 use sea_query::{PostgresQueryBuilder, QueryStatementWriter, Value};
 
 use orm_core::dialect::Dialect;
@@ -49,11 +49,34 @@ impl std::fmt::Display for DbError {
     }
 }
 
+/// One decoded cell, borrowing from its row set. Bindings turn it into their own value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cell<'a> {
+    Null,
+    Bool(bool),
+    Int(i32),
+    BigInt(i64),
+    Float(f64),
+    /// Text, or the label of a database enum.
+    Text(&'a str),
+    /// timestamptz, in UTC as on the wire.
+    DateTime(DateTime<Utc>),
+    Date(NaiveDate),
+    Uuid(uuid::Uuid),
+    Json(serde_json::Value),
+    /// A `numeric` as decimal text: `-12.50`, `NaN`.
+    Decimal(String),
+    Array(Vec<Cell<'a>>),
+}
+
 /// The rows one statement returned, decoded by the schema's column types.
 pub trait RowSet: Send + Sync {
     fn len(&self) -> usize;
-    /// One cell as a Python value (enum values as stored: the frontend maps them).
-    fn cell(&self, py: Python<'_>, row: usize, col: usize, ty: ValueType) -> PyResult<Py<PyAny>>;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// One cell (enum values as stored: the binding maps them).
+    fn cell(&self, row: usize, col: usize, ty: ValueType) -> DbResult<Cell<'_>>;
     /// One cell as a bind parameter (prefetch keys are read back this way).
     fn value(&self, row: usize, col: usize, ty: ValueType) -> DbResult<Value>;
     fn get_i64(&self, row: usize, col: usize) -> DbResult<i64>;

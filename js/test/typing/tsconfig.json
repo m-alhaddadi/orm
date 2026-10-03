@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../../..",
+    "noUnusedLocals": false,
+    "paths": { "orm": ["../../src/index.ts"] }
+  },
+  "include": ["check.ts", "../../../examples/blog/demo.ts"],
+  "exclude": []
+}

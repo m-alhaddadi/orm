@@ -9,9 +9,13 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBool, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
-use sea_query::{ArrayType, Value};
+use sea_query::Value;
 
+use crate::errors::binding;
 use orm_core::ir::{ColType, ValueType};
+use orm_engine::db::Cell;
+use orm_engine::params::{array_type, null_of, Params};
+use orm_engine::Error;
 
 static DECIMAL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -23,45 +27,6 @@ pub fn decimal_class(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 /// A `decimal.Decimal` from decimal text.
 pub fn decimal_to_py(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
     Ok(decimal_class(py)?.call1((text,))?.unbind())
-}
-
-fn scalar_null(ty: ColType) -> Value {
-    match ty {
-        ColType::BigInt => Value::BigInt(None),
-        ColType::Int => Value::Int(None),
-        ColType::Float => Value::Double(None),
-        ColType::Bool => Value::Bool(None),
-        ColType::String | ColType::Text => Value::String(None),
-        ColType::DateTime => Value::ChronoDateTimeWithTimeZone(None),
-        ColType::Date => Value::ChronoDate(None),
-        ColType::Uuid => Value::Uuid(None),
-        ColType::Json => Value::Json(None),
-        ColType::Decimal => Value::BigDecimal(None),
-    }
-}
-
-/// The element type of an array parameter.
-pub fn array_type(ty: ColType) -> ArrayType {
-    match ty {
-        ColType::BigInt => ArrayType::BigInt,
-        ColType::Int => ArrayType::Int,
-        ColType::Float => ArrayType::Double,
-        ColType::Bool => ArrayType::Bool,
-        ColType::String | ColType::Text => ArrayType::String,
-        ColType::DateTime => ArrayType::ChronoDateTimeWithTimeZone,
-        ColType::Date => ArrayType::ChronoDate,
-        ColType::Uuid => ArrayType::Uuid,
-        ColType::Json => ArrayType::Json,
-        ColType::Decimal => ArrayType::BigDecimal,
-    }
-}
-
-pub fn null_of(ty: Option<ValueType>) -> Value {
-    match ty {
-        Some(t) if t.array => Value::Array(array_type(t.ty), None),
-        Some(t) => scalar_null(t.ty),
-        None => Value::String(None),
-    }
 }
 
 fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
@@ -207,6 +172,54 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>, ty: Option<ValueType>) -> PyResult<Va
                     obj.get_type().name()?
                 )));
             }
+        }
+    })
+}
+
+/// A query's parameters: Python objects converted when the planner asks for them.
+pub struct PyParams<'a, 'py>(pub &'a [Bound<'py, PyAny>]);
+
+impl Params for PyParams<'_, '_> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn value(&self, i: usize, ty: Option<ValueType>) -> orm_engine::Result<Value> {
+        py_to_value(&self.0[i], ty).map_err(binding)
+    }
+
+    fn text(&self, i: usize) -> orm_engine::Result<String> {
+        self.0[i].extract::<String>().map_err(binding)
+    }
+
+    fn count(&self, i: usize) -> orm_engine::Result<u64> {
+        let p = &self.0[i];
+        p.extract::<u64>().map_err(|_| Error::query(format!("LIMIT and OFFSET take a non-negative integer, got {p}")))
+    }
+}
+
+/// A decoded cell as a Python value (enum values as stored).
+pub fn cell_to_py(py: Python<'_>, cell: Cell<'_>) -> PyResult<Py<PyAny>> {
+    Ok(match cell {
+        Cell::Null => py.None(),
+        Cell::Bool(v) => v.into_py_any(py)?,
+        Cell::Int(v) => v.into_py_any(py)?,
+        Cell::BigInt(v) => v.into_py_any(py)?,
+        Cell::Float(v) => v.into_py_any(py)?,
+        Cell::Text(v) => v.into_py_any(py)?,
+        // `DateTime<Utc>` reuses the `datetime.timezone.utc` singleton instead of
+        // building a tzinfo per row.
+        Cell::DateTime(v) => v.into_py_any(py)?,
+        Cell::Date(v) => v.into_py_any(py)?,
+        Cell::Uuid(v) => v.into_py_any(py)?,
+        Cell::Json(v) => json_to_py(py, &v)?,
+        Cell::Decimal(v) => decimal_to_py(py, &v)?,
+        Cell::Array(items) => {
+            let out = PyList::empty(py);
+            for item in items {
+                out.append(cell_to_py(py, item)?)?;
+            }
+            out.into_py_any(py)?
         }
     })
 }
