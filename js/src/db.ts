@@ -3,7 +3,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { blake2b } from "./blake2b.js";
-import { NotConnected, TransactionRequired } from "./errors.js";
+import { NotConnected, QueryError, TransactionRequired } from "./errors.js";
 import type { IR } from "./expr.js";
 import { registry as defaultRegistry, type Registry } from "./model.js";
 import { call, native, wait, type NativeEngine, type NativeTransaction } from "./native.js";
@@ -74,6 +74,9 @@ export class Database {
    * `db.transaction()`.
    */
   async lock(key: bigint | number | string, options: LockOptions = {}): Promise<boolean> {
+    if (this.url.startsWith("sqlite://")) {
+      throw new QueryError("sqlite does not support advisory locks");
+    }
     if (this.tx() === null) {
       throw new TransactionRequired(
         "db.lock() outside a transaction would release the lock at once; run it inside `db.transaction(...)`",

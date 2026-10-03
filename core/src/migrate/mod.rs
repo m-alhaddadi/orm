@@ -11,6 +11,7 @@ pub mod diff;
 pub mod files;
 pub mod model;
 pub mod pg;
+pub mod sqlite;
 
 use serde::Serialize;
 
@@ -61,6 +62,14 @@ pub fn snapshot(schema: &Schema) -> Result<DbSchema> {
 /// to `schema`.
 pub fn plan(schema: &Schema, previous: &DbSchema) -> Result<MigrationPlan> {
     let (current, renames) = model::build(schema)?;
+    if previous.version != 0 && previous.dialect != current.dialect {
+        return Err(format!("migration snapshot targets {}, schema targets {}; use a separate migrations directory", previous.dialect.name(), current.dialect.name()));
+    }
+    if current.dialect == crate::dialect::Dialect::Sqlite {
+        let up = sqlite::steps(previous, &current, &renames)?;
+        let down = sqlite::steps(&current, previous, &renames.reversed())?;
+        return Ok(MigrationPlan { up, down, snapshot: current });
+    }
     let up = diff::diff(previous, &current, &renames);
     let down = diff::diff(&current, previous, &renames.reversed());
     Ok(MigrationPlan { up: steps(&up), down: steps(&down), snapshot: current })
@@ -70,6 +79,7 @@ pub fn plan(schema: &Schema, previous: &DbSchema) -> Result<MigrationPlan> {
 /// `create_tables()` in development and tests.
 pub fn create_all(schema: &Schema) -> Result<Vec<String>> {
     let current = snapshot(schema)?;
+    if current.dialect == crate::dialect::Dialect::Sqlite { return Ok(sqlite::create_all(&current, true)); }
     let ops = diff::diff(&DbSchema::default(), &current, &Default::default());
     Ok(ops.iter().map(|op| pg::render(op, true)).collect())
 }
@@ -78,6 +88,9 @@ pub fn create_all(schema: &Schema) -> Result<Vec<String>> {
 /// extensions stay.
 pub fn drop_all(schema: &Schema) -> Result<Vec<String>> {
     let current = snapshot(schema)?;
+    if current.dialect == crate::dialect::Dialect::Sqlite {
+        return Ok(current.tables.iter().rev().map(|t| format!("DROP TABLE IF EXISTS {}", pg::ident(&t.name))).collect());
+    }
     let mut out: Vec<String> = current
         .tables
         .iter()

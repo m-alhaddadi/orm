@@ -20,7 +20,7 @@ use crate::ir::{
 };
 use crate::schema::{Model, Result, Schema};
 
-pub const SNAPSHOT_VERSION: u32 = 1;
+pub const SNAPSHOT_VERSION: u32 = 2;
 /// Postgres truncates identifiers longer than this (NAMEDATALEN - 1).
 const MAX_IDENT: usize = 63;
 
@@ -30,6 +30,8 @@ fn is_false(b: &bool) -> bool {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct DbSchema {
+    #[serde(default, skip_serializing_if = "crate::dialect::Dialect::is_postgres")]
+    pub dialect: crate::dialect::Dialect,
     pub version: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<Extension>,
@@ -233,6 +235,9 @@ pub struct Trigger {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
     pub function: String,
+    /// SQLite executes an inline body rather than a SQL function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
 }
@@ -454,14 +459,26 @@ impl Builder<'_> {
         let mut table = Table { name: t.clone(), comment: m.ir.comment.clone(), ..Default::default() };
 
         for f in m.fields() {
-            let ty = sql_type(f);
+            let ty = if schema.dialect == crate::dialect::Dialect::Sqlite {
+                match f.ty {
+                    ColType::BigInt | ColType::Int | ColType::Bool => "INTEGER",
+                    ColType::Float => "REAL",
+                    _ => "TEXT",
+                }.to_owned()
+            } else { sql_type(f) };
             self.require(self.catalog.for_type(&ty).map(str::to_owned).as_deref(), || {
                 format!("column {t}.{} of type {ty}", f.column)
             });
             for ext in &f.requires {
                 self.require(Some(ext), || format!("column {t}.{}", f.column));
             }
-            let default = default_sql(f)?;
+            let default = if schema.dialect == crate::dialect::Dialect::Sqlite && f.default_now {
+                Some("CURRENT_TIMESTAMP".to_owned())
+            } else if schema.dialect == crate::dialect::Dialect::Sqlite && f.ty == ColType::Json {
+                f.default_sql.clone().or_else(|| f.default.as_ref().map(|v| quote_literal(&match v {
+                    serde_json::Value::String(s) => s.clone(), v => v.to_string(),
+                })))
+            } else { default_sql(f)? };
             if let Some(d) = &default {
                 self.require_expr(d, &format!("default of {t}.{}", f.column));
             }
@@ -638,7 +655,7 @@ impl Builder<'_> {
                 (Some(f), None) => f.clone(),
                 (None, Some(body)) => {
                     let name = object_name(&[&t, &tr.name]);
-                    self.trigger_functions.push(Function {
+                    if schema.dialect != crate::dialect::Dialect::Sqlite { self.trigger_functions.push(Function {
                         name: name.clone(),
                         args: String::new(),
                         returns: "trigger".into(),
@@ -646,7 +663,7 @@ impl Builder<'_> {
                         body: body.trim().to_owned(),
                         volatility: None,
                         security_definer: false,
-                    });
+                    }); }
                     name
                 }
                 _ => return Err(format!("trigger {t}.{}: give exactly one of function / body", tr.name)),
@@ -665,6 +682,7 @@ impl Builder<'_> {
                 for_each: tr.for_each,
                 when: tr.when.as_deref().map(normalize_ws),
                 function,
+                body: if schema.dialect == crate::dialect::Dialect::Sqlite { tr.body.clone() } else { None },
                 args: tr.args.clone(),
             });
         }
@@ -681,7 +699,7 @@ pub fn build(schema: &Schema) -> Result<(DbSchema, Renames)> {
         names: BTreeSet::new(),
         trigger_functions: vec![],
     };
-    let mut db = DbSchema { version: SNAPSHOT_VERSION, ..Default::default() };
+    let mut db = DbSchema { dialect: schema.dialect, version: if schema.dialect.is_postgres() { 1 } else { SNAPSHOT_VERSION }, ..Default::default() };
     let mut renames = Renames::default();
     let mut tables = BTreeSet::new();
     for m in &schema.models {

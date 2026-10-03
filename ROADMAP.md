@@ -3,6 +3,23 @@
 Improvements we want but haven't planned yet. Phases and what's done are in
 [`PLAN.md`](PLAN.md).
 
+## SQLite
+
+The first implementation is available in Rust, Python, Node and Bun; see
+[usage and limitations](docs/schema.md#sqlite). URLs are `sqlite://:memory:` and
+`sqlite:///absolute/path.db`. One serialized connection belongs to each client;
+`max_connections` does not create a pool. Enums require explicit text/int storage.
+Exact Decimal, arrays, native enums, PostgreSQL extensions/functions and
+unsupported trigger/index features fail validation. Generated/computed columns
+remain out of scope.
+
+Future work: reduce migrations from rebuilding every managed table to rebuilding
+only affected tables, and add introspection/drift detection. Current migrations
+preserve rename hints and AUTOINCREMENT counters, validate foreign keys, roll back
+failures and reject unmanaged indexes/triggers before dropping tables. SQLite
+snapshots are version 2, PostgreSQL snapshots stay version 1, and cross-dialect
+snapshots are rejected.
+
 ## Performance
 
 ### Shortcut joins through a shared key — not scheduled

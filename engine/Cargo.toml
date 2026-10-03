@@ -11,7 +11,7 @@ name = "orm_engine"
 [dependencies]
 orm-core = { path = "../core" }
 # SQL building: one builder per dialect (multi-database support lives here).
-sea-query = { version = "1.0", features = ["backend-postgres", "with-chrono", "with-json", "with-uuid", "with-bigdecimal", "postgres-array", "thread-safe", "hashable-value"] }
+sea-query = { version = "1.0", features = ["backend-postgres", "backend-sqlite", "with-chrono", "with-json", "with-uuid", "with-bigdecimal", "postgres-array", "thread-safe", "hashable-value"] }
 # Postgres driver (see src/db/postgres.rs).
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 deadpool-postgres = "0.14"
@@ -26,3 +26,5 @@ chrono = "0.4"
 uuid = "1"
 bigdecimal = "0.4"
 sha2 = "0.10"
+
+rusqlite = { version = "0.37", features = ["bundled"] }

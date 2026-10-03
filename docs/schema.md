@@ -7,7 +7,7 @@ schema.prisma ──▶ orm-core (Rust) ──▶ schema IR (JSON) ──▶ Pyt
    ▲                 │                                └──▶ JS / Go / ...: the same IR (bindings to come)
 extensions/*.toml    │
                      ├──▶ migrations/NNNN_name/{up.sql, down.sql, snapshot.json}
-                     └──▶ Postgres DDL (create_tables)
+                     └──▶ PostgreSQL / SQLite DDL (create_tables)
 ```
 
 The file uses Prisma's schema syntax, so Prisma's VS Code extension highlights,
@@ -26,11 +26,71 @@ command-line tool, which needs no Python.
 |---|---|
 | `core/src/dsl/` | parser (`syntax.rs`) and lowering to the IR (`lower.rs`) |
 | `core/src/ext.rs`, `core/extensions/postgres/*.toml` | extension files and the catalog built from them |
-| `core/src/migrate/` | snapshot model, diff, Postgres renderer, migration folders |
+| `core/src/migrate/` | snapshot model, diff, PostgreSQL / SQLite renderers, migration folders |
 | `core/src/codegen/python.rs` | `models.py` / `models.pyi` generator |
 | `core/src/main.rs` | the `orm` CLI |
 | `python/orm/model.py` | `orm.load()` / `orm.loads()` / `orm.define()`: model classes from the IR |
 | `python/orm/migrations.py`, `__main__.py` | migration runner and `python -m orm` |
+
+## SQLite
+
+Set the schema target explicitly; omitting a datasource keeps PostgreSQL as the
+default. See [the SQLite example](../examples/sqlite/schema.prisma).
+
+```prisma
+datasource db {
+  provider = "sqlite"
+}
+
+enum Status {
+  draft
+  published
+  @@storage(text)
+}
+```
+
+Use `sqlite://:memory:` for an in-memory database or
+`sqlite:///absolute/path.db` for a persistent file. Load or generate the models
+from that SQLite schema, then pass the URL to Python's `orm.connect()` or
+TypeScript's `connect()`. A registry accepts schemas for one dialect; connecting
+it to another dialect fails before queries run.
+
+Each client owns one serialized connection on a dedicated worker thread.
+`max_connections` / `maxConnections` does not create a SQLite pool. Transactions
+hold that connection until commit or rollback; nested transactions use savepoints.
+Foreign key enforcement is enabled. Separate clients using `:memory:` have
+separate databases.
+
+Enums must choose `@@storage(text)` or `@@storage(int)` explicitly. JSON and UUID
+values use text storage; `String @db.Uuid` retains UUID conversion. Dates use
+`DateTime @db.Date`, and timestamps round-trip in UTC. `now()` uses SQLite's
+`CURRENT_TIMESTAMP`. AUTOINCREMENT requires an integer primary key. Aggregates,
+windows, CTEs, sliced prefetch and bulk updates use the shared query APIs.
+
+Unsupported features fail schema validation: exact Decimal, arrays, native enums,
+PostgreSQL extensions and declared SQL functions, native type overrides and SQL
+conversion templates, comments, exclusion constraints, covering indexes, non-btree
+index methods, operator classes, explicit NULL ordering in indexes, index storage
+parameters, deferrable uniqueness and NULLS NOT DISTINCT. SQLite supports inline
+row triggers with one INSERT, UPDATE or DELETE event. Statement triggers, TRUNCATE,
+INSTEAD OF on tables, trigger functions, languages and arguments are unsupported.
+Row/advisory locks and DISTINCT ON fail query validation. Raw SQL expressions and
+trigger bodies must use SQLite syntax. Generated/computed columns remain out of
+scope.
+
+Any schema change currently rebuilds every managed table in one transaction.
+Rebuilds copy rows, apply table/column rename hints, preserve AUTOINCREMENT high
+water marks, recreate managed indexes/triggers, and validate foreign keys before
+commit. A failure rolls back the schema, data and migration record. Unmanaged
+indexes or triggers attached to a managed table stop the migration with
+`orm_unmanaged_index_or_trigger`; incorporate them into the schema or explicitly
+remove them before retrying. Review generated up/down SQL before applying it:
+dropped columns cannot recover their old values on downgrade. Avoid rebuilding
+large databases without planning for the copy cost.
+
+SQLite snapshots use version 2 and record their dialect. PostgreSQL snapshots
+retain version 1 for compatibility. Cross-dialect snapshots are rejected; use a
+separate migrations directory for each target.
 
 ## A schema
 

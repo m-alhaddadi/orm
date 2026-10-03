@@ -396,6 +396,7 @@ async function instanceRefresh(this: Row): Promise<void> {
 export class Registry {
   private readonly models = new Map<string, ModelMeta>();
   private readonly enums = new Map<string, IREnum>();
+  private dialect: string | undefined;
   private readonly extra: Record<string, unknown[]> = {};
   private nativeSchema: NativeSchema | undefined;
 
@@ -436,6 +437,11 @@ export class Registry {
 
   /** @internal */
   addExtra(ir: SchemaIR): void {
+    const dialect = (ir.dialect as string | undefined) ?? "postgres";
+    if (this.dialect !== undefined && this.dialect !== dialect) {
+      throw new TypeError("schemas in one registry must target the same database");
+    }
+    this.dialect = dialect;
     for (const key of ["extensions", "functions", "catalog"]) {
       const items = (ir[key] as unknown[] | undefined) ?? [];
       const known = (this.extra[key] ??= []);
@@ -457,7 +463,7 @@ export class Registry {
     if (this.enums.size) {
       out.enums = [...this.enums.values()];
     }
-    return { ...out, ...this.extra };
+    return { ...out, ...(this.dialect === undefined ? {} : { dialect: this.dialect }), ...this.extra };
   }
 
   /** The compiled native schema (cached until models change). */
@@ -480,6 +486,7 @@ export function define(
 ): Record<string, ModelClass<ModelSpec> & Record<string, unknown>> {
   const ir: SchemaIR = typeof schema === "string" ? (JSON.parse(schema) as SchemaIR) : schema;
   const reg = options.registry ?? registry;
+  reg.addExtra(ir);
   for (const e of ir.enums ?? []) {
     reg.addEnum(e);
   }
@@ -491,7 +498,6 @@ export function define(
     reg.add(meta);
     out[m.name] = meta.model;
   }
-  reg.addExtra(ir);
   return out;
 }
 

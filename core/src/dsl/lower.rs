@@ -416,7 +416,9 @@ fn datasource_block(ir: &mut SchemaIr, pos: Pos, props: &Props) -> Result<()> {
     let mut n = Named::new("datasource", &args);
     match n.get("provider") {
         Some((_, Value::Str(p))) if p == "postgresql" || p == "postgres" => {}
-        Some((p, _)) => return err(p, "datasource: provider must be \"postgresql\""),
+        Some((_, Value::Str(p))) if p == "sqlite" => ir.dialect = crate::dialect::Dialect::Sqlite,
+        Some((p, _)) => return err(p, r#"datasource: provider must be "postgresql" or "sqlite""#),
+
         None => return err(pos, "datasource: provider = \"postgresql\" is missing"),
     }
     // The connection comes from ORM_DATABASE_URL / --url; Prisma's keys are accepted.

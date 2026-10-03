@@ -350,3 +350,15 @@ pub async fn run_script(conn: Arc<dyn Executor>, statements: Vec<String>, in_tx:
     }
     Ok(tx.commit().await?)
 }
+
+/// Runs schema DDL with SQLite foreign key validation at commit (also handles cycles).
+pub async fn run_schema_script(conn: Arc<dyn Executor>, statements: Vec<String>) -> Result<()> {
+    let tx = conn.begin_migration().await?;
+    for s in statements {
+        if let Err(e) = tx.batch(s).await {
+            let _ = tx.rollback().await;
+            return Err(e.into());
+        }
+    }
+    Ok(tx.commit().await?)
+}

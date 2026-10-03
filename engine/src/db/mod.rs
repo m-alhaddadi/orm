@@ -8,13 +8,14 @@
 
 mod numeric;
 mod postgres;
+mod sqlite;
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use sea_query::{PostgresQueryBuilder, QueryStatementWriter, Value};
+use sea_query::{PostgresQueryBuilder, SqliteQueryBuilder, QueryStatementWriter, Value};
 
 use orm_core::dialect::Dialect;
 use orm_core::ir::ValueType;
@@ -86,6 +87,9 @@ pub trait RowSet: Send + Sync {
 /// Something statements run on: the pool (each call takes a connection) or an open
 /// transaction (every call uses its connection).
 pub trait Executor: Send + Sync {
+    fn dialect(&self) -> Dialect { Dialect::Postgres }
+    /// A migration may rebuild SQLite tables with FK checks deferred until commit.
+    fn begin_migration(&self) -> BoxFuture<'_, DbResult<Arc<dyn Transaction>>> { self.begin() }
     fn query(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RowSet>>>;
     /// Rows affected.
     fn execute(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<u64>>;
@@ -103,7 +107,6 @@ pub trait Transaction: Executor {
 }
 
 pub trait Driver: Executor {
-    fn dialect(&self) -> Dialect;
     fn close(&self) -> BoxFuture<'_, ()>;
 }
 
@@ -111,6 +114,7 @@ pub trait Driver: Executor {
 pub async fn connect(url: &str, max_connections: usize) -> DbResult<Arc<dyn Driver>> {
     let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("");
     match scheme {
+        "sqlite" => Ok(Arc::new(sqlite::SqliteDriver::connect(url).await?)),
         "postgres" | "postgresql" => Ok(Arc::new(postgres::PgDriver::connect(url, max_connections).await?)),
         other => Err(DbError::other(format!("unsupported database URL scheme {other:?}"))),
     }
@@ -120,6 +124,7 @@ pub async fn connect(url: &str, max_connections: usize) -> DbResult<Arc<dyn Driv
 pub fn build<S: QueryStatementWriter>(dialect: Dialect, stmt: &S) -> (String, Vec<Value>) {
     let (sql, values) = match dialect {
         Dialect::Postgres => stmt.build(PostgresQueryBuilder),
+        Dialect::Sqlite => stmt.build(SqliteQueryBuilder),
     };
     (sql, values.0)
 }
@@ -128,5 +133,6 @@ pub fn build<S: QueryStatementWriter>(dialect: Dialect, stmt: &S) -> (String, Ve
 pub fn to_string<S: QueryStatementWriter>(dialect: Dialect, stmt: &S) -> String {
     match dialect {
         Dialect::Postgres => stmt.to_string(PostgresQueryBuilder),
+        Dialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
     }
 }

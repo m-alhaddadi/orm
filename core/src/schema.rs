@@ -74,6 +74,7 @@ impl Model {
 }
 
 pub struct Schema {
+    pub dialect: crate::dialect::Dialect,
     pub models: Vec<Model>,
     pub enums: Vec<EnumIr>,
     pub extensions: Vec<ExtensionIr>,
@@ -84,6 +85,7 @@ pub struct Schema {
 
 impl Schema {
     pub fn from_ir(ir: SchemaIr) -> Result<Self> {
+        crate::features::validate(&ir)?;
         let model_index: HashMap<String, usize> = ir
             .models
             .iter()
@@ -156,6 +158,7 @@ impl Schema {
             }
         }
         Ok(Schema {
+            dialect: ir.dialect,
             models,
             enums,
             extensions: ir.extensions,

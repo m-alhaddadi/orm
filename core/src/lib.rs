@@ -16,3 +16,5 @@ pub mod ext;
 pub mod ir;
 pub mod migrate;
 pub mod schema;
+
+pub mod features;

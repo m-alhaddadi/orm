@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use orm_core::dialect::Dialect;
 use orm_core::migrate::files::{self, MigrationFolder};
 
 use crate::db::{Executor, Transaction};
@@ -90,16 +91,18 @@ fn lit(text: &str) -> String {
 }
 
 async fn ensure_table(conn: &dyn Executor) -> Result<()> {
-    conn.batch(format!(
-        "CREATE TABLE IF NOT EXISTS {TABLE} (name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())"
-    ))
+    let timestamp = match conn.dialect() {
+        Dialect::Postgres => "timestamptz NOT NULL DEFAULT now()",
+        Dialect::Sqlite => "text NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    };
+    conn.batch(format!("CREATE TABLE IF NOT EXISTS {TABLE} (name text PRIMARY KEY, checksum text NOT NULL, applied_at {timestamp})"))
     .await?;
     Ok(())
 }
 
 /// name → (checksum, applied_at)
 async fn applied(conn: &dyn Executor) -> Result<BTreeMap<String, (String, String)>> {
-    let rows = conn.query_text(format!("SELECT name, checksum, applied_at::text FROM {TABLE} ORDER BY name")).await?;
+    let rows = conn.query_text(format!("SELECT name, checksum, CAST(applied_at AS text) FROM {TABLE} ORDER BY name")).await?;
     Ok(rows
         .into_iter()
         .filter_map(|r| {
@@ -115,6 +118,16 @@ async fn applied(conn: &dyn Executor) -> Result<BTreeMap<String, (String, String
 /// Every migration of `dir` and whether it is applied. Migrations recorded in the
 /// database but missing from the directory are an error.
 pub async fn status(conn: &dyn Executor, dir: &Path) -> Result<Vec<Status>> {
+    for m in list(dir)? {
+        let snapshot = m.path.join("snapshot.json");
+        if snapshot.exists() {
+            let text = std::fs::read_to_string(&snapshot).map_err(|e| Error::Migration(e.to_string()))?;
+            let target = orm_core::migrate::parse_snapshot(&text).map_err(Error::Migration)?.dialect;
+            if target != conn.dialect() {
+                return Err(Error::Migration(format!("{} targets {}, connection uses {}", m.name, target.name(), conn.dialect().name())));
+            }
+        }
+    }
     ensure_table(conn).await?;
     let mut done = applied(conn).await?;
     let out: Vec<Status> = list(dir)?
@@ -158,9 +171,11 @@ async fn locked(
     conn: &dyn Executor,
     scripts: impl FnOnce(&BTreeMap<String, (String, String)>) -> Option<[String; 2]>,
 ) -> Result<bool> {
-    let tx = conn.begin().await?;
+    let tx = conn.begin_migration().await?;
     let run = async {
-        tx.batch(format!("SELECT pg_advisory_xact_lock({LOCK_ID})")).await?;
+        if conn.dialect() == Dialect::Postgres {
+            tx.batch(format!("SELECT pg_advisory_xact_lock({LOCK_ID})")).await?;
+        }
         let Some(scripts) = scripts(&applied(&*tx).await?) else { return Ok(false) };
         for sql in scripts {
             tx.batch(sql).await?;

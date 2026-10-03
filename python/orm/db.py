@@ -10,7 +10,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from . import _native
-from .errors import NotConnected, TransactionRequired
+from .errors import NotConnected, QueryError, TransactionRequired
 from .model import Registry, registry
 
 __all__ = ["Database", "connect", "get_database"]
@@ -95,6 +95,8 @@ class Database:
         8 bytes of its BLAKE2b digest, signed big-endian). Must run inside
         ``db.transaction()``.
         """
+        if self.url.startswith("sqlite://"):
+            raise QueryError("sqlite does not support advisory locks")
         if self._tx() is None:
             raise TransactionRequired(
                 "db.lock() outside a transaction would release the lock at once; "

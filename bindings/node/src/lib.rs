@@ -21,7 +21,7 @@ use napi_derive::napi;
 
 use crate::convert::{Conv, JsParams};
 use crate::js::{Js, V};
-use orm_core::dialect::{Dialect, Target};
+use orm_core::dialect::Target;
 use orm_core::ir::{self, ValueType};
 use orm_core::{migrate, schema};
 use orm_engine::db::{self, DbError, Driver, ErrorKind, Executor, RowSet};
@@ -289,7 +289,7 @@ impl JsSchema {
     #[napi]
     pub fn sql(&self, env: &Env, op_json: String, params_: Unknown<'_>) -> napi::Result<String> {
         let op = parse_op(&op_json).map_err(engine_err)?;
-        let target = Target::new(Dialect::Postgres);
+        let target = Target::new(self.inner.dialect);
         let p = params(env, params_)?;
         let plan = Planner::plan(&self.inner, target, &op, &p).map_err(engine_err)?;
         Ok(exec::sql(target, &plan))
@@ -309,7 +309,7 @@ impl JsSchema {
         batch_size: Option<u32>,
         disable: Vec<String>,
     ) -> napi::Result<Vec<String>> {
-        let target = Target::new(Dialect::Postgres).without(&disable).map_err(query_err)?;
+        let target = Target::new(self.inner.dialect).without(&disable).map_err(query_err)?;
         let (stmts, _) =
             update_many_plan(env, &self.inner, target, &model, &fields, rows, &filters_json, params_, false, batch_size)?;
         Ok(stmts.iter().map(|s| db::to_string(target.dialect, s)).collect())
@@ -536,13 +536,15 @@ impl Engine {
     #[napi]
     pub fn create_tables<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
         let stmts = migrate::create_all(&self.schema).map_err(schema_err)?;
-        self.script(env, stmts, None)
+        let conn = self.conn(None);
+        env.spawn_future(async move { exec::run_schema_script(conn, stmts).await.map_err(engine_err) })
     }
 
     #[napi]
     pub fn drop_tables<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
         let stmts = migrate::drop_all(&self.schema).map_err(schema_err)?;
-        self.script(env, stmts, None)
+        let conn = self.conn(None);
+        env.spawn_future(async move { exec::run_schema_script(conn, stmts).await.map_err(engine_err) })
     }
 
     /// Runs SQL statements in order, in one transaction (Postgres DDL is transactional).
@@ -625,6 +627,10 @@ pub fn connect<'env>(
     let schema = schema.inner.clone();
     env.spawn_future(async move {
         let driver = db::connect(&url, max_connections as usize).await.map_err(|e| tagged(db_kind(&e), e))?;
+        if driver.dialect() != schema.dialect {
+            driver.close().await;
+            return Err(schema_err(format!("schema targets {}, connection uses {}", schema.dialect.name(), driver.dialect().name())));
+        }
         let target = Target::new(driver.dialect()).without(&disable).map_err(query_err)?;
         Ok(Engine { driver, target, schema })
     })

@@ -20,7 +20,7 @@ use pyo3::IntoPyObjectExt;
 use crate::build::{Builder, Classes};
 use crate::convert::{py_to_value, PyParams};
 use crate::errors::{db_err, engine_err, query_err, schema_err};
-use orm_core::dialect::{Dialect, Target};
+use orm_core::dialect::Target;
 use orm_engine::db::{self, Driver, Executor};
 use orm_engine::exec::{self, Conflict, Outcome};
 use orm_engine::plan::Planner;
@@ -117,7 +117,7 @@ impl PySchema {
     /// SQL for an operation with parameters inlined. For debugging and tests only.
     fn sql(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<String> {
         let op = parse_op(op_json).map_err(engine_err)?;
-        let target = Target::new(Dialect::Postgres);
+        let target = Target::new(self.inner.dialect);
         let plan = Planner::plan(&self.inner, target, &op, &PyParams(&params)).map_err(engine_err)?;
         Ok(exec::sql(target, &plan))
     }
@@ -136,7 +136,7 @@ impl PySchema {
         batch_size: Option<usize>,
         disable: Vec<String>,
     ) -> PyResult<Vec<String>> {
-        let target = Target::new(Dialect::Postgres).without(&disable).map_err(query_err)?;
+        let target = Target::new(self.inner.dialect).without(&disable).map_err(query_err)?;
         let (stmts, _) =
             update_many_plan(&self.inner, target, model, &fields, rows, filters_json, &params, false, batch_size)?;
         Ok(stmts.iter().map(|s| db::to_string(target.dialect, s)).collect())
@@ -383,12 +383,18 @@ impl Engine {
 
     fn create_tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stmts = migrate::create_all(&self.schema).map_err(schema_err)?;
-        self.run_script(py, stmts, None)
+        let conn = self.conn(None);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            exec::run_schema_script(conn, stmts).await.map_err(engine_err)
+        })
     }
 
     fn drop_tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stmts = migrate::drop_all(&self.schema).map_err(schema_err)?;
-        self.run_script(py, stmts, None)
+        let conn = self.conn(None);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            exec::run_schema_script(conn, stmts).await.map_err(engine_err)
+        })
     }
 
     /// Runs SQL statements in order, in one transaction (Postgres DDL is transactional).
@@ -541,6 +547,10 @@ fn connect<'py>(
     let schema = schema.get().inner.clone();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let driver = db::connect(&url, max_connections as usize).await.map_err(db_err)?;
+        if driver.dialect() != schema.dialect {
+            driver.close().await;
+            return Err(schema_err(format!("schema targets {}, connection uses {}", schema.dialect.name(), driver.dialect().name())));
+        }
         let target = Target::new(driver.dialect()).without(&disable).map_err(query_err)?;
         Ok(Engine { driver, target, schema, classes })
     })

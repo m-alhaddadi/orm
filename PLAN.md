@@ -53,7 +53,8 @@ Schema DSL → Schema Compiler → ORM IR → Python API → PyO3 → planner (s
 ```
 
 sea-query stays as the SQL builder (one builder per dialect), and each database gets a
-driver behind one trait (`engine/src/db/`); tokio-postgres for Postgres today.
+driver behind one trait (`engine/src/db/`): tokio-postgres for PostgreSQL and
+bundled rusqlite on a dedicated worker for SQLite.
 
 ---
 
@@ -309,6 +310,24 @@ Proposed on top of the first cut (not decided): a TS frontend that doesn't copy 
 Python shape (plain objects, an explicit `tx`, Prisma-style and builder-style APIs over
 one IR), and the rest of the JS work (runtimes, packaging, errors):
 [`ROADMAP.md`](ROADMAP.md#js--typescript).
+
+### SQLite
+
+SQLite is implemented across the Rust engine and Python/TypeScript bindings.
+Schemas select `provider = "sqlite"`; connections accept `sqlite://:memory:` and
+`sqlite:///absolute/path.db`. Each client serializes work on one connection;
+`max_connections` does not create a SQLite pool. Shared APIs cover CRUD, relations,
+aggregates, windows, CTEs, sliced prefetch, bulk updates and savepoint transactions.
+Enums require explicit text/int storage. JSON, UUID, date and UTC timestamp values
+retain language conversions.
+
+Migrations currently rebuild all managed tables, preserving rows, rename hints
+and AUTOINCREMENT counters, validating foreign keys and refusing unmanaged indexes
+or triggers. SQLite snapshots use version 2; PostgreSQL keeps version 1. Targets
+cannot share snapshots. Schema validation rejects exact Decimal, arrays, native
+enums, PostgreSQL extensions/functions and unsupported trigger/index features.
+Generated/computed columns remain out of scope. Usage and the full limitations are
+in [docs/schema.md](docs/schema.md#sqlite).
 
 ### Later
 

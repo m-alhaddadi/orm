@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 pub enum Dialect {
     #[default]
     Postgres,
+    Sqlite,
 }
 
 /// Features the planner can't assume. Each flag names the SQL it guards.
@@ -46,14 +47,24 @@ pub struct Capabilities {
 }
 
 impl Dialect {
+    pub fn is_postgres(&self) -> bool { *self == Self::Postgres }
+
     pub const fn name(self) -> &'static str {
         match self {
             Dialect::Postgres => "postgres",
+            Dialect::Sqlite => "sqlite",
         }
     }
 
     pub const fn capabilities(self) -> Capabilities {
         match self {
+            Dialect::Sqlite => Capabilities {
+                returning: true, on_conflict: true, ilike: false,
+                lock_exclusive: false, lock_shared: false, lock_of: false,
+                lock_nowait: false, lock_skip_locked: false,
+                update_from_values: false, savepoints: true, distinct_on: false,
+                max_params: 32_766,
+            },
             Dialect::Postgres => Capabilities {
                 returning: true,
                 on_conflict: true,

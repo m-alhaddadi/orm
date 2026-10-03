@@ -26,7 +26,7 @@ use orm_core::ir::{
     ArithOp, Assignment, CmpOp, ColType, Count, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Operation, Order, ParamRef,
     Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType,
 };
-use orm_core::dialect::{Capabilities, Target};
+use orm_core::dialect::{Capabilities, Dialect, Target};
 use orm_core::schema::{Model, Schema};
 
 /// A `select_related` object inside each row: its columns start at `start` and it is
@@ -164,6 +164,26 @@ fn bind(v: sea_query::Value, f: Option<&FieldIr>) -> SExpr {
         Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), SExpr::val(v)),
         None => SExpr::val(v),
     }
+}
+
+/// Internal expression templates use numbered slots. SQLite's builder consumes
+/// unnumbered slots, so expand/reorder expressions while translating the template.
+fn template(dialect: Dialect, sql: impl Into<String>, exprs: Vec<SExpr>) -> SExpr {
+    let sql = sql.into();
+    if dialect == Dialect::Postgres { return SExpr::cust_with_exprs(sql, exprs); }
+    let mut rendered = String::new();
+    let mut values = vec![];
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' && chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            let mut index = String::new();
+            while chars.peek().is_some_and(|c| c.is_ascii_digit()) { index.push(chars.next().unwrap()); }
+            let index: usize = index.parse().expect("internal template slot");
+            values.push(exprs[index - 1].clone());
+            rendered.push('?');
+        } else { rendered.push(c); }
+    }
+    SExpr::cust_with_exprs(rendered, values)
 }
 
 fn fold(items: Vec<SExpr>, and: bool) -> SExpr {
@@ -844,6 +864,9 @@ impl<'s> Planner<'s> {
     fn leaf(&mut self, e: &Expr) -> Result<SExpr> {
         Ok(match e {
             Expr::Cmp { op, l, r } => {
+                if self.target.dialect == Dialect::Sqlite && matches!(op, CmpOp::Contains | CmpOp::ContainedBy | CmpOp::Overlaps) {
+                    return Err(Error::query("sqlite does not support PostgreSQL containment or overlap operators"));
+                }
                 let hint = self.hint_of(l).or(self.hint_of(r));
                 let l = self.value(l, hint)?;
                 let r = self.value(r, hint)?;
@@ -896,7 +919,7 @@ impl<'s> Planner<'s> {
                 };
                 if *ci && !self.caps.ilike {
                     // LOWER(x) LIKE LOWER(pattern), for databases without ILIKE.
-                    let lowered = SExpr::cust_with_expr("LOWER($1)", item);
+                    let lowered = template(self.target.dialect, "LOWER($1)", vec![item]);
                     let pattern = LikeExpr::new(text.to_lowercase());
                     return Ok(if *neg { lowered.not_like(pattern) } else { lowered.like(pattern) });
                 }
@@ -1169,7 +1192,8 @@ impl<'s> Planner<'s> {
             (Some(b), 1) => format!("$1 OVER {b}"),
             _ => format!("$1 OVER ({})", clauses.join(" ")),
         };
-        Ok(SExpr::cust_with_exprs(
+        Ok(template(
+            self.target.dialect,
             match cast {
                 Some(ty) => format!("CAST({sql} AS {ty})"),
                 None => sql,
@@ -1182,25 +1206,29 @@ impl<'s> Planner<'s> {
     fn call(&mut self, name: &str, args: &[Expr], distinct: bool) -> Result<SExpr> {
         let (e, cast) = self.call_parts(name, args, distinct)?;
         Ok(match cast {
-            Some(ty) => SExpr::cust_with_expr(format!("CAST($1 AS {ty})"), e),
+            Some(ty) => template(self.target.dialect, format!("CAST($1 AS {ty})"), vec![e]),
             None => e,
         })
     }
 
     /// The call, and the type its result is cast to (outside a window's `OVER`).
     fn call_parts(&mut self, name: &str, args: &[Expr], distinct: bool) -> Result<(SExpr, Option<&'static str>)> {
+        if self.target.dialect == Dialect::Sqlite && name == "cardinality" {
+            return Err(Error::query("sqlite does not support cardinality()"));
+        }
         let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
         let hint = Hint { ty: hint.ty, field: None };
         let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>()?;
         let d = if distinct { "DISTINCT " } else { "" };
         let n = planned.len();
+        let dialect = self.target.dialect;
         let call = |sql: &str, planned: Vec<SExpr>| -> Result<SExpr> {
             let slots = (1..=planned.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
-            Ok(SExpr::cust_with_exprs(format!("{sql}({slots})"), planned))
+            Ok(template(dialect, format!("{sql}({slots})"), planned))
         };
         let one = |tpl: &str, planned: Vec<SExpr>| -> Result<SExpr> {
             match <[SExpr; 1]>::try_from(planned) {
-                Ok([a]) => Ok(SExpr::cust_with_expr(tpl.to_owned(), a)),
+                Ok([a]) => Ok(template(dialect, tpl, vec![a])),
                 Err(_) => Err(Error::query(format!("{name}() takes one argument"))),
             }
         };
@@ -1741,7 +1769,7 @@ fn plan_prefetch(
             exprs.push(e?);
             slots.push(format!("${}{}", exprs.len(), if o.desc { " DESC" } else { "" }));
         }
-        let e = SExpr::cust_with_exprs(format!("ROW_NUMBER() OVER (PARTITION BY $1 ORDER BY {})", slots.join(", ")), exprs);
+        let e = template(target.dialect, format!("ROW_NUMBER() OVER (PARTITION BY $1 ORDER BY {})", slots.join(", ")), exprs);
         for (s, on) in &p.joins[joined..] {
             plan.stmt.join_as(JoinType::LeftJoin, Alias::new(p.model(s.model).table()), Alias::new(&s.alias), on.clone());
         }
@@ -1852,6 +1880,18 @@ pub fn plan_insert(
                 return Err(Error::query("insert row length does not match fields"));
             }
             let values = cols.iter().zip(row).map(|(c, item)| match item {
+                None if target.dialect == Dialect::Sqlite => {
+                    let default = if c.default_now { "CURRENT_TIMESTAMP".to_owned() }
+                    else if let Some(sql) = &c.default_sql { sql.clone() }
+                    else if let Some(v) = &c.default {
+                        match v {
+                            serde_json::Value::String(s) => orm_core::migrate::model::quote_literal(s),
+                            v if c.ty == ColType::Json => orm_core::migrate::model::quote_literal(&v.to_string()),
+                            v => v.to_string(),
+                        }
+                    } else { "NULL".to_owned() };
+                    SExpr::cust(default)
+                }
                 None => SExpr::cust("DEFAULT"),
                 Some(v) => bind(v, Some(c)),
             });

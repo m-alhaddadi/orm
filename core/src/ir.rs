@@ -98,6 +98,9 @@ pub struct EnumIr {
 
 #[derive(Deserialize, Serialize, Debug, Default)]
 pub struct SchemaIr {
+    /// Database targeted by compilation. Older artifacts imply PostgreSQL.
+    #[serde(default, skip_serializing_if = "crate::dialect::Dialect::is_postgres")]
+    pub dialect: crate::dialect::Dialect,
     pub models: Vec<ModelIr>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub enums: Vec<EnumIr>,

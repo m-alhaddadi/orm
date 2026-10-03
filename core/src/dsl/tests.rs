@@ -14,6 +14,35 @@ fn fails(src: &str) -> String {
 }
 
 #[test]
+fn sqlite_targets_and_feature_checks() {
+    let prefix = "datasource db {\n  provider = \"sqlite\"\n}\n";
+    let source = format!("{prefix}model Item {{\n  id BigInt @id @default(autoincrement())\n  title String\n}}\n");
+    let (ir, schema) = check(ok(&source)).unwrap();
+    assert_eq!(ir.dialect, crate::dialect::Dialect::Sqlite);
+    let snapshot = crate::migrate::snapshot(&schema).unwrap();
+    assert_eq!(snapshot.dialect, ir.dialect);
+    assert_eq!(snapshot.version, 2);
+    assert_eq!(snapshot.tables[0].columns[0].ty, "INTEGER");
+    assert!(crate::migrate::create_all(&schema).unwrap()[0].contains("PRIMARY KEY AUTOINCREMENT"));
+    for (body, message) in [
+        ("model Item {\n  id BigInt @id\n  values String[]\n}", "Item.values: sqlite does not support Arrays"),
+        ("enum Role {\n  user\n}\nmodel Item {\n  id BigInt @id\n  role Role\n}", "choose @@storage(text)"),
+        ("model Item {\n  id BigInt @id\n  amount Decimal\n}", "ExactDecimal"),
+        ("model Item {\n  id BigInt @id\n  @@trigger(t, after: [insert], for_each: statement, body: \"SELECT 1\")\n}", "StatementTriggers"),
+        ("model Item {\n  id BigInt @id\n  @@trigger(t, after: [insert, update], body: \"SELECT 1\")\n}", "one insert/update/delete event"),
+        ("model Item {\n  id BigInt @id\n  @@index([id], type: Gin)\n}", "IndexMethods"),
+        ("model Item {\n  id BigInt @id\n  @@unique([id], deferrable: deferred)\n}", "DeferrableUnique"),
+    ] {
+        assert!(fails(&format!("{prefix}{body}")).contains(message), "{message}");
+    }
+    let (_, postgres) = check(ok("model Item {\n  id BigInt @id\n}\n")).unwrap();
+    let pg_snapshot = crate::migrate::snapshot(&postgres).unwrap();
+    assert!(crate::migrate::plan(&schema, &pg_snapshot).err().unwrap().contains("separate migrations directory"));
+    let legacy: crate::ir::SchemaIr = serde_json::from_str(r#"{"models":[]}"#).unwrap();
+    assert_eq!(legacy.dialect, crate::dialect::Dialect::Postgres);
+}
+
+#[test]
 fn blog_schema_compiles_to_the_ir_the_engine_expects() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/blog/schema.prisma");
     let (ir, _) = check(compile_file(&path).unwrap()).unwrap();

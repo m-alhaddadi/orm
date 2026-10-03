@@ -25,7 +25,6 @@ use tokio_postgres::types::{to_sql_checked, FromSql, IsNull, Kind, ToSql, Type};
 use tokio_postgres::{NoTls, Row, SimpleQueryMessage, Statement};
 
 use super::{numeric, BoxFuture, Cell, DbError, DbResult, Driver, ErrorKind, Executor, RowSet, Transaction};
-use orm_core::dialect::Dialect;
 use orm_core::ir::{ColType, ValueType};
 
 const STATEMENT_CACHE_MAX: usize = 512;
@@ -370,10 +369,6 @@ impl Executor for PgDriver {
 }
 
 impl Driver for PgDriver {
-    fn dialect(&self) -> Dialect {
-        Dialect::Postgres
-    }
-
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { self.pool.close() })
     }

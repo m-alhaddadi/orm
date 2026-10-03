@@ -78,6 +78,7 @@ class Registry:
         self._enums: dict[str, type[enum.Enum]] = {}
         self._enum_ir: dict[str, dict[str, Any]] = {}
         # Schema-level IR (extensions, functions, extension catalog) from define().
+        self._dialect: str | None = None
         self._schema_extra: dict[str, list[Any]] = {}
         self._native: _native.Schema | None = None
 
@@ -115,6 +116,8 @@ class Registry:
         out: dict[str, Any] = {"models": [m._meta.ir() for m in self._models.values()]}
         if self._enum_ir:
             out["enums"] = list(self._enum_ir.values())
+        if self._dialect is not None:
+            out["dialect"] = self._dialect
         out.update(self._schema_extra)
         return out
 
@@ -188,6 +191,10 @@ def define(
     """
     ir: dict[str, Any] = json.loads(schema) if isinstance(schema, str) else schema
     reg = registry if registry is not None else _default_registry()
+    dialect = ir.get("dialect", "postgres")
+    if reg._dialect is not None and reg._dialect != dialect:
+        raise TypeError("schemas in one registry must target the same database")
+    reg._dialect = dialect
     out: dict[str, Any] = {}
     for e in ir.get("enums", ()):
         cls_e = reg._enums.get(e["name"]) if reg._enum_ir.get(e["name"]) == e else None
