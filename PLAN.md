@@ -296,6 +296,10 @@ Open questions: camelCase field names in TS (recommended); `BigInt` columns as `
 with an error past 2^53 (recommended) vs `bigint`; `Date` for timestamps (ms precision)
 vs waiting for `Temporal`; `await qs` (recommended, like Python) vs `.execute()`.
 
+The TS API should not copy the Python shape: query-shaped result types, plain objects,
+an explicit `tx`, Prisma-style and builder-style frontends over one IR. Proposal and the
+rest of the JS work (runtimes, packaging, value mapping, errors): [`ROADMAP.md`](ROADMAP.md#js--typescript).
+
 ### Later
 
 More databases (a dialect + a driver each), introspection / drift
