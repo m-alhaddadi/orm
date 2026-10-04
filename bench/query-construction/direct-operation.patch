@@ -1,0 +1,97 @@
+diff --git a/engine/src/lib.rs b/engine/src/lib.rs
+index 57e1bc6..478970a 100644
+--- a/engine/src/lib.rs
++++ b/engine/src/lib.rs
+@@ -18,8 +18,92 @@ pub use error::{Error, Result};
+ pub use params::{NoParams, Params};
+ 
+ use orm_core::ir::Operation;
++use serde::Deserialize;
+ 
+ /// Parses a query IR document.
+ pub fn parse_op(op_json: &str) -> Result<Operation> {
++    if let Ok(DirectOperation(op)) = serde_json::from_str(op_json) {
++        return Ok(op);
++    }
+     serde_json::from_str(op_json).map_err(|e| Error::query(format!("invalid query IR: {e}")))
+ }
++
++// Frontends write `op` first. Decode the remaining fields directly rather than
++// buffering the entire document for serde's internally tagged enum. Unusual
++// layouts and all failures use the original decoder, including its error text.
++struct DirectOperation(Operation);
++
++impl<'de> serde::Deserialize<'de> for DirectOperation {
++    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
++        struct Visitor;
++        impl<'de> serde::de::Visitor<'de> for Visitor {
++            type Value = DirectOperation;
++            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
++                f.write_str("an operation with op first")
++            }
++            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
++                if map.next_key::<&str>()? != Some("op") {
++                    return Err(serde::de::Error::custom("op is not first"));
++                }
++                let op = map.next_value::<&str>()?;
++                let d = serde::de::value::MapAccessDeserializer::new(OperationFields(map));
++                let op = match op {
++                    "select" => Operation::Select(orm_core::ir::Select::deserialize(d)?),
++                    "count" => Operation::Count(orm_core::ir::Select::deserialize(d)?),
++                    "exists" => Operation::Exists(orm_core::ir::Select::deserialize(d)?),
++                    "update" => Operation::Update(orm_core::ir::Update::deserialize(d)?),
++                    "delete" => Operation::Delete(orm_core::ir::Delete::deserialize(d)?),
++                    _ => return Err(serde::de::Error::custom("unknown op")),
++                };
++                Ok(DirectOperation(op))
++            }
++        }
++        d.deserialize_map(Visitor)
++    }
++}
++
++// A second top-level op must reach the original enum decoder, which rejects it.
++struct OperationFields<A>(A);
++impl<'de, A: serde::de::MapAccess<'de>> serde::de::MapAccess<'de> for OperationFields<A> {
++    type Error = A::Error;
++    fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(&mut self, seed: K) -> std::result::Result<Option<K::Value>, A::Error> {
++        use serde::de::IntoDeserializer;
++        match self.0.next_key::<String>()? {
++            Some(key) if key == "op" => Err(serde::de::Error::custom("duplicate op")),
++            Some(key) => seed.deserialize(key.into_deserializer()).map(Some),
++            None => Ok(None),
++        }
++    }
++    fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(&mut self, seed: V) -> std::result::Result<V::Value, A::Error> {
++        self.0.next_value_seed(seed)
++    }
++}
++
++#[cfg(test)]
++mod parser_tests {
++    use super::*;
++
++    #[test]
++    fn differential_operation_decoding() {
++        let cases = [
++            r#"{"op":"select","model":"Book"}"#,
++            r#"{"model":"Book","op":"select"}"#,
++            r#"{"op":"select","model":"Book","op":"count"}"#,
++            r#"{"op":"select","model":"Book","filters":[{"t":"param","i":2}]}"#,
++            r#"{"op":"update","model":"Book","set":[]}"#,
++            r#"{"op":"delete","model":"Book"}"#,
++            r#"{"op":"select","model":"Book","unknown":1e999}"#,
++            r#"{"op":"select","model":"Book","with":[{"name":"b","query":{"model":"Book","unknown":1e999}}]}"#,
++        ];
++        for src in cases {
++            let original = serde_json::from_str::<Operation>(src)
++                .map(|op| format!("{op:?}"))
++                .map_err(|e| format!("invalid query IR: {e}"));
++            let candidate = parse_op(src).map(|op| format!("{op:?}")).map_err(|e| match e {
++                Error::Query(msg) => msg,
++                _ => unreachable!(),
++            });
++            assert_eq!(original, candidate, "{src}");
++        }
++    }
++}

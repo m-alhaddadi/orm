@@ -1,0 +1,17 @@
+{
+  "date": "2026-10-04",
+  "os": "macOS 26.6.2, arm64",
+  "rustc": "1.97.0 (2d8144b78 2026-07-07)",
+  "python": "CPython 3.14.7",
+  "node": "26.9.0",
+  "postgresql": "18.6",
+  "build": "release, fat LTO, one codegen unit",
+  "pool_size": 4,
+  "timed_concurrency": 1,
+  "sha256": {
+    "before_python": "07b27b3afe066a53c374ccd15a99ee1cc73adbb8c3844567cccef6b95d67b984",
+    "after_python": "9fac87e7e5ea80daa880859cd4a4b0073685d6a02ca413d199079d27b29035db",
+    "before_node": "193d7902cb5f2749dad155e194eccefb97f3069344951080748c5a531ed87ac8",
+    "after_node": "a60f8c5c5012d00d1389328999858d793ea0b22d0266678ea5224aadfd255fa4"
+  }
+}

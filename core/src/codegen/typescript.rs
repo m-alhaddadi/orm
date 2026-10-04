@@ -142,7 +142,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
             }
         }
     }
-    let ir_json = serde_json::to_string_pretty(ir).map_err(|e| e.to_string())?;
+    let ir_json = super::embedded_schema_json(ir)?;
     let mut used: BTreeSet<&str> = BTreeSet::new();
     let mut body = String::new();
 

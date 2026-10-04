@@ -1,0 +1,8 @@
+{
+  "test": "parser_tests::differential_operation_decoding",
+  "outcome": "failed; prototype rejected and removed from production",
+  "input": "{\"op\":\"select\",\"model\":\"Book\",\"unknown\":1e999}",
+  "before": "invalid query IR: number out of range at line 1 column 45",
+  "after": "successfully decoded Operation::Select",
+  "scope": "shared Rust parser used by both language bindings; no database required"
+}

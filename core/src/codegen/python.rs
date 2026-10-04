@@ -95,7 +95,7 @@ fn has_server_value(f: &FieldIr) -> bool {
 /// Generates `models.py` / `models.pyi` for `ir` (already validated as `schema`).
 /// `source` names the schema file in the header comment.
 pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generated, String> {
-    let ir_json = serde_json::to_string_pretty(ir).map_err(|e| e.to_string())?;
+    let ir_json = super::embedded_schema_json(ir)?;
     if ir_json.contains("\"\"\"") {
         return Err("schema text contains \"\"\" which can't be embedded in the generated module".into());
     }
