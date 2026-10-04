@@ -22,6 +22,17 @@ snapshots are rejected.
 
 ## Performance
 
+### Stream result materialization and reuse row decoders — measured, not scheduled
+
+Prioritize avoiding the intermediate raw-row collection for large reads, then
+investigate a decoder chosen once from each query's output shape. A controlled
+Rust prototype reduced typed 1,000-row reads from 296.52 to 247.84 µs; integrating
+it into the engine and Python/Node bindings remains future work.
+
+See [performance opportunities](docs/performance.md) for implementation order,
+constraints, benchmark evidence, and acceptance requirements. The same evidence
+puts general plan caching below result materialization for these simple reads.
+
 ### Shortcut joins through a shared key — not scheduled
 
 A relation path `A → B → C` where B reaches C through the same key that A uses to

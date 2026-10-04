@@ -243,6 +243,12 @@ multiple language bindings. Validate the architecture and API first.
 
 ### Performance plan  (measured, see "Where a query's time goes" in [`bench/RESULTS.md`](bench/RESULTS.md))
 
+The 2026-10-03 native Rust investigation adds measured opportunities for streaming
+result materialization and reusable output decoders. See
+[`docs/performance.md`](docs/performance.md) for the implementation priorities and
+validation requirements. Its measurements use a different machine and workload
+from the Python measurements below; do not combine their estimated savings.
+
 `get by pk` takes ~300–340 µs on asyncio. Of that, ~110 µs is the asyncio ↔ Tokio
 hand-off, ~90 µs is Postgres, ~60 µs is building and planning the query, and ~40 µs is
 building the result. Below, in order of gain per unit of work. The estimates use the
