@@ -231,6 +231,9 @@ const FIELD_ATTRS: &str = "@id, @unique, @default, @map, @db.*, @check, @comment
 pub struct Lowering<'l> {
     /// Reads an imported file (path as written in the schema).
     pub load: &'l dyn Fn(&str) -> std::result::Result<String, String>,
+    /// Model declarations selected for compiler contributions may derive identity.
+    /// Final identity validation runs after the selected passes.
+    pub deferred_identity: &'l HashSet<String>,
 }
 
 struct Ctx {
@@ -308,7 +311,7 @@ impl Lowering<'_> {
             .map(|m| (m.name.clone(), m.fields.iter().find(|f| f.primary_key).map(|f| f.name.clone())))
             .collect();
         for (m, decl) in lowered.iter_mut().zip(&models) {
-            if pks[&m.name].is_none() {
+            if pks[&m.name].is_none() && !self.deferred_identity.contains(&m.name) {
                 return err(decl.pos, format!("model {} has no @id field", decl.name));
             }
             for member in decl.members.iter().filter(|mm| model_names.contains_key(mm.ty.name.as_str())) {

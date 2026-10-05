@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf, process::Command};
 #[test]
 fn local_crate_builds_without_host_id_changes_and_lowers_once() {
     let host = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
-    let root = std::env::temp_dir().join(format!("orm-extension-build-test-{}", std::process::id()));
+    let root = host.join("target/extension-proof-tests").join(format!("orm-extension-build-test-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     let output = root.join("build");
     assert!(!output.exists());
@@ -18,7 +18,9 @@ fn local_crate_builds_without_host_id_changes_and_lowers_once() {
     fs::write(output.join("core/examples/proof.rs"), r###"
 use orm_core::{dsl, schema::Schema, migrate};
 fn main() {
-    let ir = dsl::compile("model User {\n id Int @id\n name String @example.rename(to: \"public_name\")\n secret String? @example.hide\n}\nmodel UserView {\n id Int @id\n @@example.proxy(parent: \"User\")\n}", None).unwrap();
+    let ir = dsl::compile("model User {\n id Int @id\n name String @example.rename(to: \"public_name\")\n secret String? @example.hide\n}\nmodel UserView {\n @@example.proxy(parent: \"User\")\n}", None).unwrap();
+    let missing_identity = dsl::compile("model User {\n id Int @id\n}\nmodel UserView {\n id Int @example.hide\n @@example.proxy(parent: \"User\")\n}", None).err().unwrap();
+    assert!(missing_identity.contains("UserView has no @id field after extension lowering"));
     assert_eq!(ir.models[0].fields[1].name, "public_name");
     assert_eq!(ir.models[0].fields[1].column, "name");
     let json = serde_json::to_string(&ir).unwrap();

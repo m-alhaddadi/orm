@@ -32,9 +32,13 @@ async fn check(url: &str) {
     for statement in orm_core::migrate::create_all(&schema).unwrap() { db.batch(statement).await.unwrap(); }
     let child = &schema.models[1];
     let shape = ResultShape { model: ModelId(1), fields: child.resolved_fields.iter().map(|f| ResultField { field:f.logical, physical:Some(f.storage.column), public:true, dependencies:vec![] }).collect() };
+    let unrelated = [OwnerWrite { owner: OwnerId(1), fields: &[], values: &[] }];
+    let invalid_owner = WriteContract { model: ModelId(0), mode: WriteMode::Insert, owners: &unrelated,
+        validation_dependencies: &[], returning: None };
+    assert!(ownership::prepare_write(&schema, &invalid_owner).err().unwrap().to_string().contains("not an ancestor"));
     for invalid in [true, false] {
-        let parent_fields = [StorageId { owner:OwnerId(0), column:1 }];
-        let parent_values = [Supplied::Value(WriteValue::Value(Value::from("Alice")))];
+        let parent_fields = [StorageId { owner:OwnerId(0), column:0 }, StorageId { owner:OwnerId(0), column:1 }];
+        let parent_values = [Supplied::Value(WriteValue::Value(Value::from(42))), Supplied::Value(WriteValue::Value(Value::from("Alice")))];
         let child_fields = [StorageId { owner:OwnerId(1), column:0 }, StorageId { owner:OwnerId(1), column:1 }];
         let child_values = [Supplied::Value(WriteValue::Returned { step:0, column:StorageId { owner:OwnerId(0),column:0 } }), Supplied::Value(WriteValue::Value(Value::from(if invalid { "invalid" } else { "employee" })))];
         let owners = [OwnerWrite { owner:OwnerId(0),fields:&parent_fields,values:&parent_values },OwnerWrite { owner:OwnerId(1),fields:&child_fields,values:&child_values }];
@@ -48,6 +52,7 @@ async fn check(url: &str) {
             assert_eq!(outer.query("SELECT COUNT(*) FROM extension_owner_parents".into(),vec![]).await.unwrap().get_i64(0,0).unwrap(),0);
         } else {
             let Outcome::Rows { rows,types,.. } = result.unwrap() else { panic!("missing composed result") };
+            assert_eq!(rows.cell(0,0,types[0]).unwrap(),db::Cell::Int(42));
             assert_eq!(rows.cell(0,2,types[2]).unwrap(),db::Cell::Text("Alice"));
             assert_eq!(rows.cell(0,1,types[1]).unwrap(),db::Cell::Text("employee"));
         }
