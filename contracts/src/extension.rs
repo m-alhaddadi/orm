@@ -52,12 +52,70 @@ pub struct Requirements {
     pub field_storage: Vec<FieldStorage>,
     #[serde(default)]
     pub owner_links: Vec<OwnerLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub field_adapters: Vec<FieldAdapter>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_fields: Vec<FileField>,
 }
 impl Requirements {
     pub fn is_empty(&self) -> bool {
         self.declarations.is_empty() && self.extensions.is_empty() && self.specializations.is_empty()
-            && self.lowered_models.is_empty() && self.completed_passes.is_empty() && self.result_fields.is_empty() && self.storage.is_none() && self.field_storage.is_empty() && self.owner_links.is_empty() && self.methods.is_empty() && self.schema_contract == 0
+            && self.lowered_models.is_empty() && self.completed_passes.is_empty() && self.result_fields.is_empty() && self.storage.is_none() && self.field_storage.is_empty() && self.owner_links.is_empty() && self.methods.is_empty() && self.field_adapters.is_empty() && self.file_fields.is_empty() && self.schema_contract == 0
     }
+}
+
+/// A build-selected binding codec identity, never a provider or import path.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FieldAdapter {
+    pub model: String,
+    pub field: String,
+    pub adapter: String,
+}
+
+/// File-field configuration has durable identity only; clients remain application configuration.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileField {
+    pub model: String,
+    pub field: String,
+    pub storage: String,
+    pub reference_contract: u32,
+}
+
+pub const FILE_REFERENCE_ADAPTER: &str = "file-storage.reference.v1";
+
+/// Validate field codec shapes once, before usable models are published.
+pub fn validate_field_adapters(ir: &SchemaIr) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for adapter in &ir.behavior.field_adapters {
+        let model = ir.models.iter().find(|m| m.name == adapter.model)
+            .ok_or_else(|| format!("unknown field adapter model {}", adapter.model))?;
+        let field = model.fields.iter().find(|f| f.name == adapter.field)
+            .ok_or_else(|| format!("{}.{}: unknown adapter field", adapter.model, adapter.field))?;
+        if field.ty != ColType::Json || field.array || field.enum_name.is_some() {
+            return Err(format!("{}.{}: field adapters require scalar Json", adapter.model, adapter.field));
+        }
+        if !seen.insert((&adapter.model, &adapter.field)) || adapter.adapter.is_empty() {
+            return Err(format!("{}.{}: duplicate/empty field adapter", adapter.model, adapter.field));
+        }
+    }
+    let mut files = std::collections::BTreeSet::new();
+    for file in &ir.behavior.file_fields {
+        if !files.insert((&file.model, &file.field)) || file.reference_contract != 1
+            || file.storage.is_empty() || file.storage.contains('\0') {
+            return Err(format!("{}.{}: invalid file-field contract", file.model, file.field));
+        }
+        if !ir.behavior.field_adapters.iter().any(|a| a.model == file.model && a.field == file.field && a.adapter == FILE_REFERENCE_ADAPTER) {
+            return Err(format!("{}.{}: missing file reference adapter", file.model, file.field));
+        }
+    }
+    for adapter in ir.behavior.field_adapters.iter().filter(|a| a.adapter == FILE_REFERENCE_ADAPTER) {
+        if !files.contains(&(&adapter.model, &adapter.field)) {
+            return Err(format!("{}.{}: missing file-field configuration", adapter.model, adapter.field));
+        }
+    }
+    Ok(())
 }
 
 /// Setup contribution connecting a logical field to one physical owner.
@@ -307,7 +365,13 @@ pub fn validate_declarations(ir: &SchemaIr, manifests: &[Manifest], language: Op
 
 /// Contract compatibility is checked once at definition, never at materialization.
 pub fn check_requirements(ir: &SchemaIr, artifact: &Artifact) -> Result<(), String> {
+    validate_field_adapters(ir)?;
     let r = &ir.behavior;
+    for adapter in &r.field_adapters {
+        if adapter.adapter == FILE_REFERENCE_ADAPTER && !artifact.capabilities.iter().any(|c| c == "file-storage") {
+            return Err("file-storage adapter is not compiled into this artifact; rebuild".into());
+        }
+    }
     if !r.is_empty() && r.schema_contract != artifact.schema_contract {
         return Err(format!("schema contract {} unavailable (artifact {}); rebuild native artifact", r.schema_contract, artifact.schema_contract));
     }
@@ -446,6 +510,8 @@ pub fn merge_definition(mut context: SchemaIr, mut incoming: SchemaIr) -> Result
     c.methods.extend(n.methods);
     c.field_storage.extend(n.field_storage);
     c.owner_links.extend(n.owner_links);
+    c.field_adapters.extend(n.field_adapters);
+    c.file_fields.extend(n.file_fields);
     for (id, version) in n.extensions {
         if c.extensions.get(&id).is_some_and(|v| v != &version) { return Err(format!("incompatible extension {id}; rebuild dependent schemas together")); }
         c.extensions.insert(id, version);

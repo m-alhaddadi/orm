@@ -32,6 +32,9 @@ export class Reference {
     for (const name of ["version", "filename", "content_type"] as const) {
       if (Object.hasOwn(data, name) && (typeof data[name] !== "string" || data[name]!.includes("\0"))) throw new TypeError(`invalid ${name}`);
     }
+    for (const value of [data.storage, data.key, data.version, data.filename, data.content_type]) {
+      if (value !== undefined && /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value)) throw new TypeError("reference strings must contain valid Unicode scalars");
+    }
     if (Object.hasOwn(data, "size") && (!Number.isSafeInteger(data.size) || data.size! < 0)) throw new TypeError("size must be a nonnegative safe integer");
     this.storage = data.storage; this.key = data.key; this.version = data.version;
     this.filename = data.filename; this.contentType = data.content_type; this.size = data.size;

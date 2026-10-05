@@ -36,7 +36,7 @@ export class S3Storage implements Provider {
     };
     try {
       options.signal?.throwIfAborted();
-      const created = await this.client.send(new CreateMultipartUploadCommand({ ...params, ContentType: reference.contentType }));
+      const created = await this.client.send(new CreateMultipartUploadCommand({ ...params, ContentType: reference.contentType }), { abortSignal: options.signal });
       uploadId = created.UploadId;
       if (!uploadId) throw new StorageError("provider omitted multipart upload identity");
       for await (const chunk of chunks(source, options)) {
@@ -52,7 +52,7 @@ export class S3Storage implements Provider {
       options.signal?.throwIfAborted();
       completing = true;
       const completed = await this.client.send(new CompleteMultipartUploadCommand({ ...params, UploadId: uploadId,
-        MultipartUpload: { Parts: parts } }));
+        MultipartUpload: { Parts: parts } }), { abortSignal: options.signal });
       // Do not report cancellation after completion: the durable object already exists.
       return new Reference({ ...reference.toJSON(), size,
         ...(completed.VersionId !== undefined ? { version: completed.VersionId } : {}) });

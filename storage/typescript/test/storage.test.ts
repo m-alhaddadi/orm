@@ -19,7 +19,7 @@ async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer> {
 test("shared wire vectors and invalid values", async () => {
   const vectors = JSON.parse(await readFile(new URL("../../../fixtures/references.json", import.meta.url), "utf8"));
   for (const data of vectors) assert.deepEqual(Reference.fromJSON(data).toJSON(), data);
-  for (const extra of [{ v: 2 }, { size: -1 }, { size: true }, { size: 2 ** 53 }, { version: null }, { storage: "" }, { secret: "no" }]) {
+  for (const extra of [{ v: 2 }, { size: -1 }, { size: true }, { size: 2 ** 53 }, { version: null }, { storage: "" }, { secret: "no" }, { key: "\ud800" }]) {
     assert.throws(() => Reference.fromJSON({ v: 1, storage: "local", key: "key", ...extra }));
   }
 });
@@ -95,4 +95,25 @@ test("real SDK signs versioned references without storage request", async () => 
     assert.equal(url.searchParams.get("X-Amz-Expires"), "300");
     assert.ok(url.searchParams.has("X-Amz-Signature"));
   } finally { client.destroy(); }
+});
+test("S3 cancelled completion exposes uncertain reference and never deletes", async () => {
+  const controller = new AbortController();
+  class CancelComplete extends FakeS3 {
+    async send(command: any, options?: any) {
+      if (command.constructor.name === "CompleteMultipartUploadCommand") {
+        controller.abort(); options?.abortSignal?.throwIfAborted();
+      }
+      return super.send(command);
+    }
+  }
+  const client = new CancelComplete();
+  await assert.rejects(new S3Storage("s3", "bucket", client.client()).upload(Buffer.from("report"), { signal: controller.signal }), error => {
+    assert.ok(error instanceof UploadError);
+    assert.equal(error.recovery.completionUnknown, true);
+    assert.equal(error.recovery.uploadId, "upload");
+    assert.equal(error.recovery.reference.storage, "s3");
+    assert.equal((error.cause as Error).name, "AbortError");
+    return true;
+  });
+  assert.equal(client.calls.at(-1)!.name, "AbortMultipartUploadCommand");
 });

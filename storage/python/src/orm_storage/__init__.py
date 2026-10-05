@@ -46,6 +46,9 @@ class Reference:
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or "\x00" in value):
                 raise ValueError(f"{name} must be a string without NUL")
+        for value in (self.storage, self.key, self.version, self.filename, self.content_type):
+            if value is not None:
+                value.encode("utf-8")
         if self.size is not None and (type(self.size) is not int or not 0 <= self.size <= MAX_SIZE):
             raise ValueError("size must be a nonnegative safe integer")
 
@@ -102,13 +105,20 @@ _T = TypeVar("_T")
 
 
 async def _io(function: Callable[..., _T], *args: Any) -> _T:
-    # Await in-flight filesystem work before unwinding resource ownership.
+    # Repeated cancellation must not detach a thread from its owned file handle.
     task = asyncio.create_task(asyncio.to_thread(function, *args))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task
-        raise
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            cancelled = True
+            if task.done():
+                raise
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 async def chunks(source: Source, max_size: int = MAX_SIZE) -> AsyncIterator[bytes]:
@@ -126,13 +136,7 @@ async def chunks(source: Source, max_size: int = MAX_SIZE) -> AsyncIterator[byte
                 yield chunk
         else:
             while True:
-                # Join each worker even if cancelled before caller may close its source.
-                task = asyncio.create_task(asyncio.to_thread(source.read, CHUNK_SIZE))
-                try:
-                    chunk = await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    await task
-                    raise
+                chunk = await _io(source.read, CHUNK_SIZE)
                 if not chunk:
                     break
                 yield chunk

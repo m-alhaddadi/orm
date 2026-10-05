@@ -176,7 +176,7 @@ class ReferenceTests(unittest.TestCase):
         for data in json.loads((Path(__file__).parents[2] / "fixtures/references.json").read_text()):
             self.assertEqual(Reference.from_dict(data).to_dict(), data)
     def test_invalid(self):
-        for extra in [{"v": 2}, {"size": -1}, {"size": True}, {"size": 2**53}, {"version": None}, {"storage": ""}, {"secret": "no"}]:
+        for extra in [{"v": 2}, {"size": -1}, {"size": True}, {"size": 2**53}, {"version": None}, {"storage": ""}, {"secret": "no"}, {"key": "\ud800"}]:
             with self.assertRaises(ValueError):
                 Reference.from_dict({"v": 1, "storage": "local", "key": "key", **extra})
 
