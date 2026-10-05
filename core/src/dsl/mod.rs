@@ -36,16 +36,118 @@ pub use syntax::Pos;
 /// Compiles schema source. `origin` is the file it came from: error messages name it
 /// and `import` paths resolve against its directory.
 pub fn compile(source: &str, origin: Option<&Path>) -> Result<SchemaIr, String> {
-    let label = origin.map(|p| p.display().to_string()).unwrap_or_else(|| "<schema>".into());
-    let base: PathBuf = origin.and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default();
-    let load = |path: &str| -> Result<String, String> {
-        let p = base.join(path);
-        std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))
-    };
-    let located = |e: syntax::Error| format!("{label}:{}: {}", e.pos, e.msg);
-    let items = syntax::parse(source).map_err(located)?;
-    let ir = lower::Lowering { load: &load }.lower(items).map_err(located)?;
-    Ok(ir)
+    compile_project(source, origin).map(|project| project.ir)
+}
+
+/// Source ownership for generated modules. Model and enum names remain global.
+pub struct SchemaUnit {
+    pub path: PathBuf,
+    pub models: Vec<String>,
+    pub enums: Vec<String>,
+}
+
+pub struct CompiledProject {
+    pub ir: SchemaIr,
+    pub units: Vec<SchemaUnit>,
+}
+
+struct Loader {
+    units: Vec<SchemaUnit>,
+    seen: std::collections::HashSet<PathBuf>,
+    active: Vec<PathBuf>,
+    locations: Vec<(u32, u32, String)>,
+    lines: u32,
+}
+
+impl Loader {
+    fn located(&self, e: syntax::Error) -> String {
+        let (start, _, label) = self.locations.iter().find(|(start, end, _)| e.pos.line >= *start && e.pos.line < *end)
+            .unwrap_or(&self.locations[0]);
+        format!("{label}:{}:{}: {}", e.pos.line.saturating_sub(*start) + 1, e.pos.col, e.msg)
+    }
+
+    fn expand(&mut self, source: &str, origin: &Path, prefix: &str, root: bool) -> Result<Vec<syntax::Item>, String> {
+        let canonical = if origin.exists() {
+            origin.canonicalize().map_err(|e| e.to_string())?
+        } else {
+            origin.to_path_buf()
+        };
+        if self.active.contains(&canonical) {
+            return Err(format!("{}: cyclic schema import", origin.display()));
+        }
+        if !self.seen.insert(canonical.clone()) {
+            return Err(format!("{}: schema imported more than once", origin.display()));
+        }
+        self.active.push(canonical);
+        let offset = self.lines;
+        self.lines += source.lines().count() as u32 + 1;
+        self.locations.push((offset + 1, self.lines + 1, origin.display().to_string()));
+        let items = if offset == 0 { syntax::parse(source) } else { syntax::parse_at(source, offset + 1) }
+            .map_err(|e| self.located(e))?;
+        let index = self.units.len();
+        self.units.push(SchemaUnit { path: origin.to_path_buf(), models: vec![], enums: vec![] });
+        let mut out = vec![];
+        for mut item in items {
+            match &mut item {
+                syntax::Item::Import { pos, path, prefix: local } => {
+                    let imported = origin.parent().unwrap_or(Path::new("")).join(&*path);
+                    if imported.extension().is_some_and(|e| e == "prisma") {
+                        let text = std::fs::read_to_string(&imported)
+                            .map_err(|e| self.located(syntax::Error { pos: *pos, msg: format!("import {path:?}: {e}") }))?;
+                        out.extend(self.expand(&text, &imported, &format!("{prefix}{local}"), false)?);
+                        continue;
+                    }
+                    if !root || !local.is_empty() {
+                        return Err(self.located(syntax::Error { pos: *pos,
+                            msg: "extension imports belong in the main schema and cannot have a prefix".into() }));
+                    }
+                    *path = imported.canonicalize().map_err(|e| self.located(syntax::Error {
+                        pos: *pos, msg: format!("import {path:?}: {e}")
+                    }))?.to_string_lossy().into_owned();
+                }
+                syntax::Item::Datasource { pos, .. } if !root => {
+                    return Err(self.located(syntax::Error { pos: *pos,
+                        msg: "datasource settings are only allowed in the main schema".into() }));
+                }
+                syntax::Item::Model(m) => {
+                    self.units[index].models.push(m.name.clone());
+                    if !prefix.is_empty() {
+                        for name in ["map", "renamed_from"] {
+                            if let Some(attr) = m.blocks.iter_mut().find(|a| a.name == name) {
+                                if let Some((_, syntax::Value::Str(value))) = attr.args.positional.first_mut() {
+                                    *value = format!("{prefix}{value}");
+                                }
+                            } else if name == "map" {
+                                m.blocks.push(syntax::Attr { pos: m.pos, name: "map".into(), args: syntax::Args {
+                                    pos: m.pos, positional: vec![(m.pos, syntax::Value::Str(format!("{prefix}{}", m.name.to_lowercase())))],
+                                    named: vec![],
+                                } });
+                            }
+                        }
+                    }
+                }
+                syntax::Item::Enum(e) => self.units[index].enums.push(e.name.clone()),
+                _ => {}
+            }
+            out.push(item);
+        }
+        self.active.pop();
+        Ok(out)
+    }
+}
+
+pub fn compile_project(source: &str, origin: Option<&Path>) -> Result<CompiledProject, String> {
+    let mut loader = Loader { units: vec![], seen: Default::default(), active: vec![], locations: vec![], lines: 0 };
+    let origin = origin.unwrap_or(Path::new("<schema>"));
+    let items = loader.expand(source, origin, "", true)?;
+    let load = |path: &str| std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"));
+    let ir = lower::Lowering { load: &load }.lower(items).map_err(|e| loader.located(e))?;
+    Ok(CompiledProject { ir, units: loader.units })
+}
+
+pub fn compile_project_file(path: &Path) -> Result<CompiledProject, String> {
+    let source = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    compile_project(&source, Some(path))
 }
 
 /// Compiles and validates a schema file.

@@ -124,10 +124,10 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     }
     py.push_str("\n# Typed per model in models.pyi; plain aliases at runtime so the names can be imported.\n");
     let qs: Vec<String> = names.iter().map(|n| format!("{n}QuerySet")).collect();
-    writeln!(py, "{} = QuerySet", qs.join(" = ")).unwrap();
+    if !qs.is_empty() { writeln!(py, "{} = QuerySet", qs.join(" = ")).unwrap(); }
     let dicts: Vec<String> =
         names.iter().flat_map(|n| [format!("{n}Insert"), format!("{n}Update"), format!("{n}UpdateRow")]).collect();
-    writeln!(py, "{} = dict\n", dicts.join(" = ")).unwrap();
+    if !dicts.is_empty() { writeln!(py, "{} = dict\n", dicts.join(" = ")).unwrap(); }
     writeln!(py, "__all__ = [\n{all}]").unwrap();
 
     // -- models.pyi ------------------------------------------------------------------
@@ -307,4 +307,42 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     pyi.push_str(&body);
     writeln!(pyi, "__all__ = [\n{all}]").unwrap();
     Ok(Generated { module: py, stub: pyi })
+}
+
+/// A module exposing only declarations owned by one source file. All modules load
+/// the same generated runtime by path, so even circular relations share classes.
+pub fn facade(unit: &crate::dsl::SchemaUnit, shared_path: &str, stub_import: &str) -> Generated {
+    let mut names = unit.enums.clone();
+    for name in &unit.models {
+        names.extend([name.clone(), format!("{name}Insert"), format!("{name}Update"), format!("{name}UpdateRow"), format!("{name}QuerySet")]);
+    }
+    let path = serde_json::to_string(shared_path).unwrap();
+    let exports = serde_json::to_string(&names).unwrap();
+    let mut module = format!(r#"# Generated schema module. Do not edit.
+import importlib.util as _util
+from pathlib import Path as _Path
+import sys as _sys
+
+_path = (_Path(__file__).parent / {path}).resolve()
+_key = '_orm_schema:' + str(_path)
+if _key not in _sys.modules:
+    _spec = _util.spec_from_file_location(_key, _path)
+    _module = _util.module_from_spec(_spec)
+    _sys.modules[_key] = _module
+    try:
+        _spec.loader.exec_module(_module)
+    except BaseException:
+        del _sys.modules[_key]
+        raise
+_shared = _sys.modules[_key]
+
+__all__ = {exports}
+"#);
+    let mut stub = String::from("# Generated schema module. Do not edit.\n");
+    for name in &names {
+        writeln!(module, "{name} = _shared.{name}").unwrap();
+        writeln!(stub, "from {stub_import} import {name} as {name}").unwrap();
+    }
+    writeln!(stub, "\n__all__ = {exports}").unwrap();
+    Generated { module, stub }
 }

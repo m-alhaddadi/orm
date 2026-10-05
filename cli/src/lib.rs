@@ -327,7 +327,8 @@ fn generate(args: &Args, host: Host, schema: &Path) -> Result<()> {
         (None, _, Host::Node) => "typescript",
         (None, _, Host::Binary) => return Err(Failure::Usage("generate needs a language: python or typescript".into())),
     };
-    let (ir, compiled) = load(schema)?;
+    let project = dsl::compile_project_file(schema).map_err(Failure::Failed)?;
+    let (ir, compiled) = dsl::check(project.ir).map_err(Failure::Failed)?;
     let source = schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     match language {
         "python" => {
@@ -336,10 +337,32 @@ fn generate(args: &Args, host: Host, schema: &Path) -> Result<()> {
             }
             let out = out.unwrap_or_else(|| schema.with_file_name("models.py"));
             let g = codegen::python::generate(&ir, &compiled, &source).map_err(Failure::Failed)?;
-            write(&out, &g.module)?;
-            let stub = out.with_extension("pyi");
-            write(&stub, &g.stub)?;
-            println!("wrote {} and {}", out.display(), stub.display());
+            if project.units.len() == 1 {
+                write(&out, &g.module)?;
+                write(&out.with_extension("pyi"), &g.stub)?;
+                println!("wrote {} and {}", out.display(), out.with_extension("pyi").display());
+            } else {
+                let shared = out.with_file_name("_orm_models.py");
+                let shared_abs = absolute(&shared)?;
+                let mut files = vec![(shared.clone(), g.module), (shared.with_extension("pyi"), g.stub)];
+                let mut outputs = std::collections::HashSet::new();
+                outputs.insert(shared_abs.clone());
+                for (index, unit) in project.units.iter().enumerate() {
+                    let target = if index == 0 { out.clone() } else { unit.path.with_file_name("models.py") };
+                    let target_abs = absolute(&target)?;
+                    if !outputs.insert(target_abs.clone()) {
+                        return Err(Failure::Failed(format!("multiple schema modules would write {}; put each schema in its own directory", target.display())));
+                    }
+                    let (relative, import) = module_paths(target_abs.parent().unwrap(), &shared_abs)?;
+                    let facade = codegen::python::facade(unit, &relative, &import);
+                    files.push((target.clone(), facade.module));
+                    files.push((target.with_extension("pyi"), facade.stub));
+                }
+                for (path, content) in files {
+                    write(&path, &content)?;
+                    println!("wrote {}", path.display());
+                }
+            }
         }
         "typescript" => {
             let out = out.unwrap_or_else(|| schema.with_file_name("models.ts"));
@@ -350,6 +373,57 @@ fn generate(args: &Args, host: Host, schema: &Path) -> Result<()> {
         other => return Err(Failure::Usage(format!("unknown language {other}; available: python, typescript"))),
     }
     Ok(())
+}
+
+// Normalize output paths without requiring generated files to exist yet.
+fn absolute(path: &Path) -> Result<PathBuf> {
+    let path = if path.is_absolute() { path.to_path_buf() } else {
+        std::env::current_dir().map_err(failed)?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+fn module_paths(from: &Path, shared: &Path) -> Result<(String, String)> {
+    let a: Vec<_> = from.components().collect();
+    let b: Vec<_> = shared.parent().unwrap().components().collect();
+    let common = a.iter().zip(&b).take_while(|(a, b)| a == b).count();
+    let mut relative = PathBuf::new();
+    for _ in common..a.len() { relative.push(".."); }
+    let mut modules = vec![];
+    for component in &b[common..] {
+        relative.push(component.as_os_str());
+        let name = component.as_os_str().to_string_lossy().into_owned();
+        modules.push(name);
+    }
+    relative.push(shared.file_name().unwrap());
+    modules.push("_orm_models".into());
+    let mut package = Vec::new();
+    let mut package_root = shared.parent().unwrap();
+    while package_root.join("__init__.py").is_file() {
+        package.push(package_root.file_name().unwrap().to_string_lossy().into_owned());
+        package_root = package_root.parent().unwrap();
+    }
+    let import = if !package.is_empty() && !from.starts_with(package_root.join(package.last().unwrap())) {
+        package.reverse();
+        package.push("_orm_models".into());
+        package.join(".")
+    } else {
+        format!("{}{}", ".".repeat(a.len() - common + 1), modules.join("."))
+    };
+    for name in import.split('.').filter(|name| !name.is_empty()) {
+        if name.chars().enumerate().any(|(i, c)| !(c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))) {
+            return Err(Failure::Failed(format!("generated Python package directory must be an identifier: {name}")));
+        }
+    }
+    Ok((relative.to_string_lossy().into_owned(), import))
 }
 
 async fn database(command: &str, args: &Args, dir: &Path) -> Result<i32> {

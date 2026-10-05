@@ -51,3 +51,17 @@ fn binary() {
     assert!(text(&no_db.stderr).contains("ORM_DATABASE_URL"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn schema_module_output_collisions_fail_before_writing() {
+    let dir = std::env::temp_dir().join(format!("orm-cli-import-collision-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("schema.prisma"), "import \"library.prisma\"\n").unwrap();
+    std::fs::write(dir.join("library.prisma"), SCHEMA).unwrap();
+    let result = orm(&dir, &["generate", "python"]);
+    assert!(!result.status.success());
+    assert!(text(&result.stderr).contains("each schema in its own directory"));
+    assert!(!dir.join("models.py").exists());
+    assert!(!dir.join("_orm_models.py").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}

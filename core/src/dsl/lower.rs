@@ -249,7 +249,7 @@ impl Lowering<'_> {
         }
         // imports first: their types are usable anywhere in the file
         for item in &items {
-            if let Item::Import { pos, path } = item {
+            if let Item::Import { pos, path, .. } = item {
                 let src = (self.load)(path).map_err(|e| super::syntax::Error { pos: *pos, msg: format!("import {path:?}: {e}") })?;
                 let def = ExtensionDef::parse(&src)
                     .map_err(|e| super::syntax::Error { pos: *pos, msg: format!("extension file {path:?}: {e}") })?;

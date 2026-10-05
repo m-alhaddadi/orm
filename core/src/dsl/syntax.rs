@@ -277,7 +277,7 @@ pub enum Item {
     Enum(EnumDecl),
     Datasource { pos: Pos, props: Props },
     Function { pos: Pos, name: String, props: Props },
-    Import { pos: Pos, path: String },
+    Import { pos: Pos, path: String, prefix: String },
 }
 
 struct Parser<'a> {
@@ -364,7 +364,20 @@ impl Parser<'_> {
                     items.push(Item::Function { pos, name, props });
                 }
                 "import" => match self.advance()? {
-                    (_, Tok::Str(path)) => items.push(Item::Import { pos, path }),
+                    (_, Tok::Str(path)) => {
+                        let mut prefix = String::new();
+                        if self.is("(") {
+                            let args = self.args()?;
+                            if !args.positional.is_empty() || args.named.len() != 1 || args.named[0].0 != "prefix" {
+                                return err(pos, "schema import takes only prefix: \"...\"");
+                            }
+                            let Value::Str(value) = &args.named[0].2 else {
+                                return err(pos, "schema import prefix must be a string");
+                            };
+                            prefix = value.clone();
+                        }
+                        items.push(Item::Import { pos, path, prefix });
+                    },
                     (p, t) => return err(p, format!("expected a file path string, found {}", describe(&t))),
                 },
                 "enum" => {
@@ -607,7 +620,12 @@ fn describe(t: &Tok) -> String {
 }
 
 pub fn parse(source: &str) -> Result<Vec<Item>> {
-    let mut lexer = Lexer { chars: source.chars().peekable(), rest: source, pos: Pos { line: 1, col: 1 } };
+    parse_at(source, 1)
+}
+
+/// Start each imported file in a distinct source-map line range.
+pub(super) fn parse_at(source: &str, line: u32) -> Result<Vec<Item>> {
+    let mut lexer = Lexer { chars: source.chars().peekable(), rest: source, pos: Pos { line, col: 1 } };
     let (pos, tok) = lexer.next()?;
     let end = lexer.pos;
     let mut p = Parser { lexer, tok, pos, end, prev_end: Pos::default(), in_model: false };

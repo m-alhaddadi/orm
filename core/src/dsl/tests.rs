@@ -471,3 +471,58 @@ model Follow {
     let snap = crate::migrate::snapshot(&schema).unwrap();
     assert_eq!(snap.tables.iter().map(|t| t.foreign_keys.len()).sum::<usize>(), 5);
 }
+
+#[test]
+fn schema_imports_share_root_settings_and_preserve_ownership() {
+    let dir = std::env::temp_dir().join(format!("orm-imports-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("billing/nested")).unwrap();
+    let root = dir.join("schema.prisma");
+    let child = dir.join("billing/schema.prisma");
+    std::fs::write(&root, "datasource db {\n provider = \"sqlite\"\n}\nimport \"billing/schema.prisma\" (prefix: \"billing_\")\nmodel User {\n id Int @id\n invoices Invoice[]\n}\n").unwrap();
+    std::fs::write(&child, "import \"nested/schema.prisma\" (prefix: \"old_\")\nenum Status {\n open\n @@storage(text)\n}\nmodel Invoice {\n id Int @id\n user_id Int\n user User @relation(fields: [user_id], references: [id])\n status Status\n @@map(\"invoices\")\n @@renamed_from(\"old_invoices\")\n}\n").unwrap();
+    std::fs::write(dir.join("billing/nested/schema.prisma"), "model Record {\n id Int @id\n}\n").unwrap();
+    let project = compile_project_file(&root).unwrap();
+    assert_eq!(project.units.len(), 3);
+    assert_eq!(project.units[0].models, ["User"]);
+    assert_eq!(project.units[1].models, ["Invoice"]);
+    assert_eq!(project.units[1].enums, ["Status"]);
+    let (ir, schema) = check(project.ir).unwrap();
+    assert_eq!(ir.dialect, crate::dialect::Dialect::Sqlite);
+    let invoice = ir.models.iter().find(|m| m.name == "Invoice").unwrap();
+    assert_eq!(invoice.table, "billing_invoices");
+    assert_eq!(invoice.renamed_from.as_deref(), Some("billing_old_invoices"));
+    assert_eq!(ir.models.iter().find(|m| m.name == "Record").unwrap().table, "billing_old_record");
+    let sql = crate::migrate::create_all(&schema).unwrap().join("\n");
+    assert!(sql.contains("billing_invoices"));
+    assert!(sql.contains("REFERENCES \"user\""));
+    std::fs::write(&child, "datasource db {\n provider = \"sqlite\"\n}\n").unwrap();
+    let error = compile_file(&root).unwrap_err();
+    assert!(error.contains("billing/schema.prisma:1:1"), "{error}");
+    assert!(error.contains("only allowed in the main schema"));
+    std::fs::write(&child, "model Invoice {\n id Strin @id\n}\n").unwrap();
+    assert!(compile_file(&root).unwrap_err().contains("billing/schema.prisma:2:"));
+    std::fs::write(&child, "import \"../schema.prisma\"\n").unwrap();
+    assert!(compile_file(&root).unwrap_err().contains("cyclic schema import"));
+    std::fs::write(&child, "model User {\n id Int @id\n}\n").unwrap();
+    assert!(compile_file(&root).unwrap_err().contains("declared twice"));
+    std::fs::write(&root, "import \"billing/nested/schema.prisma\"\nimport \"billing/nested/../nested/schema.prisma\"\n").unwrap();
+    assert!(compile_file(&root).unwrap_err().contains("imported more than once"));
+    std::fs::write(&root, "import \"missing.prisma\"\n").unwrap();
+    assert!(compile_file(&root).unwrap_err().contains("import \"missing.prisma\""));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn imported_models_use_main_extension_definitions() {
+    let dir = std::env::temp_dir().join(format!("orm-import-types-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("library")).unwrap();
+    std::fs::write(dir.join("acme.toml"), "name = \"acme\"\n[types.money]\nsql = \"numeric(12, 2)\"\nvalue = \"text\"\n").unwrap();
+    std::fs::write(dir.join("schema.prisma"), "import \"library/schema.prisma\"\nimport \"acme.toml\"\ndatasource db {\n provider = \"postgresql\"\n extensions = [acme(version: \"1.0\")]\n}\n").unwrap();
+    std::fs::write(dir.join("library/schema.prisma"), "model Price {\n id BigInt @id\n amount Unsupported(\"money\")\n}\n").unwrap();
+    let (ir, _) = check(compile_file(&dir.join("schema.prisma")).unwrap()).unwrap();
+    assert_eq!(ir.models[0].fields[1].requires, ["acme"]);
+    assert_eq!(ir.extensions[0].version.as_deref(), Some("1.0"));
+    std::fs::write(dir.join("library/schema.prisma"), "import \"../acme.toml\"\n").unwrap();
+    assert!(compile_file(&dir.join("schema.prisma")).unwrap_err().contains("extension imports belong in the main schema"));
+    std::fs::remove_dir_all(dir).unwrap();
+}

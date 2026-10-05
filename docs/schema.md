@@ -178,6 +178,58 @@ END;
 A model's table is the model name in lower case, or `@@map("name")`.
 `@@comment("...")` and `@@renamed_from("old_table")` set its comment and previous name.
 
+### Optional schema imports
+
+Prefer a single schema file for an ordinary project. Explicit schema imports are
+available for reusable libraries or a small module that needs its own generated
+models; no app registration or directory discovery is required.
+
+```prisma
+// schema.prisma: the main schema
+import "billing/schema.prisma" (prefix: "billing_")
+import "audit/schema.prisma" // prefix is optional
+
+datasource db {
+  provider = "postgresql"
+  extensions = [pg_trgm]
+}
+```
+
+Import paths resolve relative to the file containing them. Only `.prisma` imports
+load schemas; existing `.toml` imports still load extension definitions. Imports
+must be explicit so compilation has one main schema that owns the datasource,
+dialect and extension configuration. Imported schemas cannot declare a datasource
+or import extension definitions; put those settings and definitions in the main
+schema. Imported models can use the main schema's extension types. As usual,
+extension usage is inferred across the complete compiled schema, and the database
+URL comes from the connection API or `ORM_DATABASE_URL`.
+
+All imported models, enums and SQL functions compile together, with one migration
+history. Relations can reference models in another file directly. Model and enum
+names must be globally unique; a table prefix does not create a model namespace.
+A prefix is prepended to default table names, explicit `@@map` names and
+`@@renamed_from` table names. Nested imports concatenate their prefixes. Enum type
+names, explicit constraint/index names and raw SQL are preserved; use unique
+explicit names and write raw SQL with the final table names. Cycles and repeated
+imports, including the same file through different paths, are errors.
+
+Python generation writes `models.py` and `models.pyi` beside each schema. Keep
+schema modules in separate directories. Use a shared Python package tree, or put
+the main schema in an importable package when importing an external library. Each
+public module exports its own models, enums and generated typing helpers. A private
+`_orm_models.py` / `.pyi` beside the main output holds the complete compiled schema
+and shared classes, allowing either public module to be imported first:
+
+```python
+from myproject.models import User
+from myproject.billing.models import Invoice
+```
+
+`-o` relocates the main module and its private shared module; imported modules stay
+beside their schema files. Generate from the main schema so every module receives
+the same database settings and prefixes. TypeScript generation currently writes
+one combined module from the same compiled schema.
+
 ### Fields
 
 `name Type[?] @attr...`, where `?` makes the column nullable.
