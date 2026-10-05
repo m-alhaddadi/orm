@@ -16,3 +16,4 @@ storage/artifacts/
 storage/integration/typescript/dist/
 storage/integration/python/build/
 storage/integration/python/src/*.egg-info/
+.verification/
