@@ -17,7 +17,7 @@ fn copy_python(from: &Path, to: &Path) {
 #[test]
 fn application_rust_runs_through_both_bindings() {
     let host = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
-    let temporary = std::env::temp_dir().join(format!("orm-native-public-{}", std::process::id()));
+    let temporary = host.join("target/extension-proof-tests").join(format!("orm-native-public-{}", std::process::id()));
     fs::create_dir_all(&temporary).unwrap();
     let target = host.join("target/extension-proof");
     let python = std::env::var("PYO3_PYTHON").map(PathBuf::from).unwrap_or_else(|_| host.join(".venv/bin/python"));

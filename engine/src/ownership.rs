@@ -69,6 +69,11 @@ pub fn prepare_write(schema: &Schema, contract: &WriteContract<'_, WriteValue<Va
     let mut supplied_values = vec![];
     for (index, write) in contract.owners.iter().enumerate() {
         let owner = owners.get(write.owner.0).ok_or_else(|| Error::query("unknown write owner"))?;
+        let mut ancestor = logical.owner;
+        while ancestor != write.owner {
+            ancestor = schema.owner_links.iter().find(|link| link.child == ancestor)
+                .ok_or_else(|| Error::query("write owner is not an ancestor of the logical model"))?.parent;
+        }
         if !seen.insert(write.owner.0) || write.fields.len() != write.values.len() { return Err(Error::query("duplicate owner or invalid owner value shape")); }
         let mut fields = vec![];
         let mut values = vec![];
@@ -76,7 +81,11 @@ pub fn prepare_write(schema: &Schema, contract: &WriteContract<'_, WriteValue<Va
         for (&field, value) in write.fields.iter().zip(write.values) {
             if field.owner != write.owner || !columns.insert(field.column) { return Err(Error::query("invalid or duplicate owner column")); }
             let physical = owner.fields().get(field.column).ok_or_else(|| Error::query("unknown owner column"))?;
-            let position = logical.resolved_fields.iter().position(|f| f.storage == field).ok_or_else(|| Error::query("owner write column is not exposed by the logical model"))?;
+            // Shared identity belongs to the child logically, but ancestor inserts
+            // may supply that same identity explicitly before propagation.
+            let position = logical.resolved_fields.iter().position(|f| f.storage == field)
+                .or_else(|| (field.column == owner.pk).then_some(logical.pk))
+                .ok_or_else(|| Error::query("owner write column is not exposed by the logical model"))?;
             if logical.native.computed().contains(&position) { return Err(Error::query("computed fields are read-only")); }
             let mut value = match value {
                 Supplied::Omitted => { crate::behavior::omitted(logical.native, position)?; None },
