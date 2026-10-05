@@ -104,6 +104,10 @@ stable; cycles, missing pass dependencies, duplicate IDs and overlapping effect
 ownership fail. Its Rust function takes `&mut orm_contracts::ir::SchemaIr` and
 returns `Result<(), String>`. Rust paths can use `crate::function`, the owning
 crate name, or its selected dependency alias; composition rewrites the prefix.
+Namespaced model declarations may derive their primary key during selected passes.
+Ordinary models require `@id` before lowering; annotated models must have one
+after preparation. Feature-derived relations should be contributed by the pass.
+
 Completed passes and prepared model names (`lowered_models`) are recorded so a generated or serialized normalized schema is
 not lowered twice. Additional definition batches lower their new declarations
 against the complete existing definition context. Attribute-independent passes
@@ -135,6 +139,9 @@ The Rust host API `orm_engine::ownership::prepare_write` consumes a typed
 ordered parent to child. `WriteValue::Returned` copies a previously returned
 primary key; explicit owner links prevent ambiguous key propagation. Values
 are typed native inputs and native validators run before execution.
+Ancestor inserts may supply their shared primary key explicitly even when the
+logical child exposes only its local identity. Every written owner must belong
+to the declared ancestor chain.
 `run_write` executes the prepared insert sequence in its own transaction or
 savepoint and rolls back that scope on failure. It supports a complete logical
 return shape. It requires an explicit physical schema and currently supports
