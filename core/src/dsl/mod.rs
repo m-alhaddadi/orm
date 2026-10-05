@@ -195,13 +195,21 @@ fn compile_project_mode(source: &str, origin: Option<&Path>, update: Option<Iden
         catalog_inputs.borrow_mut().push(PathBuf::from(path));
         std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))
     };
-    let mut ir = lower::Lowering { load: &load }.lower(items).map_err(|e| loader.located(e))?;
+    let deferred_identity = declarations.iter().filter(|d| d.field.is_none()).map(|d| d.model.clone()).collect();
+    let mut ir = lower::Lowering { load: &load, deferred_identity: &deferred_identity }.lower(items).map_err(|e| loader.located(e))?;
     ir.identities = identities;
     if !declarations.is_empty() {
         ir.behavior.schema_contract = crate::behavior::SCHEMA_CONTRACT;
         ir.behavior.declarations = declarations;
     }
-    if update.is_none() { crate::behavior::prepare(&mut ir, None)?; }
+    if update.is_none() {
+        crate::behavior::prepare(&mut ir, None)?;
+        for model in &ir.models {
+            if !model.fields.iter().any(|field| field.primary_key) {
+                return Err(format!("model {} has no @id field after extension lowering", model.name));
+            }
+        }
+    }
     crate::identity::validate(&ir)?;
     let mut inputs: Vec<_> = loader.units.iter().map(|unit| unit.path.clone()).collect();
     inputs.extend(catalog_inputs.into_inner());
