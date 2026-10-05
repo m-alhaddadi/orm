@@ -1,0 +1,18 @@
+[package]
+name = "orm-extension-allocation-probe"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+orm-core = { path = "../../../core" }
+orm-engine = { path = "../../../engine" }
+serde_json = "1"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[features]
+allocation-probe = []

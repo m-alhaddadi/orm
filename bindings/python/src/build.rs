@@ -28,13 +28,16 @@ struct ModelClass {
 /// The Python class of each model, by schema model index, and the members of each
 /// enum by stored value.
 pub struct Classes {
+    #[cfg(feature = "composition")]
+    pub native: Vec<orm_core::behavior::NativeModel>,
     models: Vec<Option<ModelClass>>,
     enums: Vec<Option<Py<PyDict>>>,
 }
 
 impl Classes {
     pub fn empty() -> Self {
-        Classes { models: vec![], enums: vec![] }
+        Classes { models: vec![], enums: vec![],
+            #[cfg(feature = "composition")] native: vec![] }
     }
 
     /// `classes` maps model names to their classes, and enum names to their enum
@@ -64,7 +67,8 @@ impl Classes {
                 }),
             });
         }
-        Ok(Classes { models: out, enums })
+        Ok(Classes { models: out, enums,
+            #[cfg(feature = "composition")] native: schema.models.iter().map(|m| m.native).collect() })
     }
 
     fn get(&self, model: usize) -> PyResult<&ModelClass> {

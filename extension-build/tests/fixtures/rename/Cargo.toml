@@ -1,0 +1,40 @@
+[package]
+name = "example-rename"
+version = "1.0.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+orm-contracts = { path = "../../../../contracts" }
+serde_json = "1"
+
+[package.metadata.orm-extension]
+id = "example.rename"
+version = "1.0.0"
+host_contract = 1
+schema_contract = 1
+languages = ["python", "typescript"]
+databases = ["postgres", "sqlite"]
+
+[[package.metadata.orm-extension.attributes]]
+name = "example.rename"
+target = "field"
+[package.metadata.orm-extension.attributes.arguments.to]
+kind = "string"
+required = true
+
+[[package.metadata.orm-extension.passes]]
+id = "example.rename.lower"
+phase = "logical"
+rust = "rename::lower"
+effects = ["example.rename.public-fields"]
+[[package.metadata.orm-extension.attributes]]
+name = "example.hide"
+target = "field"
+[[package.metadata.orm-extension.attributes]]
+name = "example.proxy"
+target = "model"
+[package.metadata.orm-extension.attributes.arguments.parent]
+kind = "string"
+required = true

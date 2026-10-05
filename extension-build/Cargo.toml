@@ -1,0 +1,12 @@
+[package]
+name = "orm-extension-build"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+orm-contracts = { path = "../contracts" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+semver = "1"
+sha2 = "0.10"

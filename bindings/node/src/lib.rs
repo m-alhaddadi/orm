@@ -190,6 +190,8 @@ fn prefetched_js(c: Conv, schema: &schema::Schema, fetched: &[Fetched]) -> napi:
 /// for a count or a write without `RETURNING`, a boolean for exists, `{model, rows}` for
 /// rows a write returned.
 fn outcome_js(env: &Env, schema: &schema::Schema, out: Outcome) -> napi::Result<Raw> {
+    #[cfg(feature = "composition")]
+    let out = orm_engine::behavior::results(&schema.native_models, out).map_err(|e| tagged(db_kind(&e), e))?;
     let c = conv(env)?;
     let js = c.js;
     Ok(Raw(match out {
@@ -279,8 +281,9 @@ pub struct JsSchema {
 impl JsSchema {
     #[napi(constructor)]
     pub fn new(schema_json: String) -> napi::Result<Self> {
-        let ir: ir::SchemaIr =
+        let mut ir: ir::SchemaIr =
             serde_json::from_str(&schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+        orm_core::behavior::prepare(&mut ir, Some("typescript")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         Ok(JsSchema { inner: Arc::new(inner) })
     }
@@ -657,6 +660,22 @@ pub fn connect<'env>(
 /// Compiles schema-language source to the schema IR (JSON). `path` is where it came
 /// from, for error messages and `import` resolution.
 #[napi]
+pub fn prepare_schema(schema_json: String, context_json: Option<String>) -> napi::Result<String> {
+    let mut ir: ir::SchemaIr = serde_json::from_str(&schema_json).map_err(|e| schema_err(e.to_string()))?;
+    if let Some(context) = context_json {
+        let context = serde_json::from_str(&context).map_err(|e| schema_err(format!("invalid definition context: {e}")))?;
+        ir = orm_core::behavior::merge_definition(context, ir).map_err(schema_err)?;
+    }
+    orm_core::behavior::prepare(&mut ir, Some("typescript")).map_err(schema_err)?;
+    serde_json::to_string(&ir).map_err(|e| schema_err(e.to_string()))
+}
+
+#[napi]
+pub fn native_artifact() -> napi::Result<String> {
+    serde_json::to_string(&orm_core::behavior::artifact()).map_err(|e| schema_err(e.to_string()))
+}
+
+#[napi]
 pub fn compile_schema(source: String, path: Option<String>) -> napi::Result<String> {
     let ir = orm_core::dsl::compile(&source, path.as_deref().map(std::path::Path::new)).map_err(schema_err)?;
     let (ir, _) = orm_core::dsl::check(ir).map_err(schema_err)?;
@@ -700,3 +719,6 @@ pub fn generate_typescript(path: String, runtime: Option<String>) -> napi::Resul
     let source = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     orm_core::codegen::typescript::generate(&ir, &schema, &source, runtime.as_deref().unwrap_or("orm")).map_err(schema_err)
 }
+
+#[cfg(feature = "composition")]
+mod methods { include!(env!("ORM_NODE_METHODS")); }

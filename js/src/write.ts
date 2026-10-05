@@ -14,7 +14,7 @@ function normalize(meta: ModelMeta, row: object, what: string, expressions: bool
     if (!expressions && (value instanceof Expression || value instanceof ParamRef)) {
       throw new TypeError(`${meta.name}.${key}: ${what} takes plain values, not expressions`);
     }
-    const f = meta.fields.get(key);
+    const f = meta.inputFields.get(key);
     if (f) {
       values.set(f.ir, value);
       continue;
@@ -47,7 +47,7 @@ export function prepareRows(
     for (const k of values.keys()) {
       provided.add(k);
     }
-    for (const f of meta.fieldList) {
+    for (const f of meta.inputFieldList) {
       if (!values.has(f.ir) && !(f.hasServerValue || f.nullable)) {
         throw new TypeError(`${meta.name}.${f.name} is required`);
       }

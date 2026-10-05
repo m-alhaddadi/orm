@@ -49,6 +49,8 @@ pub struct SchemaUnit {
 pub struct CompiledProject {
     pub ir: SchemaIr,
     pub units: Vec<SchemaUnit>,
+    /// Source files and database catalog resources read by compilation.
+    pub inputs: Vec<PathBuf>,
 }
 
 struct Loader {
@@ -139,10 +141,30 @@ impl Loader {
 pub fn compile_project(source: &str, origin: Option<&Path>) -> Result<CompiledProject, String> {
     let mut loader = Loader { units: vec![], seen: Default::default(), active: vec![], locations: vec![], lines: 0 };
     let origin = origin.unwrap_or(Path::new("<schema>"));
-    let items = loader.expand(source, origin, "", true)?;
-    let load = |path: &str| std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"));
-    let ir = lower::Lowering { load: &load }.lower(items).map_err(|e| loader.located(e))?;
-    Ok(CompiledProject { ir, units: loader.units })
+    let mut items = loader.expand(source, origin, "", true)?;
+    let label = origin.display().to_string();
+    let mut declarations = lower::behavior_declarations(&mut items, &label).map_err(|e| loader.located(e))?;
+    for declaration in &mut declarations {
+        let location = &mut declaration.location;
+        if let Some((start, _, file)) = loader.locations.iter().find(|(start, end, _)| location.line >= *start && location.line < *end) {
+            location.file = file.clone();
+            location.line = location.line - start + 1;
+        }
+    }
+    let catalog_inputs = std::cell::RefCell::new(Vec::new());
+    let load = |path: &str| {
+        catalog_inputs.borrow_mut().push(PathBuf::from(path));
+        std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))
+    };
+    let mut ir = lower::Lowering { load: &load }.lower(items).map_err(|e| loader.located(e))?;
+    if !declarations.is_empty() {
+        ir.behavior.schema_contract = crate::behavior::SCHEMA_CONTRACT;
+        ir.behavior.declarations = declarations;
+    }
+    crate::behavior::prepare(&mut ir, None)?;
+    let mut inputs: Vec<_> = loader.units.iter().map(|unit| unit.path.clone()).collect();
+    inputs.extend(catalog_inputs.into_inner());
+    Ok(CompiledProject { ir, units: loader.units, inputs })
 }
 
 pub fn compile_project_file(path: &Path) -> Result<CompiledProject, String> {

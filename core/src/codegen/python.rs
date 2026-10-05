@@ -159,6 +159,10 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         let name = &m.ir.name;
         writeln!(body, "{}\n", section(name)).unwrap();
         writeln!(body, "class {name}(Model):").unwrap();
+        for method in ir.behavior.methods.iter().filter(|method| method.model == *name) {
+            let output = if method.output.is_some() { "str" } else { "None" };
+            writeln!(body, "    @staticmethod\n    def {}(value: str) -> {output}: ...", method.name).unwrap();
+        }
         for f in m.fields() {
             writeln!(body, "    {}: f.{}[{}]", f.name, field_class(f), value_type(f)).unwrap();
         }
@@ -201,7 +205,11 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         let belongs =
             |field: &str| m.ir.relations.iter().find(|r| r.kind == RelKind::One && r.foreign_key && r.from == field);
         writeln!(body, "class {name}Insert(TypedDict):").unwrap();
-        for f in m.fields() {
+        for (position, f) in m.fields().iter().enumerate() {
+            #[cfg(feature = "composition")]
+            if m.native.computed().contains(&position) { continue; }
+            #[cfg(not(feature = "composition"))]
+            let _ = position;
             let t = value_type(f);
             match belongs(&f.name) {
                 Some(r) => {
@@ -217,9 +225,18 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
             }
         }
         writeln!(body, "\nclass {name}Update(TypedDict, total=False):").unwrap();
-        for f in m.fields() {
+        for (position, f) in m.fields().iter().enumerate() {
+            #[cfg(feature = "composition")]
+            if m.native.computed().contains(&position) { continue; }
+            #[cfg(not(feature = "composition"))]
+            let _ = position;
             let t = value_type(f);
-            writeln!(body, "    {}: {t} | Expression[{t}]", f.name).unwrap();
+            #[cfg(feature = "composition")]
+            let expression = !m.native.validated().contains(&position);
+            #[cfg(not(feature = "composition"))]
+            let expression = true;
+            if expression { writeln!(body, "    {}: {t} | Expression[{t}]", f.name).unwrap(); }
+            else { writeln!(body, "    {}: {t}", f.name).unwrap(); }
             if let Some(r) = belongs(&f.name) {
                 let target = if f.nullable { format!("{} | None", r.target) } else { r.target.clone() };
                 writeln!(body, "    {}: {target}", r.name).unwrap();
@@ -227,7 +244,11 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         }
         // update_many rows: the primary key plus plain values (no expressions)
         writeln!(body, "\nclass {name}UpdateRow(TypedDict, total=False):").unwrap();
-        for f in m.fields() {
+        for (position, f) in m.fields().iter().enumerate() {
+            #[cfg(feature = "composition")]
+            if m.native.computed().contains(&position) { continue; }
+            #[cfg(not(feature = "composition"))]
+            let _ = position;
             let t = value_type(f);
             if f.primary_key {
                 writeln!(body, "    {}: Required[{t}]", f.name).unwrap();

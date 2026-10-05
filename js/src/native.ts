@@ -116,6 +116,8 @@ export interface NativeEngine {
 interface Addon {
   Schema: new (schemaJson: string) => NativeSchema;
   connect(url: string, schema: NativeSchema, maxConnections: number, disable: string[]): Promise<NativeEngine>;
+  prepareSchema(schemaJson: string, contextJson?: string): string;
+  nativeArtifact(): string;
   compileSchema(source: string, path?: string | null): string;
   compileSchemaFile(path: string): string;
   generateTypescript(path: string, runtime?: string | null): string;

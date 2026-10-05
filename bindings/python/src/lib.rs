@@ -7,6 +7,8 @@
 mod build;
 mod convert;
 mod errors;
+#[cfg(feature = "composition")]
+mod methods { include!(env!("ORM_PYTHON_METHODS")); }
 
 use orm_core::{ir, migrate, schema};
 
@@ -104,8 +106,9 @@ impl PySchema {
     #[new]
     #[pyo3(signature = (schema_json, classes = None))]
     fn new(py: Python<'_>, schema_json: &str, classes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let ir: ir::SchemaIr =
+        let mut ir: ir::SchemaIr =
             serde_json::from_str(schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+        orm_core::behavior::prepare(&mut ir, Some("python")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         let classes = match classes {
             Some(c) => Classes::new(py, &inner, c)?,
@@ -478,6 +481,8 @@ fn outcome_to_py(
     db: Option<Py<PyAny>>,
     row_cls: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    #[cfg(feature = "composition")]
+    let out = orm_engine::behavior::results(&classes.native, out).map_err(db_err)?;
     let db = db.map(|d| d.into_bound(py));
     let b = Builder::new(py, classes, db.as_ref());
     match out {
@@ -491,6 +496,24 @@ fn outcome_to_py(
         Outcome::Affected(n) => n.into_py_any(py),
         Outcome::Rows { model, rows, types } => b.model_rows(model, rows.as_ref(), &types)?.into_py_any(py),
     }
+}
+
+/// Normalize behavioral declarations before building language classes.
+#[pyfunction]
+#[pyo3(signature = (schema_json, context_json = None))]
+fn prepare_schema(schema_json: &str, context_json: Option<&str>) -> PyResult<String> {
+    let mut ir: ir::SchemaIr = serde_json::from_str(schema_json).map_err(|e| schema_err(e.to_string()))?;
+    if let Some(context) = context_json {
+        let context = serde_json::from_str(context).map_err(|e| schema_err(format!("invalid definition context: {e}")))?;
+        ir = orm_core::behavior::merge_definition(context, ir).map_err(schema_err)?;
+    }
+    orm_core::behavior::prepare(&mut ir, Some("python")).map_err(schema_err)?;
+    serde_json::to_string(&ir).map_err(|e| schema_err(e.to_string()))
+}
+
+#[pyfunction]
+fn native_artifact() -> PyResult<String> {
+    serde_json::to_string(&orm_core::behavior::artifact()).map_err(|e| schema_err(e.to_string()))
 }
 
 /// Compiles schema-language source to the schema IR (JSON). `path` is where it came
@@ -571,7 +594,11 @@ fn connect<'py>(
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
+    #[cfg(feature = "composition")]
+    methods::register(m)?;
     m.add_function(wrap_pyfunction!(connect, m)?)?;
+    m.add_function(wrap_pyfunction!(prepare_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(native_artifact, m)?)?;
     m.add_function(wrap_pyfunction!(compile_schema, m)?)?;
     m.add_function(wrap_pyfunction!(compile_schema_file, m)?)?;
     m.add_function(wrap_pyfunction!(generate_python, m)?)?;

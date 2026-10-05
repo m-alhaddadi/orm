@@ -1,0 +1,141 @@
+{
+  "regressions": [
+    {
+      "case": "python/postgres/construct",
+      "interval": [
+        0.415288897335242,
+        1.4410038860761865
+      ]
+    },
+    {
+      "case": "python/postgres/construct+sql",
+      "interval": [
+        0.3974656196767734,
+        1.3686484270929444
+      ]
+    },
+    {
+      "case": "python/sqlite/construct+sql",
+      "interval": [
+        0.13977540414372713,
+        1.0418037404590463
+      ]
+    },
+    {
+      "case": "python/sqlite/read-1000",
+      "interval": [
+        0.7203318758712385,
+        2.26042590394242
+      ]
+    },
+    {
+      "case": "node/postgres/construct",
+      "interval": [
+        2.6140195000209587,
+        4.3371488271760406
+      ]
+    },
+    {
+      "case": "node/postgres/plan-native",
+      "interval": [
+        0.04082010861313212,
+        1.5268942574201971
+      ]
+    },
+    {
+      "case": "node/postgres/construct+sql",
+      "interval": [
+        2.244980035728439,
+        5.614367303973999
+      ]
+    },
+    {
+      "case": "node/sqlite/construct",
+      "interval": [
+        1.4422256779974774,
+        3.6805910078941295
+      ]
+    },
+    {
+      "case": "node/sqlite/construct+sql",
+      "interval": [
+        3.545536194050636,
+        5.198287526627765
+      ]
+    }
+  ],
+  "inconclusive": [
+    "python/postgres/plan-native",
+    "python/postgres/read-1",
+    "python/postgres/read-50",
+    "python/postgres/read-1000",
+    "python/postgres/projection",
+    "python/postgres/update",
+    "python/postgres/bulk-update-50",
+    "python/postgres/insert",
+    "python/postgres/bulk-insert-50",
+    "python/sqlite/construct",
+    "python/sqlite/plan-native",
+    "python/sqlite/read-1",
+    "python/sqlite/read-50",
+    "python/sqlite/projection",
+    "python/sqlite/update",
+    "python/sqlite/bulk-update-50",
+    "python/sqlite/insert",
+    "python/sqlite/bulk-insert-50",
+    "node/postgres/read-1",
+    "node/postgres/read-50",
+    "node/postgres/read-1000",
+    "node/postgres/projection",
+    "node/postgres/update",
+    "node/postgres/bulk-update-50",
+    "node/postgres/insert",
+    "node/postgres/bulk-insert-50",
+    "node/sqlite/plan-native",
+    "node/sqlite/read-1",
+    "node/sqlite/read-50",
+    "node/sqlite/read-1000",
+    "node/sqlite/projection",
+    "node/sqlite/bulk-update-50",
+    "node/sqlite/insert",
+    "node/sqlite/bulk-insert-50"
+  ],
+  "within_3_percent": [
+    "python/postgres/construct",
+    "python/postgres/plan-native",
+    "python/postgres/construct+sql",
+    "python/postgres/read-1",
+    "python/postgres/read-50",
+    "python/postgres/read-1000",
+    "python/postgres/projection",
+    "python/postgres/update",
+    "python/postgres/insert",
+    "python/postgres/bulk-insert-50",
+    "python/sqlite/construct",
+    "python/sqlite/plan-native",
+    "python/sqlite/construct+sql",
+    "python/sqlite/read-1",
+    "python/sqlite/read-50",
+    "python/sqlite/read-1000",
+    "python/sqlite/projection",
+    "python/sqlite/update",
+    "python/sqlite/bulk-update-50",
+    "python/sqlite/insert",
+    "python/sqlite/bulk-insert-50",
+    "node/postgres/plan-native",
+    "node/postgres/read-1",
+    "node/postgres/read-50",
+    "node/postgres/read-1000",
+    "node/postgres/projection",
+    "node/postgres/update",
+    "node/postgres/insert",
+    "node/postgres/bulk-insert-50",
+    "node/sqlite/plan-native",
+    "node/sqlite/read-1",
+    "node/sqlite/read-50",
+    "node/sqlite/read-1000",
+    "node/sqlite/projection",
+    "node/sqlite/bulk-update-50",
+    "node/sqlite/bulk-insert-50"
+  ]
+}

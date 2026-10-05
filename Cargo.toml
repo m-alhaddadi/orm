@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "engine", "cli", "bindings/python", "bindings/node"]
+members = ["contracts", "extension-build", "core", "engine", "cli", "bindings/python", "bindings/node"]
 # bench/ormcore is a separate workspace (Phase 0 harness).
 exclude = ["bench"]
 

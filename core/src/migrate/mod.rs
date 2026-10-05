@@ -55,12 +55,14 @@ pub fn parse_snapshot(json: &str) -> Result<DbSchema> {
 }
 
 pub fn snapshot(schema: &Schema) -> Result<DbSchema> {
+    let schema = schema.physical();
     model::build(schema).map(|(s, _)| s)
 }
 
 /// The migration from `previous` (an earlier snapshot; empty for the first migration)
 /// to `schema`.
 pub fn plan(schema: &Schema, previous: &DbSchema) -> Result<MigrationPlan> {
+    let schema = schema.physical();
     let (current, renames) = model::build(schema)?;
     if previous.version != 0 && previous.dialect != current.dialect {
         return Err(format!("migration snapshot targets {}, schema targets {}; use a separate migrations directory", previous.dialect.name(), current.dialect.name()));

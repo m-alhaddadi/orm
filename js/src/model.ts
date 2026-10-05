@@ -88,6 +88,8 @@ export class ModelMeta implements Source {
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
   readonly fieldList: FieldMeta[] = [];
+  inputFields: ReadonlyMap<string, FieldMeta> = this.fields;
+  inputFieldList: readonly FieldMeta[] = this.fieldList;
   readonly relations = new Map<string, RelationMeta>();
   readonly relationByIr = new Map<string, RelationMeta>();
   readonly pk: FieldMeta;
@@ -398,6 +400,7 @@ export class Registry {
   private readonly enums = new Map<string, IREnum>();
   private dialect: string | undefined;
   private readonly extra: Record<string, unknown[]> = {};
+  private behavior: Record<string, unknown> = {};
   private nativeSchema: NativeSchema | undefined;
 
   get(name: string): ModelMeta {
@@ -457,13 +460,45 @@ export class Registry {
     this.nativeSchema = undefined;
   }
 
+  /** @internal: normalized context is owned by this candidate. */
+  setBehavior(value: unknown): void { this.behavior = structuredClone((value ?? {}) as Record<string, unknown>); }
+
   /** The schema IR of every registered model. */
   ir(): SchemaIR {
     const out: SchemaIR = { models: [...this.models.values()].map((m) => m.ir) };
     if (this.enums.size) {
       out.enums = [...this.enums.values()];
     }
-    return { ...out, ...(this.dialect === undefined ? {} : { dialect: this.dialect }), ...this.extra };
+    return JSON.parse(JSON.stringify({ ...out, ...(this.dialect === undefined ? {} : { dialect: this.dialect }), ...this.extra, ...(Object.keys(this.behavior).length ? { behavior: this.behavior } : {}) })) as SchemaIR;
+  }
+
+  /** Prepare the entire registered dependency batch. */
+  prepare(): NativeSchema {
+    return this.native();
+  }
+
+  /** @internal */
+  candidate(): Registry {
+    const next = new Registry();
+    for (const [k, v] of this.models) next.models.set(k, v);
+    for (const [k, v] of this.enums) next.enums.set(k, v);
+    next.dialect = this.dialect;
+    next.behavior = structuredClone(this.behavior);
+    for (const [k, v] of Object.entries(this.extra)) next.extra[k] = [...v];
+    return next;
+  }
+
+  /** @internal: called only after preparation succeeds. */
+  publish(next: Registry): void {
+    this.models.clear();
+    for (const [k, v] of next.models) this.models.set(k, v);
+    this.enums.clear();
+    for (const [k, v] of next.enums) this.enums.set(k, v);
+    this.dialect = next.dialect;
+    this.behavior = structuredClone(next.behavior);
+    for (const k of Object.keys(this.extra)) delete this.extra[k];
+    for (const [k, v] of Object.entries(next.extra)) this.extra[k] = [...v];
+    this.nativeSchema = next.nativeSchema;
   }
 
   /** The compiled native schema (cached until models change). */
@@ -484,20 +519,45 @@ export function define(
   schema: string | SchemaIR,
   options: { readonly registry?: Registry } = {},
 ): Record<string, ModelClass<ModelSpec> & Record<string, unknown>> {
-  const ir: SchemaIR = typeof schema === "string" ? (JSON.parse(schema) as SchemaIR) : schema;
-  const reg = options.registry ?? registry;
+  let ir: SchemaIR = JSON.parse(typeof schema === "string" ? schema : JSON.stringify(schema)) as SchemaIR;
+  const destination = options.registry ?? registry;
+  const context = [...destination].length ? JSON.stringify(destination.ir()) : undefined;
+  ir = JSON.parse(call(() => native().prepareSchema(JSON.stringify(ir), context))) as SchemaIR;
+  const reg = destination.candidate();
   reg.addExtra(ir);
+  reg.setBehavior(ir.behavior);
   for (const e of ir.enums ?? []) {
     reg.addEnum(e);
   }
   const out: Record<string, ModelClass<ModelSpec> & Record<string, unknown>> = {};
   for (const m of ir.models) {
+    if (destination.has(m.name)) {
+      if (JSON.stringify(m) !== JSON.stringify(destination.get(m.name).ir)) throw new TypeError(`extension changed existing model ${m.name}; define dependent schemas together in a new registry`);
+      continue;
+    }
     const meta = new ModelMeta(m, reg);
+    const computed = new Set(((ir.behavior as { result_fields?: { model: string; field: string }[] } | undefined)?.result_fields ?? []).filter((f) => f.model === m.name).map((f) => f.field));
+    if (computed.size) {
+      meta.inputFieldList = meta.fieldList.filter((f) => !computed.has(f.ir));
+      meta.inputFields = new Map(meta.inputFieldList.map((f) => [f.name, f]));
+    }
+    for (const method of ((ir.behavior as { methods?: { model: string; name: string; native_function: string }[] } | undefined)?.methods ?? [])) {
+      if (method.model === m.name) {
+        const name = camel(method.name);
+        checkName(m.name, name, meta.fields);
+        if (meta.relations.has(name) || Object.prototype.hasOwnProperty.call(meta.model, name)) throw new TypeError(`${m.name}.${name}: model method collision`);
+        const fn = (native() as unknown as Record<string, (value: string) => unknown>)[method.native_function];
+        if (typeof fn !== "function") throw new TypeError(`${m.name}.${name}: missing native method; rebuild`);
+        Object.defineProperty(meta.model, name, { value: (value: string) => call(() => fn(value)), enumerable: true });
+      }
+    }
     meta.objects = makeQuerySet(meta);
     Object.defineProperty(meta.Row, "meta", { value: meta });
     reg.add(meta);
     out[m.name] = meta.model;
   }
+  reg.prepare();
+  destination.publish(reg);
   return out;
 }
 
