@@ -6,3 +6,5 @@ bench/log-*.txt
 node_modules/
 *.node
 js/dist/
+
+.verification/
