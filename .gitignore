@@ -6,3 +6,10 @@ bench/log-*.txt
 node_modules/
 *.node
 js/dist/
+
+storage/typescript/dist/
+storage/python/build/
+storage/python/src/*.egg-info/
+.storage-venv/
+.storage-core-venv/
+storage/artifacts/
