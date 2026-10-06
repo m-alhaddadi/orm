@@ -50,6 +50,16 @@ for backend, provider in [('sqlite','sqlite'),('postgres','postgresql')]:
         elapsed = time.perf_counter() - start
     else:
         elapsed = None
+        # An interrupted frontend can leave its workspace before the native
+        # libraries were packaged. Rebuild that profile rather than treating
+        # directory existence as a completed build.
+        if not (extension/'python/orm/_native.so').exists() or not (extension/'js/orm.node').exists():
+            buildenv = dict(env, ORM_CORE_COMPOSITION=str(extension/'composition.rs'),
+                ORM_ENGINE_COMPOSITION=str(extension/'engine-composition.rs'),
+                ORM_PYTHON_METHODS=str(extension/'python-methods.rs'),
+                ORM_NODE_METHODS=str(extension/'node-methods.rs'))
+            subprocess.run(['cargo','build','--release','--offline','--locked','--manifest-path',str(extension/'Cargo.toml'),'-p','orm-python','-p','orm-node'],env=buildenv,check=True)
+            elapsed = time.perf_counter() - start
     def package(workspace, elapsed):
         (workspace/'python').mkdir(exist_ok=True)
         shutil.copytree(root/'python/orm',workspace/'python/orm',ignore=shutil.ignore_patterns('*.so','__pycache__'),dirs_exist_ok=True)
