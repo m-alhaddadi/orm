@@ -4,10 +4,14 @@
 //! connection's [`Dialect`] into SQL text plus [`Value`]s, and a driver runs them.
 //! Everything above this module is driver-neutral: a driver implements [`Driver`],
 //! [`Executor`], [`Transaction`] and [`RowSet`] for one database, and [`connect`] picks
-//! it from the URL scheme. Postgres (tokio-postgres) is the only driver today.
+//! it from the URL scheme. A build compiles PostgreSQL (tokio-postgres), SQLite
+//! (rusqlite), or both.
 
+#[cfg(feature = "postgres")]
 mod numeric;
+#[cfg(feature = "postgres")]
 mod postgres;
+#[cfg(feature = "sqlite")]
 mod sqlite;
 
 use std::future::Future;
@@ -15,7 +19,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use sea_query::{PostgresQueryBuilder, SqliteQueryBuilder, QueryStatementWriter, Value};
+use sea_query::{QueryStatementWriter, Value};
+#[cfg(feature = "postgres")]
+use sea_query::PostgresQueryBuilder;
+#[cfg(feature = "sqlite")]
+use sea_query::SqliteQueryBuilder;
 
 use orm_core::dialect::Dialect;
 use orm_core::ir::ValueType;
@@ -117,21 +125,30 @@ pub trait Driver: Executor {
     fn close(&self) -> BoxFuture<'_, ()>;
 }
 
-/// Opens a connection pool for `url` (`postgres://` / `postgresql://`).
+/// Opens the selected driver for `postgres://`, `postgresql://` or `sqlite://`.
 pub async fn connect(url: &str, max_connections: usize) -> DbResult<Arc<dyn Driver>> {
+    let _ = max_connections;
     let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("");
     match scheme {
+        #[cfg(feature = "sqlite")]
         "sqlite" => Ok(Arc::new(sqlite::SqliteDriver::connect(url).await?)),
+        #[cfg(feature = "postgres")]
         "postgres" | "postgresql" => Ok(Arc::new(postgres::PgDriver::connect(url, max_connections).await?)),
+        #[allow(unreachable_patterns)]
+        "postgres" | "postgresql" | "sqlite" => Err(DbError::other(format!("database backend for {scheme:?} is not compiled into this native profile"))),
         other => Err(DbError::other(format!("unsupported database URL scheme {other:?}"))),
     }
 }
 
 /// SQL text and parameters of a statement in `dialect`.
 pub fn build<S: QueryStatementWriter>(dialect: Dialect, stmt: &S) -> (String, Vec<Value>) {
-    let (sql, values) = match dialect {
+    let (sql, values): (String, sea_query::Values) = match dialect {
+        #[cfg(feature = "postgres")]
         Dialect::Postgres => stmt.build(PostgresQueryBuilder),
+        #[cfg(feature = "sqlite")]
         Dialect::Sqlite => stmt.build(SqliteQueryBuilder),
+        #[allow(unreachable_patterns)]
+        _ => panic!("database dialect is not compiled into this native profile"),
     };
     (sql, values.0)
 }
@@ -139,7 +156,20 @@ pub fn build<S: QueryStatementWriter>(dialect: Dialect, stmt: &S) -> (String, Ve
 /// `stmt` with parameters inlined, for debugging.
 pub fn to_string<S: QueryStatementWriter>(dialect: Dialect, stmt: &S) -> String {
     match dialect {
+        #[cfg(feature = "postgres")]
         Dialect::Postgres => stmt.to_string(PostgresQueryBuilder),
+        #[cfg(feature = "sqlite")]
         Dialect::Sqlite => stmt.to_string(SqliteQueryBuilder),
+        #[allow(unreachable_patterns)]
+        _ => panic!("database dialect is not compiled into this native profile"),
     }
+}
+
+/// Reject unsupported schema dialects before planning or opening connections.
+pub fn require_dialect(dialect: Dialect) -> DbResult<()> {
+    let enabled = match dialect {
+        Dialect::Postgres => cfg!(feature = "postgres"),
+        Dialect::Sqlite => cfg!(feature = "sqlite"),
+    };
+    if enabled { Ok(()) } else { Err(DbError::other(format!("{} is not compiled into this native profile", dialect.name()))) }
 }

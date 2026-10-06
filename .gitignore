@@ -17,3 +17,6 @@ storage/integration/typescript/dist/
 storage/integration/python/build/
 storage/integration/python/src/*.egg-info/
 .verification/
+# Local distribution build artifacts.
+build/
+*.egg-info/

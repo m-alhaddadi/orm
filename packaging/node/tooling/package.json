@@ -1,0 +1,21 @@
+{
+  "name": "@orm/native-tooling",
+  "version": "0.1.0",
+  "description": "Static ORM tooling profile",
+  "main": "index.cjs",
+  "files": [
+    "index.cjs",
+    "orm.node"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "orm": "0.1.0"
+  },
+  "optionalDependencies": {
+    "@orm/native-tooling-darwin-arm64": "0.1.0",
+    "@orm/native-tooling-linux-x64": "0.1.0",
+    "@orm/native-tooling-win32-x64": "0.1.0"
+  }
+}

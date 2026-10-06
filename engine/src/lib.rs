@@ -32,3 +32,11 @@ pub mod ownership;
 
 #[cfg(feature = "file-storage")]
 pub mod file_storage;
+
+/// Database backends compiled into this engine, independent of installed packages.
+pub fn compiled_backends() -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if cfg!(feature = "postgres") { names.push("postgres"); }
+    if cfg!(feature = "sqlite") { names.push("sqlite"); }
+    names
+}

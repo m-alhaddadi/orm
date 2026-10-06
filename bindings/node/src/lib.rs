@@ -12,6 +12,16 @@
 mod convert;
 mod js;
 
+#[cfg(any(
+    all(feature = "profile-postgres", feature = "profile-sqlite"),
+    all(feature = "profile-postgres", feature = "profile-combined"),
+    all(feature = "profile-postgres", feature = "profile-tooling"),
+    all(feature = "profile-sqlite", feature = "profile-combined"),
+    all(feature = "profile-sqlite", feature = "profile-tooling"),
+    all(feature = "profile-combined", feature = "profile-tooling")
+))]
+compile_error!("select exactly one named native profile; use a custom feature build for exact combinations");
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -298,6 +308,7 @@ impl JsSchema {
             serde_json::from_str(&schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
         orm_core::behavior::prepare(&mut ir, Some("typescript")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
+        db::require_dialect(inner.dialect).map_err(|e| schema_err(e.to_string()))?;
         Ok(JsSchema { inner: Arc::new(inner) })
     }
 
@@ -697,6 +708,7 @@ pub fn compile_schema(source: String, path: Option<String>) -> napi::Result<Stri
 
 /// `npx orm`: the `orm` command line (`orm_cli`). Resolves to the exit code; output
 /// goes to the process's stdout / stderr.
+#[cfg(feature = "cli")]
 #[napi]
 pub fn cli<'env>(env: &'env Env, argv: Vec<String>) -> napi::Result<PromiseRaw<'env, i32>> {
     env.spawn_future(async move { Ok(orm_cli::run(&argv, orm_cli::Host::Node).await) })
@@ -724,6 +736,7 @@ pub fn compile_schema_file(path: String) -> napi::Result<String> {
 }
 
 /// `models.ts` source for a schema file; the runtime is imported from `runtime`.
+#[cfg(feature = "generate-typescript")]
 #[napi]
 pub fn generate_typescript(path: String, runtime: Option<String>) -> napi::Result<String> {
     let p = std::path::Path::new(&path);
@@ -735,3 +748,22 @@ pub fn generate_typescript(path: String, runtime: Option<String>) -> napi::Resul
 
 #[cfg(feature = "composition")]
 mod methods { include!(env!("ORM_NODE_METHODS")); }
+
+/// Static packaging compatibility metadata (separate from extension manifests).
+#[napi]
+pub fn profile_metadata() -> napi::Result<String> {
+    let profile = if cfg!(feature = "profile-tooling") { "tooling" }
+        else if cfg!(feature = "profile-combined") { "combined" }
+        else if cfg!(feature = "profile-postgres") { "postgres" }
+        else if cfg!(feature = "profile-sqlite") { "sqlite" }
+        else { "custom" };
+    serde_json::to_string(&serde_json::json!({
+        "abi": 1, "version": env!("CARGO_PKG_VERSION"), "language": "node", "profile": profile,
+        "backends": orm_engine::compiled_backends(),
+        "adapters": [],
+        "capabilities": { "cli": cfg!(feature = "cli"),
+            "generate-python": cfg!(feature = "generate-python"),
+            "generate-typescript": cfg!(feature = "generate-typescript"),
+            "composition": cfg!(feature = "composition") }
+    })).map_err(|e| schema_err(e.to_string()))
+}

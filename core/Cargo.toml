@@ -16,6 +16,9 @@ toml = "0.8"
 storage-reference = { path = "../storage/reference", optional = true }
 
 [features]
+default = ["generate-python", "generate-typescript"]
+generate-python = []
+generate-typescript = []
 composition = []
 file-storage = ["dep:storage-reference"]
 reference-loading = []

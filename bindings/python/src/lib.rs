@@ -10,6 +10,16 @@ mod errors;
 #[cfg(feature = "composition")]
 mod methods { include!(env!("ORM_PYTHON_METHODS")); }
 
+#[cfg(any(
+    all(feature = "profile-postgres", feature = "profile-sqlite"),
+    all(feature = "profile-postgres", feature = "profile-combined"),
+    all(feature = "profile-postgres", feature = "profile-tooling"),
+    all(feature = "profile-sqlite", feature = "profile-combined"),
+    all(feature = "profile-sqlite", feature = "profile-tooling"),
+    all(feature = "profile-combined", feature = "profile-tooling")
+))]
+compile_error!("select exactly one named native profile; use a custom feature build for exact combinations");
+
 use orm_core::{ir, migrate, schema};
 
 use std::path::PathBuf;
@@ -110,6 +120,7 @@ impl PySchema {
             serde_json::from_str(schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
         orm_core::behavior::prepare(&mut ir, Some("python")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
+        db::require_dialect(inner.dialect).map_err(db_err)?;
         let classes = match classes {
             Some(c) => Classes::new(py, &inner, c)?,
             None => Classes::empty(),
@@ -542,6 +553,7 @@ fn compile_schema_file(path: &str) -> PyResult<String> {
 }
 
 /// `(models.py, models.pyi)` source for a schema file.
+#[cfg(feature = "generate-python")]
 #[pyfunction]
 fn generate_python(path: &str) -> PyResult<(String, String)> {
     let p = std::path::Path::new(path);
@@ -554,6 +566,7 @@ fn generate_python(path: &str) -> PyResult<(String, String)> {
 
 /// `python -m orm`: the `orm` command line (`orm_cli`), on its own runtime with the GIL
 /// released. Gives the exit code; output goes to the process's stdout / stderr.
+#[cfg(feature = "cli")]
 #[pyfunction]
 fn cli(py: Python<'_>, argv: Vec<String>) -> i32 {
     py.detach(|| orm_cli::run_blocking(&argv, orm_cli::Host::Python))
@@ -607,9 +620,12 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(connect, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_schema, m)?)?;
     m.add_function(wrap_pyfunction!(native_artifact, m)?)?;
+    m.add_function(wrap_pyfunction!(profile_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(compile_schema, m)?)?;
     m.add_function(wrap_pyfunction!(compile_schema_file, m)?)?;
+    #[cfg(feature = "generate-python")]
     m.add_function(wrap_pyfunction!(generate_python, m)?)?;
+    #[cfg(feature = "cli")]
     m.add_function(wrap_pyfunction!(cli, m)?)?;
     m.add_function(wrap_pyfunction!(list_migrations, m)?)?;
     m.add_function(wrap_pyfunction!(find_migration, m)?)?;
@@ -624,4 +640,23 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SchemaError", py.get_type::<errors::SchemaError>())?;
     m.add("MigrationError", py.get_type::<errors::MigrationError>())?;
     Ok(())
+}
+
+/// Static packaging compatibility metadata (separate from extension manifests).
+#[pyfunction]
+fn profile_metadata() -> PyResult<String> {
+    let profile = if cfg!(feature = "profile-tooling") { "tooling" }
+        else if cfg!(feature = "profile-combined") { "combined" }
+        else if cfg!(feature = "profile-postgres") { "postgres" }
+        else if cfg!(feature = "profile-sqlite") { "sqlite" }
+        else { "custom" };
+    serde_json::to_string(&serde_json::json!({
+        "abi": 1, "version": env!("CARGO_PKG_VERSION"), "language": "python", "profile": profile,
+        "backends": orm_engine::compiled_backends(),
+        "adapters": [],
+        "capabilities": { "cli": cfg!(feature = "cli"),
+            "generate-python": cfg!(feature = "generate-python"),
+            "generate-typescript": cfg!(feature = "generate-typescript"),
+            "composition": cfg!(feature = "composition") }
+    })).map_err(|e| schema_err(e.to_string()))
 }

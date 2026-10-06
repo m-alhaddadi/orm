@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "orm-native-custom"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.maturin]
+manifest-path = "../../../bindings/python/Cargo.toml"
+python-source = "."
+module-name = "orm_native_custom._native"
+no-default-features = true
+features = ["pyo3/extension-module"]

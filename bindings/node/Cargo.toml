@@ -9,12 +9,12 @@ name = "orm_node"
 crate-type = ["cdylib"]
 
 [dependencies]
-orm-core = { path = "../../core" }
-orm-engine = { path = "../../engine" }
-orm-cli = { path = "../../cli", default-features = false }
+orm-core = { path = "../../core", default-features = false }
+orm-engine = { path = "../../engine", default-features = false }
+orm-cli = { path = "../../cli", optional = true, default-features = false }
 napi = { version = "3", default-features = false, features = ["napi8", "tokio_rt", "serde-json"] }
 napi-derive = "3"
-sea-query = { version = "1.0", features = ["backend-postgres", "with-chrono", "with-json", "with-uuid", "with-bigdecimal", "postgres-array", "thread-safe", "hashable-value"] }
+sea-query = { version = "1.0", default-features = false, features = ["with-chrono", "with-json", "with-uuid", "with-bigdecimal", "postgres-array", "thread-safe", "hashable-value"] }
 serde_json = "1"
 chrono = "0.4"
 uuid = "1"
@@ -24,7 +24,18 @@ bigdecimal = "0.4"
 napi-build = "2"
 
 [features]
+default = ["postgres", "sqlite", "cli", "generate-python", "generate-typescript", "reference-loading"]
+postgres = ["orm-engine/postgres", "sea-query/backend-postgres", "orm-cli?/postgres"]
+sqlite = ["orm-engine/sqlite", "sea-query/backend-sqlite", "orm-cli?/sqlite"]
+cli = ["dep:orm-cli"]
+generate-python = ["orm-core/generate-python", "orm-cli?/generate-python"]
+generate-typescript = ["orm-core/generate-typescript", "orm-cli?/generate-typescript"]
 composition = ["orm-engine/composition", "orm-core/composition"]
 file-storage = ["orm-engine/file-storage", "orm-core/file-storage"]
-default = ["reference-loading"]
-reference-loading = ["orm-core/reference-loading", "orm-cli/reference-loading"]
+reference-loading = ["orm-core/reference-loading", "orm-cli?/reference-loading"]
+
+# Named release profiles must be built with --no-default-features.
+profile-postgres = ["postgres"]
+profile-sqlite = ["sqlite"]
+profile-combined = ["postgres", "sqlite"]
+profile-tooling = ["postgres", "sqlite", "cli", "generate-python", "generate-typescript", "reference-loading"]

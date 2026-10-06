@@ -1,5 +1,7 @@
 //! Code generation from the schema, one module per language.
+#[cfg(feature = "generate-python")]
 pub mod python;
+#[cfg(feature = "generate-typescript")]
 pub mod typescript;
 
 /// Compact schema payload for self-contained generated modules in every language.

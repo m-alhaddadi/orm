@@ -1,6 +1,6 @@
 [build-system]
-requires = ["maturin>=1.5,<2"]
-build-backend = "maturin"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "orm"
@@ -9,13 +9,17 @@ description = "Async Python ORM with a Rust core"
 requires-python = ">=3.11"
 
 [project.optional-dependencies]
+postgres = ["orm-native-postgres==0.1.0"]
+sqlite = ["orm-native-sqlite==0.1.0"]
+combined = ["orm-native-combined==0.1.0"]
+tooling = ["orm-native-tooling==0.1.0"]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "mypy>=1.11", "pyright"]
 
-[tool.maturin]
-manifest-path = "bindings/python/Cargo.toml"
-python-source = "python"
-module-name = "orm._native"
-features = ["pyo3/extension-module"]
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.setuptools.package-data]
+orm = ["py.typed", "*.pyi"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

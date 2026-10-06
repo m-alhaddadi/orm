@@ -1,0 +1,21 @@
+{
+  "name": "@orm/native-combined",
+  "version": "0.1.0",
+  "description": "Static ORM combined profile",
+  "main": "index.cjs",
+  "files": [
+    "index.cjs",
+    "orm.node"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "orm": "0.1.0"
+  },
+  "optionalDependencies": {
+    "@orm/native-combined-darwin-arm64": "0.1.0",
+    "@orm/native-combined-linux-x64": "0.1.0",
+    "@orm/native-combined-win32-x64": "0.1.0"
+  }
+}

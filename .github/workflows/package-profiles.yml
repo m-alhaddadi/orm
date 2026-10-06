@@ -1,0 +1,81 @@
+name: Native profile release checks
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['**/Cargo.toml', 'Cargo.lock', 'engine/**', 'core/**', 'bindings/**', 'packaging/**', 'python/**', 'js/**', 'pyproject.toml', '.github/workflows/package-profiles.yml']
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-latest]
+        python: ['3.11', '3.12', '3.13', '3.14']
+        profile: [postgres, sqlite, combined, tooling]
+    runs-on: ${{ matrix.os }}
+    services:
+      postgres:
+        image: ${{ matrix.os == 'ubuntu-24.04' && 'postgres:16' || '' }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: orm_test
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ORM_TEST_DATABASE_URL: ${{ matrix.os == 'ubuntu-24.04' && 'postgres://postgres:postgres@localhost/orm_test' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install maturin setuptools wheel
+      - run: python packaging/check-dependencies.py
+      - run: python -m pip wheel --no-deps --no-build-isolation -w target/wheels .
+      - run: maturin build --release --out ../../../target/wheels
+        working-directory: packaging/python/${{ matrix.profile }}
+      - run: python packaging/check-wheel.py target/wheels ${{ matrix.profile }}
+      - run: python -m pip install --no-index --find-links target/wheels "orm[${{ matrix.profile }}]"
+      - run: python packaging/smoke-python.py
+        env:
+          ORM_PROFILE: ${{ matrix.profile }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.profile }}
+          path: target/wheels/*.whl
+  node:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-latest]
+        profile: [postgres, sqlite, combined, tooling]
+    runs-on: ${{ matrix.os }}
+    services:
+      postgres:
+        image: ${{ matrix.os == 'ubuntu-24.04' && 'postgres:16' || '' }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: orm_test
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ORM_TEST_DATABASE_URL: ${{ matrix.os == 'ubuntu-24.04' && 'postgres://postgres:postgres@localhost/orm_test' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+        working-directory: js
+      - run: npx tsc -p tsconfig.json
+        working-directory: js
+      - run: node packaging/build-node-profile.mjs ${{ matrix.profile }} --release
+      - run: node packaging/check-node-install.mjs ${{ matrix.profile }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-${{ matrix.os }}-${{ matrix.profile }}
+          path: target/npm-packs/*.tgz

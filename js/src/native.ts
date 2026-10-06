@@ -118,6 +118,7 @@ interface Addon {
   connect(url: string, schema: NativeSchema, maxConnections: number, disable: string[]): Promise<NativeEngine>;
   prepareSchema(schemaJson: string, contextJson?: string): string;
   nativeArtifact(): string;
+  profileMetadata(): string;
   compileSchema(source: string, path?: string | null): string;
   compileSchemaFile(path: string): string;
   generateTypescript(path: string, runtime?: string | null): string;
@@ -127,22 +128,77 @@ interface Addon {
   findMigration(dir: string, name: string): string[];
 }
 
+const profiles: Record<string, readonly string[]> = {
+  postgres: ["postgres"], sqlite: ["sqlite"], combined: ["postgres", "sqlite"], tooling: ["postgres", "sqlite"],
+};
+
+function validate(addon: Addon, profile?: string): void {
+  if (typeof addon.profileMetadata !== "function") throw new Error("incompatible orm native artifact; rebuild for metadata ABI 1");
+  const meta = JSON.parse(addon.profileMetadata()) as {
+    abi: number; version: string; language: string; profile: string; backends: string[];
+    capabilities: Record<string, boolean>; adapters: string[];
+  };
+  if (typeof meta !== "object" || meta === null || Array.isArray(meta) || meta.abi !== 1 || meta.version !== "0.1.0" || meta.language !== "node" ||
+      !Array.isArray(meta.backends) || meta.backends.length === 0 ||
+      new Set(meta.backends).size !== meta.backends.length || meta.backends.some(b => !["postgres", "sqlite"].includes(b)) ||
+      typeof meta.capabilities !== "object" || meta.capabilities === null ||
+      Array.isArray(meta.capabilities) || Object.values(meta.capabilities).some(v => typeof v !== "boolean") ||
+      !Array.isArray(meta.adapters) || meta.adapters.some(a => typeof a !== "string" || meta.capabilities[a] !== true) ||
+      new Set(meta.adapters).size !== meta.adapters.length) {
+    throw new Error("incompatible orm native artifact; rebuild or install matching orm 0.1.0 packages");
+  }
+  if (profile) {
+    const capabilities = { cli: profile === "tooling", "generate-python": profile === "tooling",
+      "generate-typescript": profile === "tooling", composition: false };
+    if (meta.profile !== profile || meta.adapters.length !== 0 || JSON.stringify(meta.backends) !== JSON.stringify(profiles[profile]) ||
+        Object.keys(capabilities).some(key => meta.capabilities[key] !== capabilities[key as keyof typeof capabilities]) ||
+        Object.keys(meta.capabilities).length !== Object.keys(capabilities).length) {
+      throw new Error(`incompatible orm native profile ${profile}; reinstall matching packages`);
+    }
+  }
+}
+
 function load(): Addon {
   const require = createRequire(import.meta.url);
-  const candidates = [
-    process.env["ORM_NATIVE"],
-    // src/native.ts (run directly, e.g. by Bun) and dist/src/native.js
-    fileURLToPath(new URL("../orm.node", import.meta.url)),
-    fileURLToPath(new URL("../../orm.node", import.meta.url)),
-  ];
-  for (const path of candidates) {
-    if (path && existsSync(path)) {
+  const selected = process.env["ORM_PROFILE"];
+  if (selected !== undefined && !Object.hasOwn(profiles, selected)) {
+    throw new Error(`unknown ORM_PROFILE ${selected}; choose ${Object.keys(profiles).join(", ")}`);
+  }
+  const explicit = process.env["ORM_NATIVE"];
+  if (explicit) {
+    const addon = require(explicit) as Addon;
+    validate(addon, selected);
+    addon.setDecimalClass(Decimal);
+    return addon;
+  }
+  const available = Object.keys(profiles).filter(profile => {
+    try { require.resolve(`@orm/native-${profile}`); return true; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "MODULE_NOT_FOUND") throw error;
+      return false;
+    }
+  });
+  if (selected || available.length) {
+    const profile = selected ?? (available.length === 1 ? available[0] : undefined);
+    if (!profile || !available.includes(profile)) {
+      throw new Error(`select one installed native profile with ORM_PROFILE; installed: ${available.join(", ") || "none"}`);
+    }
+    const addon = require(`@orm/native-${profile}`) as Addon;
+    validate(addon, profile);
+    addon.setDecimalClass(Decimal);
+    return addon;
+  }
+  // Source checkout: the addon that `npm run build:native` writes.
+  for (const path of [fileURLToPath(new URL("../orm.node", import.meta.url)),
+                      fileURLToPath(new URL("../../orm.node", import.meta.url))]) {
+    if (existsSync(path)) {
       const addon = require(path) as Addon;
+      validate(addon);
       addon.setDecimalClass(Decimal);
       return addon;
     }
   }
-  throw new Error("the orm native addon (orm.node) is missing; build it with `npm run build:native`");
+  throw new Error("install @orm/native-postgres, @orm/native-sqlite, @orm/native-combined or @orm/native-tooling alongside orm");
 }
 
 let addon: Addon | undefined;
@@ -168,4 +224,17 @@ export async function wait<T>(f: () => Promise<T>): Promise<T> {
   } catch (e) {
     throw fromNative(e);
   }
+}
+
+/** Fixed adapter set. Bind specialized methods at module/definition initialization. */
+let adapters: readonly string[] | undefined;
+export function nativeAdapters(): readonly string[] {
+  if (adapters === undefined) {
+    const meta = JSON.parse(native().profileMetadata()) as { adapters: string[]; capabilities: Record<string, boolean> };
+    if (!Array.isArray(meta.adapters) || meta.adapters.some(name => meta.capabilities[name] !== true)) {
+      throw new Error("native adapter/capability metadata mismatch");
+    }
+    adapters = Object.freeze([...meta.adapters]);
+  }
+  return adapters;
 }

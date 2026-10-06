@@ -59,7 +59,8 @@ on port 55439. Substitute your URL when invoking the runner.
 
 ```nu
 $env.UV_CACHE_DIR = '/tmp/orm-uv-cache'
-^.venv/bin/maturin develop --release
+^uv pip install --python .venv/bin/python -e .
+with-env {VIRTUAL_ENV: ($env.PWD | path join .venv)} { cd packaging/python/tooling; ^../../../.venv/bin/maturin develop --release }
 ^node js/scripts/build-native.mjs --release
 ^npm --prefix js run build
 ^nu bench/shared-behavior/run.nu --url 'postgres://postgres:postgres@127.0.0.1:55439/orm_test' --out /tmp/orm-lock-results
