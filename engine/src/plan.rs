@@ -2062,7 +2062,12 @@ pub fn plan_insert(
     params: &dyn Params,
 ) -> Result<(InsertStatement, Vec<ValueType>)> {
     crate::db::require_dialect(target.dialect)?;
-    let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+    let idx = schema.model_idx(model).map_err(query_err)?;
+    let m = schema.model(idx);
+    #[cfg(feature = "proxy-models")]
+    let (fields, rows) = crate::proxy::insert_defaults(&schema.proxy_models[idx], m, fields, rows)?;
+    #[cfg(feature = "proxy-models")]
+    let fields = fields.as_ref();
     #[cfg(feature = "file-storage")]
     crate::file_storage::rows(m, fields, &rows)?;
     #[cfg(feature = "composition")]

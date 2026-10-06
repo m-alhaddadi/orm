@@ -315,7 +315,7 @@ impl Lowering<'_> {
                 return err(decl.pos, format!("model {} has no @id field", decl.name));
             }
             for member in decl.members.iter().filter(|mm| model_names.contains_key(mm.ty.name.as_str())) {
-                let r = relation(decl, member, &m.fields, &model_names)?;
+                let r = relation(decl, member, &m.fields, &model_names, self.deferred_identity)?;
                 m.relations.push(r);
             }
             for block in &decl.blocks {
@@ -759,7 +759,7 @@ fn rel_args(a: &Attr) -> RelArgs {
     RelArgs { name, fields: names("fields"), references: names("references") }
 }
 
-fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap<&str, &ModelDecl>) -> Result<RelationIr> {
+fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap<&str, &ModelDecl>, deferred_identity: &HashSet<String>) -> Result<RelationIr> {
     let target = &member.ty.name;
     let what = format!("relation {}.{}", m.name, member.name);
     if let Some(a) = member.attrs.iter().find(|a| a.name != "relation") {
@@ -871,7 +871,7 @@ fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap
         return err(member.ty.pos, format!("{what}: {from} is {}nullable, so the relation type is `{hint}`", if local.nullable { "" } else { "not " }));
     }
     let Some((tpos, to)) = to else { return err(rel.pos, format!("{what}: fields: needs references: [<field of {target}>]")) };
-    if !target_fields.contains(&to.as_str()) {
+    if !target_fields.contains(&to.as_str()) && !deferred_identity.contains(target) {
         return err(tpos, format!("{what}: {target} has no field {to}"));
     }
     let on_delete = match n.get("onDelete") {
@@ -1219,6 +1219,26 @@ fn param(pos: Pos, v: &Value) -> Result<String> {
     })
 }
 
+/// A behavioral declaration argument as literal JSON: a bare identifier is a string.
+fn declaration_value(pos: Pos, value: &Value) -> Result<serde_json::Value> {
+    Ok(match value {
+        Value::Path(path, None) if path.as_slice() == ["null"] => serde_json::Value::Null,
+        Value::Path(path, None) => serde_json::Value::String(path.join(".")),
+        Value::Path(_, Some(_)) => return err(pos, "behavioral arguments require literal values, not function calls"),
+        Value::List(items) => serde_json::Value::Array(items.iter().map(|(p, v)| declaration_value(*p, v)).collect::<Result<_>>()?),
+        Value::Object(entries) => {
+            let mut object = serde_json::Map::new();
+            for (key, pos, value) in entries {
+                if object.insert(key.clone(), declaration_value(*pos, value)?).is_some() {
+                    return err(*pos, format!("duplicate behavioral object key {key}"));
+                }
+            }
+            serde_json::Value::Object(object)
+        }
+        value => json_of(pos, value)?,
+    })
+}
+
 /// Preserve namespaced behavioral declarations before ordinary schema lowering.
 /// Database type attributes keep their existing interpretation.
 pub(super) fn behavior_declarations(items: &mut [Item], file: &str) -> Result<Vec<crate::behavior::Declaration>> {
@@ -1232,14 +1252,14 @@ pub(super) fn behavior_declarations(items: &mut [Item], file: &str) -> Result<Ve
             }
             let mut arguments = BTreeMap::new();
             for (name, pos, value) in &a.args.named {
-                if arguments.insert(name.clone(), json_of(*pos, value)?).is_some() {
+                if arguments.insert(name.clone(), declaration_value(*pos, value)?).is_some() {
                     return err(*pos, format!("@{}: duplicate argument {name}", a.name));
                 }
             }
             out.push(crate::behavior::Declaration {
                 lowered: false,
                 attribute: a.name, model: model.to_owned(), field: field.map(str::to_owned), arguments,
-                positional: a.args.positional.iter().map(|(pos, v)| json_of(*pos, v)).collect::<Result<_>>()?,
+                positional: a.args.positional.iter().map(|(pos, v)| declaration_value(*pos, v)).collect::<Result<_>>()?,
                 location: crate::behavior::SourceLocation { file: file.to_owned(), line: a.pos.line, column: a.pos.col },
             });
         }

@@ -138,6 +138,11 @@ fn build() -> Result<(), String> {
     let mut core: toml::Value = toml::from_str(&fs::read_to_string(&core_path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     core["dependencies"]["orm-contracts"]["path"] = toml::Value::String(config.host.join("contracts").to_string_lossy().into());
     core["dependencies"]["storage-reference"]["path"] = toml::Value::String(config.host.join("storage/reference").to_string_lossy().into());
+    // Optional in-tree consumer crates retain their original source location in
+    // the isolated native workspace, just like the shared contracts SDK.
+    if core["dependencies"].get("orm-proxy-runtime").is_some() {
+        core["dependencies"]["orm-proxy-runtime"]["path"] = toml::Value::String(config.host.join("extensions/proxy-runtime").to_string_lossy().into());
+    }
     for (alias, dependency) in &config.dependencies {
         orm_extension_build::rust_path(&alias.replace('-', "_"))?;
         if alias.contains("::") || core["dependencies"].get(alias).is_some() { return Err(format!("invalid or occupied dependency alias {alias}")); }

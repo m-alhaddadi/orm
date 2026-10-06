@@ -30,6 +30,7 @@ pub struct Declaration {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Requirements {
+    /// Same-table logical views, prepared by the selected proxy compiler.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proxy_models: Vec<ProxyModel>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -168,6 +169,8 @@ pub fn validate_field_adapters(ir: &SchemaIr) -> Result<(), String> {
     Ok(())
 }
 
+/// Intended shape only. Physical encoding, enum representation and constraints
+/// remain on the storage owner. These contracts never imply SQL predicates.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyModel {
@@ -288,7 +291,7 @@ pub struct Argument {
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ArgumentKind { String, Integer, Boolean, List }
+pub enum ArgumentKind { String, Integer, Boolean, List, Value }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AttributeTarget { Model, Field }
@@ -420,6 +423,7 @@ pub fn validate_declarations(ir: &SchemaIr, manifests: &[Manifest], language: Op
         let matches = |v: &serde_json::Value, arg: &Argument| match arg.kind {
             ArgumentKind::String => v.is_string(), ArgumentKind::Integer => v.is_i64(),
             ArgumentKind::Boolean => v.is_boolean(), ArgumentKind::List => v.is_array(),
+            ArgumentKind::Value => true,
         };
         for (name, value) in &d.arguments {
             let arg = a.arguments.get(name).ok_or_else(|| fail(d, format!("unknown argument {name}")))?;
@@ -451,6 +455,9 @@ pub fn check_requirements(ir: &SchemaIr, artifact: &Artifact) -> Result<(), Stri
     }
     if (!r.generic_relations.is_empty() || !r.generic_reverse.is_empty()) && !artifact.capabilities.iter().any(|c| c == "generic-relations") {
         return Err("generic relations are not compiled into this artifact; rebuild with generic-relations".into());
+    }
+    if !r.proxy_models.is_empty() && !artifact.capabilities.iter().any(|c| c == "proxy-models") {
+        return Err("proxy models require the compiled proxy-models capability; rebuild native artifact".into());
     }
     if !r.is_empty() && r.schema_contract != artifact.schema_contract {
         return Err(format!("schema contract {} unavailable (artifact {}); rebuild native artifact", r.schema_contract, artifact.schema_contract));

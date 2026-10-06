@@ -63,7 +63,8 @@ fn element_type(f: &FieldIr) -> String {
 /// The type a column reads as.
 fn value_type(f: &FieldIr) -> String {
     let t = element_type(f);
-    let t = if f.array && !f.hints.contains_key("typescript") { format!("{t}[]") } else { t };
+    let t = if f.array && f.enum_name.is_some() && f.hints.contains_key("typescript") { format!("({t})[]") }
+        else if f.array && !f.hints.contains_key("typescript") { format!("{t}[]") } else { t };
     if f.nullable {
         format!("{t} | null")
     } else {
@@ -240,7 +241,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
             if m.native.computed().contains(&position) { continue; }
             #[cfg(not(feature = "composition"))]
             let _ = position;
-            let optional = f.nullable || has_server_value(f);
+            let optional = f.nullable || has_server_value(f) || super::has_client_default(ir, &m.ir.name, &f.name);
             match belongs_to(m, &f.name) {
                 Some(r) if !optional => one_of.push((f, r)),
                 Some(r) => {

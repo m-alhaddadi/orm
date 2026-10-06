@@ -1,0 +1,30 @@
+enum Status {
+  ACTIVE @map("active")
+  OLD @map("old")
+  @@storage(text)
+}
+model User {
+  id Int @id
+  name String?
+  status Status @default(OLD)
+  settings Json?
+  active Boolean @default(false)
+  volume Int @default(1)
+  @@map("proxy_05_users")
+}
+model Active {
+  @@proxy.of(User)
+  @@proxy.nonNull("name")
+  @@proxy.subset("status", [ACTIVE])
+  @@proxy.default("name", "client")
+  @@proxy.default("status", "active")
+  @@proxy.default("settings", {labels: ["proxy", null], limit: 3})
+  @@proxy.default("active", true)
+  @@proxy.default("volume", 7)
+}
+model Post {
+  id Int @id
+  user_id Int
+  user Active @relation(fields: [user_id], references: [id])
+  @@map("proxy_05_posts")
+}

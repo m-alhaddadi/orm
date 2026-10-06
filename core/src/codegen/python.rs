@@ -266,13 +266,13 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
             match belongs(&f.name) {
                 Some(r) => {
                     let target = if f.nullable { format!("{} | None", r.target) } else { r.target.clone() };
-                    if !f.nullable && !has_server_value(f) {
+                    if !f.nullable && !has_server_value(f) && !super::has_client_default(ir, &m.ir.name, &f.name) {
                         writeln!(body, "    # One of {} / {} is required (checked at runtime).", f.name, r.name).unwrap();
                     }
                     writeln!(body, "    {}: NotRequired[{t}]", f.name).unwrap();
                     writeln!(body, "    {}: NotRequired[{target}]", r.name).unwrap();
                 }
-                None if f.nullable || has_server_value(f) => writeln!(body, "    {}: NotRequired[{t}]", f.name).unwrap(),
+                None if f.nullable || has_server_value(f) || super::has_client_default(ir, &m.ir.name, &f.name) => writeln!(body, "    {}: NotRequired[{t}]", f.name).unwrap(),
                 None => writeln!(body, "    {}: {t}", f.name).unwrap(),
             }
         }
@@ -378,11 +378,12 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     if !en.is_empty() {
         writeln!(pyi, "from enum import {}", en.join(", ")).unwrap();
     }
-    let typing = if used.contains("Any") {
-        "Any, ClassVar, NotRequired, Required, TypedDict"
-    } else {
-        "ClassVar, NotRequired, Required, TypedDict"
-    };
+    let literal = schema.models.iter().flat_map(|m| m.fields()).any(|f| f.hints.get("python").is_some_and(|h| h.starts_with("Literal[")));
+    let typing = format!(
+        "{}ClassVar, {}NotRequired, Required, TypedDict",
+        if used.contains("Any") { "Any, " } else { "" },
+        if literal { "Literal, " } else { "" },
+    );
     writeln!(pyi, "from typing import {typing}").unwrap();
     if used.contains("UUID") {
         pyi.push_str("from uuid import UUID\n");

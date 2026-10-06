@@ -45,3 +45,6 @@ pub fn compiled_backends() -> Vec<&'static str> {
 }
 #[cfg(any(feature = "generic-relations", test))]
 pub mod generic;
+
+#[cfg(feature = "proxy-models")]
+pub mod proxy;

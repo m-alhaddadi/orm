@@ -23,6 +23,14 @@ pub fn artifact() -> Artifact {
         artifact.capabilities.push("reference-loading".into());
         artifact
     };
+    #[cfg(feature = "proxy-models")]
+    let artifact = {
+        let mut artifact = artifact;
+        if !artifact.capabilities.iter().any(|c| c == "proxy-models") {
+            artifact.capabilities.push("proxy-models".into());
+        }
+        artifact
+    };
     artifact
 }
 

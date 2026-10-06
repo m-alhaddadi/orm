@@ -10,6 +10,7 @@ name = "orm_core"
 
 [dependencies]
 orm-contracts = { path = "../contracts" }
+orm-proxy-runtime = { path = "../extensions/proxy-runtime", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -24,3 +25,4 @@ file-storage = ["dep:storage-reference"]
 reference-loading = []
 model-composition = ["composition"]
 generic-relations = []
+proxy-models = ["composition", "dep:orm-proxy-runtime"]

@@ -95,6 +95,8 @@ impl Model {
 }
 
 pub struct Schema {
+    #[cfg(feature = "proxy-models")]
+    pub proxy_models: Vec<crate::proxy::PreparedProxy>,
     pub dialect: crate::dialect::Dialect,
     pub models: Vec<Model>,
     pub enums: Vec<EnumIr>,
@@ -218,7 +220,31 @@ impl Schema {
         }
         #[cfg(feature = "composition")]
         let owner_links = crate::ownership::resolve(&mut models, storage.as_deref(), &ir.behavior.field_storage, &ir.behavior.owner_links)?;
+        #[cfg(feature = "proxy-models")]
+        let proxy_models = {
+            let mut seen = std::collections::BTreeSet::new();
+            for proxy in &ir.behavior.proxy_models {
+                if !seen.insert(&proxy.model) || !model_index.contains_key(&proxy.model) || !model_index.contains_key(&proxy.parent) {
+                    return Err(format!("{}: duplicate or unresolved proxy metadata; rebuild schema", proxy.model));
+                }
+                let mut parent = proxy.parent.as_str();
+                let mut path = std::collections::BTreeSet::from([proxy.model.as_str()]);
+                while let Some(next) = ir.behavior.proxy_models.iter().find(|p| p.model == parent) {
+                    if !path.insert(parent) { return Err("cyclic proxy metadata; rebuild schema".into()); }
+                    parent = &next.parent;
+                }
+                let model = &models[model_index[&proxy.model]];
+                if proxy.storage_owner != parent { return Err(format!("{}: stale proxy storage owner; rebuild schema", proxy.model)); }
+                let physical = storage.as_ref().ok_or("proxy models require explicit physical storage")?;
+                if model.table() != models[model_index[parent]].table() || !physical.models.iter().any(|m| m.ir.name == parent && m.table() == model.table()) {
+                    return Err(format!("{}: proxy must share its root storage owner", proxy.model));
+                }
+            }
+            models.iter().map(|m| crate::proxy::prepare(&m.ir.name, m.fields(), &enums,
+                ir.behavior.proxy_models.iter().find(|p| p.model == m.ir.name))).collect::<Result<Vec<_>>>()?
+        };
         Ok(Schema {
+            #[cfg(feature = "proxy-models")] proxy_models,
             dialect: ir.dialect,
             models,
             enums,

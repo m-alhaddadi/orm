@@ -65,3 +65,8 @@ mod reference_tests {
         assert!(typescript::generate(&ir, &schema, "schema.prisma", "orm").err().unwrap().contains("collides"));
     }
 }
+
+/// A proxy client default lets an insert omit the field.
+fn has_client_default(ir: &crate::ir::SchemaIr, model: &str, field: &str) -> bool {
+    ir.behavior.proxy_models.iter().any(|p| p.model == model && p.defaults.contains_key(field))
+}

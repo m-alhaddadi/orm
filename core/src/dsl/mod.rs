@@ -209,6 +209,13 @@ fn compile_project_mode(source: &str, origin: Option<&Path>, update: Option<Iden
             if !model.fields.iter().any(|field| field.primary_key) {
                 return Err(format!("model {} has no @id field after extension lowering", model.name));
             }
+            for relation in &model.relations {
+                if let Some(target) = ir.models.iter().find(|m| m.name == relation.target) {
+                    if !target.fields.iter().any(|f| f.name == relation.to) {
+                        return Err(format!("relation {}.{}: {} has no field {} after extension lowering", model.name, relation.name, relation.target, relation.to));
+                    }
+                }
+            }
         }
     }
     crate::identity::validate(&ir)?;

@@ -53,6 +53,8 @@ class Field(Generic[T]):
     name: str
     column: str
     model: type[Model]
+    # A proxy client default, which native insert preparation supplies.
+    client_default: bool = False
 
     def __init__(
         self,
@@ -103,6 +105,11 @@ class Field(Generic[T]):
         """True if the database fills the column when the insert leaves it out."""
         literal = self.default is not MISSING and not callable(self.default)
         return self.auto_increment or self.default_now or self.server_default or literal
+
+    @property
+    def has_insert_default(self) -> bool:
+        """True if native insert preparation or the database fills an omitted value."""
+        return self.client_default or self.has_server_value
 
     def ir(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "column": self.column, "type": self.type_name}

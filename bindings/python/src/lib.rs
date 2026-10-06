@@ -521,6 +521,8 @@ fn outcome_to_py(
 ) -> PyResult<Py<PyAny>> {
     #[cfg(feature = "composition")]
     let out = orm_engine::behavior::results(&classes.native, out).map_err(db_err)?;
+    #[cfg(feature = "proxy-models")]
+    orm_engine::proxy::emit(&orm_engine::proxy::diagnostics(&classes.proxies, &out).map_err(db_err)?);
     let db = db.map(|d| d.into_bound(py));
     let b = Builder::new(py, classes, db.as_ref());
     match out {
