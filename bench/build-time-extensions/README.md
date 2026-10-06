@@ -56,6 +56,17 @@ are part of the experiment.
 
 ## Current gate
 
+The final source at `360685a` has fresh release artifacts and structural/allocation
+evidence in `results/final-structural.json`. Disabled allocations match the
+baseline for all three workloads on both databases; enabled allocations match
+independently handwritten controls for all ten workloads on both databases.
+Selected disabled runtime dependencies exclude extension compiler/application
+crates. Enabled generated execution uses direct Rust calls. Python and Node
+runtime/generated native proofs pass on SQLite and PostgreSQL; the PostgreSQL
+stage was rerun with the same artifacts after restarting the isolated cluster.
+These findings establish no timing parity. Final focused native and public paired
+matrices await the coordinator's quiet window and must pass their strict checks.
+
 The interim gate has **not passed**. Under the accepted less-than-1% rule,
 20 of 44 warm cases have upper confidence bounds below the limit; 24 remain
 inconclusive. None has a lower bound establishing a cost of 1% or more.
