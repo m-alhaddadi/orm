@@ -93,7 +93,7 @@ class Field(Generic[T]):
         if obj is None:
             return ColumnRef(owner, (), self)
         # Only reached when the value is absent from the instance __dict__.
-        raise AttributeError(f"{owner.__name__}.{self.name} was not loaded")
+        raise NotLoaded(f"{owner.__name__}.{self.name} was not loaded")
 
     if TYPE_CHECKING:
         # Instances are read-only. Declared for type checkers only: a runtime __set__
@@ -305,14 +305,15 @@ class BelongsTo(Relation[M, P]):
         if obj is None:
             return RelationPath(owner, (self.name,), cast("type[Model]", self.target))
         d = obj.__dict__
-        key = d.get(self.via)
+        key = cast("Model", obj)._field_value(self.via)
         if self.name in d:
             related = d[self.name]
-            if related is None and key is None:
+            # A default-filtered target joins as absent even when the key is set.
+            if related is None and (key is None or cast("type[Model]", self.target)._meta.default_filter is not None):
                 return None
-            if related is not None and getattr(related, self.to, None) == key:
+            if related is not None and related._field_value(self.to) == key:
                 return related
-        elif key is None and self.via in d:
+        elif key is None:
             return None
         raise NotLoaded(
             f"{owner.__name__}.{self.name} is not loaded; use "

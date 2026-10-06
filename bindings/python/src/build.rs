@@ -142,9 +142,19 @@ impl<'a, 'py> Builder<'a, 'py> {
     }
 
     /// An instance of `model` from row `r`, its fields in columns `start..`.
-    fn instance(&self, model: usize, rows: &dyn RowSet, r: usize, start: usize, types: &[ValueType]) -> PyResult<Instance<'py>> {
+    fn instance(&self, model: usize, shape: Option<&orm_core::behavior::ResultShape>, rows: &dyn RowSet, r: usize, start: usize, types: &[ValueType]) -> PyResult<Instance<'py>> {
         let mc = self.classes.get(model)?;
         let inst = self.blank(mc)?;
+        if let Some(shape) = shape {
+            let internal = PyDict::new(self.py);
+            for f in &shape.fields {
+                let slot = start + f.physical.expect("selected field slot");
+                let target = if f.public { &inst.dict } else { &internal };
+                target.set_item(mc.names[f.field.position].bind(self.py), self.cell(rows, r, slot, types[slot])?)?;
+            }
+            inst.dict.set_item("_orm_internal", internal)?;
+            return Ok(inst);
+        }
         for (i, name) in mc.names.iter().enumerate() {
             inst.dict.set_item(name.bind(self.py), self.cell(rows, r, start + i, types[start + i])?)?;
         }
@@ -152,16 +162,16 @@ impl<'a, 'py> Builder<'a, 'py> {
     }
 
     /// One instance per row, `select_related` objects attached.
-    fn instances(&self, model: usize, joins: &[JoinShape], rows: &dyn RowSet, types: &[ValueType]) -> PyResult<Vec<Instance<'py>>> {
+    fn instances(&self, model: usize, shape: Option<&orm_core::behavior::ResultShape>, joins: &[JoinShape], rows: &dyn RowSet, types: &[ValueType]) -> PyResult<Vec<Instance<'py>>> {
         let mut out = Vec::with_capacity(rows.len());
         let mut related: Vec<Option<Instance<'py>>> = Vec::with_capacity(joins.len());
         for r in 0..rows.len() {
-            let root = self.instance(model, rows, r, 0, types)?;
+            let root = self.instance(model, shape, rows, r, 0, types)?;
             related.clear();
             for j in joins {
                 // A LEFT JOIN without a match yields NULLs, including the primary key.
                 let pk = rows.cell(r, j.start + j.pk_pos, types[j.start + j.pk_pos]).map_err(db_err)?;
-                let child = if pk == Cell::Null { None } else { Some(self.instance(j.model, rows, r, j.start, types)?) };
+                let child = if pk == Cell::Null { None } else { Some(self.instance(j.model, j.shape.as_ref(), rows, r, j.start, types)?) };
                 let parent = match j.parent {
                     None => Some(&root),
                     Some(p) => related[p].as_ref(),
@@ -187,8 +197,8 @@ impl<'a, 'py> Builder<'a, 'py> {
         row_cls: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyList>> {
         match output {
-            Output::Instances { model, joins } => {
-                let objs = self.instances(*model, joins, rows, types)?;
+            Output::Instances { model, shape, joins } => {
+                let objs = self.instances(*model, shape.as_ref(), joins, rows, types)?;
                 for f in prefetched {
                     self.attach(&objs, rows, f)?;
                 }
@@ -203,7 +213,7 @@ impl<'a, 'py> Builder<'a, 'py> {
                     for item in items {
                         match item {
                             Some(width) => {
-                                values.push(self.instance(*model, rows, r, pos, types)?.obj.unbind());
+                                values.push(self.instance(*model, None, rows, r, pos, types)?.obj.unbind());
                                 pos += width;
                             }
                             None => {
@@ -224,18 +234,18 @@ impl<'a, 'py> Builder<'a, 'py> {
     }
 
     /// Instances of `model` for rows returned by a write (`RETURNING`).
-    pub fn model_rows(&self, model: usize, rows: &dyn RowSet, types: &[ValueType]) -> PyResult<Bound<'py, PyList>> {
-        PyList::new(self.py, self.instances(model, &[], rows, types)?.into_iter().map(|i| i.obj))
+    pub fn model_rows(&self, model: usize, shape: Option<&orm_core::behavior::ResultShape>, rows: &dyn RowSet, types: &[ValueType]) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(self.py, self.instances(model, shape, &[], rows, types)?.into_iter().map(|i| i.obj))
     }
 
     /// Puts the related objects of `f` on `parents` (built from `parent_rows`, in order).
     fn attach(&self, parents: &[Instance<'py>], parent_rows: &dyn RowSet, f: &Fetched) -> PyResult<()> {
         let py = self.py;
         let p = &f.plan;
-        let Output::Instances { model, joins } = &p.output else {
+        let Output::Instances { model, shape, joins } = &p.output else {
             return Err(PyTypeError::new_err("prefetch rows must be instances"));
         };
-        let children = self.instances(*model, joins, f.rows.as_ref(), &p.types)?;
+        let children = self.instances(*model, shape.as_ref(), joins, f.rows.as_ref(), &p.types)?;
         for c in &f.children {
             self.attach(&children, f.rows.as_ref(), c)?;
         }

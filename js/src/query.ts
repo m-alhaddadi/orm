@@ -36,7 +36,7 @@ import {
 } from "./expr.js";
 import { NotLoaded, QueryError, TransactionRequired } from "./errors.js";
 import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
-import { DB, RELATED, registerQueries, type ModelClass, type ModelMeta } from "./model.js";
+import { DB, fieldValue, RELATED, registerQueries, type Instance, type ModelClass, type ModelMeta } from "./model.js";
 import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
 import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
@@ -328,6 +328,10 @@ function prefetchIr(
 
 /** @internal The state of a query set; copied, never changed. */
 export interface QueryState {
+  readonly modelHelpers?: readonly string[];
+  readonly withoutDefaults: boolean;
+  readonly withoutRelated: boolean;
+  readonly modelFields: readonly string[] | undefined;
   readonly filters: readonly Node[];
   readonly order: readonly Ordering<string, unknown>[];
   readonly limit: number | ParamRef<string> | undefined;
@@ -342,6 +346,9 @@ export interface QueryState {
 }
 
 const EMPTY: QueryState = {
+  withoutDefaults: false,
+  withoutRelated: false,
+  modelFields: undefined,
   filters: [],
   order: [],
   limit: undefined,
@@ -416,6 +423,27 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   }
 
   // -- building -------------------------------------------------------------------------------
+
+  /** @internal Preserve an exact public shape, including zero fields. */
+  onlyFields(names: readonly string[]): this { return this.clone({ modelFields: names }); }
+
+  /** Bypass schema filter, selection and loading defaults; keep caller filters. */
+  withoutDefaults(): this { return this.clone({ withoutDefaults: true }); }
+
+  /** Clear default and explicitly requested eager reference loading. */
+  withoutRelated(): this { return this.clone({ withoutRelated: true, related: [] }); }
+
+  /** Partial model instances; no arguments restores all public fields. */
+  only(): QuerySet<M, M["row"], S, P, X>;
+  only(...fields: readonly Column<unknown, string>[]): QuerySet<M, Partial<M["row"]> & Instance<M>, S, P, X>;
+  only(...fields: readonly Column<unknown, string>[]): QuerySet<M, Partial<M["row"]> & Instance<M>, S, P, X> {
+    const names = fields.map((f) => {
+      if (!(f instanceof Column) || f.root !== this.meta || f.path.length) throw new TypeError("only() takes root model columns");
+      return f.field.ir;
+    });
+    if (new Set(names).size !== names.length) throw new TypeError("duplicate model field");
+    return this.clone({ modelFields: fields.length ? names : this.meta.fieldList.map((f) => f.ir) }) as never;
+  }
 
   /** Keep rows matching all `conditions`. */
   filter<const C extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
@@ -641,7 +669,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       if (objs.length < size) {
         return;
       }
-      last = (objs[objs.length - 1] as Record<string, unknown>)[this.meta.pk.name];
+      last = fieldValue(objs[objs.length - 1] as object, this.meta.pk.name);
     }
   }
 
@@ -680,6 +708,10 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     const s = this.state;
     const ctx = this.context(params, outer, ctes);
     const ir: IR = { op, model: this.rootName() };
+    if (s.withoutDefaults) ir["without_defaults"] = true;
+    if (s.withoutRelated) ir["without_related"] = true;
+    if (s.modelFields !== undefined) ir["model_fields"] = s.modelFields;
+    if (s.modelHelpers?.length) ir["model_helpers"] = s.modelHelpers;
     if (s.from) {
       ir["from"] = s.from.name;
     }
@@ -752,6 +784,8 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     }
     const ctx = new IRContext(this.meta, params);
     const ir: IR = { op, model: this.meta.name, filters: s.filters.map((f) => f.ir(ctx)) };
+    if (s.withoutDefaults) ir["without_defaults"] = true;
+    if (s.modelFields !== undefined) ir["model_fields"] = s.modelFields;
     if (values !== undefined) {
       ir["set"] = assignments(this.meta, values, ctx);
     }
@@ -890,16 +924,16 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     const out = new Map<T, R>();
     const add = (objs: R[]): void => {
       for (const o of objs) {
-        out.set((o as Record<string, T>)[name]!, o);
+        out.set(fieldValue(o as object, name) as T, o);
       }
     };
     if (ids === undefined || ids === null) {
-      add(await this.fetch());
+      add(await this.clone({ modelHelpers: [...(this.state.modelHelpers ?? []), col.field.ir] }).fetch());
       return out;
     }
     const keys = [...new Set(ids)];
     for (let i = 0; i < keys.length; i += IN_BULK_CHUNK) {
-      add(await this.clone({ filters: [...this.state.filters, col.in(keys.slice(i, i + IN_BULK_CHUNK) as never)] }).fetch());
+      add(await this.clone({ modelHelpers: [...(this.state.modelHelpers ?? []), col.field.ir], filters: [...this.state.filters, col.in(keys.slice(i, i + IN_BULK_CHUNK) as never)] }).fetch());
     }
     return out;
   }
@@ -971,7 +1005,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     }
     const db = this.db();
     const res = await db_wait(db, (tx) =>
-      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx),
+      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx, this.state.withoutDefaults),
     );
     return returning ? (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][]) : (res as number);
   }
@@ -1253,7 +1287,7 @@ export class RelatedSet<M extends ModelSpec, L extends string = never> extends Q
     const meta = this.meta;
     const via = meta.fieldByIr.get(this.relation.to)!.name;
     const owner = (this.instance.constructor as unknown as { meta: ModelMeta }).meta;
-    return { [via]: this.instance[owner.fieldByIr.get(this.relation.from)!.name] };
+    return { [via]: fieldValue(this.instance, owner.fieldByIr.get(this.relation.from)!.name) };
   }
 
   /** Inserts a related row pointing at this instance. */
@@ -1300,7 +1334,7 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
 
   private key(): unknown {
     const owner = (this.instance.constructor as unknown as { meta: ModelMeta }).meta;
-    return this.instance[owner.fieldByIr.get(this.relation.from)!.name];
+    return fieldValue(this.instance, owner.fieldByIr.get(this.relation.from)!.name);
   }
 
   /** The join rows of this instance. */
@@ -1326,7 +1360,7 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
         if (m !== this.meta) {
           throw new TypeError(`${this.relation.name} links ${this.meta.name} rows, not ${String(o)}`);
         }
-        keys.push((o as Record<string, unknown>)[to]);
+        keys.push(fieldValue(o, to));
       } else {
         keys.push(o);
       }
@@ -1440,7 +1474,7 @@ function makeRelatedSet(rel: RelationMeta, instance: object): RelatedSet<ModelSp
   const owner = (inst.constructor as unknown as { meta: ModelMeta }).meta;
   const target = owner.registry.get(rel.target);
   const via = target.column(target.fieldByIr.get(rel.to)!);
-  const key = inst[owner.fieldByIr.get(rel.from)!.name];
+  const key = fieldValue(inst, owner.fieldByIr.get(rel.from)!.name);
   const qs = new RelatedSet<ModelSpec>(target, { ...EMPTY, filters: [asCondition(via.eq(key as never))] });
   Object.assign(qs, { relation: rel, instance: inst });
   return qs as never;
@@ -1454,7 +1488,7 @@ function makeManyRelatedSet(rel: RelationMeta, instance: object): ManyRelatedSet
   const source = join.column(join.fieldByIr.get(rel.through!.source)!);
   const tcol = join.column(join.fieldByIr.get(rel.through!.target)!);
   const to = target.column(target.fieldByIr.get(rel.to)!);
-  const key = inst[owner.fieldByIr.get(rel.from)!.name];
+  const key = fieldValue(inst, owner.fieldByIr.get(rel.from)!.name);
   const cond = exists(join.objects.filter(source.eq(key as never) as never, tcol.eq(outer(to) as never) as never) as never);
   const qs = new ManyRelatedSet<ModelSpec>(target, { ...EMPTY, filters: [cond] });
   Object.assign(qs, { relation: rel, instance: inst });

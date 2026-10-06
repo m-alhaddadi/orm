@@ -1,6 +1,6 @@
 //! `orm-extension-build CONFIG.json`: resolve selected Cargo dependencies, emit fixed
 //! composition, then build the ordinary bindings in an isolated workspace.
-use orm_extension_build::Composition;
+use orm_extension_build::{Composition, QUERY_DEFAULTS};
 use orm_contracts::extension::Manifest;
 use serde::Deserialize;
 use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command};
@@ -219,7 +219,7 @@ fn main() -> Result<(), String> {
         let schema_inputs = config.output.join("schema-inputs.json");
         let mut command = Command::new("cargo");
         command.args(["run", "--quiet", "--locked", "--manifest-path"]).arg(config.output.join("Cargo.toml"))
-            .args(["-p", "orm-core", "--features", "composition", "--example", "orm_extension_normalize"]);
+            .args(["-p", "orm-core", "--features", if composition.has_capability(QUERY_DEFAULTS) { "composition,query-defaults" } else { "composition" }, "--example", "orm_extension_normalize"]);
         if config.offline { command.arg("--offline"); }
         command.arg("--").arg(base.join(&selected.schema)).arg(&normalized).arg(&schema_inputs)
             .env("ORM_CORE_COMPOSITION", config.output.join("composition.rs"));
@@ -306,3 +306,4 @@ fn main() -> Result<(), String> {
     println!("{}", config.output.display());
     Ok(())
 }
+

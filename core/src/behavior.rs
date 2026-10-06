@@ -31,6 +31,12 @@ pub fn artifact() -> Artifact {
         }
         artifact
     };
+    #[cfg(feature = "query-defaults")]
+    let artifact = {
+        let mut artifact = artifact;
+        if !artifact.capabilities.iter().any(|c| c == QUERY_DEFAULTS) { artifact.capabilities.push(QUERY_DEFAULTS.into()); }
+        artifact
+    };
     artifact
 }
 

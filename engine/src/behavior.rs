@@ -84,10 +84,17 @@ pub fn results(kinds: &[NativeModel], out: Outcome) -> DbResult<Outcome> {
             selected.prefetched = selected.prefetched.into_iter().map(|f| fetched(f)).collect::<DbResult<_>>()?;
             Outcome::Select(selected)
         }
-        Outcome::Rows { model, rows: result, types } => {
-            let computations = model_computations(kinds[model], 0);
-            Outcome::Rows { model, rows: rows(result, &types, &computations)?, types }
+        Outcome::Rows { model, rows: result, types, shape } => {
+            let computations = match &shape { Some(shape) => shape_computations(kinds[model], 0, &shape.fields.iter().map(|f| f.field.position).collect::<Vec<_>>()), None => model_computations(kinds[model], 0) };
+            Outcome::Rows { model, rows: rows(result, &types, &computations)?, types, shape }
         }
         out => out,
     })
+}
+
+pub fn shape_computations(kind: NativeModel, start: usize, positions: &[usize]) -> Vec<Computation> {
+    positions.iter().enumerate().filter_map(|(slot, &field)| {
+        let dependency = kind.dependency(field)?;
+        Some(Computation { kind, field, column: start + slot, dependency: start + positions.iter().position(|&f| f == dependency).expect("selected computed dependency") })
+    }).collect()
 }

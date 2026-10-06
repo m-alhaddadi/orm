@@ -44,4 +44,4 @@ file-storage = ["orm-core/file-storage"]
 model-composition = ["composition", "orm-core/model-composition"]
 generic-relations = ["orm-core/generic-relations"]
 proxy-models = ["composition", "orm-core/proxy-models"]
-
+query-defaults = ["orm-core/query-defaults"]

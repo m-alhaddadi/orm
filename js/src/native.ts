@@ -21,9 +21,12 @@ export interface NativeRows {
 
 /** How rows become instances: the root model's fields first, then each
  * `select_related` object (`parent` -1: attached to the root object). */
+export type NativeShape = readonly { field: number; slot: number; public: boolean }[] | null;
+
 export interface NativeInstances {
+  readonly shape?: NativeShape;
   readonly model: string;
-  readonly joins: readonly { parent: number; attr: string; model: string; start: number; pk: number }[];
+  readonly joins: readonly { parent: number; attr: string; model: string; start: number; pk: number; shape?: NativeShape }[];
 }
 
 /** `select()` rows: per item, the width of a model instance or -1 for one value. */
@@ -51,6 +54,7 @@ export interface NativeSelect {
 
 /** Rows a write returned (`RETURNING`). */
 export interface NativeReturned {
+  readonly shape?: NativeShape;
   readonly model: string;
   readonly rows: NativeRows;
 }
@@ -100,6 +104,7 @@ export interface NativeEngine {
     returning: boolean,
     batchSize: number | null,
     tx: NativeTransaction | null,
+    withoutDefaults: boolean,
   ): Promise<unknown>;
   begin(tx: NativeTransaction | null): Promise<NativeTransaction>;
   advisoryLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, tx: NativeTransaction): Promise<boolean>;

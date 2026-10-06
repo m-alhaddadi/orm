@@ -11,6 +11,8 @@ pub struct Model {
     pub pk: usize,
     #[cfg(feature = "file-storage")]
     pub file_fields: Vec<crate::file_storage::PreparedFileField>,
+    #[cfg(feature = "query-defaults")]
+    pub query_defaults: crate::selection::PreparedDefaults,
     #[cfg(feature = "composition")]
     pub native: crate::behavior::NativeModel,
     #[cfg(feature = "composition")]
@@ -46,6 +48,7 @@ impl Model {
         Ok(Model {
             #[cfg(feature = "file-storage")] file_fields: vec![],
             ir, pk: 0, field_index, relation_index: HashMap::new(),
+            #[cfg(feature = "query-defaults")] query_defaults: Default::default(),
             #[cfg(feature = "composition")] native: crate::behavior::NativeModel::None,
             #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
             #[cfg(feature = "composition")] resolved_fields: vec![] })
@@ -198,6 +201,7 @@ impl Schema {
             models.push(Model {
                 #[cfg(feature = "file-storage")] file_fields: file_fields.next().expect("prepared file model"),
                 ir: m, pk, field_index, relation_index,
+                #[cfg(feature = "query-defaults")] query_defaults: Default::default(),
                 #[cfg(feature = "composition")] native: native.next().expect("prepared model"),
                 #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
             #[cfg(feature = "composition")] resolved_fields: vec![] });
@@ -218,6 +222,10 @@ impl Schema {
                 }
             }
         }
+        #[cfg(not(feature = "query-defaults"))]
+        if !ir.behavior.query_defaults.is_empty() { return Err("query defaults require an enabled query-defaults artifact; rebuild".into()); }
+        #[cfg(feature = "query-defaults")]
+        crate::selection::prepare(&mut models, &ir.behavior.query_defaults)?;
         #[cfg(feature = "composition")]
         let owner_links = crate::ownership::resolve(&mut models, storage.as_deref(), &ir.behavior.field_storage, &ir.behavior.owner_links)?;
         #[cfg(feature = "proxy-models")]

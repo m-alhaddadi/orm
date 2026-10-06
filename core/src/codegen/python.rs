@@ -225,6 +225,8 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
                     let nullable = m.field(&r.from)?.nullable;
                     #[cfg(feature = "reference-loading")]
                     let nullable = nullable || super::reference_target_filtered(ir, &r.target);
+                    #[cfg(feature = "query-defaults")]
+                    let nullable = nullable || schema.model(schema.model_idx(&r.target)?).query_defaults.filter.is_some();
                     let t = if nullable { format!("{} | None", r.target) } else { r.target.clone() };
                     writeln!(body, "    {}: f.BelongsTo[{t}, _{}Path]", r.name, r.target).unwrap();
                 }

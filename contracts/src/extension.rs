@@ -38,6 +38,8 @@ pub struct Requirements {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generic_reverse: Vec<crate::generic::GenericReverse>,
     #[serde(default)]
+    pub query_defaults: Vec<QueryDefaults>,
+    #[serde(default)]
     pub schema_contract: u32,
     #[serde(default)]
     pub declarations: Vec<Declaration>,
@@ -66,7 +68,7 @@ pub struct Requirements {
 }
 impl Requirements {
     pub fn is_empty(&self) -> bool {
-        self.proxy_models.is_empty() && self.generic_relations.is_empty() && self.generic_reverse.is_empty() && self.declarations.is_empty() && self.extensions.is_empty() && self.specializations.is_empty()
+        self.query_defaults.is_empty() && self.proxy_models.is_empty() && self.generic_relations.is_empty() && self.generic_reverse.is_empty() && self.declarations.is_empty() && self.extensions.is_empty() && self.specializations.is_empty()
             && self.lowered_models.is_empty() && self.completed_passes.is_empty() && self.result_fields.is_empty() && self.storage.is_none() && self.field_storage.is_empty() && self.owner_links.is_empty() && self.methods.is_empty() && self.field_adapters.is_empty() && self.file_fields.is_empty() && self.schema_contract == 0
     }
 }
@@ -531,13 +533,16 @@ pub fn capture_storage(ir: &mut SchemaIr) -> Result<(), String> {
     Ok(())
 }
 
+/// The capability, and Cargo feature, of compiled query defaults.
+pub const QUERY_DEFAULTS: &str = "query-defaults";
+
 pub const HOST_CAPABILITIES: &[&str] = &[
     "schema-transformations", "physical-schema", "native-string-values",
-    "native-string-records", "native-string-results", "file-storage",
+    "native-string-records", "native-string-results", "file-storage", QUERY_DEFAULTS,
 ];
 
 /// Capabilities that a build selects as the host Cargo feature of the same name.
-pub const HOST_FEATURE_CAPABILITIES: &[&str] = &["file-storage"];
+pub const HOST_FEATURE_CAPABILITIES: &[&str] = &["file-storage", QUERY_DEFAULTS];
 
 /// Combine one new declaration batch with an immutable definition context. Lowered
 /// declarations retain their phase state; new declarations are the only pass inputs.
@@ -603,6 +608,7 @@ pub fn merge_definition(mut context: SchemaIr, mut incoming: SchemaIr) -> Result
     c.proxy_models.extend(n.proxy_models);
     c.generic_relations.extend(n.generic_relations);
     c.generic_reverse.extend(n.generic_reverse);
+    c.query_defaults.extend(n.query_defaults);
     c.specializations.extend(n.specializations);
     c.result_fields.extend(n.result_fields);
     c.methods.extend(n.methods);
@@ -639,6 +645,17 @@ pub fn specialization_storage(model: &crate::ir::ModelIr, requirements: &Require
     let mut physical: crate::ir::ModelIr = serde_json::from_value(serde_json::to_value(model).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     physical.fields.retain(|f| !computed.contains(&f.name));
     Ok(vec![physical])
+}
+
+/// Resolved schema policies. `filter` is query expression JSON, never SQL text.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryDefaults {
+    pub model: String,
+    #[serde(default)] pub parent: Option<String>,
+    #[serde(default)] pub filter: Option<serde_json::Value>,
+    #[serde(default)] pub fields: Option<Vec<String>>,
+    #[serde(default)] pub related: Vec<Vec<String>>,
 }
 
 #[cfg(test)]

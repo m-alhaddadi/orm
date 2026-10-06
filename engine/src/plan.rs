@@ -40,12 +40,13 @@ pub struct JoinShape {
     pub model: usize,
     pub start: usize,
     pub pk_pos: usize,
+    pub shape: Option<orm_core::behavior::ResultShape>,
 }
 
 /// How a statement's rows become objects.
 pub enum Output {
     /// Instances of `model` (its fields first), with `select_related` objects attached.
-    Instances { model: usize, joins: Vec<JoinShape> },
+    Instances { model: usize, shape: Option<orm_core::behavior::ResultShape>, joins: Vec<JoinShape> },
     /// `select(...)` rows: per item, `Some(width)` for an instance of `model` (taking
     /// that many columns) or `None` for one value.
     Rows { model: usize, items: Vec<Option<usize>> },
@@ -109,9 +110,9 @@ pub enum Plan {
     Count(SelectStatement),
     Exists(SelectStatement),
     /// The model and column types of the returned rows when the update has `RETURNING`.
-    Update(UpdateStatement, Option<(usize, Vec<ValueType>)>),
+    Update(UpdateStatement, Option<Returned>),
     /// The model and column types of the returned rows when the delete has `RETURNING`.
-    Delete(DeleteStatement, Option<(usize, Vec<ValueType>)>),
+    Delete(DeleteStatement, Option<Returned>),
     /// `INSERT ... RETURNING`: the model and column types of the returned rows.
     Insert(InsertStatement, (usize, Vec<ValueType>)),
     #[cfg(feature = "model-composition")]
@@ -273,6 +274,7 @@ fn col_paths<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
         Expr::Param { .. }
         | Expr::Const { .. }
         | Expr::Excluded { .. }
+        | Expr::Text { .. }
         | Expr::Int { .. }
         | Expr::Outer { .. }
         | Expr::CteCol { .. }
@@ -406,6 +408,8 @@ pub struct Planner<'s> {
     allow_window: bool,
     target: Target,
     caps: Capabilities,
+    #[cfg(feature = "query-defaults")]
+    policy_bypass: bool,
 }
 
 impl<'s> Planner<'s> {
@@ -438,6 +442,7 @@ impl<'s> Planner<'s> {
             allow_window: false,
             target,
             caps: target.caps,
+            #[cfg(feature = "query-defaults")] policy_bypass: false,
         };
         p.root = p.model_idx(model)?;
         p.source = match from {
@@ -502,7 +507,7 @@ impl<'s> Planner<'s> {
                 if let Some(w) = p.with_clause(&q.with)? {
                     stmt.with_cte(w);
                 }
-                Plan::Update(stmt, types.map(|t| (p.root, t)))
+                Plan::Update(stmt, types.map(|(types, shape)| (p.root, types, shape)))
             }
             Operation::Delete(q) => {
                 #[cfg(feature = "model-composition")]
@@ -515,7 +520,7 @@ impl<'s> Planner<'s> {
                 if let Some(w) = p.with_clause(&q.with)? {
                     stmt.with_cte(w);
                 }
-                Plan::Delete(stmt, types.map(|t| (p.root, t)))
+                Plan::Delete(stmt, types.map(|(types, shape)| (p.root, types, shape)))
             }
         })
     }
@@ -567,6 +572,7 @@ impl<'s> Planner<'s> {
 
     /// Takes note of what `q` declares for its expressions: joined CTEs, named windows.
     fn enter(&mut self, q: &Select) -> Result<()> {
+        #[cfg(feature = "query-defaults")] { self.policy_bypass = q.without_defaults; }
         self.joined.clear();
         for j in &q.joins {
             let idx = self.model_idx(&j.cte)?;
@@ -748,8 +754,15 @@ impl<'s> Planner<'s> {
 
     // -- filters ------------------------------------------------------------------------
 
-    fn apply_filters(&mut self, filters: &[Expr]) -> Result<Vec<SExpr>> {
-        filters.iter().map(|f| self.cond(f)).collect()
+    fn apply_filters(&mut self, filters: &[Expr], _without_defaults: bool) -> Result<Vec<SExpr>> {
+        #[cfg(feature = "query-defaults")] { self.policy_bypass = _without_defaults; }
+        #[allow(unused_mut)]
+        let mut out: Vec<SExpr> = filters.iter().map(|f| self.cond(f)).collect::<Result<_>>()?;
+        #[cfg(feature = "query-defaults")]
+        if !_without_defaults {
+            if let Some(filter) = &self.model(self.root).query_defaults.filter { out.push(self.cond(filter)?); }
+        }
+        Ok(out)
     }
 
     /// The relation every column in `e` goes through next, if they all agree and `e`
@@ -828,6 +841,8 @@ impl<'s> Planner<'s> {
                 }
             }
         }
+        #[cfg(feature = "query-defaults")]
+        if !self.policy_bypass { if let Some(filter) = &tm.query_defaults.filter { stmt.and_where(self.target_default(target, &alias, filter)?); } }
         Ok(alias)
     }
 
@@ -1071,6 +1086,7 @@ impl<'s> Planner<'s> {
             Expr::Param { i } => bind(self.params.value(self.param(*i)?, hint.ty)?, hint.field),
             Expr::Const { value } => SExpr::val(*value),
             Expr::Int { value } => SExpr::cust(value.to_string()),
+            Expr::Text { value } => bind(sea_query::Value::from(value.clone()), hint.field),
             Expr::Excluded { name } => {
                 if !self.allow_excluded {
                     return Err(Error::query("excluded() can only be used in on_conflict(...).do_update()"));
@@ -1128,6 +1144,7 @@ impl<'s> Planner<'s> {
                 self.model(self.model_idx(cte)?).field(name).map_err(query_err)?.value_type()
             }
             Expr::Int { .. } => scalar(ColType::BigInt),
+            Expr::Text { .. } => scalar(ColType::Text),
             Expr::Subquery { select } => self.child(select)?.expr_type(Self::one_column(select, "as_scalar()")?)?,
             Expr::Window { func, .. } => self.expr_type(func)?,
             Expr::Arith { l, r, .. } => match self.expr_type(l) {
@@ -1586,10 +1603,21 @@ impl<'s> Planner<'s> {
             let to_col = &self.model(target).field(&rel.to).map_err(query_err)?.column;
             let new_alias = self.alias("j");
             let on = col(&new_alias, to_col).eq(col(&alias, from_col));
+            #[cfg(feature = "query-defaults")]
+            let on = match self.model(target).query_defaults.filter.as_ref().filter(|_| !self.policy_bypass) {
+                Some(filter) => on.and(self.target_default(target, &new_alias, filter)?), None => on,
+            };
             self.joins.push((Scope { path: prefix.to_vec(), model: target, alias: new_alias.clone() }, on));
             (alias, model) = (new_alias, target);
         }
         Ok((alias, model))
+    }
+
+    #[cfg(feature = "query-defaults")]
+    fn target_default(&self, model: usize, alias: &str, filter: &Expr) -> Result<SExpr> {
+        let mut planner = Planner::new(self.schema, self.virt, self.target, &self.model(model).ir.name, None, self.params, vec![], 0)?;
+        planner.scopes[0].alias = alias.into();
+        planner.cond(filter)
     }
 
     fn apply_joins(&self, stmt: &mut SelectStatement) {
@@ -1616,7 +1644,7 @@ impl<'s> Planner<'s> {
             let kind = if j.outer { JoinType::LeftJoin } else { JoinType::InnerJoin };
             stmt.join(kind, Alias::new(&j.cte), on);
         }
-        for w in self.apply_filters(&q.filters)? {
+        for w in self.apply_filters(&q.filters, q.without_defaults)? {
             stmt.and_where(w);
         }
         for o in q.order.iter().filter(|_| order) {
@@ -1663,9 +1691,68 @@ impl<'s> Planner<'s> {
 
     // -- statements ---------------------------------------------------------------------
 
+    /// The output shape for public `names` plus private `extra` helpers; `None` keeps the
+    /// whole-model row and its fast materialization path.
+    fn instance_shape(&self, model: usize, names: Option<&[String]>, extra: &[String]) -> Result<Option<orm_core::behavior::ResultShape>> {
+        use orm_core::behavior::{FieldId, ModelId, ResultField, ResultShape};
+        let Some(names) = names else { return Ok(None) };
+        let m = self.model(model);
+        let mut positions = Vec::new();
+        for name in names {
+            let pos = m.field_pos(name).map_err(query_err)?;
+            if positions.as_slice().contains(&pos) { return Err(Error::query("duplicate model field")); }
+            positions.push(pos);
+        }
+        if positions.len() == m.fields().len() && positions.iter().enumerate().all(|(i, &p)| i == p) { return Ok(None); }
+        let public = positions.len();
+        // Identity and relation keys remain private when omitted by the caller.
+        let mut helpers = vec![m.pk];
+        for r in &m.ir.relations { helpers.push(m.field_pos(&r.from).map_err(query_err)?); }
+        for source in &self.schema.models {
+            for relation in &source.ir.relations {
+                if relation.target == m.ir.name { helpers.push(m.field_pos(&relation.to).map_err(query_err)?); }
+            }
+        }
+        for name in extra { helpers.push(m.field_pos(name).map_err(query_err)?); }
+        for pos in helpers { if !positions.as_slice().contains(&pos) { positions.push(pos); } }
+        // Computed fields need their inputs, including computed helpers.
+        #[cfg(feature = "composition")]
+        for i in 0..positions.len() { if let Some(d) = m.native.dependency(positions[i]) { if !positions.contains(&d) { positions.push(d); } } }
+        Ok(Some(ResultShape { model: ModelId(model), fields: positions.into_iter().enumerate().map(|(slot, field)| ResultField {
+            field: FieldId { model: ModelId(model), position: field }, physical: Some(slot), public: slot < public,
+            dependencies: {
+                #[cfg(feature = "composition")]
+                { m.native.dependency(field).map(|position| FieldId { model: ModelId(model), position }).into_iter().collect() }
+                #[cfg(not(feature = "composition"))]
+                { vec![] }
+            },
+        }).collect() }))
+    }
+
     /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
     /// columns.
     fn build_select(&mut self, q: &Select) -> Result<SelectPlan> {
+        #[cfg(feature = "query-defaults")]
+        let q = &{
+            let mut q = q.clone();
+            let defaults = &self.model(self.root).query_defaults;
+            if !q.without_defaults {
+                if q.model_fields.is_none() { q.model_fields = defaults.fields.clone(); }
+                if !q.without_related && q.columns.is_none() {
+                    for path in orm_core::selection::expanded_related(self.schema.models.as_slice(), self.root).map_err(query_err)? {
+                        if !q.select_related.contains(&path) { q.select_related.push(path); }
+                    }
+                    for prefix in q.select_related.clone() {
+                        let target = self.schema.walk(self.root, &prefix).map_err(query_err)?;
+                        for suffix in orm_core::selection::expanded_related(self.schema.models.as_slice(), target).map_err(query_err)? {
+                            let mut path = prefix.clone(); path.extend(suffix);
+                            if !q.select_related.contains(&path) { q.select_related.push(path); }
+                        }
+                    }
+                }
+            }
+            q
+        };
         if let Some(items) = &q.columns {
             return self.select_columns(q, items, false);
         }
@@ -1680,11 +1767,12 @@ impl<'s> Planner<'s> {
         let alias = self.root_alias().to_owned();
         let mut stmt = Query::select();
         let mut types = vec![];
-        for (_position, f) in root.fields().iter().enumerate() {
-            #[cfg(not(feature = "composition"))]
-            let _ = _position;
+        let shape = self.instance_shape(self.root, q.model_fields.as_deref(), &q.model_helpers)?;
+        let positions = shape_positions(root, shape.as_ref());
+        for &position in &positions {
+            let f = &root.fields()[position];
             #[cfg(feature = "composition")]
-            if root.native.computed().contains(&_position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
+            if root.native.computed().contains(&position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
             stmt.expr(self.read_field(self.root, &alias, f)?);
             types.push(f.value_type());
         }
@@ -1702,18 +1790,23 @@ impl<'s> Planner<'s> {
                         .ok_or_else(|| Error::query("select_related paths must list their prefixes first"))?,
                 ),
             };
+            #[cfg(feature = "query-defaults")]
+            let joined_shape = self.instance_shape(model, if q.without_defaults { None } else { m.query_defaults.fields.as_deref() }, &[])?;
+            #[cfg(not(feature = "query-defaults"))]
+            let joined_shape = None;
+            let joined_positions = shape_positions(m, joined_shape.as_ref());
             joins.push(JoinShape {
                 parent,
                 attr: path[path.len() - 1].clone(),
                 model,
                 start: types.len(),
-                pk_pos: m.pk,
+                pk_pos: joined_positions.iter().position(|&f| f == m.pk).expect("identity selected"),
+                shape: joined_shape,
             });
-            for (_position, f) in m.fields().iter().enumerate() {
-                #[cfg(not(feature = "composition"))]
-                let _ = _position;
+            for &position in &joined_positions {
+                let f = &m.fields()[position];
                 #[cfg(feature = "composition")]
-                if m.native.computed().contains(&_position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
+                if m.native.computed().contains(&position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
                 stmt.expr(self.read_field(model, &alias, f)?);
                 types.push(f.value_type());
             }
@@ -1729,15 +1822,17 @@ impl<'s> Planner<'s> {
         }
         let mut prefetch = vec![];
         for node in &q.prefetch {
-            prefetch.push(plan_prefetch(self.schema, self.target, self.params, self.root, node)?);
+            let mut plan = plan_prefetch(self.schema, self.target, self.params, self.root, node, q.without_defaults)?;
+            plan.key_pos = positions.iter().position(|&f| f == plan.key_pos).expect("selected relation helper");
+            prefetch.push(plan);
         }
         #[cfg(feature = "composition")]
         let computations = {
-            let mut out = crate::behavior::model_computations(root.native, 0);
-            for j in &joins { out.extend(crate::behavior::model_computations(self.model(j.model).native, j.start)); }
+            let mut out = crate::behavior::shape_computations(root.native, 0, &positions);
+            for j in &joins { out.extend(crate::behavior::shape_computations(self.model(j.model).native, j.start, &shape_positions(self.model(j.model), j.shape.as_ref()))); }
             out
         };
-        Ok(SelectPlan { stmt, types, output: Output::Instances { model: self.root, joins }, prefetch,
+        Ok(SelectPlan { stmt, types, output: Output::Instances { model: self.root, shape, joins }, prefetch,
             #[cfg(feature = "composition")] computations })
     }
 
@@ -1812,7 +1907,13 @@ impl<'s> Planner<'s> {
         }).collect()
     }
 
-    pub fn update(&mut self, q: &Update) -> Result<(UpdateStatement, Option<Vec<ValueType>>)> {
+    fn return_shape(&self, names: Option<&[String]>, _without_defaults: bool) -> Result<Option<orm_core::behavior::ResultShape>> {
+        #[cfg(feature = "query-defaults")]
+        let names = names.or_else(|| if _without_defaults { None } else { self.model(self.root).query_defaults.fields.as_deref() });
+        self.instance_shape(self.root, names, &[])
+    }
+
+    pub fn update(&mut self, q: &Update) -> Result<(UpdateStatement, Option<ReturnColumns>)> {
         let root = self.model(self.root);
         #[cfg(feature = "composition")]
         crate::ownership::require_local_write(root)?;
@@ -1842,38 +1943,46 @@ impl<'s> Planner<'s> {
             let v = self.value(&a.value, Hint { ty: Some(f.value_type()), field: Some(f) })?;
             stmt.value(Alias::new(&f.column), v);
         }
-        for w in self.apply_filters(&q.filters)? {
+        for w in self.apply_filters(&q.filters, q.without_defaults)? {
             stmt.and_where(w);
         }
         if !q.returning {
             return Ok((stmt, None));
         }
         self.require(self.caps.returning, "update().returning()")?;
-        #[cfg(feature = "composition")]
-        stmt.returning(Query::returning().exprs(root.fields().iter().enumerate().map(|(pos, f)| if root.native.computed().contains(&pos) { SExpr::cust("NULL") } else { returning_col(f) })));
-        #[cfg(not(feature = "composition"))]
-        stmt.returning(Query::returning().exprs(root.fields().iter().map(returning_col)));
-        Ok((stmt, Some(root.fields().iter().map(|f| f.value_type()).collect())))
+        let shape = self.return_shape(q.model_fields.as_deref(), q.without_defaults)?;
+        let positions = shape_positions(root, shape.as_ref());
+        stmt.returning(Query::returning().exprs(positions.iter().map(|&pos| {
+            let f = &root.fields()[pos];
+            #[cfg(feature = "composition")]
+            if root.native.computed().contains(&pos) { return SExpr::cust("NULL"); }
+            returning_col(f)
+        })));
+        Ok((stmt, Some((positions.iter().map(|&pos| root.fields()[pos].value_type()).collect(), shape))))
     }
 
-    pub fn delete(&mut self, q: &Delete) -> Result<(DeleteStatement, Option<Vec<ValueType>>)> {
+    pub fn delete(&mut self, q: &Delete) -> Result<(DeleteStatement, Option<ReturnColumns>)> {
         let root = self.model(self.root);
         #[cfg(feature = "composition")]
         crate::ownership::require_local_write(root)?;
         let mut stmt = Query::delete();
         stmt.from_table(Alias::new(root.table()));
-        for w in self.apply_filters(&q.filters)? {
+        for w in self.apply_filters(&q.filters, q.without_defaults)? {
             stmt.and_where(w);
         }
         if !q.returning {
             return Ok((stmt, None));
         }
         self.require(self.caps.returning, "delete().returning()")?;
-        #[cfg(feature = "composition")]
-        stmt.returning(Query::returning().exprs(root.fields().iter().enumerate().map(|(pos, f)| if root.native.computed().contains(&pos) { SExpr::cust("NULL") } else { returning_col(f) })));
-        #[cfg(not(feature = "composition"))]
-        stmt.returning(Query::returning().exprs(root.fields().iter().map(returning_col)));
-        Ok((stmt, Some(root.fields().iter().map(|f| f.value_type()).collect())))
+        let shape = self.return_shape(q.model_fields.as_deref(), q.without_defaults)?;
+        let positions = shape_positions(root, shape.as_ref());
+        stmt.returning(Query::returning().exprs(positions.iter().map(|&pos| {
+            let f = &root.fields()[pos];
+            #[cfg(feature = "composition")]
+            if root.native.computed().contains(&pos) { return SExpr::cust("NULL"); }
+            returning_col(f)
+        })));
+        Ok((stmt, Some((positions.iter().map(|&pos| root.fields()[pos].value_type()).collect(), shape))))
     }
 }
 
@@ -1897,6 +2006,7 @@ fn plan_prefetch(
     params: &dyn Params,
     parent: usize,
     node: &Prefetch,
+    without_defaults: bool,
 ) -> Result<PrefetchPlan> {
     let pm = schema.model(parent);
     let (rel, child) = pm.relation(&node.relation).map_err(query_err)?;
@@ -1912,6 +2022,7 @@ fn plan_prefetch(
     }
     let many = rel.kind == RelKind::Many;
     let mut q = node.query.clone();
+    q.without_defaults |= without_defaults;
     let pk_order = Order { expr: Expr::Col { path: vec![], name: cm.pk_field().name.clone() }, desc: false };
     let sliced = q.limit.is_some() || q.offset.is_some();
     let slice = match sliced {
@@ -1937,7 +2048,7 @@ fn plan_prefetch(
     let (key_field, key, child_key_pos) = match &rel.through {
         None => {
             let f = cm.field(&rel.to).map_err(query_err)?;
-            (f, col(p.root_alias(), &f.column), cm.field_pos(&rel.to).map_err(query_err)?)
+            (f, col(p.root_alias(), &f.column), match &plan.output { Output::Instances { shape, .. } => shape_positions(cm, shape.as_ref()).iter().position(|&pos| pos == cm.field_pos(&rel.to).expect("validated relation")).ok_or_else(|| Error::query("missing prefetch key"))?, _ => unreachable!() })
         }
         Some(th) => {
             let jm = schema.model(schema.model_idx(&th.model).map_err(query_err)?);
@@ -2201,6 +2312,7 @@ pub fn plan_update_many(
     filters: &[Expr],
     params: &dyn Params,
     returning: bool,
+    without_defaults: bool,
 ) -> Result<(Vec<UpdateStatement>, Option<Vec<ValueType>>)> {
     let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
     let m = schema.model(planner.root);
@@ -2215,7 +2327,7 @@ pub fn plan_update_many(
     if returning {
         planner.require(planner.caps.returning, "update_many().returning()")?;
     }
-    let where_ = planner.apply_filters(filters)?;
+    let where_ = planner.apply_filters(filters, without_defaults)?;
     let pk_col = col(&table, &cols[0].column);
     let mut stmts = vec![];
     for chunk in rows.chunks(chunk_rows.max(1)) {
@@ -2260,3 +2372,10 @@ fn write_expr(e: SExpr, f: &FieldIr) -> SExpr {
         None => e,
     }
 }
+
+fn shape_positions(model: &Model, shape: Option<&orm_core::behavior::ResultShape>) -> Vec<usize> {
+    match shape { Some(shape) => shape.fields.iter().map(|f| f.field.position).collect(), None => (0..model.fields().len()).collect() }
+}
+
+pub type Returned = (usize, Vec<ValueType>, Option<orm_core::behavior::ResultShape>);
+pub type ReturnColumns = (Vec<ValueType>, Option<orm_core::behavior::ResultShape>);

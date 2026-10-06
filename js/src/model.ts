@@ -10,12 +10,14 @@
 import { DoesNotExist, MultipleObjectsReturned, NotLoaded } from "./errors.js";
 import { Column, PATH, RelationPath, type PathState, type Source } from "./expr.js";
 import { camel, type ColType, type FieldMeta, type ModelSpec, type RelationKind, type RelationMeta } from "./meta.js";
-import { call, native, type NativeSchema } from "./native.js";
+import { call, native, type NativeShape, type NativeSchema } from "./native.js";
 import { resolve, type Database } from "./db.js";
 import type { ManyRelatedSet, QuerySet, RelatedSet } from "./query.js";
 
 /** Where an instance keeps its loaded relations. */
 export const RELATED: unique symbol = Symbol("orm.related");
+/** Private helper values (identity, relation keys) of a partial instance. */
+export const INTERNAL: unique symbol = Symbol("orm.internal");
 /** The database an instance was read from (`using(db)`), which it writes back to. */
 export const DB: unique symbol = Symbol("orm.db");
 /** Hidden values (such as relation keys) that adapters read but ordinary property access does not show. */
@@ -84,7 +86,7 @@ export interface Instance<M extends ModelSpec> {
   /** `DELETE ... WHERE pk = ...`. The instance keeps its last values. */
   delete(): Promise<void>;
   /** Reload column values from the database. */
-  refresh(): Promise<void>;
+  refresh(...fields: readonly Column<unknown, string>[]): Promise<void>;
 }
 
 export type Row = Record<PropertyKey, unknown> & { [RELATED]?: Record<string, unknown>; [DB]?: Database | undefined };
@@ -92,6 +94,8 @@ export type Row = Record<PropertyKey, unknown> & { [RELATED]?: Record<string, un
 /** Schema information about one model (`User._meta`). */
 export class ModelMeta implements Source {
   declare attachInputFields?: readonly FieldMeta[];
+  /** The schema default filter IR, if any; set once by `define()`. */
+  defaultFilter: unknown;
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
   readonly fieldList: FieldMeta[] = [];
@@ -102,6 +106,8 @@ export class ModelMeta implements Source {
   readonly pk: FieldMeta;
   /** Makes instances: `new meta.Row()`, then the fields are assigned in schema order. */
   readonly Row: new () => Row;
+  /** Makes partial instances: like `Row`, but an absent field throws `NotLoaded`. */
+  readonly PartialRow: new () => Row;
   /** The prototype of paths that reach this model (`User.posts` for `Post`). */
   readonly pathProto: object;
   readonly model: ModelClass<ModelSpec> & Record<string, unknown>;
@@ -158,6 +164,7 @@ export class ModelMeta implements Source {
     this.pk = pks[0]!;
     this.pathProto = this.makePathProto();
     this.Row = this.makeRow();
+    this.PartialRow = this.makePartialRow();
     const model = Object.create(this.pathProto) as Record<PropertyKey, unknown>;
     model[PATH] = { root: this, path: [], names: [], target: ir.name } satisfies PathState;
     const name = ir.name;
@@ -231,7 +238,7 @@ export class ModelMeta implements Source {
     Object.defineProperties(proto, {
       pk: {
         get(this: Row) {
-          return this[meta.pk.name];
+          return Object.hasOwn(this, meta.pk.name) ? this[meta.pk.name] : (this[INTERNAL] as Record<string, unknown> | undefined)?.[meta.pk.name];
         },
       },
       update: { value: instanceUpdate, writable: true, configurable: true },
@@ -241,7 +248,7 @@ export class ModelMeta implements Source {
         value(this: Row) {
           const out: Record<string, unknown> = {};
           for (const f of meta.fieldList) {
-            out[f.name] = this[f.name];
+            if (Object.hasOwn(this, f.name)) out[f.name] = this[f.name];
           }
           return out;
         },
@@ -249,7 +256,7 @@ export class ModelMeta implements Source {
       },
       [Symbol.for("nodejs.util.inspect.custom")]: {
         value(this: Row) {
-          const shown = meta.fieldList.map((f) => `${f.name}: ${show(this[f.name])}`).join(", ");
+          const shown = meta.fieldList.filter((f) => Object.hasOwn(this, f.name)).map((f) => `${f.name}: ${show(this[f.name])}`).join(", ");
           return `${meta.name} { ${shown} }`;
         },
       },
@@ -264,12 +271,36 @@ export class ModelMeta implements Source {
     return Row;
   }
 
+  /** Field accessors live only here, so whole-model rows keep plain assignment. */
+  private makePartialRow(): new () => Row {
+    const meta = this;
+    const proto = Object.create(this.Row.prototype) as Record<string, unknown>;
+    for (const f of this.fieldList) {
+      Object.defineProperty(proto, f.name, {
+        get() { throw new NotLoaded(`${meta.name}.${f.name} was not loaded`); },
+        set(this: Row, value: unknown) { Object.defineProperty(this, f.name, { value, writable: true, configurable: true, enumerable: true }); },
+      });
+    }
+    const PartialRow = function (this: Row) {} as unknown as new () => Row;
+    (PartialRow as unknown as { prototype: object }).prototype = proto;
+    Object.defineProperty(PartialRow, "name", { value: meta.name });
+    return PartialRow;
+  }
+
   /** The instance for the row in `values` starting at `start`. */
-  instance(values: unknown[], start: number, db: Database | undefined): Row {
-    const o = new this.Row();
+  instance(values: unknown[], start: number, db: Database | undefined, shape?: NativeShape): Row {
+    const o = shape ? new this.PartialRow() : new this.Row();
     const fields = this.fieldList;
-    for (let i = 0; i < fields.length; i++) {
-      o[fields[i]!.name] = values[start + i];
+    if (shape) {
+      const internal: Record<string, unknown> = {};
+      for (const f of shape) {
+        const name = fields[f.field]!.name;
+        if (f.public) o[name] = values[start + f.slot];
+        else internal[name] = values[start + f.slot];
+      }
+      o[INTERNAL] = internal;
+    } else {
+      for (let i = 0; i < fields.length; i++) o[fields[i]!.name] = values[start + i];
     }
     if (db !== undefined) {
       o[DB] = db;
@@ -320,12 +351,14 @@ function relationGetter(meta: ModelMeta, r: RelationMeta): (this: Row) => unknow
     case "belongsTo": {
       const via = meta.fieldByIr.get(r.from)!.name;
       return function (this) {
-        const key = this[via];
+        const key = fieldValue(this, via);
         const loaded = this[RELATED];
         if (loaded && r.name in loaded) {
           const value = loaded[r.name] as Row | null;
-          const to = registry.get(r.target).fieldByIr.get(r.to)!.name;
-          if (value === null ? key === null : value[to] === key) {
+          const target = registry.get(r.target);
+          const to = target.fieldByIr.get(r.to)!.name;
+          // A default-filtered target joins as absent even when the key is set.
+          if (value === null ? key === null || target.defaultFilter !== undefined : fieldValue(value, to) === key) {
             return value;
           }
         } else if (key === null) {
@@ -377,33 +410,55 @@ function metaOf(o: Row): ModelMeta {
 
 function rowQuery(o: Row): QuerySet<ModelSpec> {
   const meta = metaOf(o);
-  return meta.objects.using(o[DB]).filter(meta.column(meta.pk).eq(o[meta.pk.name] as never) as never) as never;
+  return meta.objects.withoutDefaults().using(o[DB]).filter(meta.column(meta.pk).eq(o["pk"] as never) as never) as never;
 }
 
-function apply(o: Row, fresh: Row): void {
-  for (const f of metaOf(o).fieldList) {
-    o[f.name] = fresh[f.name];
+function invalidateChangedKeys(o: Row, fresh: Row): void {
+  const meta = metaOf(o);
+  for (const relation of meta.relations.values()) {
+    const source = meta.fieldByIr.get(relation.from)!.name;
+    if (fieldValue(o, source) !== fieldValue(fresh, source) && o[RELATED]) delete o[RELATED][relation.name];
   }
+}
+
+/** The row query; a partial instance keeps its public shape plus `extra`. */
+function loadedQuery(o: Row, extra: readonly string[] = []): QuerySet<ModelSpec> {
+  const query = rowQuery(o);
+  if (!o[INTERNAL]) return query;
+  const loaded = metaOf(o).fieldList.filter((f) => Object.hasOwn(o, f.name)).map((f) => f.ir);
+  return query.onlyFields([...new Set([...loaded, ...extra])]);
+}
+
+function replaceFrom(o: Row, fresh: Row): void {
+  invalidateChangedKeys(o, fresh);
+  const fields = metaOf(o).fieldList;
+  if (!o[INTERNAL] && !fresh[INTERNAL]) {
+    for (const f of fields) o[f.name] = fresh[f.name];
+    return;
+  }
+  for (const f of fields) { delete o[f.name]; if (Object.hasOwn(fresh, f.name)) o[f.name] = fresh[f.name]; }
+  if (fresh[INTERNAL]) o[INTERNAL] = fresh[INTERNAL]; else delete o[INTERNAL];
 }
 
 async function instanceUpdate(this: Row, values: object): Promise<void> {
   if (!Object.keys(values).length) {
     return;
   }
-  const rows = (await rowQuery(this).update(values as never, { returning: true })) as Row[];
+  const rows = (await loadedQuery(this).update(values as never, { returning: true })) as Row[];
   if (!rows.length) {
     const meta = metaOf(this);
-    throw new (meta.model.DoesNotExist)(`${meta.name} ${show(this[meta.pk.name])} no longer exists`);
+    throw new (meta.model.DoesNotExist)(`${meta.name} ${show(this["pk"])} no longer exists`);
   }
-  apply(this, rows[0]!);
+  replaceFrom(this, rows[0]!);
 }
 
 async function instanceDelete(this: Row): Promise<void> {
   await rowQuery(this).delete();
 }
 
-async function instanceRefresh(this: Row): Promise<void> {
-  apply(this, (await rowQuery(this).get()) as Row);
+async function instanceRefresh(this: Row, ...fields: readonly Column<unknown, string>[]): Promise<void> {
+  const requested = fields.length ? rowQuery(this).only(...fields).state.modelFields ?? [] : [];
+  replaceFrom(this, (await loadedQuery(this, requested).get()) as Row);
 }
 
 // -- registry -------------------------------------------------------------------------------------
@@ -578,6 +633,7 @@ export function define(
     }
     const defaults = ((ir.behavior as { proxy_models?: { model: string; defaults: Record<string, unknown> }[] } | undefined)?.proxy_models ?? []).find((p) => p.model === m.name)?.defaults;
     const meta = new ModelMeta(m, reg, defaults === undefined ? [] : Object.keys(defaults));
+    meta.defaultFilter = ((ir.behavior as { query_defaults?: { model: string; filter?: unknown }[] } | undefined)?.query_defaults ?? []).find((d) => d.model === m.name)?.filter;
     const computed = new Set(((ir.behavior as { result_fields?: { model: string; field: string }[] } | undefined)?.result_fields ?? []).filter((f) => f.model === m.name).map((f) => f.field));
     if (computed.size) {
       meta.inputFieldList = meta.fieldList.filter((f) => !computed.has(f.ir));
@@ -620,4 +676,13 @@ export function loads(source: string, options: { readonly registry?: Registry } 
 export function modelMeta(x: unknown): ModelMeta | undefined {
   const meta = (x as { _meta?: unknown } | null)?._meta;
   return meta instanceof ModelMeta && meta.model === x ? meta : undefined;
+}
+
+/** Internal relation-key access without changing public loaded state. */
+export function fieldValue(o: object, name: string): unknown {
+  const row = o as Row;
+  if (Object.hasOwn(row, name)) return row[name];
+  const internal = row[INTERNAL] as Record<string, unknown> | undefined;
+  if (internal && Object.hasOwn(internal, name)) return internal[name];
+  return row[name]; // prototype throws NotLoaded
 }

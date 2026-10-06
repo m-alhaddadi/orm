@@ -37,7 +37,7 @@ pub enum Outcome {
     /// Rows affected by an UPDATE / DELETE without `RETURNING`.
     Affected(u64),
     /// Rows of `model` returned by a write (`RETURNING` every column).
-    Rows { model: usize, rows: Box<dyn RowSet>, types: Vec<ValueType> },
+    Rows { model: usize, rows: Box<dyn RowSet>, types: Vec<ValueType>, shape: Option<orm_core::behavior::ResultShape> },
 }
 
 /// Runs `plan` on `conn` (the pool or a transaction).
@@ -65,7 +65,7 @@ pub async fn run(conn: &dyn Executor, target: Target, plan: Plan) -> Result<Outc
         }
         Plan::Insert(s, (model, types)) => {
             let (sql, args) = db::build(d, &s);
-            Outcome::Rows { model, rows: conn.query(sql, args).await?, types }
+            Outcome::Rows { model, rows: conn.query(sql, args).await?, types, shape: None }
         }
         #[cfg(feature = "model-composition")]
         Plan::ComposedInsert(insert) => return crate::composed::run_insert(conn, target, *insert).await,
@@ -95,11 +95,11 @@ async fn count_or_rows(
     conn: &dyn Executor,
     sql: String,
     args: Vec<Value>,
-    returning: Option<(usize, Vec<ValueType>)>,
+    returning: Option<plan::Returned>,
 ) -> Result<Outcome> {
     Ok(match returning {
         None => Outcome::Affected(conn.execute(sql, args).await?),
-        Some((model, types)) => Outcome::Rows { model, rows: conn.query(sql, args).await?, types },
+        Some((model, types, shape)) => Outcome::Rows { model, rows: conn.query(sql, args).await?, types, shape },
     })
 }
 
@@ -291,6 +291,7 @@ pub fn plan_update_many(
     params: &dyn Params,
     returning: bool,
     batch_size: Option<usize>,
+    without_defaults: bool,
 ) -> Result<(Vec<UpdateStatement>, UpdateMany)> {
     if rows.iter().any(|r| r.len() != fields.len()) {
         return Err(Error::query("update_many row length does not match fields"));
@@ -320,7 +321,7 @@ pub fn plan_update_many(
     if let Some(n) = batch_size {
         chunk = chunk.min(n);
     }
-    let (stmts, types) = plan::plan_update_many(schema, target, model, fields, &rows, chunk, filters, params, returning)?;
+    let (stmts, types) = plan::plan_update_many(schema, target, model, fields, &rows, chunk, filters, params, returning, without_defaults)?;
     let model_idx = schema.model_idx(model).map_err(query_err)?;
     let statements = stmts.iter().map(|s| db::build(target.dialect, s)).collect();
     Ok((stmts, UpdateMany { statements, returning: types.map(|t| (model_idx, t)) }))
@@ -360,7 +361,7 @@ pub async fn run_update_many(conn: &dyn Executor, um: UpdateMany, own_tx: bool) 
     }
     Ok(match um.returning {
         None => Outcome::Affected(count),
-        Some((model, types)) => Outcome::Rows { model, rows: Box::new(ChainedRows::new(fetched)), types },
+        Some((model, types)) => Outcome::Rows { model, rows: Box::new(ChainedRows::new(fetched)), types, shape: None },
     })
 }
 

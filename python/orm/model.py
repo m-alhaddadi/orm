@@ -10,7 +10,7 @@ from os import PathLike
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from . import _native
-from .errors import DoesNotExist, MultipleObjectsReturned
+from .errors import DoesNotExist, MultipleObjectsReturned, NotLoaded
 from .expr import ColumnRef
 from .fields import BY_TYPE, Array, BelongsTo, Enum, Field, HasMany, HasOne, ManyToMany, Relation, String
 from .proxy import prepare_defaults
@@ -56,6 +56,7 @@ class ModelMeta:
         # Row tuples from the engine follow this order.
         self.field_names: tuple[str, ...] = tuple(self.fields)
         self.input_fields: dict[str, Field[Any]] = self.fields
+        self.default_filter: dict[str, Any] | None = None
 
     def pk_ref(self) -> ColumnRef[Any]:
         return ColumnRef(self.model, (), self.pk)
@@ -216,6 +217,7 @@ class Registry:
             meta.table = ir["table"]
             meta.pk = next(field for field in fields.values() if field.primary_key)
             meta.schema_ir = ir
+            meta.default_filter = next((d.get("filter") for d in prepared.get("behavior", {}).get("query_defaults", ()) if d["model"] == meta.name), None)
             meta.field_names = tuple(fields)
             pk_ir = next(f for f in ir["fields"] if f.get("primary_key"))
             meta.attach_fields = (
@@ -251,7 +253,7 @@ class Registry:
         return self._native
 
 
-_RESERVED = {"pk", "objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "update", "delete", "refresh"}
+_RESERVED = {"pk", "objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "update", "delete", "refresh", "to_dict", "_field_value", "_orm_internal"}
 
 registry = Registry()
 
@@ -425,39 +427,71 @@ class Model:
 
     @property
     def pk(self) -> Any:
-        return self.__dict__.get(self._meta.pk.name)
+        return self.__dict__.get(self._meta.pk.name, self.__dict__.get("_orm_internal", {}).get(self._meta.pk.name))
+
+    def _field_value(self, name: str) -> Any:
+        """Internal key access for relation loaders; never marks a field loaded."""
+        if name in self.__dict__:
+            return self.__dict__[name]
+        internal = self.__dict__.get("_orm_internal", {})
+        if name in internal:
+            return internal[name]
+        raise NotLoaded(f"{type(self).__name__}.{name} was not loaded")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize public loaded scalar fields, retaining loaded NULL values."""
+        return {n: self.__dict__[n] for n in self._meta.field_names if n in self.__dict__}
 
     # -- writes --------------------------------------------------------------------------
     # Each method is one statement on this row (matched by primary key), run on the
     # database the instance was read from.
 
     def _row_query(self) -> QuerySet[Self]:
-        return type(self).objects.using(self.__dict__.get("_db")).filter(self._meta.pk_ref() == self.pk)
+        return type(self).objects.without_defaults().using(self.__dict__.get("_db")).filter(self._meta.pk_ref() == self.pk)
 
-    def _apply_row(self, row: tuple[Any, ...]) -> None:
-        self.__dict__.update(zip(self._meta.field_names, row))
+    def _loaded_query(self, *extra: str) -> QuerySet[Self]:
+        """The row query; a partial instance keeps its public shape plus ``extra``."""
+        query = self._row_query()
+        if "_orm_internal" not in self.__dict__:
+            return query
+        names = [n for n in self._meta.field_names if n in self.__dict__]
+        names.extend(n for n in extra if n not in names)
+        return query._clone(_model_fields=tuple(names))
+
+    def _replace_from(self, fresh: Model) -> None:
+        for name, relation in self._meta.relations.items():
+            source = relation.via if isinstance(relation, BelongsTo) else getattr(relation, "from_", None)
+            if source and self._field_value(source) != fresh._field_value(source):
+                self.__dict__.pop(name, None)
+        for name in self._meta.field_names:
+            self.__dict__.pop(name, None)
+        self.__dict__.update({n: fresh.__dict__[n] for n in self._meta.field_names if n in fresh.__dict__})
+        if "_orm_internal" in fresh.__dict__:
+            self.__dict__["_orm_internal"] = fresh.__dict__["_orm_internal"]
+        else:
+            self.__dict__.pop("_orm_internal", None)
 
     async def update(self, **values: Any) -> None:
-        """``UPDATE ... SET <values> WHERE pk = ... RETURNING *``.
+        """``UPDATE ... SET <values> WHERE pk = ... RETURNING`` the loaded fields.
 
         Values may be expressions (``views=Post.views + 1``); the instance is refreshed
         from the returned row, so it shows what the database stored.
         """
         if not values:
             return
-        rows = await self._row_query().update(**values).returning()
+        rows = await self._loaded_query().update(**values).returning()
         if not rows:
             raise self.DoesNotExist(f"{type(self).__name__} {self.pk!r} no longer exists")
-        self._apply_row(tuple(rows[0].__dict__[n] for n in self._meta.field_names))
+        self._replace_from(rows[0])
 
     async def delete(self) -> None:
         """``DELETE ... WHERE pk = ...``. The instance keeps its last values."""
         await self._row_query().delete()
 
-    async def refresh(self) -> None:
+    async def refresh(self, *fields: ColumnRef[Any]) -> None:
         """Reload column values from the database."""
-        fresh = await self._row_query().get()
-        self._apply_row(tuple(fresh.__dict__[n] for n in self._meta.field_names))
+        requested = self._row_query().only(*fields)._model_fields or () if fields else ()
+        self._replace_from(await self._loaded_query(*requested).get())
 
     # -- dunder --------------------------------------------------------------------------
 
