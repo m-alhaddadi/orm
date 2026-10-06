@@ -117,6 +117,14 @@ impl PySchema {
         Ok(PySchema { inner: Arc::new(inner), classes: Arc::new(classes) })
     }
 
+    /// Selected upload preflight: ordinary conversion/planning without SQL or I/O.
+    #[cfg(feature = "file-storage")]
+    fn validate_file_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>) -> PyResult<()> {
+        let values = convert_rows(&self.inner, model, &fields, rows, true)?;
+        exec::plan_insert(&self.inner, Target::new(self.inner.dialect), model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
+        Ok(())
+    }
+
     /// SQL for an operation with parameters inlined. For debugging and tests only.
     fn sql(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<String> {
         let op = parse_op(op_json).map_err(engine_err)?;

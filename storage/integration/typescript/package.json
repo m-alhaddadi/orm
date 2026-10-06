@@ -10,6 +10,10 @@
     "./decoder": {
       "types": "./dist/src/decoder.d.ts",
       "default": "./dist/src/decoder.js"
+    },
+    "./model": {
+      "types": "./dist/src/model.d.ts",
+      "default": "./dist/src/model.js"
     }
   },
   "files": [
@@ -23,7 +27,11 @@
     "test": "npm run build && node --test dist/test/*.test.js"
   },
   "peerDependencies": {
-    "@orm/storage": "^0.1.0"
+    "@orm/storage": "^0.1.0",
+    "orm": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "orm": { "optional": true }
   },
   "devDependencies": {
     "@orm/storage": "file:../../typescript",

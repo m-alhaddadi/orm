@@ -154,3 +154,22 @@ forwarding, signing and deletion. This is not a production S3 service acceptance
 claim. The TypeScript suite verifies real SDK signing and controlled multipart
 commands. Python memory tests stream 64 MiB and cap traced peak allocations at
 2 MiB local / 16 MiB multipart (caller-generated chunks; transport discards parts).
+
+The root `CLAUDE.md` checks build without `file-storage` and do not run these packages.
+Run them too when you change `storage/` or the file-storage host code:
+
+```bash
+cargo test -q -p orm-core -p orm-engine --features file-storage
+cargo test -q --manifest-path storage/reference/Cargo.toml
+cargo test -q --manifest-path storage/orm-extension/Cargo.toml
+uv pip install -e storage/python -e storage/integration/python
+python -m pytest -q storage/python/tests storage/integration/python/tests
+(cd storage/typescript && npm install && npm test)
+(cd storage/integration/typescript && npm install && npm test)
+# End-to-end, against a file-storage build; set FILE_STORAGE_DATABASE_URL for Postgres.
+maturin develop --features file-storage && python storage/integration/tests/native_python.py
+cargo build -p orm-node --features file-storage && cp target/debug/liborm_node.dylib js/orm.node
+(cd js && npm run build) && node --test storage/integration/tests/native_node.mjs
+```
+
+Rebuild the default bindings (`maturin develop`, `npm run build:native`) before the root checks.

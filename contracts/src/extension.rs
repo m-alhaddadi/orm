@@ -85,6 +85,50 @@ pub struct FileField {
 
 pub const FILE_REFERENCE_ADAPTER: &str = "file-storage.reference.v1";
 
+/// Names the host runtimes give meaning to on models and instances.
+pub const RESERVED_MEMBERS: [&str; 12] =
+    ["objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "pk", "update", "delete", "refresh", "toJSON", "constructor", "toString", "then"];
+
+/// Reject a file field whose generated Python or TypeScript operations collide with a model member.
+pub fn check_file_methods(ir: &SchemaIr, model: &crate::ir::ModelIr, field: &str) -> Result<(), String> {
+    for method in [format!("{field}_signed_url"), format!("{field}_open"), format!("{}SignedUrl", camel(field)), format!("{}Open", camel(field))] {
+        let taken = |name: &str| name == method || camel(name) == method;
+        if RESERVED_MEMBERS.contains(&method.as_str())
+            || model.fields.iter().any(|f| taken(&f.name))
+            || model.relations.iter().any(|r| taken(&r.name))
+            || ir.behavior.methods.iter().any(|m| m.model == model.name && taken(&m.name))
+        {
+            return Err(format!("{}.{method}: generated file method collides with a model member", model.name));
+        }
+    }
+    Ok(())
+}
+
+/// `author_id` -> `authorId`: an underscore after a letter or digit is dropped and the
+/// next letter or digit upper-cased (leading and trailing underscores stay).
+pub fn camel(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::with_capacity(name.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '_' && i > 0 && chars[i - 1].is_ascii_alphanumeric() {
+            let mut j = i;
+            while j < chars.len() && chars[j] == '_' {
+                j += 1;
+            }
+            if j < chars.len() && chars[j].is_ascii_alphanumeric() {
+                out.extend(chars[j].to_uppercase());
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// Validate field codec shapes once, before usable models are published.
 pub fn validate_field_adapters(ir: &SchemaIr) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
@@ -446,8 +490,11 @@ pub fn capture_storage(ir: &mut SchemaIr) -> Result<(), String> {
 
 pub const HOST_CAPABILITIES: &[&str] = &[
     "schema-transformations", "physical-schema", "native-string-values",
-    "native-string-records", "native-string-results",
+    "native-string-records", "native-string-results", "file-storage",
 ];
+
+/// Capabilities that a build selects as the host Cargo feature of the same name.
+pub const HOST_FEATURE_CAPABILITIES: &[&str] = &["file-storage"];
 
 /// Combine one new declaration batch with an immutable definition context. Lowered
 /// declarations retain their phase state; new declarations are the only pass inputs.

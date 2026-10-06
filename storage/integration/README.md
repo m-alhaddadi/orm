@@ -4,10 +4,10 @@
 They depend on the independent storage package. They do not import ORM internals,
 provider SDKs, or install a runtime native callback registry.
 
-These helpers and the `../orm-extension/` schema compiler are implemented and tested
-independently. Automatic model definition/code generation/decoding and ORM write
-integration remain pending the verified host/packaging APIs. Installing these
-helpers alone does not enable annotated file fields in an ORM artifact.
+`install_model` / `installModel` decode loaded file fields to `Reference` and route
+`Upload` writes through `PreparedFileWrite`. Annotated file fields need a native
+artifact built with the `file-storage` feature; selecting `../orm-extension/` in
+`orm-extension-build` turns it on. Installing these helpers alone does not.
 
 The selected declaration is proposed as:
 
@@ -80,3 +80,43 @@ FileField's explicit signed URL/open operations distinguish omitted public field
 from loaded NULL, raising FileNotLoaded/MissingFile before provider access. Decode
 and Reference access make no storage requests. FileField helper errors must map to
 the selected ORM's public missing/unloaded error classes in final integration.
+
+## Selected native model integration (current milestone)
+
+The native `file-storage` Cargo feature includes the durable reference validator,
+resolves logical JSON field positions at definition, and validates ordinary
+insert/update/bulk-update references without provider calls. Both bindings expose
+selected insert preflight that converts and plans all inputs without executing
+SQL. No storage dependency or prepared file layout exists in disabled native core.
+
+Selected code generation uses the fixed `file-storage.reference.v1` adapter:
+Python imports `orm_file_storage.model.install_model`; TypeScript imports
+`installModel` from `@orm/file-storage/model`. Generated modules expose
+`configure_file_storage(registry)` / `configureFileStorage(registry)` for the
+application's storage Registry. Methods delegate signing/opening explicitly;
+reference-only writes normalize without uploading. Generated single insert and
+unique-row update wrappers prepare Upload outside native SQL execution and retain
+completed references after SQL failure. Unique updates require a direct equality
+on a prepared primary-key/unique field, possibly within AND; arbitrary OR, bulk,
+conflict and expression uploads reject before I/O.
+
+Python retains the prepared operation on the selected statement's `operation`.
+TypeScript's selected query exposes `prepareFileInsert(values)` returning
+`{ operation, execute }` when the caller needs recovery after a successful
+statement followed by outer rollback. Convenience errors in both bindings retain
+the operation. Retry explicitly with its `.execute()`; no upload replay or
+physical cleanup is automatic.
+
+Dynamic hosts use the same setup function and fixed decoder. For TypeScript pass
+`meta` as the fourth installModel argument to install selected query statements;
+Python install_model installs statements when passed an ORM model class. The
+host must stage this setup on candidate models before publishing its definition.
+Selected descriptor maps use Python field names / TypeScript camelCase names.
+
+Automatic public Reference materialization still requires the plan 03-owned
+materializer to install the fixed decoder from `orm_file_storage.decoder` /
+`@orm/file-storage/decoder`. Until that integration is adopted, native reads
+return the ordinary JSON wire dictionary/object despite the generated Reference
+type declaration. This milestone is not release-ready. Plan 02's immutable
+ADAPTERS/nativeAdapters must select/import these modules once at initialization;
+this branch does not fabricate that selector or advertise finished packaging.

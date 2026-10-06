@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write;
 
 use crate::ir::{ColType, EnumStorage, FieldIr, RelKind, SchemaIr};
-use crate::schema::Schema;
+use crate::schema::{Model, Schema};
 
 pub struct Generated {
     pub module: String,
@@ -88,6 +88,13 @@ fn value_type(f: &FieldIr) -> String {
     }
 }
 
+fn file_value_type(m: &Model, f: &FieldIr) -> String {
+    if m.is_file_field(&f.name) {
+        return if f.nullable { "Reference | None".into() } else { "Reference".into() };
+    }
+    value_type(f)
+}
+
 fn has_server_value(f: &FieldIr) -> bool {
     f.auto_increment || f.default.is_some() || f.default_now || f.default_sql.is_some()
 }
@@ -119,6 +126,19 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     );
     writeln!(py, "_SCHEMA = r\"\"\"\n{ir_json}\n\"\"\"\n").unwrap();
     writeln!(py, "_models = define(_SCHEMA, module=__name__)").unwrap();
+    #[cfg(feature = "file-storage")]
+    if !ir.behavior.file_fields.is_empty() {
+        py.push_str("from orm_file_storage import FileField as _FileField\nfrom orm_file_storage.model import install_model as _install_file_model\n\n_FILE_ADAPTERS = []\n");
+        for m in &schema.models {
+            if m.file_fields.is_empty() { continue; }
+            let fields = m.file_fields.iter().map(|f| {
+                let name = &m.fields()[f.position].name;
+                format!("{name:?}: _FileField({name:?}, {:?}, {})", f.storage, if f.nullable { "True" } else { "False" })
+            }).collect::<Vec<_>>().join(", ");
+            writeln!(py, "_FILE_ADAPTERS.append(_install_file_model(_models[{:?}], {{{fields}}}))", m.ir.name).unwrap();
+        }
+        py.push_str("\ndef configure_file_storage(registry):\n    for adapter in _FILE_ADAPTERS:\n        adapter.configure(registry)\n\n");
+    }
     for n in enums.iter().chain(&names) {
         writeln!(py, "{n} = _models[\"{n}\"]").unwrap();
     }
@@ -163,8 +183,13 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
             let output = if method.output.is_some() { "str" } else { "None" };
             writeln!(body, "    @staticmethod\n    def {}(value: str) -> {output}: ...", method.name).unwrap();
         }
+        #[cfg(feature = "file-storage")]
+        for file in &m.file_fields {
+            let field = &m.fields()[file.position].name;
+            writeln!(body, "    async def {field}_signed_url(self, *, expires_in: int = 300) -> str: ...\n    def {field}_open(self) -> AsyncIterator[bytes]: ...").unwrap();
+        }
         for f in m.fields() {
-            writeln!(body, "    {}: f.{}[{}]", f.name, field_class(f), value_type(f)).unwrap();
+            writeln!(body, "    {}: f.{}[{}]", f.name, field_class(f), file_value_type(m, f)).unwrap();
         }
         if !m.ir.relations.is_empty() {
             body.push('\n');
@@ -194,7 +219,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
 
         writeln!(body, "class _{name}Path(RelationPath[{name}]):").unwrap();
         for f in m.fields() {
-            writeln!(body, "    {}: ColumnRef[{}]", f.name, value_type(f)).unwrap();
+            writeln!(body, "    {}: ColumnRef[{}]", f.name, file_value_type(m, f)).unwrap();
         }
         for r in &m.ir.relations {
             writeln!(body, "    {}: _{}Path", r.name, r.target).unwrap();
@@ -210,7 +235,8 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
             if m.native.computed().contains(&position) { continue; }
             #[cfg(not(feature = "composition"))]
             let _ = position;
-            let t = value_type(f);
+            let t = file_value_type(m, f);
+            let t = if m.is_file_field(&f.name) { format!("{t} | Upload") } else { t };
             match belongs(&f.name) {
                 Some(r) => {
                     let target = if f.nullable { format!("{} | None", r.target) } else { r.target.clone() };
@@ -230,11 +256,13 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
             if m.native.computed().contains(&position) { continue; }
             #[cfg(not(feature = "composition"))]
             let _ = position;
-            let t = value_type(f);
+            let t = file_value_type(m, f);
             #[cfg(feature = "composition")]
             let expression = !m.native.validated().contains(&position);
             #[cfg(not(feature = "composition"))]
             let expression = true;
+            let expression = expression && !m.is_file_field(&f.name);
+            let t = if m.is_file_field(&f.name) { format!("{t} | Upload") } else { t };
             if expression { writeln!(body, "    {}: {t} | Expression[{t}]", f.name).unwrap(); }
             else { writeln!(body, "    {}: {t}", f.name).unwrap(); }
             if let Some(r) = belongs(&f.name) {
@@ -249,7 +277,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
             if m.native.computed().contains(&position) { continue; }
             #[cfg(not(feature = "composition"))]
             let _ = position;
-            let t = value_type(f);
+            let t = file_value_type(m, f);
             if f.primary_key {
                 writeln!(body, "    {}: Required[{t}]", f.name).unwrap();
             } else {
@@ -325,6 +353,10 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
          from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update, UpdateMany\n\
          from orm import fields as f\n\n",
     );
+    #[cfg(feature = "file-storage")]
+    if !ir.behavior.file_fields.is_empty() {
+        pyi.push_str("from collections.abc import AsyncIterator\nfrom orm_storage import Reference, Registry as StorageRegistry\nfrom orm_file_storage import Upload\n\ndef configure_file_storage(registry: StorageRegistry) -> None: ...\n\n");
+    }
     pyi.push_str(&body);
     writeln!(pyi, "__all__ = [\n{all}]").unwrap();
     Ok(Generated { module: py, stub: pyi })

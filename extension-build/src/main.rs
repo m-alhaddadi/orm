@@ -109,6 +109,7 @@ fn build() -> Result<(), String> {
     let core_path = config.output.join("core/Cargo.toml");
     let mut core: toml::Value = toml::from_str(&fs::read_to_string(&core_path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     core["dependencies"]["orm-contracts"]["path"] = toml::Value::String(config.host.join("contracts").to_string_lossy().into());
+    core["dependencies"]["storage-reference"]["path"] = toml::Value::String(config.host.join("storage/reference").to_string_lossy().into());
     for (alias, dependency) in &config.dependencies {
         orm_extension_build::rust_path(&alias.replace('-', "_"))?;
         if alias.contains("::") || core["dependencies"].get(alias).is_some() { return Err(format!("invalid or occupied dependency alias {alias}")); }
@@ -214,15 +215,21 @@ fn main() -> Result<(), String> {
     }
     if !config.dependencies.is_empty() {
         // Features are selected through manifests, never through build-script cfg tricks.
+        let selected: Vec<String> = composition.manifests.iter().flat_map(|m| &m.capabilities)
+            .filter(|c| orm_contracts::extension::HOST_FEATURE_CAPABILITIES.contains(&c.as_str()))
+            .cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let features = |base: &[&str]| toml::Value::Array(base.iter().map(|f| (*f).to_owned()).chain(selected.iter().cloned()).map(toml::Value::String).collect());
         for binding in &config.bindings {
             let path = config.output.join("bindings").join(binding).join("Cargo.toml");
             let mut manifest: toml::Value = toml::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             if native.is_some() {
                 for (alias, dependency) in &config.dependencies { manifest["dependencies"].as_table_mut().unwrap().insert(alias.clone(), dependency.clone()); }
-                manifest["features"].as_table_mut().unwrap().insert("default".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
+                manifest["features"].as_table_mut().unwrap().insert("default".into(), features(&["composition"]));
                 manifest["dependencies"]["orm-engine"].as_table_mut().unwrap().insert("features".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
+            } else if !selected.is_empty() {
+                manifest["features"].as_table_mut().unwrap().insert("default".into(), features(&[]));
             }
-            manifest["dependencies"]["orm-core"].as_table_mut().unwrap().insert("features".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
+            manifest["dependencies"]["orm-core"].as_table_mut().unwrap().insert("features".into(), features(&["composition"]));
             fs::write(path, toml::to_string(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         }
     }

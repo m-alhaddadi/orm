@@ -62,43 +62,7 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         {
             return Err(fail("duplicate file-field adapter"));
         }
-        // Both language APIs must be collision safe regardless of selected generator.
-        for method in [
-            format!("{name}_signed_url"),
-            format!("{name}_open"),
-            format!("{}SignedUrl", camel(name)),
-            format!("{}Open", camel(name)),
-        ] {
-            if model
-                .fields
-                .iter()
-                .any(|f| f.name == method || camel(&f.name) == method)
-                || model
-                    .relations
-                    .iter()
-                    .any(|r| r.name == method || camel(&r.name) == method)
-                || ir
-                    .behavior
-                    .methods
-                    .iter()
-                    .any(|m| m.model == model.name && m.name == method)
-                || [
-                    "pk",
-                    "update",
-                    "delete",
-                    "refresh",
-                    "toJSON",
-                    "constructor",
-                    "then",
-                    "objects",
-                ]
-                .contains(&method.as_str())
-            {
-                return Err(fail(&format!(
-                    "generated method {method} collides with a model member"
-                )));
-            }
-        }
+        orm_contracts::extension::check_file_methods(ir, model, name).map_err(|e| fail(&e))?;
         contributions.push(FileField {
             model: model.name.clone(),
             field: name.clone(),
@@ -116,24 +80,6 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
     }
     validate_field_adapters(ir)
 }
-fn camel(name: &str) -> String {
-    let mut out = String::new();
-    let mut uppercase = false;
-    for character in name.chars() {
-        if character == '_' && !out.is_empty() {
-            uppercase = true;
-            continue;
-        }
-        out.push(if uppercase {
-            character.to_ascii_uppercase()
-        } else {
-            character
-        });
-        uppercase = false;
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

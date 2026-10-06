@@ -98,6 +98,8 @@ pub fn prepare_write(schema: &Schema, contract: &WriteContract<'_, WriteValue<Va
                     if std::mem::discriminant(value) != std::mem::discriminant(&expected) || matches!((&*value, &expected), (Value::Array(a, _), Value::Array(b, _)) if a != b) {
                         return Err(Error::query("owner value does not match its prepared physical type"));
                     }
+                    #[cfg(feature = "file-storage")]
+                    crate::file_storage::value(logical, position, value)?;
                     crate::behavior::field(logical.native, position, value)?;
                     supplied_positions.push(position); supplied_values.push(value.clone());
                 }

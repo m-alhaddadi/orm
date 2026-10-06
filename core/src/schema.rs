@@ -66,6 +66,14 @@ impl Model {
             .ok_or_else(|| format!("model {} has no field {name:?}", self.ir.name))
     }
 
+    /// True if the selected file-storage codec owns the field.
+    pub fn is_file_field(&self, name: &str) -> bool {
+        #[cfg(feature = "file-storage")]
+        { self.file_fields.iter().any(|file| self.fields()[file.position].name == name) }
+        #[cfg(not(feature = "file-storage"))]
+        { let _ = name; false }
+    }
+
     pub fn field_pos(&self, name: &str) -> Result<usize> {
         self.field_index
             .get(name)

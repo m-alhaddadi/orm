@@ -36,6 +36,7 @@ pub fn prepare(ir: &SchemaIr) -> Result<Vec<Vec<PreparedFileField>>, String> {
             || field.default_sql.is_some() || field.auto_increment {
             return Err(format!("{}.{}: file fields cannot be keys or have defaults", file.model, file.field));
         }
+        crate::behavior::check_file_methods(ir, &ir.models[model], &file.field)?;
         prepared[model].push(PreparedFileField {
             position, storage: file.storage.clone(), nullable: field.nullable,
         });
@@ -67,6 +68,24 @@ mod tests {
         for invalid in [serde_json::json!({"v":2,"storage":"reports","key":"x"}), serde_json::json!({"v":1,"storage":"other","key":"x"}), serde_json::json!({"v":1,"storage":"reports","key":"x","credentials":"secret"})] {
             assert!(field.validate(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn generated_types_and_methods_are_selected_only() {
+        let ir = schema();
+        let schema = crate::schema::Schema::from_ir(serde_json::from_value(serde_json::to_value(&ir).unwrap()).unwrap()).unwrap();
+        let py = crate::codegen::python::generate(&ir, &schema, "report.prisma").unwrap();
+        assert!(py.module.contains("_install_file_model"));
+        assert!(py.stub.contains("Reference | None | Upload"));
+        assert!(py.stub.contains("file_signed_url"));
+        let ts = crate::codegen::typescript::generate(&ir, &schema, "report.prisma", "orm").unwrap();
+        assert!(ts.contains("installModel"));
+        assert!(ts.contains("fileSignedUrl"));
+        assert!(ts.contains("Reference | null | Upload"));
+        let ir = crate::dsl::compile("model Plain {\n id Int @id\n data Json?\n}", None).unwrap();
+        let schema = crate::schema::Schema::from_ir(serde_json::from_value(serde_json::to_value(&ir).unwrap()).unwrap()).unwrap();
+        assert!(!crate::codegen::python::generate(&ir, &schema, "plain").unwrap().module.contains("orm_file_storage"));
+        assert!(!crate::codegen::typescript::generate(&ir, &schema, "plain", "orm").unwrap().contains("@orm/storage"));
     }
 
     #[test]

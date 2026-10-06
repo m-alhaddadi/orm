@@ -4,7 +4,7 @@ host_contract = 1
 schema_contract = 1
 languages = ["python", "typescript"]
 databases = ["postgres", "sqlite"]
-capabilities = ["schema-transformations"]
+capabilities = ["schema-transformations", "file-storage"]
 
 [[attributes]]
 name = "storage.file"
