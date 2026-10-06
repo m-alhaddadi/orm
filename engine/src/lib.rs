@@ -43,3 +43,5 @@ pub fn compiled_backends() -> Vec<&'static str> {
     if cfg!(feature = "sqlite") { names.push("sqlite"); }
     names
 }
+#[cfg(any(feature = "generic-relations", test))]
+pub mod generic;

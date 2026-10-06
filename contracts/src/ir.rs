@@ -98,6 +98,9 @@ pub struct EnumIr {
 
 #[derive(Deserialize, Serialize, Debug, Default)]
 pub struct SchemaIr {
+    /// Frozen storage identities for the complete application schema set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identities: Option<crate::identity::IdentityManifest>,
     /// Database targeted by compilation. Older artifacts imply PostgreSQL.
     #[serde(default, skip_serializing_if = "crate::dialect::Dialect::is_postgres")]
     pub dialect: crate::dialect::Dialect,

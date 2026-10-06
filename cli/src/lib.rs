@@ -61,7 +61,7 @@ impl Host {
     }
 }
 
-const COMMANDS: &str = "  check                                    compile the schema and report errors
+const COMMANDS: &str = "  identities [--rename Old=New] [--restore Model]\n                                           explicitly update frozen ContentType IDs\n  check                                    compile the schema and report errors
   compile [-o ir.json]                     print or write the compiled schema (JSON IR)
   generate [python|typescript] [-o FILE] [--import MODULE]
                                            the models module from the schema
@@ -108,7 +108,7 @@ struct Args {
 }
 
 const FLAGS: [&str; 5] = ["--empty", "--check", "--down", "-h", "--help"];
-const VALUED: [&str; 9] = ["--schema", "--dir", "--url", "-o", "--out", "--import", "--name", "--steps", "--to"];
+const VALUED: [&str; 11] = ["--schema", "--dir", "--url", "-o", "--out", "--import", "--name", "--steps", "--to", "--rename", "--restore"];
 
 impl Args {
     fn parse(raw: &[String]) -> Result<Self> {
@@ -251,6 +251,29 @@ async fn command(argv: &[String], host: Host) -> Result<i32> {
     let schema = PathBuf::from(args.opt(&["--schema"]).or(cfg.schema.as_deref()).unwrap_or("schema.prisma"));
     let dir = PathBuf::from(args.opt(&["--dir"]).or(cfg.migrations.as_deref()).unwrap_or("migrations"));
     match command {
+        "identities" => {
+            args.allow(command, &["--rename", "--restore"], 0)?;
+            let mut renames = vec![];
+            let mut restores = vec![];
+            for (key, value) in &args.options {
+                match (key.as_str(), value.as_deref()) {
+                    ("--rename", Some(value)) => {
+                        let (old, new) = value.split_once('=').filter(|(a, b)| !a.is_empty() && !b.is_empty())
+                            .ok_or_else(|| Failure::Usage("--rename needs Old=New".into()))?;
+                        renames.push((old.to_owned(), new.to_owned()));
+                    }
+                    ("--restore", Some(value)) => restores.push(value.to_owned()),
+                    _ => {}
+                }
+            }
+            let path = orm_core::identity::manifest_path(&schema);
+            let previous = if path.exists() { orm_core::identity::read(&path).map_err(Failure::Failed)? } else { Default::default() };
+            let manifest = dsl::generate_identities(&schema, &renames, &restores).map_err(Failure::Failed)?;
+            let changes = orm_core::identity::changes(&previous, &manifest);
+            if changes.is_empty() { println!("no identity changes"); }
+            for change in changes { println!("{change}"); }
+            println!("wrote {}", path.display());
+        }
         "check" => {
             args.allow(command, &[], 0)?;
             let (ir, _) = load(&schema)?;

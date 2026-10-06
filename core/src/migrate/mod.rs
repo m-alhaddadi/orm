@@ -64,17 +64,30 @@ pub fn snapshot(schema: &Schema) -> Result<DbSchema> {
 pub fn plan(schema: &Schema, previous: &DbSchema) -> Result<MigrationPlan> {
     let schema = schema.physical();
     let (current, renames) = model::build(schema)?;
+    if let Some(old) = &previous.identities {
+        let next = current.identities.as_ref().ok_or("identity manifest removed from schema; retain frozen identities and tombstones")?;
+        old.validate_successor(next)?;
+    }
     if previous.version != 0 && previous.dialect != current.dialect {
         return Err(format!("migration snapshot targets {}, schema targets {}; use a separate migrations directory", previous.dialect.name(), current.dialect.name()));
     }
+    let identity_changed = previous.identities != current.identities;
     if current.dialect == crate::dialect::Dialect::Sqlite {
-        let up = sqlite::steps(previous, &current, &renames)?;
-        let down = sqlite::steps(&current, previous, &renames.reversed())?;
+        let mut up = sqlite::steps(previous, &current, &renames)?;
+        let mut down = sqlite::steps(&current, previous, &renames.reversed())?;
+        if identity_changed { identity_step(&mut up); identity_step(&mut down); }
         return Ok(MigrationPlan { up, down, snapshot: current });
     }
     let up = diff::diff(previous, &current, &renames);
     let down = diff::diff(&current, previous, &renames.reversed());
-    Ok(MigrationPlan { up: steps(&up), down: steps(&down), snapshot: current })
+    let mut up = steps(&up);
+    let mut down = steps(&down);
+    if identity_changed { identity_step(&mut up); identity_step(&mut down); }
+    Ok(MigrationPlan { up, down, snapshot: current })
+}
+
+fn identity_step(steps: &mut Vec<Step>) {
+    steps.push(Step { summary: "Record frozen ContentType identities".into(), sql: "-- Frozen ContentType identity mapping recorded in snapshot.json".into(), warning: None });
 }
 
 /// The whole schema as idempotent DDL (`IF NOT EXISTS` / `OR REPLACE`), for

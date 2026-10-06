@@ -30,6 +30,12 @@ pub struct Declaration {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Requirements {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proxy_models: Vec<ProxyModel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generic_relations: Vec<crate::generic::GenericRelation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generic_reverse: Vec<crate::generic::GenericReverse>,
     #[serde(default)]
     pub schema_contract: u32,
     #[serde(default)]
@@ -59,7 +65,7 @@ pub struct Requirements {
 }
 impl Requirements {
     pub fn is_empty(&self) -> bool {
-        self.declarations.is_empty() && self.extensions.is_empty() && self.specializations.is_empty()
+        self.proxy_models.is_empty() && self.generic_relations.is_empty() && self.generic_reverse.is_empty() && self.declarations.is_empty() && self.extensions.is_empty() && self.specializations.is_empty()
             && self.lowered_models.is_empty() && self.completed_passes.is_empty() && self.result_fields.is_empty() && self.storage.is_none() && self.field_storage.is_empty() && self.owner_links.is_empty() && self.methods.is_empty() && self.field_adapters.is_empty() && self.file_fields.is_empty() && self.schema_contract == 0
     }
 }
@@ -160,6 +166,33 @@ pub fn validate_field_adapters(ir: &SchemaIr) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyModel {
+    pub model: String,
+    pub parent: String,
+    /// Resolved root physical model identity, filled by lowering. Generic identity
+    /// manifests exclude `model` and refer to this concrete storage identity.
+    #[serde(default)]
+    pub storage_owner: String,
+    #[serde(default)]
+    pub fields: Vec<ProxyField>,
+    /// Literal client defaults; a JSON null is an explicit supplied null.
+    #[serde(default)]
+    pub defaults: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyField {
+    pub field: String,
+    #[serde(default)]
+    pub non_null: bool,
+    /// Parent enum member names, not database labels. None means the whole enum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subset: Option<Vec<String>>,
 }
 
 /// Setup contribution connecting a logical field to one physical owner.
@@ -416,6 +449,9 @@ pub fn check_requirements(ir: &SchemaIr, artifact: &Artifact) -> Result<(), Stri
             return Err("file-storage adapter is not compiled into this artifact; rebuild".into());
         }
     }
+    if (!r.generic_relations.is_empty() || !r.generic_reverse.is_empty()) && !artifact.capabilities.iter().any(|c| c == "generic-relations") {
+        return Err("generic relations are not compiled into this artifact; rebuild with generic-relations".into());
+    }
     if !r.is_empty() && r.schema_contract != artifact.schema_contract {
         return Err(format!("schema contract {} unavailable (artifact {}); rebuild native artifact", r.schema_contract, artifact.schema_contract));
     }
@@ -500,6 +536,11 @@ pub const HOST_FEATURE_CAPABILITIES: &[&str] = &["file-storage"];
 /// declarations retain their phase state; new declarations are the only pass inputs.
 pub fn merge_definition(mut context: SchemaIr, mut incoming: SchemaIr) -> Result<SchemaIr, String> {
     if context.dialect != incoming.dialect { return Err("schemas in one registry must target the same database".into()); }
+    match (&context.identities, incoming.identities.take()) {
+        (Some(old), Some(new)) if old != &new => return Err("different identity manifests in one registry; define the complete application schema together".into()),
+        (None, new) => context.identities = new,
+        _ => {}
+    }
     for model in &incoming.models {
         if context.models.iter().any(|m| m.name == model.name) {
             return Err(format!("a model named {} is already registered", model.name));
@@ -552,6 +593,9 @@ pub fn merge_definition(mut context: SchemaIr, mut incoming: SchemaIr) -> Result
     c.lowered_models.extend(n.lowered_models);
     c.lowered_models.sort(); c.lowered_models.dedup();
     c.declarations.extend(n.declarations);
+    c.proxy_models.extend(n.proxy_models);
+    c.generic_relations.extend(n.generic_relations);
+    c.generic_reverse.extend(n.generic_reverse);
     c.specializations.extend(n.specializations);
     c.result_fields.extend(n.result_fields);
     c.methods.extend(n.methods);

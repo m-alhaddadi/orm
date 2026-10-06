@@ -20,7 +20,7 @@ use crate::ir::{
 };
 use crate::schema::{Model, Result, Schema};
 
-pub const SNAPSHOT_VERSION: u32 = 2;
+pub const SNAPSHOT_VERSION: u32 = 3;
 /// Postgres truncates identifiers longer than this (NAMEDATALEN - 1).
 const MAX_IDENT: usize = 63;
 
@@ -30,6 +30,9 @@ fn is_false(b: &bool) -> bool {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct DbSchema {
+    /// Frozen ID-to-model routing is migration state even without a registry table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identities: Option<crate::identity::IdentityManifest>,
     #[serde(default, skip_serializing_if = "crate::dialect::Dialect::is_postgres")]
     pub dialect: crate::dialect::Dialect,
     pub version: u32,
@@ -703,7 +706,7 @@ pub fn build(schema: &Schema) -> Result<(DbSchema, Renames)> {
         names: BTreeSet::new(),
         trigger_functions: vec![],
     };
-    let mut db = DbSchema { dialect: schema.dialect, version: if schema.dialect.is_postgres() { 1 } else { SNAPSHOT_VERSION }, ..Default::default() };
+    let mut db = DbSchema { identities: schema.identities.clone(), dialect: schema.dialect, version: if schema.identities.is_some() { SNAPSHOT_VERSION } else if schema.dialect.is_postgres() { 1 } else { 2 }, ..Default::default() };
     let mut renames = Renames::default();
     let mut tables = BTreeSet::new();
     for m in &schema.models {

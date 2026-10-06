@@ -1,0 +1,30 @@
+id = "orm.generic"
+version = "0.1.0"
+host_contract = 1
+schema_contract = 1
+languages = ["python", "typescript"]
+databases = ["postgres", "sqlite"]
+capabilities = ["schema-transformations", "physical-schema"]
+
+[[attributes]]
+name = "generic.relation"
+target = "model"
+positional = [{ kind = "string", required = true }]
+[attributes.arguments]
+type = { kind = "string", required = true }
+key = { kind = "string", required = true }
+targets = { kind = "list", required = true }
+
+[[attributes]]
+name = "generic.reverse"
+target = "model"
+positional = [{ kind = "string", required = true }]
+[attributes.arguments]
+source = { kind = "string", required = true }
+relation = { kind = "string", required = true }
+
+[[passes]]
+id = "orm.generic.prepare"
+phase = "behavior"
+rust = "crate::prepare"
+effects = ["behavior.generic_relations", "behavior.generic_reverse", "storage.generic_checks"]

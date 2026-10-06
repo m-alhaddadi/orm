@@ -217,8 +217,10 @@ pub fn generate_with_sources(schema: &mut SchemaIr, specs: &[NativeSpec], manife
         let file_fields: Vec<_> = schema.behavior.file_fields.iter().filter(|f| f.model == model.name).collect();
         let field_adapters_json = serde_json::to_string(&field_adapters).map_err(|e| e.to_string())?;
         let file_fields_json = serde_json::to_string(&file_fields).map_err(|e| e.to_string())?;
+        let identities_json = serde_json::to_string(&schema.identities).map_err(|e| e.to_string())?;
+        let generic_json = serde_json::to_string(&(&schema.behavior.generic_relations, &schema.behavior.generic_reverse)).map_err(|e| e.to_string())?;
         let versions: BTreeMap<_, _> = manifests.iter().map(|m| (&m.id, &m.version)).collect();
-        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&serde_json::json!({"model": model, "enums": relevant_enums, "physical_schema": physical, "field_storage": ownership, "owner_links": links, "field_adapters": field_adapters, "file_fields": file_fields, "dialect": schema.dialect, "configuration": spec, "extensions": versions, "composition": manifests, "sources": sources, "host_contract": orm_contracts::extension::HOST_CONTRACT})).map_err(|e| e.to_string())?));
+        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&serde_json::json!({"model": model, "identities": schema.identities, "generic_relations": schema.behavior.generic_relations, "generic_reverse": schema.behavior.generic_reverse, "enums": relevant_enums, "physical_schema": physical, "field_storage": ownership, "owner_links": links, "field_adapters": field_adapters, "file_fields": file_fields, "dialect": schema.dialect, "configuration": spec, "extensions": versions, "composition": manifests, "sources": sources, "host_contract": orm_contracts::extension::HOST_CONTRACT})).map_err(|e| e.to_string())?));
         ids.sort(); ids.dedup();
         let specialization = Specialization { model: spec.model.clone(), fingerprint, exports: ids };
         let specialization_json = serde_json::to_string(&specialization).map_err(|e| e.to_string())?;
@@ -228,6 +230,9 @@ pub fn generate_with_sources(schema: &mut SchemaIr, specs: &[NativeSpec], manife
     let additions: Vec<crate::ir::FieldIr> = serde_json::from_str({added_fields:?}).expect("generated result fields");
     for field in additions {{
         if !m.fields.iter().any(|f| f.name == field.name) {{ m.fields.push(field); }}
+    }}
+    if serde_json::to_string(&ir.identities).map_err(|e| e.to_string())? != {identities_json:?} || serde_json::to_string(&(&ir.behavior.generic_relations, &ir.behavior.generic_reverse)).map_err(|e| e.to_string())? != {generic_json:?} {{
+        return Err(format!("{{}}: stale native identity/generic routing specialization; rebuild", m.name));
     }}
     let enum_names: std::collections::BTreeSet<String> = serde_json::from_str({enum_names_json:?}).expect("generated enum dependencies");
     let relevant_enums: Vec<_> = ir.enums.iter().filter(|e| enum_names.contains(&e.name)).collect();

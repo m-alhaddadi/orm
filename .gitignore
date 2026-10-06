@@ -20,3 +20,6 @@ storage/integration/python/src/*.egg-info/
 # Local distribution build artifacts.
 build/
 *.egg-info/
+.test-tmp/
+.mypy_cache/
+.pytest_cache/

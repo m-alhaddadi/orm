@@ -139,9 +139,27 @@ impl Loader {
 }
 
 pub fn compile_project(source: &str, origin: Option<&Path>) -> Result<CompiledProject, String> {
+    compile_project_mode(source, origin, None)
+}
+
+type IdentityUpdate<'a> = (&'a [(String, String)], &'a [String]);
+
+fn compile_project_mode(source: &str, origin: Option<&Path>, update: Option<IdentityUpdate<'_>>) -> Result<CompiledProject, String> {
     let mut loader = Loader { units: vec![], seen: Default::default(), active: vec![], locations: vec![], lines: 0 };
     let origin = origin.unwrap_or(Path::new("<schema>"));
     let mut items = loader.expand(source, origin, "", true)?;
+    let mut declared = std::collections::HashMap::new();
+    for item in &items {
+        let (name, pos) = match item {
+            syntax::Item::Model(m) => (&m.name, m.pos),
+            syntax::Item::Enum(e) => (&e.name, e.pos),
+            _ => continue,
+        };
+        if let Some(first) = declared.insert(name, pos) {
+            let first = loader.located(syntax::Error { pos: first, msg: "first declaration".into() });
+            return Err(loader.located(syntax::Error { pos, msg: format!("{name} is declared twice; {first}") }));
+        }
+    }
     let label = origin.display().to_string();
     let mut declarations = lower::behavior_declarations(&mut items, &label).map_err(|e| loader.located(e))?;
     for declaration in &mut declarations {
@@ -151,6 +169,28 @@ pub fn compile_project(source: &str, origin: Option<&Path>) -> Result<CompiledPr
             location.line = location.line - start + 1;
         }
     }
+    let path = crate::identity::manifest_path(origin);
+    // A handwritten ContentType enum stays ordinary unless generation or a generic relation asks for identities.
+    let handwritten = items.iter().any(|i| matches!(i, syntax::Item::Enum(e) if e.name == "ContentType"));
+    let needs_identities = update.is_some() || declarations.iter().any(|d| d.attribute.starts_with("generic.")) || !handwritten && (path.is_file()
+        || items.iter().any(|item| matches!(item, syntax::Item::Model(m) if m.members.iter().any(|f| f.ty.name == "ContentType"))));
+    let identities = if needs_identities {
+        if handwritten {
+            return Err("ContentType is generated from the identity manifest; remove the handwritten enum".into());
+        }
+        let manifest = if let Some((renames, restores)) = update {
+            let prior = if path.exists() { crate::identity::read(&path)? } else { Default::default() };
+            let names = items.iter().filter_map(|i| if let syntax::Item::Model(m) = i { if declarations.iter().any(|d| d.model == m.name && d.attribute == "proxy.of") { None } else { Some(m.name.clone()) } } else { None }).collect::<Vec<_>>();
+            crate::identity::reconcile(&prior, &names, renames, restores)?
+        } else { crate::identity::read(&path)? };
+        let e = crate::identity::content_type(&manifest)?;
+        let members = e.values.iter().map(|v| format!("{} @value({})", v.name, v.value)).collect::<Vec<_>>().join("\n");
+        let generated = format!("enum ContentType {{\n{members}\n@@storage(int)\n}}");
+        items.extend(syntax::parse(&generated).map_err(|e| format!("generated ContentType: {}", e.msg))?);
+        // All per-source Python facades expose the same shared enum.
+        for unit in &mut loader.units { unit.enums.push("ContentType".into()); }
+        Some(manifest)
+    } else { None };
     let catalog_inputs = std::cell::RefCell::new(Vec::new());
     let load = |path: &str| {
         catalog_inputs.borrow_mut().push(PathBuf::from(path));
@@ -158,18 +198,23 @@ pub fn compile_project(source: &str, origin: Option<&Path>) -> Result<CompiledPr
     };
     let deferred_identity = declarations.iter().filter(|d| d.field.is_none()).map(|d| d.model.clone()).collect();
     let mut ir = lower::Lowering { load: &load, deferred_identity: &deferred_identity }.lower(items).map_err(|e| loader.located(e))?;
+    ir.identities = identities;
     if !declarations.is_empty() {
         ir.behavior.schema_contract = crate::behavior::SCHEMA_CONTRACT;
         ir.behavior.declarations = declarations;
     }
-    crate::behavior::prepare(&mut ir, None)?;
-    for model in &ir.models {
-        if !model.fields.iter().any(|field| field.primary_key) {
-            return Err(format!("model {} has no @id field after extension lowering", model.name));
+    if update.is_none() {
+        crate::behavior::prepare(&mut ir, None)?;
+        for model in &ir.models {
+            if !model.fields.iter().any(|field| field.primary_key) {
+                return Err(format!("model {} has no @id field after extension lowering", model.name));
+            }
         }
     }
+    crate::identity::validate(&ir)?;
     let mut inputs: Vec<_> = loader.units.iter().map(|unit| unit.path.clone()).collect();
     inputs.extend(catalog_inputs.into_inner());
+    if ir.identities.is_some() { inputs.push(path); }
     Ok(CompiledProject { ir, units: loader.units, inputs })
 }
 
@@ -195,3 +240,15 @@ pub fn check(ir: SchemaIr) -> Result<(SchemaIr, Schema), String> {
 
 #[cfg(test)]
 mod tests;
+
+/// Explicit allocation is separate from compilation and usable without a compiled
+/// generic relation extension. A schema without extension declarations gets the full
+/// engine check before atomic publication; extension lowering waits for compilation.
+pub fn generate_identities(path: &Path, renames: &[(String, String)], restores: &[String]) -> Result<orm_contracts::identity::IdentityManifest, String> {
+    let source = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let project = compile_project_mode(&source, Some(path), Some((renames, restores)))?;
+    let manifest = project.ir.identities.clone().ok_or("missing generated identities")?;
+    if project.ir.behavior.declarations.is_empty() { check(project.ir)?; }
+    crate::identity::write(&crate::identity::manifest_path(path), &manifest)?;
+    Ok(manifest)
+}

@@ -413,9 +413,11 @@ async function instanceRefresh(this: Row): Promise<void> {
 export class Registry {
   private readonly models = new Map<string, ModelMeta>();
   private readonly enums = new Map<string, IREnum>();
+  private readonly enumValues = new Map<string, Readonly<Record<string, string | number>>>();
   private dialect: string | undefined;
   private readonly extra: Record<string, unknown[]> = {};
   private behavior: Record<string, unknown> = {};
+  private identities: unknown;
   private nativeSchema: NativeSchema | undefined;
 
   get(name: string): ModelMeta {
@@ -443,6 +445,13 @@ export class Registry {
     this.nativeSchema = undefined;
   }
 
+  /** The shared enum members of this prepared schema, including ContentType. */
+  getEnum(name: string): Readonly<Record<string, string | number>> {
+    const values = this.enumValues.get(name);
+    if (!values) throw new TypeError(`unknown enum ${JSON.stringify(name)}`);
+    return values;
+  }
+
   /** @internal */
   addEnum(e: IREnum): void {
     const known = this.enums.get(e.name);
@@ -450,6 +459,7 @@ export class Registry {
       throw new TypeError(`an enum named ${e.name} is already registered`);
     }
     this.enums.set(e.name, e);
+    if (!this.enumValues.has(e.name)) this.enumValues.set(e.name, Object.freeze(Object.fromEntries(e.values.map((v) => [v.name, v.value]))));
     this.nativeSchema = undefined;
   }
 
@@ -475,6 +485,9 @@ export class Registry {
     this.nativeSchema = undefined;
   }
 
+  /** @internal */
+  setIdentities(value: unknown): void { this.identities = structuredClone(value); }
+
   /** @internal: normalized context is owned by this candidate. */
   setBehavior(value: unknown): void { this.behavior = structuredClone((value ?? {}) as Record<string, unknown>); }
 
@@ -484,7 +497,7 @@ export class Registry {
     if (this.enums.size) {
       out.enums = [...this.enums.values()];
     }
-    return JSON.parse(JSON.stringify({ ...out, ...(this.dialect === undefined ? {} : { dialect: this.dialect }), ...this.extra, ...(Object.keys(this.behavior).length ? { behavior: this.behavior } : {}) })) as SchemaIR;
+    return JSON.parse(JSON.stringify({ ...out, ...(this.dialect === undefined ? {} : { dialect: this.dialect }), ...this.extra, ...(this.identities === undefined ? {} : { identities: this.identities }), ...(Object.keys(this.behavior).length ? { behavior: this.behavior } : {}) })) as SchemaIR;
   }
 
   /** Prepare the entire registered dependency batch. */
@@ -497,8 +510,10 @@ export class Registry {
     const next = new Registry();
     for (const [k, v] of this.models) next.models.set(k, v);
     for (const [k, v] of this.enums) next.enums.set(k, v);
+    for (const [k, v] of this.enumValues) next.enumValues.set(k, v);
     next.dialect = this.dialect;
     next.behavior = structuredClone(this.behavior);
+    next.identities = structuredClone(this.identities);
     for (const [k, v] of Object.entries(this.extra)) next.extra[k] = [...v];
     return next;
   }
@@ -508,9 +523,12 @@ export class Registry {
     this.models.clear();
     for (const [k, v] of next.models) this.models.set(k, v);
     this.enums.clear();
+    this.enumValues.clear();
     for (const [k, v] of next.enums) this.enums.set(k, v);
+    for (const [k, v] of next.enumValues) this.enumValues.set(k, v);
     this.dialect = next.dialect;
     this.behavior = structuredClone(next.behavior);
+    this.identities = structuredClone(next.identities);
     for (const k of Object.keys(this.extra)) delete this.extra[k];
     for (const [k, v] of Object.entries(next.extra)) this.extra[k] = [...v];
     this.nativeSchema = next.nativeSchema;
@@ -545,6 +563,7 @@ export function define(
   const reg = destination.candidate();
   reg.addExtra(ir);
   reg.setBehavior(ir.behavior);
+  reg.setIdentities(ir.identities);
   for (const e of ir.enums ?? []) {
     reg.addEnum(e);
   }

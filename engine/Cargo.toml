@@ -30,6 +30,11 @@ sha2 = "0.10"
 rusqlite = { optional = true, version = "0.37", features = ["bundled"] }
 blake2 = "0.10"
 
+[dev-dependencies]
+# Unit tests also cover the optional generic module.
+orm-core = { path = "../core", features = ["generic-relations"] }
+tokio = { version = "1", features = ["time"] }
+
 [features]
 default = ["postgres", "sqlite"]
 postgres = ["dep:tokio-postgres", "dep:deadpool-postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:webpki-roots", "dep:bytes", "sea-query/backend-postgres"]
@@ -37,6 +42,5 @@ sqlite = ["dep:rusqlite", "sea-query/backend-sqlite"]
 composition = ["orm-core/composition"]
 file-storage = ["orm-core/file-storage"]
 model-composition = ["composition", "orm-core/model-composition"]
+generic-relations = ["orm-core/generic-relations"]
 
-[dev-dependencies]
-tokio = { version = "1", features = ["time"] }

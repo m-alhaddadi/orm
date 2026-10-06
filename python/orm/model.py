@@ -90,6 +90,7 @@ class Registry:
         self._dialect: str | None = dialect
         self._schema_extra: dict[str, list[Any]] = {}
         self._behavior: dict[str, Any] = {}
+        self._identities: dict[str, Any] | None = None
         self._native: _native.Schema | None = None
 
     def register(self, model: type[Model]) -> None:
@@ -129,6 +130,8 @@ class Registry:
         if self._dialect is not None:
             out["dialect"] = self._dialect
         out.update(self._schema_extra)
+        if self._identities is not None:
+            out["identities"] = self._identities
         if self._behavior:
             out["behavior"] = self._behavior
         return copy.deepcopy(out)
@@ -237,6 +240,7 @@ class Registry:
         candidate._dialect = self._dialect
         candidate._schema_extra = copy.deepcopy(self._schema_extra)
         candidate._behavior = copy.deepcopy(self._behavior)
+        candidate._identities = copy.deepcopy(self._identities)
         return candidate
 
     def native(self) -> _native.Schema:
@@ -354,6 +358,7 @@ def define(
         if not items:
             del reg._schema_extra[key]
     reg._behavior = copy.deepcopy(ir.get("behavior", {}))
+    reg._identities = copy.deepcopy(ir.get("identities"))
     reg.prepare()
     destination._models = reg._models.copy()
     destination._enums = reg._enums.copy()
@@ -362,6 +367,7 @@ def define(
     destination._schema_extra = {k: v.copy() for k, v in reg._schema_extra.items()}
     destination._native = reg._native
     destination._behavior = copy.deepcopy(reg._behavior)
+    destination._identities = copy.deepcopy(reg._identities)
     return out
 
 
