@@ -16,11 +16,9 @@ import type { ManyRelatedSet, QuerySet, RelatedSet } from "./query.js";
 
 /** Where an instance keeps its loaded relations. */
 export const RELATED: unique symbol = Symbol("orm.related");
-/** Private helper values (identity, relation keys) of a partial instance. */
-export const INTERNAL: unique symbol = Symbol("orm.internal");
 /** The database an instance was read from (`using(db)`), which it writes back to. */
 export const DB: unique symbol = Symbol("orm.db");
-/** Hidden values (such as relation keys) that adapters read but ordinary property access does not show. */
+/** Hidden values of a partial instance (identity, relation keys) that adapters read but ordinary property access does not show. */
 export const INTERNAL: unique symbol = Symbol.for("orm.internal");
 // Adapter selection happens once; baseline artifacts never import its runtime module.
 const referenceAdapter = (JSON.parse(native().nativeArtifact()) as { capabilities: string[] }).capabilities.includes("reference-loading")
