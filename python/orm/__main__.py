@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     """Runs the command line; gives the exit code."""
     sys.stdout.flush()
     sys.stderr.flush()
+    if not hasattr(_native, "cli"):
+        raise RuntimeError("CLI is unavailable in this runtime profile; install orm[tooling] and set ORM_PROFILE=tooling")
     return _native.cli(sys.argv[1:] if argv is None else list(argv))
 
 

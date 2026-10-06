@@ -8,3 +8,6 @@ node_modules/
 js/dist/
 
 .verification/
+# Local distribution build artifacts.
+build/
+*.egg-info/

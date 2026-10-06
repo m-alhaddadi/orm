@@ -14,9 +14,12 @@
 //!   FROM tags t2 JOIN post_tags t3 ON t3.tag_id = t2.id WHERE t3.post_id = posts.id
 //!   AND ...)`, and its prefetch selects the join row's key next to each tag.
 
+#[cfg(feature = "postgres")]
+use sea_query::extension::postgres::PgExpr;
+
 use sea_query::{
     self,
-    extension::postgres::PgExpr, Alias, IntoIden, DeleteStatement, Expr as SExpr, ExprTrait, InsertStatement,
+    Alias, IntoIden, DeleteStatement, Expr as SExpr, ExprTrait, InsertStatement,
     JoinType, LikeExpr, LockBehavior, LockType, Order as SOrder, Query, SelectStatement, UpdateStatement,
 };
 
@@ -413,6 +416,7 @@ impl<'s> Planner<'s> {
         outer: Vec<(String, usize)>,
         next_alias: usize,
     ) -> Result<Self> {
+        crate::db::require_dialect(target.dialect)?;
         let mut p = Planner {
             schema,
             virt,
@@ -931,8 +935,12 @@ impl<'s> Planner<'s> {
                 match (ci, neg) {
                     (false, false) => item.like(pattern),
                     (false, true) => item.not_like(pattern),
+                    #[cfg(feature = "postgres")]
                     (true, false) => item.ilike(pattern),
+                    #[cfg(feature = "postgres")]
                     (true, true) => item.not_ilike(pattern),
+                    #[cfg(not(feature = "postgres"))]
+                    (true, _) => return Err(Error::query("ILIKE requires the postgres native capability")),
                 }
             }
             other => self.value(other, Hint::ty(ColType::Bool))?,
@@ -2002,6 +2010,7 @@ pub fn plan_insert(
     on_conflict: Option<OnConflict>,
     params: &dyn Params,
 ) -> Result<(InsertStatement, Vec<ValueType>)> {
+    crate::db::require_dialect(target.dialect)?;
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
     #[cfg(feature = "composition")]
     crate::ownership::require_local_write(m)?;

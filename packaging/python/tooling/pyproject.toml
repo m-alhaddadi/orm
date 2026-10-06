@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "orm-native-tooling"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Statically compiled ORM tooling engine"
+
+[tool.maturin]
+manifest-path = "../../../bindings/python/Cargo.toml"
+python-source = "."
+module-name = "orm_native_tooling._native"
+no-default-features = true
+features = ["pyo3/extension-module", "profile-tooling"]

@@ -13,8 +13,15 @@ name = "orm"
 path = "src/main.rs"
 
 [dependencies]
-orm-core = { path = "../core" }
-orm-engine = { path = "../engine" }
+orm-core = { path = "../core", default-features = false }
+orm-engine = { path = "../engine", default-features = false }
 serde_json = "1"
 toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[features]
+default = ["postgres", "sqlite", "generate-python", "generate-typescript"]
+postgres = ["orm-engine/postgres"]
+sqlite = ["orm-engine/sqlite"]
+generate-python = ["orm-core/generate-python"]
+generate-typescript = ["orm-core/generate-typescript"]

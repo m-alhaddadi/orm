@@ -1,3 +1,4 @@
+#![cfg(feature = "sqlite")]
 use std::sync::Arc;
 use orm_core::{dsl, migrate as ddl};
 use orm_engine::{db::{self, Executor, ErrorKind}, exec};

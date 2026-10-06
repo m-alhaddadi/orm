@@ -1,0 +1,21 @@
+{
+  "name": "@orm/native-postgres",
+  "version": "0.1.0",
+  "description": "Static ORM postgres profile",
+  "main": "index.cjs",
+  "files": [
+    "index.cjs",
+    "orm.node"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "orm": "0.1.0"
+  },
+  "optionalDependencies": {
+    "@orm/native-postgres-darwin-arm64": "0.1.0",
+    "@orm/native-postgres-linux-x64": "0.1.0",
+    "@orm/native-postgres-win32-x64": "0.1.0"
+  }
+}

@@ -15,7 +15,9 @@ import { native } from "./native.js";
 
 /** Runs the command line; gives the exit code. Output goes to stdout / stderr. */
 export function main(argv: readonly string[]): Promise<number> {
-  return native().cli([...argv]);
+  const addon = native();
+  if (typeof addon.cli !== "function") throw new Error("CLI unavailable; install @orm/native-tooling and set ORM_PROFILE=tooling");
+  return addon.cli([...argv]);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {

@@ -331,6 +331,7 @@ fn generate(args: &Args, host: Host, schema: &Path) -> Result<()> {
     let (ir, compiled) = dsl::check(project.ir).map_err(Failure::Failed)?;
     let source = schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     match language {
+        #[cfg(feature = "generate-python")]
         "python" => {
             if args.opt(&["--import"]).is_some() {
                 return Err(Failure::Usage("--import is for typescript".into()));
@@ -364,12 +365,17 @@ fn generate(args: &Args, host: Host, schema: &Path) -> Result<()> {
                 }
             }
         }
+        #[cfg(feature = "generate-typescript")]
         "typescript" => {
             let out = out.unwrap_or_else(|| schema.with_file_name("models.ts"));
             let runtime = args.opt(&["--import"]).unwrap_or("orm");
             write(&out, &codegen::typescript::generate(&ir, &compiled, &source, runtime).map_err(Failure::Failed)?)?;
             println!("wrote {}", out.display());
         }
+        #[cfg(not(feature = "generate-python"))]
+        "python" => return Err(Failure::Usage("python generator is not compiled into this profile".into())),
+        #[cfg(not(feature = "generate-typescript"))]
+        "typescript" => return Err(Failure::Usage("typescript generator is not compiled into this profile".into())),
         other => return Err(Failure::Usage(format!("unknown language {other}; available: python, typescript"))),
     }
     Ok(())

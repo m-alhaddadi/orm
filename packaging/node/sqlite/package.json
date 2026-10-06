@@ -1,0 +1,21 @@
+{
+  "name": "@orm/native-sqlite",
+  "version": "0.1.0",
+  "description": "Static ORM sqlite profile",
+  "main": "index.cjs",
+  "files": [
+    "index.cjs",
+    "orm.node"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "orm": "0.1.0"
+  },
+  "optionalDependencies": {
+    "@orm/native-sqlite-darwin-arm64": "0.1.0",
+    "@orm/native-sqlite-linux-x64": "0.1.0",
+    "@orm/native-sqlite-win32-x64": "0.1.0"
+  }
+}
