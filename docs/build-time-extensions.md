@@ -61,6 +61,16 @@ all selected behavioral extension crates in `dependencies`, including extensions
 required by another manifest. Cargo resolves Rust package versions; the frontend
 checks extension dependency constraints against that resolved selection.
 
+Binding backend and generator defaults are preserved when composition is added.
+For explicit host selection, use `binding_features`, for example
+`{"python": ["sqlite"], "node": ["postgres"]}`. Each supplied entry replaces
+that binding's defaults with the listed features plus required static composition;
+an omitted entry preserves its original defaults. Unknown features, `default`,
+and entries for unselected bindings fail before the native build. Use a host with
+the optional-packaging contracts for backend/generator exclusion; Cargo dependency
+feature unification remains authoritative. Selection is recorded in the build
+configuration and emitted binding manifests, and participates in rebuild guards.
+
 Instead of a dependency, `modules` accepts an application source module:
 `{"alias":"rules","source":"rules.rs","manifest":{...},"dependencies":{...}}`.
 The frontend wraps the source in a Cargo crate and supplies `orm-contracts`.

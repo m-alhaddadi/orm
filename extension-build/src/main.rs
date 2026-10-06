@@ -30,6 +30,8 @@ struct Config {
     #[serde(default = "bindings")]
     bindings: Vec<String>,
     #[serde(default)]
+    binding_features: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     offline: bool,
     #[serde(default)]
     prepare_only: bool,
@@ -41,6 +43,20 @@ struct Config {
     inputs: Vec<PathBuf>,
 }
 fn bindings() -> Vec<String> { vec!["python".into(), "node".into()] }
+
+fn add_feature(manifest: &mut toml::Value, path: &[&str], feature: &str) -> Result<(), String> {
+    let mut table = manifest;
+    for key in &path[..path.len()-1] {
+        table = table.get_mut(*key).ok_or_else(|| format!("missing manifest table {key}"))?;
+    }
+    let values = table.as_table_mut().ok_or("expected manifest table")?
+        .entry(path[path.len()-1]).or_insert_with(|| toml::Value::Array(vec![]))
+        .as_array_mut().ok_or("expected feature array")?;
+    if !values.iter().any(|value| value.as_str() == Some(feature)) {
+        values.push(toml::Value::String(feature.into()));
+    }
+    Ok(())
+}
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|e| e.to_string())?;
@@ -102,6 +118,18 @@ fn build() -> Result<(), String> {
     }
     for dir in ["core", "engine", "cli"] { copy_tree(&config.host.join(dir), &config.output.join(dir))?; }
     for binding in &config.bindings { copy_tree(&config.host.join("bindings").join(binding), &config.output.join("bindings").join(binding))?; }
+    for (binding, selected) in &config.binding_features {
+        if !config.bindings.contains(binding) { return Err(format!("binding_features names unselected binding {binding}")); }
+        let path = config.output.join("bindings").join(binding).join("Cargo.toml");
+        let mut manifest: toml::Value = toml::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        for feature in selected {
+            if feature == "default" || manifest["features"].get(feature).is_none() {
+                return Err(format!("{binding}: unknown or non-exact host feature {feature}"));
+            }
+        }
+        manifest["features"]["default"] = toml::Value::Array(selected.iter().cloned().map(toml::Value::String).collect());
+        fs::write(path, toml::to_string(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    }
     let mut root: toml::Value = toml::from_str(&fs::read_to_string(config.host.join("Cargo.toml")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     root["workspace"]["members"] = toml::Value::Array(["core", "engine", "cli"].into_iter().map(|x| toml::Value::String(x.into())).chain(config.bindings.iter().map(|x| toml::Value::String(format!("bindings/{x}")))).collect());
     fs::write(config.output.join("Cargo.toml"), toml::to_string(&root).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -219,10 +247,10 @@ fn main() -> Result<(), String> {
             let mut manifest: toml::Value = toml::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             if native.is_some() {
                 for (alias, dependency) in &config.dependencies { manifest["dependencies"].as_table_mut().unwrap().insert(alias.clone(), dependency.clone()); }
-                manifest["features"].as_table_mut().unwrap().insert("default".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
-                manifest["dependencies"]["orm-engine"].as_table_mut().unwrap().insert("features".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
+                add_feature(&mut manifest, &["features", "default"], "composition")?;
+                add_feature(&mut manifest, &["dependencies", "orm-engine", "features"], "composition")?;
             }
-            manifest["dependencies"]["orm-core"].as_table_mut().unwrap().insert("features".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
+            add_feature(&mut manifest, &["dependencies", "orm-core", "features"], "composition")?;
             fs::write(path, toml::to_string(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         }
     }
