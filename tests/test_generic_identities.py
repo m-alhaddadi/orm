@@ -1,17 +1,14 @@
 """Public identity/ContentType seam; full generic execution is tested separately."""
 import json
 import os
-import subprocess
-from pathlib import Path
 
 import pytest
 import orm
-
-ROOT = Path(__file__).resolve().parents[1]
+from orm.__main__ import main as cli
 
 
 def generate(path):
-    subprocess.run([str(ROOT / "target/debug/orm"), "--schema", str(path), "identities"], check=True, capture_output=True)
+    assert cli(["--schema", str(path), "identities"]) == 0
 
 
 @pytest.mark.parametrize("url,provider", [
@@ -43,7 +40,7 @@ async def test_runtime_and_generated_identities_roundtrip(tmp_path, url, provide
         assert (await models["Tag"].objects.using(db).get()).object_id == 7
         # Generated Python embeds the same immutable mapping, runtime needs no file.
         out = tmp_path / "models.py"
-        subprocess.run([str(ROOT / "target/debug/orm"), "--schema", str(schema), "generate", "python", "-o", str(out)], check=True, capture_output=True)
+        assert cli(["--schema", str(schema), "generate", "python", "-o", str(out)]) == 0
         payload = out.read_text().split('_SCHEMA = r"""\n', 1)[1].split('\n"""', 1)[0]
         copied = orm.Registry()
         generated = orm.define(payload, registry=copied)

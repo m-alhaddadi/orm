@@ -470,9 +470,10 @@ export class Registry {
     this.nativeSchema = undefined;
   }
 
-  /** @internal: normalized context is owned by this candidate. */
+  /** @internal */
   setIdentities(value: unknown): void { this.identities = structuredClone(value); }
 
+  /** @internal: normalized context is owned by this candidate. */
   setBehavior(value: unknown): void { this.behavior = structuredClone((value ?? {}) as Record<string, unknown>); }
 
   /** The schema IR of every registered model. */

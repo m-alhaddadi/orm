@@ -266,9 +266,13 @@ async fn command(argv: &[String], host: Host) -> Result<i32> {
                     _ => {}
                 }
             }
+            let path = orm_core::identity::manifest_path(&schema);
+            let previous = if path.exists() { orm_core::identity::read(&path).map_err(Failure::Failed)? } else { Default::default() };
             let manifest = dsl::generate_identities(&schema, &renames, &restores).map_err(Failure::Failed)?;
-            println!("{}", serde_json::to_string_pretty(&manifest).map_err(failed)?);
-            println!("wrote {}", orm_core::identity::manifest_path(&schema).display());
+            let changes = orm_core::identity::changes(&previous, &manifest);
+            if changes.is_empty() { println!("no identity changes"); }
+            for change in changes { println!("{change}"); }
+            println!("wrote {}", path.display());
         }
         "check" => {
             args.allow(command, &[], 0)?;

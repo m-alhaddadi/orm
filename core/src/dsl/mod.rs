@@ -170,11 +170,12 @@ fn compile_project_mode(source: &str, origin: Option<&Path>, update: Option<Iden
         }
     }
     let path = crate::identity::manifest_path(origin);
-    let needs_identities = update.is_some() || path.is_file() || items.iter().any(|item| {
-        matches!(item, syntax::Item::Model(m) if m.members.iter().any(|f| f.ty.name == "ContentType")) && !items.iter().any(|i| matches!(i, syntax::Item::Enum(e) if e.name == "ContentType"))
-    }) || declarations.iter().any(|d| d.attribute.starts_with("generic."));
+    // A handwritten ContentType enum stays ordinary unless generation or a generic relation asks for identities.
+    let handwritten = items.iter().any(|i| matches!(i, syntax::Item::Enum(e) if e.name == "ContentType"));
+    let needs_identities = update.is_some() || declarations.iter().any(|d| d.attribute.starts_with("generic.")) || !handwritten && (path.is_file()
+        || items.iter().any(|item| matches!(item, syntax::Item::Model(m) if m.members.iter().any(|f| f.ty.name == "ContentType"))));
     let identities = if needs_identities {
-        if items.iter().any(|i| matches!(i, syntax::Item::Enum(e) if e.name == "ContentType")) {
+        if handwritten {
             return Err("ContentType is generated from the identity manifest; remove the handwritten enum".into());
         }
         let manifest = if let Some((renames, restores)) = update {
@@ -241,11 +242,13 @@ pub fn check(ir: SchemaIr) -> Result<(SchemaIr, Schema), String> {
 mod tests;
 
 /// Explicit allocation is separate from compilation and usable without a compiled
-/// generic relation extension. Validate scalar schema shape before atomic publication.
+/// generic relation extension. A schema without extension declarations gets the full
+/// engine check before atomic publication; extension lowering waits for compilation.
 pub fn generate_identities(path: &Path, renames: &[(String, String)], restores: &[String]) -> Result<orm_contracts::identity::IdentityManifest, String> {
     let source = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let project = compile_project_mode(&source, Some(path), Some((renames, restores)))?;
-    let manifest = project.ir.identities.ok_or("missing generated identities")?;
+    let manifest = project.ir.identities.clone().ok_or("missing generated identities")?;
+    if project.ir.behavior.declarations.is_empty() { check(project.ir)?; }
     crate::identity::write(&crate::identity::manifest_path(path), &manifest)?;
     Ok(manifest)
 }

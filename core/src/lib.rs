@@ -26,5 +26,5 @@ pub mod ownership;
 
 pub mod identity;
 
-#[cfg(feature = "generic-relations")]
+#[cfg(any(feature = "generic-relations", test))]
 pub mod generic;

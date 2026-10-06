@@ -30,6 +30,10 @@ sha2 = "0.10"
 rusqlite = { version = "0.37", features = ["bundled"] }
 blake2 = "0.10"
 
+[dev-dependencies]
+# Unit tests also cover the optional generic module.
+orm-core = { path = "../core", features = ["generic-relations"] }
+
 [features]
 composition = ["orm-core/composition"]
 generic-relations = ["orm-core/generic-relations"]

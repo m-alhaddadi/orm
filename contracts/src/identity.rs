@@ -12,7 +12,11 @@ pub struct ModelIdentity {
     pub retired: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previous_names: Vec<String>,
+    /// Counts explicit restorations, so a successor can prove restore intent.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub restorations: u32,
 }
+fn is_zero(n: &u32) -> bool { *n == 0 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -29,7 +33,7 @@ impl IdentityManifest {
         let mut ids = BTreeSet::new();
         let mut active = BTreeSet::new();
         for e in &self.entries {
-            if e.id <= 0 || !ids.insert(e.id) { return Err(format!("model {} has invalid or duplicate ContentType ID {}", e.model, e.id)); }
+            if e.id <= 0 || !ids.insert(e.id) { return Err(format!("model {} has invalid or duplicate ContentType ID {}; if this ID never shipped in a migration, give one entry an ID above the highest allocated ID, otherwise restore the shipped manifest", e.model, e.id)); }
             if e.model.is_empty() || e.previous_names.iter().any(|n| n.is_empty() || n == &e.model) {
                 return Err(format!("invalid identity name/history for {}", e.model));
             }
@@ -49,6 +53,9 @@ impl IdentityManifest {
                 .ok_or_else(|| format!("ContentType ID {} was removed; retain its tombstone", old.id))?;
             if old.model != new.model && !new.previous_names.contains(&old.model) {
                 return Err(format!("ContentType ID {} reassigned from {} to {}; use explicit identity rename", old.id, old.model, new.model));
+            }
+            if old.retired && !new.retired && new.restorations <= old.restorations {
+                return Err(format!("ContentType ID {} for {} was reactivated without explicit restoration; use orm identities --restore", old.id, new.model));
             }
             if old.previous_names.iter().any(|n| n != &new.model && !new.previous_names.contains(n)) {
                 return Err(format!("ContentType ID {} lost its rename history", old.id));

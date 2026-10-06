@@ -22,3 +22,4 @@ bigdecimal = "0.4"
 
 [features]
 composition = ["orm-engine/composition", "orm-core/composition"]
+generic-relations = ["orm-engine/generic-relations", "orm-core/generic-relations"]

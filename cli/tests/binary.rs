@@ -75,6 +75,7 @@ fn identity_cli_allocates_explicitly_and_compile_never_mutates() {
     assert!(!orm(&dir, &["compile"]).status.success());
     let generated = orm(&dir, &["identities"]);
     assert!(generated.status.success(), "{}", text(&generated.stderr));
+    assert!(text(&generated.stdout).contains("added Post = 1\nadded Tag = 2\n"), "{}", text(&generated.stdout));
     let before = std::fs::read(dir.join("schema.identities.json")).unwrap();
     for args in [&["compile"][..], &["check"][..], &["generate", "python"][..], &["generate", "typescript"][..]] {
         let out = orm(&dir, args); assert!(out.status.success(), "{}", text(&out.stderr));

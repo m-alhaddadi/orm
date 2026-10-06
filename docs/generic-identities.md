@@ -9,8 +9,11 @@ Initial positive signed 32-bit IDs are allocated in model-name order. Subsequent
 models receive IDs above the highest allocation; existing values never move.
 Removed models retain permanent retired entries. Reintroducing a name allocates a
 new ID unless `orm identities --restore Model` explicitly restores its single
-retired identity. Renames use `orm identities --rename Old=New`. Rename chains,
+retired identity; the entry's `restorations` count records that intent, and a
+manifest that reactivates a tombstone without it is rejected. Renames use
+`orm identities --rename Old=New`. Rename chains,
 including a return to an original name, retain the original ID and history.
+The command prints each added, renamed, retired, and restored entry.
 Moving a declaration between files or changing its table mapping preserves its ID.
 
 Compilation, generation, runtime definition and migration planning only read

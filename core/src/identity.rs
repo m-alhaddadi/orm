@@ -12,8 +12,8 @@ pub fn reconcile(previous: &IdentityManifest, models: &[String], renames: &[(Str
     let mut next = previous.clone();
     let mut used = BTreeSet::new();
     for (old, new) in renames {
-        if old == new || names.contains(old) || !names.contains(new) || !used.insert(old) || !used.insert(new) {
-            return Err(format!("invalid identity rename {old}={new}; old must be removed, new must exist, and each name may be used once"));
+        if old == new || !names.contains(new) || !used.insert(old) || !used.insert(new) {
+            return Err(format!("invalid identity rename {old}={new}; new must exist, and each name may be used once"));
         }
         if next.active().any(|e| &e.model == new) { return Err(format!("{new} already has an active identity")); }
         let entry = next.entries.iter_mut().find(|e| !e.retired && &e.model == old)
@@ -29,7 +29,7 @@ pub fn reconcile(previous: &IdentityManifest, models: &[String], renames: &[(Str
         }
         let candidates: Vec<_> = next.entries.iter().enumerate().filter(|(_, e)| e.retired && &e.model == name).map(|(i, _)| i).collect();
         match candidates.as_slice() {
-            [i] => next.entries[*i].retired = false,
+            [i] => { let entry = &mut next.entries[*i]; entry.retired = false; entry.restorations += 1; }
             _ => return Err(format!("restoration {name} needs exactly one retired identity; select/repair identity metadata explicitly")),
         }
     }
@@ -38,11 +38,26 @@ pub fn reconcile(previous: &IdentityManifest, models: &[String], renames: &[(Str
     let mut max = next.entries.iter().map(|e| e.id).max().unwrap_or(0);
     for model in missing {
         max = max.checked_add(1).ok_or("ContentType IDs exhausted; cannot allocate above signed 32-bit maximum")?;
-        next.entries.push(ModelIdentity { id: max, model, retired: false, previous_names: vec![] });
+        next.entries.push(ModelIdentity { id: max, model, retired: false, previous_names: vec![], restorations: 0 });
     }
     next.entries.sort_by_key(|e| e.id);
     previous.validate_successor(&next)?;
     Ok(next)
+}
+
+/// One line per allocation, rename, retirement, or restoration from `previous` to `next`.
+pub fn changes(previous: &IdentityManifest, next: &IdentityManifest) -> Vec<String> {
+    let mut out = vec![];
+    for e in &next.entries {
+        let Some(old) = previous.entries.iter().find(|o| o.id == e.id) else {
+            out.push(format!("added {} = {}", e.model, e.id));
+            continue;
+        };
+        if old.model != e.model { out.push(format!("renamed {} -> {} ({})", old.model, e.model, e.id)); }
+        if !old.retired && e.retired { out.push(format!("retired {} ({})", e.model, e.id)); }
+        if old.retired && !e.retired { out.push(format!("restored {} = {}", e.model, e.id)); }
+    }
+    out
 }
 
 pub fn content_type(manifest: &IdentityManifest) -> Result<EnumIr, String> {
@@ -150,6 +165,19 @@ mod tests {
         assert_eq!(reused.active().find(|e| e.model == "Post").unwrap().id, 4);
         let restored = reconcile(&removed, &names(&["Photo", "Account", "Post"]), &[], &names(&["Post"])).unwrap();
         assert_eq!(restored.active().find(|e| e.model == "Post").unwrap().id, 2);
+        removed.validate_successor(&restored).unwrap();
+        assert_eq!(changes(&added, &removed), vec!["retired Post (2)"]);
+        assert_eq!(changes(&removed, &restored), vec!["restored Post = 2"]);
+        assert_eq!(changes(&removed, &reused), vec!["added Post = 4"]);
+        let mut forged = removed.clone();
+        forged.entries.iter_mut().find(|e| e.id == 2).unwrap().retired = false;
+        assert!(removed.validate_successor(&forged).unwrap_err().contains("without explicit restoration"));
+    }
+    #[test]
+    fn rename_and_reintroduction_in_one_generation() {
+        let first = reconcile(&Default::default(), &names(&["Post"]), &[], &[]).unwrap();
+        let next = reconcile(&first, &names(&["Article", "Post"]), &[("Post".into(), "Article".into())], &[]).unwrap();
+        assert_eq!(next.active().map(|e| (&*e.model, e.id)).collect::<Vec<_>>(), vec![("Article", 1), ("Post", 2)]);
     }
     #[test]
     fn explicit_rename_keeps_identity() {
@@ -213,8 +241,36 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
     #[test]
+    fn generation_rejects_name_and_table_collisions() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.test-tmp").join(format!("orm-identity-names-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let tag = "model Tag {\nid Int @id\nkind ContentType\n}\n";
+        for (models, error) in [
+            ("model Model {\nid Int @id\n}", "collides"),
+            ("model Post {\nid Int @id\n}\nmodel PostInsert {\nid Int @id\n}", "collides"),
+            ("model Post {\nid Int @id\n@@map(\"t\")\n}\nmodel Photo {\nid Int @id\n@@map(\"t\")\n}", "physical table"),
+            ("model Post {\nid Int @id\n}\nmodel Post {\nid Int @id\n}", "declared twice"),
+        ] {
+            let path = root.join("schema.prisma");
+            std::fs::write(&path, format!("{tag}{models}")).unwrap();
+            let err = crate::dsl::generate_identities(&path, &[], &[]).unwrap_err();
+            assert!(err.contains(error), "{models}: {err}");
+            assert!(!manifest_path(&path).exists());
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
     fn ordinary_enum_named_content_type_does_not_activate_extension() {
-        crate::dsl::check(crate::dsl::compile("enum ContentType {\nPost @value(7)\n@@storage(int)\n}\nmodel Tag {\nid Int @id\nt ContentType\n}", None).unwrap()).unwrap();
+        let source = "enum ContentType {\nPost @value(7)\n@@storage(int)\n}\nmodel Tag {\nid Int @id\nt ContentType\n}";
+        crate::dsl::check(crate::dsl::compile(source, None).unwrap()).unwrap();
+        // A stray manifest beside the schema does not override the handwritten enum.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.test-tmp").join(format!("orm-handwritten-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("schema.prisma");
+        std::fs::write(&path, source).unwrap();
+        write(&manifest_path(&path), &reconcile(&Default::default(), &names(&["Post"]), &[], &[]).unwrap()).unwrap();
+        crate::dsl::check(crate::dsl::compile_file(&path).unwrap()).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
 
