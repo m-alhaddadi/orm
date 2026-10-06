@@ -167,9 +167,9 @@ python -m pytest -q storage/python/tests storage/integration/python/tests
 (cd storage/typescript && npm install && npm test)
 (cd storage/integration/typescript && npm install && npm test)
 # End-to-end, against a file-storage build; set FILE_STORAGE_DATABASE_URL for Postgres.
-maturin develop --features file-storage && python storage/integration/tests/native_python.py
+(cd packaging/python/tooling && maturin develop --features file-storage) && python storage/integration/tests/native_python.py
 cargo build -p orm-node --features file-storage && cp target/debug/liborm_node.dylib js/orm.node
 (cd js && npm run build) && node --test storage/integration/tests/native_node.mjs
 ```
 
-Rebuild the default bindings (`maturin develop`, `npm run build:native`) before the root checks.
+Rebuild the default bindings (`maturin develop` in `packaging/python/tooling`, `npm run build:native`) before the root checks.

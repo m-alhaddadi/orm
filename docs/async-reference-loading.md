@@ -1,8 +1,8 @@
 # Explicit async reference loading
 
 The `reference-loading` Cargo feature adds explicit reference loaders. The Python
-and Node bindings and the `orm` CLI enable it by default. Build them with
-`--no-default-features` to get a baseline artifact. A baseline artifact keeps
+and Node bindings, the `orm` CLI and the tooling profile enable it. The runtime
+profiles `postgres`, `sqlite` and `combined` are baseline artifacts. A baseline artifact keeps
 ordinary eager and prefetch relation support, but it does not have this adapter or
 the generated loader methods. Generated modules record the capability that they
 require. An artifact without that capability rejects them at definition.
