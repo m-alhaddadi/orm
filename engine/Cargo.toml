@@ -36,6 +36,7 @@ postgres = ["dep:tokio-postgres", "dep:deadpool-postgres", "dep:tokio-postgres-r
 sqlite = ["dep:rusqlite", "sea-query/backend-sqlite"]
 composition = ["orm-core/composition"]
 file-storage = ["orm-core/file-storage"]
+model-composition = ["composition", "orm-core/model-composition"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["time"] }

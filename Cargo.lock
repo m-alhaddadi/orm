@@ -850,6 +850,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orm-model-composition"
+version = "0.1.0"
+dependencies = [
+ "orm-contracts",
+ "serde_json",
+]
+
+[[package]]
 name = "orm-node"
 version = "0.1.0"
 dependencies = [

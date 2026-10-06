@@ -114,6 +114,10 @@ pub enum Plan {
     Delete(DeleteStatement, Option<(usize, Vec<ValueType>)>),
     /// `INSERT ... RETURNING`: the model and column types of the returned rows.
     Insert(InsertStatement, (usize, Vec<ValueType>)),
+    #[cfg(feature = "model-composition")]
+    ComposedInsert(Box<crate::composed::Insert>),
+    #[cfg(feature = "model-composition")]
+    ComposedMutation(Box<crate::composed::Mutation>),
 }
 
 /// What a bound value is compared with or assigned to: its type drives the conversion
@@ -157,7 +161,7 @@ fn read_col(alias: &str, f: &FieldIr) -> SExpr {
 }
 
 /// A column in `RETURNING` (unqualified), through `read_sql` if any.
-fn returning_col(f: &FieldIr) -> SExpr {
+pub(crate) fn returning_col(f: &FieldIr) -> SExpr {
     let c = SExpr::col(Alias::new(&f.column));
     match &f.read_sql {
         Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), c),
@@ -166,7 +170,7 @@ fn returning_col(f: &FieldIr) -> SExpr {
 }
 
 /// A bound value for a field: through the field's `write_sql` template, if any.
-fn bind(v: sea_query::Value, f: Option<&FieldIr>) -> SExpr {
+pub(crate) fn bind(v: sea_query::Value, f: Option<&FieldIr>) -> SExpr {
     match f.and_then(|f| f.write_sql.as_ref()) {
         Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), SExpr::val(v)),
         None => SExpr::val(v),
@@ -481,6 +485,19 @@ impl<'s> Planner<'s> {
             Operation::Update(q) => {
                 let virt = derive_ctes(schema, target, &q.with, params)?;
                 let mut p = Planner::new(schema, &virt, target, &q.model, None, params, vec![], 0)?;
+                #[cfg(feature = "model-composition")]
+                if crate::composed::is_composed(schema, &q.model)? {
+                    let mut select: Select = serde_json::from_value(serde_json::json!({"model":q.model})).map_err(|e| query_err(e.to_string()))?;
+                    select.filters = q.filters.clone(); select.with = q.with.clone();
+                    let mut matched = p.build_select(&select)?.stmt;
+                    let prior_joins = p.joins.len();
+                    let expressions = p.composed_update_values(q)?;
+                    for (scope, on) in p.joins.iter().skip(prior_joins) {
+                        matched.join_as(JoinType::LeftJoin, Alias::new(p.model(scope.model).table()), Alias::new(&scope.alias), on.clone());
+                    }
+                    if let Some(with) = p.with_clause(&q.with)? { matched.with_cte(with); }
+                    return Ok(Plan::ComposedMutation(Box::new(crate::composed::prepare_update(schema, target, q, params, expressions, matched)?)));
+                }
                 let (mut stmt, types) = p.update(q)?;
                 if let Some(w) = p.with_clause(&q.with)? {
                     stmt.with_cte(w);
@@ -488,6 +505,10 @@ impl<'s> Planner<'s> {
                 Plan::Update(stmt, types.map(|t| (p.root, t)))
             }
             Operation::Delete(q) => {
+                #[cfg(feature = "model-composition")]
+                if crate::composed::is_composed(schema, &q.model)? {
+                    return Ok(Plan::ComposedMutation(Box::new(crate::composed::prepare_delete(schema, target, q, params)?)));
+                }
                 let virt = derive_ctes(schema, target, &q.with, params)?;
                 let mut p = Planner::new(schema, &virt, target, &q.model, None, params, vec![], 0)?;
                 let (mut stmt, types) = p.delete(q)?;
@@ -1755,6 +1776,42 @@ impl<'s> Planner<'s> {
         Ok(stmt)
     }
 
+    #[cfg(feature = "model-composition")]
+    fn composed_update_values(&mut self, q: &Update) -> Result<Vec<SExpr>> {
+        if q.set.is_empty() { return Err(Error::query("update() needs at least one field")); }
+        self.enter(&serde_json::from_value(serde_json::json!({"model":q.model})).map_err(|e| query_err(e.to_string()))?)?;
+        let root = self.model(self.root);
+        let positions = q.set.iter().map(|a| root.field_pos(&a.field).map_err(query_err)).collect::<Result<Vec<_>>>()?;
+        if positions.iter().collect::<std::collections::BTreeSet<_>>().len() != positions.len() { return Err(Error::query("duplicate update field")); }
+        self.set_values(q)
+    }
+
+    /// `SET` values in `q.set` order, after the model's native field and record checks.
+    #[cfg(feature = "composition")]
+    fn set_values(&mut self, q: &Update) -> Result<Vec<SExpr>> {
+        let root = self.model(self.root);
+        let positions: Vec<_> = q.set.iter().map(|a| root.field_pos(&a.field).map_err(query_err)).collect::<Result<_>>()?;
+        if positions.iter().any(|p| root.native.computed().contains(p)) { return Err(Error::query("computed fields are read-only")); }
+        let map = if root.native.has_records() { crate::behavior::input_map(root.fields().len(), &positions)? } else { vec![] };
+        let mut values = Vec::with_capacity(q.set.len());
+        for (a, &position) in q.set.iter().zip(&positions) {
+            let f = &root.fields()[position];
+            values.push(if let Expr::Param { i } = &a.value {
+                let mut value = self.params.value(self.param(*i)?, Some(f.value_type()))?;
+                crate::behavior::field(root.native, position, &mut value)?;
+                Some(value)
+            } else {
+                crate::behavior::expression(root.native, position)?;
+                None
+            });
+        }
+        crate::behavior::record(root.native, &map, values.as_slice())?;
+        q.set.iter().zip(values).map(|(a, value)| {
+            let f = root.field(&a.field).map_err(query_err)?;
+            match value { Some(value) => Ok(bind(value, Some(f))), None => self.value(&a.value, Hint { ty: Some(f.value_type()), field: Some(f) }) }
+        }).collect()
+    }
+
     pub fn update(&mut self, q: &Update) -> Result<(UpdateStatement, Option<Vec<ValueType>>)> {
         let root = self.model(self.root);
         #[cfg(feature = "composition")]
@@ -1776,30 +1833,8 @@ impl<'s> Planner<'s> {
             }
         }
         #[cfg(feature = "composition")]
-        {
-            let mut values = Vec::with_capacity(q.set.len());
-            let positions: Vec<_> = q.set.iter().map(|a| root.field_pos(&a.field).map_err(query_err)).collect::<Result<_>>()?;
-            let map = if root.native.has_records() { crate::behavior::input_map(root.fields().len(), &positions)? } else { vec![] };
-            for a in &q.set {
-                let f = root.field(&a.field).map_err(query_err)?;
-                let position = root.field_pos(&a.field).map_err(query_err)?;
-                if root.native.computed().contains(&position) { return Err(Error::query("computed fields are read-only")); }
-                let value = if let Expr::Param { i } = &a.value {
-                    let mut value = self.params.value(self.param(*i)?, Some(f.value_type()))?;
-                    crate::behavior::field(root.native, position, &mut value)?;
-                    Some(value)
-                } else {
-                    crate::behavior::expression(root.native, position)?;
-                    None
-                };
-                values.push(value);
-            }
-            crate::behavior::record(root.native, &map, values.as_slice())?;
-            for (a, value) in q.set.iter().zip(values) {
-                let f = root.field(&a.field).map_err(query_err)?;
-                let v = match value { Some(value) => bind(value, Some(f)), None => self.value(&a.value, Hint { ty: Some(f.value_type()), field: Some(f) })? };
-                stmt.value(Alias::new(&f.column), v);
-            }
+        for (a, v) in q.set.iter().zip(self.set_values(q)?) {
+            stmt.value(Alias::new(&root.field(&a.field).map_err(query_err)?.column), v);
         }
         #[cfg(not(feature = "composition"))]
         for a in &q.set {

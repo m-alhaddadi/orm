@@ -38,7 +38,7 @@ import { NotLoaded, QueryError, TransactionRequired } from "./errors.js";
 import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
 import { DB, RELATED, registerQueries, type ModelClass, type ModelMeta } from "./model.js";
 import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
-import { assignments, prepareRows, prepareUpdateRows } from "./write.js";
+import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
 import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./select.js";
 
@@ -987,6 +987,15 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   async insert(values: M["insert"], options?: InsertOptions<M>): Promise<M["row"] | null> {
     const rows = await this.insertRows([values], options);
     return rows[0] ?? null;
+  }
+
+  /** Attaches local child values to an existing parent, without a change to the parent.
+   * Only composed child models accept it. */
+  async attach(parentId: In<M["pk"]>, values: M extends { readonly attach: infer A extends object } ? A : never): Promise<M["row"]> {
+    const prepared = prepareAttach(this.meta, values);
+    const db = this.db();
+    const res = await db_wait(db, (tx) => db.engine.attach(this.meta.name, parentId, prepared.fields, prepared.rows, tx));
+    return (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][])[0]!;
   }
 
   /** `INSERT` many rows with one statement; gives the new instances in input order (rows

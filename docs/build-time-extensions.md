@@ -143,7 +143,9 @@ Every written owner must belong to the declared ancestor chain.
 `run_write` executes the prepared insert sequence in its own transaction or savepoint and rolls back that scope on failure.
 It supports a complete logical return shape.
 It requires an explicit physical schema and currently supports single composed inserts.
-Updates, bulk identity strategies, attach and deletion policy remain plan 06 work.
+The `model-composition` package does not use it:
+`orm_engine::composed` plans its creates, attaches, filtered updates and deletes, and each runs in one transaction or savepoint.
+`update_many` on a composed model is rejected.
 Ordinary model writes reject inherited storage instead of writing nonexistent columns.
 Full filters, selection defaults, proxy warnings, loaders and the composition-facing language APIs belong to plans 03–06;
 this framework does not expose those feature APIs yet.

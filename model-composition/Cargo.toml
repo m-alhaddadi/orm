@@ -1,0 +1,37 @@
+[package]
+name = "orm-model-composition"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+orm-contracts = { path = "../contracts" }
+serde_json = "1"
+
+[package.metadata.orm-extension]
+id = "composition"
+version = "0.1.0"
+host_contract = 1
+schema_contract = 1
+languages = ["python", "typescript"]
+databases = ["postgres", "sqlite"]
+capabilities = ["physical-schema", "schema-transformations"]
+
+[[package.metadata.orm-extension.attributes]]
+name = "composition.model"
+target = "model"
+[package.metadata.orm-extension.attributes.arguments.parent]
+kind = "string"
+required = true
+[package.metadata.orm-extension.attributes.arguments.parentRef]
+kind = "string"
+required = true
+[package.metadata.orm-extension.attributes.arguments.childRef]
+kind = "string"
+required = true
+
+[[package.metadata.orm-extension.passes]]
+id = "composition.lower"
+phase = "logical"
+rust = "composition::lower"
+effects = ["composition.storage-ownership"]

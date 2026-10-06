@@ -33,6 +33,7 @@ generate-typescript = ["orm-core/generate-typescript", "orm-cli?/generate-typesc
 composition = ["orm-engine/composition", "orm-core/composition"]
 file-storage = ["orm-engine/file-storage", "orm-core/file-storage"]
 reference-loading = ["orm-core/reference-loading", "orm-cli?/reference-loading"]
+model-composition = ["composition", "orm-core/model-composition", "orm-engine/model-composition"]
 
 # Named release profiles must be built with --no-default-features.
 profile-postgres = ["postgres"]

@@ -38,6 +38,8 @@ class ModelMeta:
         # The model's schema IR when it was built from a compiled schema: it carries
         # everything (indexes, triggers, extension types) the Python side doesn't use.
         self.schema_ir: dict[str, Any] | None = None
+        # Local fields that `attach` accepts; `None` for a model that is not a composed child.
+        self.attach_fields: dict[str, Field[Any]] | None = None
         self.fields: dict[str, Field[Any]] = {}
         self.relations: dict[str, Relation[Any, Any]] = {}
         for klass in reversed(model.__mro__):
@@ -210,6 +212,12 @@ class Registry:
             meta.pk = next(field for field in fields.values() if field.primary_key)
             meta.schema_ir = ir
             meta.field_names = tuple(fields)
+            pk_ir = next(f for f in ir["fields"] if f.get("primary_key"))
+            meta.attach_fields = (
+                {f["name"]: fields[f["name"]] for f in ir["fields"] if f.get("hints", {}).get("composition.local") == "true"}
+                if pk_ir.get("hints", {}).get("composition.child") == "true"
+                else None
+            )
             computed = {f["field"] for f in snapshot._behavior.get("result_fields", ()) if f["model"] == meta.name}
             meta.input_fields = {k: v for k, v in fields.items() if k not in computed} if computed else fields
             for name, function in methods_by_model.get(meta.name, {}).items():
@@ -255,7 +263,7 @@ def _field(ir: dict[str, Any]) -> Field[Any]:
         "index": ir.get("index", False),
         "column": ir["column"],
         "default_now": ir.get("default_now", False),
-        "server_default": "default_sql" in ir,
+        "server_default": "default_sql" in ir or ir.get("hints", {}).get("composition.key-default") == "true",
     }
     if "default" in ir:
         kwargs["default"] = ir["default"]

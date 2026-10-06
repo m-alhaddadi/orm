@@ -91,7 +91,7 @@ fn file_input_type(m: &Model, f: &FieldIr) -> String {
 }
 
 fn has_server_value(f: &FieldIr) -> bool {
-    f.auto_increment || f.default.is_some() || f.default_now || f.default_sql.is_some()
+    f.auto_increment || f.default.is_some() || f.default_now || f.default_sql.is_some() || f.hints.get("composition.key-default").is_some_and(|v| v == "true")
 }
 
 fn quote(s: &str) -> String {
@@ -305,11 +305,21 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         }
         writeln!(body, "}}\n").unwrap();
 
+        let composed = pk.hints.get("composition.child").is_some_and(|v| v == "true");
+        if composed {
+            writeln!(body, "export interface {name}Attach {{").unwrap();
+            for field in m.fields().iter().filter(|f| f.hints.get("composition.local").is_some_and(|v| v == "true")) {
+                let optional = if field.nullable || has_server_value(field) { "?" } else { "" };
+                writeln!(body, "  {}{optional}: {};", camel(&field.name), input_type(field)).unwrap();
+            }
+            writeln!(body, "}}\n").unwrap();
+        }
         writeln!(body, "export interface {name}Spec {{").unwrap();
         writeln!(body, "  readonly name: {};", quote(name)).unwrap();
         writeln!(body, "  readonly row: {name};").unwrap();
         writeln!(body, "  readonly data: {name}Data;").unwrap();
         writeln!(body, "  readonly insert: {name}Insert;").unwrap();
+        if composed { writeln!(body, "  readonly attach: {name}Attach;").unwrap(); }
         writeln!(body, "  readonly update: {name}Update;").unwrap();
         writeln!(body, "  readonly updateRow: {name}UpdateRow;").unwrap();
         writeln!(body, "  readonly pk: {};", value_type(pk)).unwrap();
