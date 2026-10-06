@@ -25,3 +25,4 @@ napi-build = "2"
 
 [features]
 composition = ["orm-engine/composition", "orm-core/composition"]
+file-storage = ["orm-engine/file-storage", "orm-core/file-storage"]

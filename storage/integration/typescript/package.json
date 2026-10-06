@@ -1,8 +1,33 @@
 {
-  "name": "@orm/file-storage", "version": "0.1.0", "type": "module",
-  "exports": { ".": { "types": "./dist/src/index.d.ts", "default": "./dist/src/index.js" } },
-  "files": ["dist/src"], "engines": { "node": ">=20" },
-  "scripts": { "build": "tsc -p tsconfig.json", "test": "npm run build && node --test dist/test/*.test.js" },
-  "peerDependencies": { "@orm/storage": "^0.1.0" },
-  "devDependencies": { "@orm/storage": "file:../../typescript", "typescript": "^5.9.0", "@types/node": "^22.0.0" }
+  "name": "@orm/file-storage",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./decoder": {
+      "types": "./dist/src/decoder.d.ts",
+      "default": "./dist/src/decoder.js"
+    }
+  },
+  "files": [
+    "dist/src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "peerDependencies": {
+    "@orm/storage": "^0.1.0"
+  },
+  "devDependencies": {
+    "@orm/storage": "file:../../typescript",
+    "typescript": "^5.9.0",
+    "@types/node": "^22.0.0"
+  }
 }

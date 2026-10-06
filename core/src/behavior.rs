@@ -6,9 +6,18 @@ mod composition { include!(env!("ORM_CORE_COMPOSITION")); }
 
 pub fn artifact() -> Artifact {
     #[cfg(feature = "composition")]
-    { composition::artifact() }
+    let artifact = composition::artifact();
     #[cfg(not(feature = "composition"))]
-    { Artifact::default() }
+    let artifact = Artifact::default();
+    #[cfg(feature = "file-storage")]
+    let artifact = {
+        let mut artifact = artifact;
+        if !artifact.capabilities.iter().any(|c| c == "file-storage") {
+            artifact.capabilities.push("file-storage".into());
+        }
+        artifact
+    };
+    artifact
 }
 
 pub fn prepare(ir: &mut crate::ir::SchemaIr, language: Option<&str>) -> Result<(), String> {

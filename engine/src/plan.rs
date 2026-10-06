@@ -1751,6 +1751,17 @@ impl<'s> Planner<'s> {
         if q.set.is_empty() {
             return Err(Error::query("update() needs at least one field"));
         }
+        #[cfg(feature = "file-storage")]
+        for assignment in &q.set {
+            let position = root.field_pos(&assignment.field).map_err(query_err)?;
+            if root.file_fields.iter().any(|f| f.position == position) {
+                let Expr::Param { i } = assignment.value else {
+                    return Err(Error::query("file-field updates require a durable reference, not an expression"));
+                };
+                let field = root.field(&assignment.field).map_err(query_err)?;
+                crate::file_storage::value(root, position, &self.params.value(self.param(i)?, Some(field.value_type()))?)?;
+            }
+        }
         #[cfg(feature = "composition")]
         {
             let mut values = Vec::with_capacity(q.set.len());
@@ -2003,6 +2014,8 @@ pub fn plan_insert(
     params: &dyn Params,
 ) -> Result<(InsertStatement, Vec<ValueType>)> {
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+    #[cfg(feature = "file-storage")]
+    crate::file_storage::rows(m, fields, &rows)?;
     #[cfg(feature = "composition")]
     crate::ownership::require_local_write(m)?;
     #[cfg(feature = "composition")]
