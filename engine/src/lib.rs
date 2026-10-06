@@ -30,7 +30,7 @@ pub mod behavior;
 #[cfg(feature = "composition")]
 pub mod ownership;
 
-/// Exact compiled runtime capabilities, independent of installed adapter packages.
+/// Database backends compiled into this engine, independent of installed packages.
 pub fn compiled_backends() -> Vec<&'static str> {
     let mut names = Vec::new();
     if cfg!(feature = "postgres") { names.push("postgres"); }

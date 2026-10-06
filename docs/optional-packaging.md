@@ -18,36 +18,34 @@ Each native wheel owns a unique `orm_native_<profile>._native` namespace.
 Installing `orm[postgres,sqlite]` installs two engines, not a combined engine. Use
 `orm[combined]` for both databases. With exactly one installed profile, initialization
 selects it automatically. With multiple profiles, set `ORM_PROFILE` to one profile.
-An unknown/uninstalled selector, ambiguous install, incompatible ABI/version,
-unexpected backend or adapter set fails before queries. Changing the environment
-after initialization does not change the selected engine.
+Initialization fails before any query for an unknown or absent selector, an
+ambiguous install, an incompatible ABI or version, or an unexpected backend or adapter
+set. A change to the environment after initialization does not change the engine.
 
 Node installs use `orm` alongside `@orm/native-postgres`, `@orm/native-sqlite`,
 `@orm/native-combined` or `@orm/native-tooling`. Optional peers do not install every
 profile. Each selected profile's optional dependencies are **platform artifacts**,
 not additional database features. Supported prebuilt targets are darwin-arm64,
 linux-x64 (glibc) and win32-x64. Unsupported targets require a source build. The
-release workflow builds CPython 3.11–3.14 wheels and N-API 8 Node artifacts. Artifacts
-are retained by CI; publishing requires the coordinator's release process.
+release workflow builds CPython 3.11–3.14 wheels and N-API 8 Node artifacts. CI keeps
+the artifacts. No job publishes them.
 
-Commands below use Nushell. Once distributions are published:
+After the distributions are published:
 
-```nu
+```bash
 python -m pip install 'orm[sqlite]'
-$env.ORM_PROFILE = "sqlite"
+export ORM_PROFILE=sqlite
 npm install orm @orm/native-sqlite
 ```
 
-`python -m orm`, `npx orm`, migration/schema APIs and standalone `orm` remain
-available. The language CLI entry points require the tooling profile; runtime
-migration/schema APIs remain in runtime profiles for existing applications. Python
-exposes its generator only when selected, and Node exposes its generator only when
-selected. The tooling profile contains both generator implementations so either
-language CLI can generate both languages.
+`python -m orm` and `npx orm` require the tooling profile. The standalone `orm`
+binary does not use a profile. All runtime profiles contain the migration and schema
+APIs. Each binding exposes a generator only when the build selects it. The tooling
+profile contains both generators, so each language CLI generates both languages.
 
-```nu
+```bash
 python -m pip install 'orm[tooling]'
-$env.ORM_PROFILE = "tooling"
+export ORM_PROFILE=tooling
 python -m orm generate
 npm install orm @orm/native-tooling
 npx orm generate typescript
@@ -56,13 +54,13 @@ npx orm generate typescript
 ## Exact source builds
 
 Cargo features are additive. Reproducible minimal builds always pass
-`--no-default-features`; source-development defaults preserve both backends and
-existing tooling. Engine backend features are `postgres` and `sqlite`. Bindings
-forward selected backends without enabling dependency defaults. `cli` selects the
-CLI crate. `generate-python` and `generate-typescript` select generator modules
-independently, including through an optional CLI dependency. `composition` selects
-the build-time static extension host; extension contract/compiler logic belongs to
-the build-time extension system. It is distinct from model composition.
+`--no-default-features`. The default features select both backends and all tooling.
+Engine backend features are `postgres` and `sqlite`. Bindings forward selected
+backends without enabling dependency defaults. `cli` selects the CLI crate.
+`generate-python` and `generate-typescript` select generator modules independently,
+including through an optional CLI dependency. `composition` selects the build-time
+static extension host; extension contract/compiler logic belongs to the build-time
+extension system. It is distinct from model composition.
 
 Baseline native profiles do not claim optional query-defaults, reference-loading,
 proxy-models, model-composition, file-storage or generic-relations support. Their
@@ -77,25 +75,25 @@ extension manifest/compiler configuration with the artifact. This template has n
 backend by default; at least one backend must be explicitly selected. Additional
 features on the command line are additive to the template's extension-module flag.
 
-```nu
+```bash
 cd packaging/python/custom
 maturin build --features postgres,generate-python --out ../../../target/custom-wheels
 cd ../../..
 python -m pip install .
 python -m pip install --no-index --find-links target/custom-wheels orm-native-custom
-$env.ORM_PROFILE = "custom"
+export ORM_PROFILE=custom
 ```
 
-The custom loader validates ABI/version/language, unique supported backend names,
-boolean capability metadata and adapter/capability consistency. It does not
-pretend to know a custom artifact's exact feature set; application build records
+The custom loader validates the ABI, version and language, unique supported backend
+names, boolean capability metadata, and adapter and capability consistency. It does
+not know the exact feature set of a custom artifact. The application build record
 must specify it. Install one custom wheel per environment. For Node, an explicit
 source-built path is selected once with `ORM_NATIVE`:
 
-```nu
+```bash
 cd js
 node scripts/build-native.mjs --features postgres,generate-typescript
-$env.ORM_NATIVE = ($env.PWD | path join "orm.node")
+export ORM_NATIVE="$PWD/orm.node"
 ```
 
 For named Node release profiles, `node packaging/build-node-profile.mjs sqlite
@@ -127,4 +125,5 @@ checks the dependency lock and runs installed-package smoke tests. Python
 `packaging/smoke-python.py` runs against fresh installed wheels. Set
 `ORM_TEST_DATABASE_URL` to an isolated PostgreSQL database for PostgreSQL checks;
 SQLite checks use in-memory databases. CI Linux jobs provide an isolated service.
-The release workflow retains wheels/tarballs without publishing them.
+The release workflow keeps the wheels and tarballs as CI artifacts. It does not
+publish them.

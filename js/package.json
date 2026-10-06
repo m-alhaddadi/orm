@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "TypeScript ORM with a Rust core: the same engine and schema as the Python package",
   "license": "MIT",
+  "private": true,
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",

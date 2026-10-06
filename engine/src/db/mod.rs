@@ -4,7 +4,8 @@
 //! connection's [`Dialect`] into SQL text plus [`Value`]s, and a driver runs them.
 //! Everything above this module is driver-neutral: a driver implements [`Driver`],
 //! [`Executor`], [`Transaction`] and [`RowSet`] for one database, and [`connect`] picks
-//! it from the URL scheme. Selected profiles compile PostgreSQL (tokio-postgres), SQLite (rusqlite), or both.
+//! it from the URL scheme. A build compiles PostgreSQL (tokio-postgres), SQLite
+//! (rusqlite), or both.
 
 #[cfg(feature = "postgres")]
 mod numeric;

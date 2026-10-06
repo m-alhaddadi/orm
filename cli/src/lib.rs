@@ -376,7 +376,7 @@ fn generate(args: &Args, host: Host, schema: &Path) -> Result<()> {
         "python" => return Err(Failure::Usage("python generator is not compiled into this profile".into())),
         #[cfg(not(feature = "generate-typescript"))]
         "typescript" => return Err(Failure::Usage("typescript generator is not compiled into this profile".into())),
-        other => return Err(Failure::Usage(format!("unknown language {other}; available: python, typescript"))),
+        other => return Err(Failure::Usage(format!("unknown language {other}; known: python, typescript"))),
     }
     Ok(())
 }

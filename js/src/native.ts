@@ -188,7 +188,7 @@ function load(): Addon {
     addon.setDecimalClass(Decimal);
     return addon;
   }
-  // Local source builds retain the documented development path.
+  // Source checkout: the addon that `npm run build:native` writes.
   for (const path of [fileURLToPath(new URL("../orm.node", import.meta.url)),
                       fileURLToPath(new URL("../../orm.node", import.meta.url))]) {
     if (existsSync(path)) {

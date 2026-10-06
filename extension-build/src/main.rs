@@ -219,8 +219,11 @@ fn main() -> Result<(), String> {
             let mut manifest: toml::Value = toml::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             if native.is_some() {
                 for (alias, dependency) in &config.dependencies { manifest["dependencies"].as_table_mut().unwrap().insert(alias.clone(), dependency.clone()); }
-                manifest["features"].as_table_mut().unwrap().insert("default".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
-                manifest["dependencies"]["orm-engine"].as_table_mut().unwrap().insert("features".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
+                // Keep the binding's default backends; bindings use orm-engine without its defaults.
+                let features = manifest["features"].as_table_mut().unwrap();
+                let mut default = features.get("default").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                default.push(toml::Value::String("composition".into()));
+                features.insert("default".into(), toml::Value::Array(default));
             }
             manifest["dependencies"]["orm-core"].as_table_mut().unwrap().insert("features".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
             fs::write(path, toml::to_string(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;

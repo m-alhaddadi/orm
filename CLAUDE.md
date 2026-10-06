@@ -10,7 +10,8 @@
 
 ```bash
 service postgresql start          # the test database (postgres:postgres@localhost/orm_test)
-. .venv/bin/activate && maturin develop
+. .venv/bin/activate && uv pip install -e .   # the thin `orm` package (python/)
+(cd packaging/python/tooling && maturin develop)   # the tooling native profile
 python -m pytest -q               # Python end-to-end, SQL shape and typing tests
 cargo test -q && cargo clippy -q -p orm-core -p orm-engine -p orm-python -p orm-node
 mypy --strict python/orm && pyright python/orm
