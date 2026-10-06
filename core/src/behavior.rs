@@ -5,10 +5,15 @@ pub use orm_contracts::extension::*;
 mod composition { include!(env!("ORM_CORE_COMPOSITION")); }
 
 pub fn artifact() -> Artifact {
+    let artifact = {
     #[cfg(feature = "composition")]
     { composition::artifact() }
     #[cfg(not(feature = "composition"))]
     { Artifact::default() }
+    };
+    #[cfg(feature = "proxy-models")]
+    let artifact = { let mut artifact = artifact; artifact.capabilities.push("proxy-models".into()); artifact };
+    artifact
 }
 
 pub fn prepare(ir: &mut crate::ir::SchemaIr, language: Option<&str>) -> Result<(), String> {

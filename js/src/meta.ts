@@ -80,7 +80,9 @@ export interface FieldMeta {
   readonly enumName: string | undefined;
   readonly primaryKey: boolean;
   readonly unique: boolean;
-  /** The database fills the column when an insert leaves it out. */
+  /** Native preparation or the database fills an omitted insert value. */
+  readonly hasInsertDefault: boolean;
+  /** Physical database default; proxy client defaults do not change it. */
   readonly hasServerValue: boolean;
 }
 

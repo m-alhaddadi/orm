@@ -52,12 +52,44 @@ pub struct Requirements {
     pub field_storage: Vec<FieldStorage>,
     #[serde(default)]
     pub owner_links: Vec<OwnerLink>,
+    /// Same-table logical views, prepared by the selected proxy compiler.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proxy_models: Vec<ProxyModel>,
 }
 impl Requirements {
     pub fn is_empty(&self) -> bool {
         self.declarations.is_empty() && self.extensions.is_empty() && self.specializations.is_empty()
-            && self.lowered_models.is_empty() && self.completed_passes.is_empty() && self.result_fields.is_empty() && self.storage.is_none() && self.field_storage.is_empty() && self.owner_links.is_empty() && self.methods.is_empty() && self.schema_contract == 0
+            && self.lowered_models.is_empty() && self.completed_passes.is_empty() && self.result_fields.is_empty() && self.storage.is_none() && self.field_storage.is_empty() && self.owner_links.is_empty() && self.proxy_models.is_empty() && self.methods.is_empty() && self.schema_contract == 0
     }
+}
+
+/// Intended shape only. Physical encoding, enum representation and constraints
+/// remain on the storage owner. These contracts never imply SQL predicates.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyModel {
+    pub model: String,
+    pub parent: String,
+    /// Resolved root physical model identity, filled by lowering. Generic identity
+    /// manifests exclude `model` and refer to this concrete storage identity.
+    #[serde(default)]
+    pub storage_owner: String,
+    #[serde(default)]
+    pub fields: Vec<ProxyField>,
+    /// Literal client defaults; a JSON null is an explicit supplied null.
+    #[serde(default)]
+    pub defaults: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyField {
+    pub field: String,
+    #[serde(default)]
+    pub non_null: bool,
+    /// Parent enum member names, not database labels. None means the whole enum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subset: Option<Vec<String>>,
 }
 
 /// Setup contribution connecting a logical field to one physical owner.
@@ -153,7 +185,7 @@ pub struct Argument {
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ArgumentKind { String, Integer, Boolean, List }
+pub enum ArgumentKind { String, Integer, Boolean, List, Value }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AttributeTarget { Model, Field }
@@ -285,6 +317,7 @@ pub fn validate_declarations(ir: &SchemaIr, manifests: &[Manifest], language: Op
         let matches = |v: &serde_json::Value, arg: &Argument| match arg.kind {
             ArgumentKind::String => v.is_string(), ArgumentKind::Integer => v.is_i64(),
             ArgumentKind::Boolean => v.is_boolean(), ArgumentKind::List => v.is_array(),
+            ArgumentKind::Value => true,
         };
         for (name, value) in &d.arguments {
             let arg = a.arguments.get(name).ok_or_else(|| fail(d, format!("unknown argument {name}")))?;
@@ -308,6 +341,9 @@ pub fn validate_declarations(ir: &SchemaIr, manifests: &[Manifest], language: Op
 /// Contract compatibility is checked once at definition, never at materialization.
 pub fn check_requirements(ir: &SchemaIr, artifact: &Artifact) -> Result<(), String> {
     let r = &ir.behavior;
+    if !r.proxy_models.is_empty() && !artifact.capabilities.iter().any(|c| c == "proxy-models") {
+        return Err("proxy models require the compiled proxy-models capability; rebuild native artifact".into());
+    }
     if !r.is_empty() && r.schema_contract != artifact.schema_contract {
         return Err(format!("schema contract {} unavailable (artifact {}); rebuild native artifact", r.schema_contract, artifact.schema_contract));
     }
@@ -446,6 +482,7 @@ pub fn merge_definition(mut context: SchemaIr, mut incoming: SchemaIr) -> Result
     c.methods.extend(n.methods);
     c.field_storage.extend(n.field_storage);
     c.owner_links.extend(n.owner_links);
+    c.proxy_models.extend(n.proxy_models);
     for (id, version) in n.extensions {
         if c.extensions.get(&id).is_some_and(|v| v != &version) { return Err(format!("incompatible extension {id}; rebuild dependent schemas together")); }
         c.extensions.insert(id, version);

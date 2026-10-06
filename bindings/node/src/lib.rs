@@ -192,6 +192,8 @@ fn prefetched_js(c: Conv, schema: &schema::Schema, fetched: &[Fetched]) -> napi:
 fn outcome_js(env: &Env, schema: &schema::Schema, out: Outcome) -> napi::Result<Raw> {
     #[cfg(feature = "composition")]
     let out = orm_engine::behavior::results(&schema.native_models, out).map_err(|e| tagged(db_kind(&e), e))?;
+    #[cfg(feature = "proxy-models")]
+    orm_engine::proxy::emit(&orm_engine::proxy::diagnostics(&schema.proxy_models, &out).map_err(|e| tagged(db_kind(&e), e))?);
     let c = conv(env)?;
     let js = c.js;
     Ok(Raw(match out {

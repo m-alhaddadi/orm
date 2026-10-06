@@ -1,0 +1,25 @@
+enum Status {
+  ACTIVE @map("active")
+  OLD @map("old")
+  @@storage(text)
+}
+model User {
+  id Int @id
+  name String?
+  status Status @default(OLD)
+  @@map("proxy_05_users")
+}
+model Active {
+  id Int @id
+  @@proxy.of("User")
+  @@proxy.nonNull("name")
+  @@proxy.subset("status", ["ACTIVE"])
+  @@proxy.default("name", "client")
+  @@proxy.default("status", "active")
+}
+model Post {
+  id Int @id
+  user_id Int
+  user Active @relation(fields: [user_id], references: [id])
+  @@map("proxy_05_posts")
+}

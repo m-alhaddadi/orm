@@ -23,3 +23,5 @@ pub mod behavior;
 
 #[cfg(feature = "composition")]
 pub mod ownership;
+#[cfg(feature = "proxy-models")]
+pub use orm_proxy_runtime as proxy;

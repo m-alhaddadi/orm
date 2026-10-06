@@ -32,3 +32,4 @@ blake2 = "0.10"
 
 [features]
 composition = ["orm-core/composition"]
+proxy-models = ["composition", "orm-core/proxy-models"]

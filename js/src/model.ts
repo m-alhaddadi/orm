@@ -84,6 +84,10 @@ export interface Instance<M extends ModelSpec> {
 type Row = Record<PropertyKey, unknown> & { [RELATED]?: Record<string, unknown>; [DB]?: Database | undefined };
 
 /** Schema information about one model (`User._meta`). */
+const fieldDefaultMetadata = {
+  get hasServerValue(): boolean { return (this as unknown as FieldMeta).hasInsertDefault; },
+};
+
 export class ModelMeta implements Source {
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
@@ -104,9 +108,11 @@ export class ModelMeta implements Source {
   constructor(
     readonly ir: IRModel,
     readonly registry: Registry,
+    clientDefaults: readonly string[] = [],
   ) {
     for (const f of ir.fields) {
-      const fm: FieldMeta = {
+      const physicalDefault = !!(f.auto_increment || f.default !== undefined || f.default_now || f.default_sql);
+      const fm: FieldMeta = Object.assign(Object.create(fieldDefaultMetadata), {
         name: camel(f.name),
         ir: f.name,
         type: f.type,
@@ -115,8 +121,11 @@ export class ModelMeta implements Source {
         enumName: f.enum,
         primaryKey: f.primary_key ?? false,
         unique: f.unique ?? false,
-        hasServerValue: !!(f.auto_increment || f.default !== undefined || f.default_now || f.default_sql),
-      };
+        hasInsertDefault: physicalDefault || clientDefaults.includes(f.name),
+      } satisfies Omit<FieldMeta, "hasServerValue">);
+      if (clientDefaults.includes(f.name)) {
+        Object.defineProperty(fm, "hasServerValue", { value: physicalDefault });
+      }
       checkName(ir.name, fm.name, this.fields);
       this.fields.set(fm.name, fm);
       this.fieldByIr.set(fm.ir, fm);
@@ -535,7 +544,8 @@ export function define(
       if (JSON.stringify(m) !== JSON.stringify(destination.get(m.name).ir)) throw new TypeError(`extension changed existing model ${m.name}; define dependent schemas together in a new registry`);
       continue;
     }
-    const meta = new ModelMeta(m, reg);
+    const defaults = ((ir.behavior as { proxy_models?: { model: string; defaults: Record<string, unknown> }[] } | undefined)?.proxy_models ?? []).find((p) => p.model === m.name)?.defaults;
+    const meta = new ModelMeta(m, reg, defaults === undefined ? [] : Object.keys(defaults));
     const computed = new Set(((ir.behavior as { result_fields?: { model: string; field: string }[] } | undefined)?.result_fields ?? []).filter((f) => f.model === m.name).map((f) => f.field));
     if (computed.size) {
       meta.inputFieldList = meta.fieldList.filter((f) => !computed.has(f.ir));

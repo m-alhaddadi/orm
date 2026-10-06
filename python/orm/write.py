@@ -75,7 +75,7 @@ def prepare_rows(
                 continue
             if callable(field.default):
                 values[name] = field.default()
-            elif not (field.has_server_value or field.nullable):
+            elif not (field.has_insert_default or field.nullable):
                 raise ValueError(f"{meta.name}.{name} is required")
         normalized.append(values)
     fields = [n for n in meta.field_names if any(n in v for v in normalized)]

@@ -860,6 +860,7 @@ name = "orm-core"
 version = "0.1.0"
 dependencies = [
  "orm-contracts",
+ "orm-proxy-runtime",
  "serde",
  "serde_json",
  "toml",
@@ -913,6 +914,28 @@ dependencies = [
  "orm-core",
  "orm-engine",
  "sea-query",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "orm-proxy"
+version = "0.1.0"
+dependencies = [
+ "orm-contracts",
+ "orm-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "orm-proxy-runtime"
+version = "0.1.0"
+dependencies = [
+ "bigdecimal",
+ "chrono",
+ "orm-contracts",
+ "serde",
  "serde_json",
  "uuid",
 ]

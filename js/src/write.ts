@@ -48,7 +48,7 @@ export function prepareRows(
       provided.add(k);
     }
     for (const f of meta.inputFieldList) {
-      if (!values.has(f.ir) && !(f.hasServerValue || f.nullable)) {
+      if (!values.has(f.ir) && !(f.hasInsertDefault || f.nullable)) {
         throw new TypeError(`${meta.name}.${f.name} is required`);
       }
     }

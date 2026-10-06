@@ -1,0 +1,62 @@
+[package]
+name = "orm-proxy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Selected same-table proxy schema compiler for ORM"
+
+[dependencies]
+orm-contracts = { path = "../../contracts" }
+serde_json = "1"
+serde = "1"
+
+[dev-dependencies]
+orm-core = { path = "../../core" }
+
+[package.metadata.orm-extension]
+id = "orm.proxy"
+version = "0.1.0"
+host_contract = 1
+schema_contract = 1
+languages = ["python", "typescript"]
+databases = ["postgres", "sqlite"]
+
+[[package.metadata.orm-extension.passes]]
+id = "orm.proxy.lower"
+phase = "logical"
+rust = "proxy::lower"
+effects = ["orm.proxy.logical-models"]
+
+[[package.metadata.orm-extension.attributes]]
+name = "proxy.of"
+target = "model"
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "string"
+required = true
+
+[[package.metadata.orm-extension.attributes]]
+name = "proxy.nonNull"
+target = "model"
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "string"
+required = true
+
+[[package.metadata.orm-extension.attributes]]
+name = "proxy.subset"
+target = "model"
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "string"
+required = true
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "list"
+required = true
+
+[[package.metadata.orm-extension.attributes]]
+name = "proxy.default"
+target = "model"
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "string"
+required = true
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "value"
+required = true

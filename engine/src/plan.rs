@@ -2003,6 +2003,10 @@ pub fn plan_insert(
     params: &dyn Params,
 ) -> Result<(InsertStatement, Vec<ValueType>)> {
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+    #[cfg(feature = "proxy-models")]
+    let (fields, rows) = crate::proxy::insert_defaults(&schema.proxy_models[schema.model_idx(model).map_err(query_err)?], m, fields, rows)?;
+    #[cfg(feature = "proxy-models")]
+    let fields = fields.as_slice();
     #[cfg(feature = "composition")]
     crate::ownership::require_local_write(m)?;
     #[cfg(feature = "composition")]

@@ -25,3 +25,4 @@ napi-build = "2"
 
 [features]
 composition = ["orm-engine/composition", "orm-core/composition"]
+proxy-models = ["composition", "orm-engine/proxy-models", "orm-core/proxy-models"]

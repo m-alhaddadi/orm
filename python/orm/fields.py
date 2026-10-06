@@ -104,6 +104,12 @@ class Field(Generic[T]):
         literal = self.default is not MISSING and not callable(self.default)
         return self.auto_increment or self.default_now or self.server_default or literal
 
+    @property
+    def has_insert_default(self) -> bool:
+        """Whether native insert preparation can supply an omitted value."""
+        literal = self.default is not MISSING and not callable(self.default)
+        return self.auto_increment or self.default_now or self.server_default or literal
+
     def ir(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "column": self.column, "type": self.type_name}
         for flag in ("nullable", "primary_key", "auto_increment", "unique", "index", "default_now"):
