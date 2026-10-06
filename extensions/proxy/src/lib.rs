@@ -131,7 +131,7 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
             if let Some(contract) = prepared.fields.iter_mut().find(|p| p.field == declared.name) {
                 contract.non_null = !declared.nullable;
             } else if !declared.nullable && source.fields.iter().any(|f| f.name == declared.name && f.nullable) {
-                prepared.fields.push(ProxyField {field:declared.name.clone(),non_null:true,subset:None});
+                prepared.fields.push(ProxyField { field: declared.name.clone(), non_null: true, subset: None });
             }
         }
         let mut seen = BTreeSet::new();
@@ -151,8 +151,10 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
                 }
                 // Runtime continues using e.name and all its members. Hints alone
                 // describe the intended subset, including enum arrays.
-                f.hints.insert("python".into(), format!("Literal[{}]", members.iter().map(|n| format!("{}.{n}", e.name)).collect::<Vec<_>>().join(", ")));
-                f.hints.insert("typescript".into(), members.iter().map(|n| format!("{}.{n}", e.name)).collect::<Vec<_>>().join(" | "));
+                let python: Vec<_> = members.iter().map(|n| format!("{}.{n}", e.name)).collect();
+                let typescript: Vec<_> = members.iter().map(|n| format!("typeof {}.{n}", e.name)).collect();
+                f.hints.insert("python".into(), format!("Literal[{}]", python.join(", ")));
+                f.hints.insert("typescript".into(), typescript.join(" | "));
             }
             f.nullable &= !contract.non_null;
             let subset = contract.subset.clone().or_else(|| prepared.fields.iter().find(|p| p.field == f.name).and_then(|p| p.subset.clone()));

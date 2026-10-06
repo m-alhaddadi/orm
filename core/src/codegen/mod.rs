@@ -7,3 +7,8 @@ pub mod typescript;
 pub fn embedded_schema_json(ir: &crate::ir::SchemaIr) -> Result<String, String> {
     serde_json::to_string(ir).map_err(|e| e.to_string())
 }
+
+/// A proxy client default lets an insert omit the field.
+fn has_client_default(ir: &crate::ir::SchemaIr, model: &str, field: &str) -> bool {
+    ir.behavior.proxy_models.iter().any(|p| p.model == model && p.defaults.contains_key(field))
+}

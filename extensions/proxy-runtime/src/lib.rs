@@ -44,7 +44,6 @@ pub struct PreparedField {
     pub position: usize,
     pub name: String,
     pub ty: ValueType,
-    pub array: bool,
     pub expected: ExpectedShape,
     pub allowed: Option<Vec<Value>>,
 }
@@ -79,7 +78,7 @@ pub fn prepare(model: &str, fields: &[FieldIr], enums: &[EnumIr], proxy: Option<
             if members.is_empty() || members.iter().collect::<std::collections::BTreeSet<_>>().len() != members.len() { return Err("proxy enum subset must be nonempty and unique".into()); }
             Some(members.iter().map(|m| e.values.iter().find(|v| v.name == *m).map(|v| v.value.clone()).ok_or_else(|| format!("{model}.{}: unknown parent enum member {m}", field.name))).collect::<Result<_, _>>()?)
         } else { None };
-        prepared.fields.push(PreparedField { position, name: field.name.clone(), ty: field.value_type(), array: field.array,
+        prepared.fields.push(PreparedField { position, name: field.name.clone(), ty: field.value_type(),
             expected: ExpectedShape { non_null: contract.non_null, enum_members: contract.subset.clone() }, allowed });
     }
     for (name, value) in &proxy.defaults {

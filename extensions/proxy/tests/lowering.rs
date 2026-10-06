@@ -39,6 +39,9 @@ fn chains_preserve_physical_constraints_enum_representation_and_relation_identit
     assert_eq!(ir.models[2].fields[2].default, Some(json!("old")));
     assert!(!ir.models[2].fields[1].nullable);
     assert_eq!(ir.behavior.proxy_models[1].defaults["status"], json!("active"));
+    // Generated TypeScript enums are const objects, so a member type needs `typeof`.
+    assert_eq!(ir.models[1].fields[2].hints["typescript"], "typeof Status.ACTIVE");
+    assert_eq!(ir.models[1].fields[2].hints["python"], "Literal[Status.ACTIVE]");
     assert_eq!(ir.behavior.proxy_models[1].fields.len(), 2);
     assert_eq!(ir.models[3].relations[0].target, "Named");
     let storage = ir.behavior.storage.as_ref().unwrap();
@@ -102,7 +105,7 @@ fn explicit_defaults_replace_inherited_and_shape_violations_remain_allowed() {
     let mut ir = schema();
     let mut active = spec("Active", "User"); active.defaults.insert("name".into(), json!("parent"));
     let mut named = spec("Named", "Active");
-    named.fields.push(ProxyField { field:"name".into(),non_null:true,subset:None });
+    named.fields.push(ProxyField { field: "name".into(), non_null: true, subset: None });
     named.defaults.insert("name".into(), json!(null));
     lower_specs(&mut ir, &[named, active]).unwrap();
     assert_eq!(ir.behavior.proxy_models[1].defaults["name"], json!(null));

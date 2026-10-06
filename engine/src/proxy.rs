@@ -40,8 +40,7 @@ fn accepts(field: &PreparedField, cell: &Cell<'_>) -> bool {
     }
 }
 
-/// Collect once for an operation. Projection/count results never acquire proxy
-/// diagnostics. Feature 03 supplies public ResultShape slots for partial outputs.
+/// Collect once for an operation. Projection/count results never acquire proxy diagnostics.
 pub fn diagnostics(proxies: &[PreparedProxy], out: &crate::exec::Outcome) -> DbResult<Vec<Warning>> {
     use crate::{exec::{Fetched, Outcome}, plan::Output};
     fn output<'a>(proxies: &'a [PreparedProxy], output: &Output, rows: &dyn RowSet,

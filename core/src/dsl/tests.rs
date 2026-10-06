@@ -526,6 +526,7 @@ fn imported_models_use_main_extension_definitions() {
     assert!(compile_file(&dir.join("schema.prisma")).unwrap_err().contains("extension imports belong in the main schema"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
 #[test]
 fn behavioral_arguments_preserve_names_null_and_nested_json() {
     let mut items = syntax::parse(r#"model View {

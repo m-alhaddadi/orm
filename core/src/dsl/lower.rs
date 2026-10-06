@@ -759,7 +759,7 @@ fn rel_args(a: &Attr) -> RelArgs {
     RelArgs { name, fields: names("fields"), references: names("references") }
 }
 
-fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap<&str, &ModelDecl>, deferred_models: &HashSet<String>) -> Result<RelationIr> {
+fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap<&str, &ModelDecl>, deferred_identity: &HashSet<String>) -> Result<RelationIr> {
     let target = &member.ty.name;
     let what = format!("relation {}.{}", m.name, member.name);
     if let Some(a) = member.attrs.iter().find(|a| a.name != "relation") {
@@ -871,7 +871,7 @@ fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap
         return err(member.ty.pos, format!("{what}: {from} is {}nullable, so the relation type is `{hint}`", if local.nullable { "" } else { "not " }));
     }
     let Some((tpos, to)) = to else { return err(rel.pos, format!("{what}: fields: needs references: [<field of {target}>]")) };
-    if !target_fields.contains(&to.as_str()) && !deferred_models.contains(target) {
+    if !target_fields.contains(&to.as_str()) && !deferred_identity.contains(target) {
         return err(tpos, format!("{what}: {target} has no field {to}"));
     }
     let on_delete = match n.get("onDelete") {
@@ -1219,8 +1219,7 @@ fn param(pos: Pos, v: &Value) -> Result<String> {
     })
 }
 
-/// Preserve namespaced behavioral declarations before ordinary schema lowering.
-/// Database type attributes keep their existing interpretation.
+/// A behavioral declaration argument as literal JSON: a bare identifier is a string.
 fn declaration_value(pos: Pos, value: &Value) -> Result<serde_json::Value> {
     Ok(match value {
         Value::Path(path, None) if path.as_slice() == ["null"] => serde_json::Value::Null,
@@ -1240,6 +1239,8 @@ fn declaration_value(pos: Pos, value: &Value) -> Result<serde_json::Value> {
     })
 }
 
+/// Preserve namespaced behavioral declarations before ordinary schema lowering.
+/// Database type attributes keep their existing interpretation.
 pub(super) fn behavior_declarations(items: &mut [Item], file: &str) -> Result<Vec<crate::behavior::Declaration>> {
     let mut out = vec![];
     let mut collect = |attrs: &mut Vec<Attr>, model: &str, field: Option<&str>| -> Result<()> {

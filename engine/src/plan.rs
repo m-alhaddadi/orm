@@ -2002,9 +2002,10 @@ pub fn plan_insert(
     on_conflict: Option<OnConflict>,
     params: &dyn Params,
 ) -> Result<(InsertStatement, Vec<ValueType>)> {
-    let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+    let idx = schema.model_idx(model).map_err(query_err)?;
+    let m = schema.model(idx);
     #[cfg(feature = "proxy-models")]
-    let (fields, rows) = crate::proxy::insert_defaults(&schema.proxy_models[schema.model_idx(model).map_err(query_err)?], m, fields, rows)?;
+    let (fields, rows) = crate::proxy::insert_defaults(&schema.proxy_models[idx], m, fields, rows)?;
     #[cfg(feature = "proxy-models")]
     let fields = fields.as_ref();
     #[cfg(feature = "composition")]

@@ -222,7 +222,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
             if m.native.computed().contains(&position) { continue; }
             #[cfg(not(feature = "composition"))]
             let _ = position;
-            let optional = f.nullable || has_server_value(f) || ir.behavior.proxy_models.iter().any(|p| p.model == m.ir.name && p.defaults.contains_key(&f.name));
+            let optional = f.nullable || has_server_value(f) || super::has_client_default(ir, &m.ir.name, &f.name);
             match belongs_to(m, &f.name) {
                 Some(r) if !optional => one_of.push((f, r)),
                 Some(r) => {

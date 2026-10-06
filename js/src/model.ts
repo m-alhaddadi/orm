@@ -84,10 +84,6 @@ export interface Instance<M extends ModelSpec> {
 type Row = Record<PropertyKey, unknown> & { [RELATED]?: Record<string, unknown>; [DB]?: Database | undefined };
 
 /** Schema information about one model (`User._meta`). */
-const fieldDefaultMetadata = {
-  get hasServerValue(): boolean { return (this as unknown as FieldMeta).hasInsertDefault; },
-};
-
 export class ModelMeta implements Source {
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
@@ -112,7 +108,7 @@ export class ModelMeta implements Source {
   ) {
     for (const f of ir.fields) {
       const physicalDefault = !!(f.auto_increment || f.default !== undefined || f.default_now || f.default_sql);
-      const fm: FieldMeta = Object.assign(Object.create(fieldDefaultMetadata), {
+      const fm: FieldMeta = {
         name: camel(f.name),
         ir: f.name,
         type: f.type,
@@ -122,10 +118,8 @@ export class ModelMeta implements Source {
         primaryKey: f.primary_key ?? false,
         unique: f.unique ?? false,
         hasInsertDefault: physicalDefault || clientDefaults.includes(f.name),
-      } satisfies Omit<FieldMeta, "hasServerValue">);
-      if (clientDefaults.includes(f.name)) {
-        Object.defineProperty(fm, "hasServerValue", { value: physicalDefault });
-      }
+        hasServerValue: physicalDefault,
+      };
       checkName(ir.name, fm.name, this.fields);
       this.fields.set(fm.name, fm);
       this.fieldByIr.set(fm.ir, fm);
