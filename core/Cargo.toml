@@ -18,3 +18,4 @@ storage-reference = { path = "../storage/reference", optional = true }
 [features]
 composition = []
 file-storage = ["dep:storage-reference"]
+reference-loading = []

@@ -17,6 +17,12 @@ pub fn artifact() -> Artifact {
         }
         artifact
     };
+    #[cfg(feature = "reference-loading")]
+    let artifact = {
+        let mut artifact = artifact;
+        artifact.capabilities.push("reference-loading".into());
+        artifact
+    };
     artifact
 }
 

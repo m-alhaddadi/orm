@@ -34,6 +34,13 @@ pub use crate::behavior::camel;
 
 use crate::behavior::RESERVED_MEMBERS as RESERVED;
 
+#[cfg(feature = "reference-loading")]
+pub fn reference_loader_name(name: &str) -> String {
+    let name = camel(name);
+    let mut chars = name.chars();
+    format!("load{}{}", chars.next().unwrap().to_uppercase(), chars.as_str())
+}
+
 fn element_type(f: &FieldIr) -> String {
     if let Some(h) = f.hints.get("typescript") {
         return h.clone();
@@ -130,6 +137,17 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
                 return Err(format!("{} has two members named {c} in TypeScript (camelCase)", m.ir.name));
             }
         }
+        #[cfg(feature = "reference-loading")]
+        for method in ir.behavior.methods.iter().filter(|method| method.model == m.ir.name) {
+            seen.insert(camel(&method.name));
+        }
+        #[cfg(feature = "reference-loading")]
+        for r in m.ir.relations.iter().filter(|r| r.kind == RelKind::One) {
+            let method = reference_loader_name(&r.name);
+            if !seen.insert(method.clone()) {
+                return Err(format!("{}.{method}: reference loader collides with an existing member", m.ir.name));
+            }
+        }
     }
     let ir_json = super::embedded_schema_json(ir)?;
     let mut used: BTreeSet<&str> = BTreeSet::new();
@@ -201,7 +219,14 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
                     }
                     writeln!(body, "  readonly {}: RelatedSet<{}Spec, {}>;", camel(&r.name), r.target, link.join(" | ")).unwrap()
                 }
-                RelKind::One => {}
+                RelKind::One => {
+                    #[cfg(feature = "reference-loading")]
+                    {
+                        let nullable = super::reference_loader_nullable(ir, m, r)?;
+                        let t = if nullable { format!("{} | null", r.target) } else { r.target.clone() };
+                        writeln!(body, "  {}(options?: {{ readonly reload?: boolean }}): Promise<{t}>;", reference_loader_name(&r.name)).unwrap();
+                    }
+                }
             }
         }
         writeln!(body, "}}\n").unwrap();
@@ -303,6 +328,8 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         }
         for r in &m.ir.relations {
             let kind = hop_kind(m, r)?;
+            #[cfg(feature = "reference-loading")]
+            let kind = if kind == "one" && super::reference_target_filtered(ir, &r.target) { "opt" } else { kind };
             let scope = if matches!(kind, "many" | "m2m") { "S | Many" } else { "S" };
             let opt = if kind == "opt" { "true" } else { "O" };
             writeln!(
@@ -355,6 +382,9 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
     let imports = types.iter().map(|t| format!("type {t}")).collect::<Vec<_>>().join(", ");
     writeln!(out, "import {{ define, {imports} }} from {};\n", quote(runtime)).unwrap();
     writeln!(out, "const SCHEMA: SchemaIR = {ir_json};\n").unwrap();
+    #[cfg(feature = "reference-loading")]
+    writeln!(out, "const models = define(SCHEMA, {{ requiredCapabilities: [\"reference-loading\"] }});\n").unwrap();
+    #[cfg(not(feature = "reference-loading"))]
     writeln!(out, "const models = define(SCHEMA);\n").unwrap();
     #[cfg(feature = "file-storage")]
     if !ir.behavior.file_fields.is_empty() {

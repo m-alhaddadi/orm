@@ -142,7 +142,7 @@ const SCHEMA: SchemaIR = {
 
 // Bun loads all test files in one process, alongside PostgreSQL models.
 export const sqliteRegistry = new Registry();
-const models = define(SCHEMA, { registry: sqliteRegistry });
+const models = define(SCHEMA, { registry: sqliteRegistry, requiredCapabilities: ["reference-loading"] });
 
 // -- Status ----------------------------------------------------------------------------
 
@@ -233,6 +233,7 @@ export interface BookData {
 
 /** A Book row. To-one relations are typed on rows of queries that load them. */
 export interface Book extends BookData, Instance<BookSpec> {
+  loadAuthor(options?: { readonly reload?: boolean }): Promise<Author>;
 }
 
 export type BookInsert = {
