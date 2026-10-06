@@ -204,7 +204,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         }
         #[cfg(feature = "reference-loading")]
         for r in m.ir.relations.iter().filter(|r| r.kind == RelKind::One) {
-            let nullable = !r.foreign_key || m.field(&r.from)?.nullable || super::reference_target_filtered(ir, &r.target);
+            let nullable = super::reference_loader_nullable(ir, m, r)?;
             let t = if nullable { format!("{} | None", r.target) } else { r.target.clone() };
             writeln!(body, "    async def load_{}(self, *, reload: bool = False) -> {t}: ...", r.name).unwrap();
         }

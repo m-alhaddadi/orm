@@ -1,9 +1,9 @@
 """Explicit reference loaders run on the instance context and cache per owner."""
 import asyncio
-import os
 
 import pytest
 import orm
+from conftest import DATABASE_URL
 from orm.query import QuerySet
 
 SOURCE = '''
@@ -47,7 +47,7 @@ async def references(request):
     dialect = request.param
     registry = orm.Registry()
     models = orm.loads(f'datasource db {{\n provider = "{dialect}"\n}}\n' + SOURCE, registry=registry)
-    url = "sqlite://:memory:" if dialect == "sqlite" else os.environ.get("ORM_REFERENCE_DATABASE_URL", "postgres://postgres:postgres@localhost/orm_test")
+    url = "sqlite://:memory:" if dialect == "sqlite" else DATABASE_URL
     db = await orm.connect(url, registry=registry, default=False)
     await db.drop_tables()
     await db.create_tables()

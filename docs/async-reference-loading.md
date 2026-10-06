@@ -1,9 +1,11 @@
 # Explicit async reference loading
 
-Build both the native binding and model generator with the `reference-loading`
-Cargo feature. Baseline artifacts retain ordinary eager/prefetch relation support,
-but exclude this adapter and its generated instance methods. Generated modules
-record their required capability and reject incompatible artifacts at definition.
+The `reference-loading` Cargo feature adds explicit reference loaders. The Python
+and Node bindings and the `orm` CLI enable it by default. Build them with
+`--no-default-features` to get a baseline artifact. A baseline artifact keeps
+ordinary eager and prefetch relation support, but it does not have this adapter or
+the generated loader methods. Generated modules record the capability that they
+require. An artifact without that capability rejects them at definition.
 
 For a belongs-to or reverse one-to-one relation:
 
@@ -18,33 +20,40 @@ const person = await customer.loadPerson();
 const fresh = await customer.loadPerson({ reload: true });
 ```
 
-Synchronous access performs no I/O and raises `NotLoaded` until ready. TypeScript
-loaders return the target type; relation properties retain the existing
-query-loaded typing rules. Generated loader names must not collide with fields,
-relations, runtime members, or extension methods. Collisions reject the schema.
+Synchronous access does no I/O. It raises `NotLoaded` until the reference is
+loaded. TypeScript loaders return the target type. Relation properties keep the
+existing query-loaded typing rules, with one exception: a target with a prepared
+default filter makes the relation property nullable too. A generated loader name
+must not be the same as a field, a relation, a runtime member, or an extension
+method. The schema fails with an error when two names are the same.
 
-The loader uses ordinary target queries and the owner's database binding, including
-its current task transaction. An explicit reference cache belongs to that owner;
-there is no global identity map. Valid cached objects and cached optional absence
-need no query. Reverse one-to-one absence and optional missing targets return
-`None`/`null`. A physically missing required target raises `IntegrityError`.
-Targets with a prepared default filter may return filtered-view absence, including
-required references; their generated return types are nullable.
+The loader uses ordinary target queries and the database of the owner instance.
+When the current task has a transaction, the loader uses that transaction. The
+reference cache belongs to the owner instance. There is no global identity map.
+A valid cached object or a cached optional absence needs no query. An absent
+reverse one-to-one target and an absent optional target return `None` in Python
+and `null` in TypeScript. A required target that is not in the database raises
+`IntegrityError`. A target with a prepared default filter can be absent because
+the filter hides it. This applies to required references too, so the generated
+return types for these targets are nullable.
 
-Calls for the same reference, key and database/transaction context share an
-inflight query. Concurrent forced reloads share it too. A failed query can be
-retried. Cancelling a Python waiter does not cancel the shared query or other
-waiters; the shared operation completes normally, and exceptions remain observed.
-Node uses ordinary promises and has no separate cancellation API.
+Calls for the same reference, key, database, and transaction share one query that
+is in progress. Concurrent forced reloads also share it. After a query fails, a
+new call starts a new query. In Python, when you cancel one waiter, the shared
+query and the other waiters continue. The shared operation completes normally, and
+its exception is always observed. Node uses ordinary promises and has no separate
+cancellation API.
 
-Changing a source key through instance update/refresh invalidates its reference.
-Refresh also invalidates reverse one-to-one caches, even if the source key is
-unchanged, so cached absence can be refreshed after inserting a target. An older
-inflight query may still return its original result to its callers, but cannot
-repopulate a cache invalidated by a mutation. A forced reload refreshes the cached
-reference without changing the owning row's scalar fields. Other instances remain
-snapshots until explicitly refreshed/reloaded.
+When an instance update or refresh changes a source key, the reference becomes
+invalid. A refresh also makes reverse one-to-one caches invalid, even when the
+source key does not change. Thus a refresh after you insert a target replaces a
+cached absence. A query that started before such a change can still return its
+original result to its callers, but it does not write that result to the cache.
+A forced reload replaces the cached reference and does not change the scalar
+fields of the owner row. Other instances stay as they are until you refresh or
+reload them.
 
-Selected adapters resolve hidden helper keys with public-first lookup while
-keeping them hidden from ordinary attribute access. Internal coalescing primitives
-are reusable by generic-reference adapters; they do not implement generic routing.
+An adapter reads hidden helper keys: it looks first at the public attribute, then
+at the hidden values. Ordinary attribute access does not show the hidden values.
+Adapters for generic references can use the internal function that shares
+concurrent loads. That function does not route generic references.

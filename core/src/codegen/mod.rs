@@ -8,8 +8,7 @@ pub fn embedded_schema_json(ir: &crate::ir::SchemaIr) -> Result<String, String> 
     serde_json::to_string(ir).map_err(|e| e.to_string())
 }
 
-/// Only generation/setup inspects declaration metadata. Prepared query defaults are
-/// contributed by feature 03; no query-time metadata lookup is introduced here.
+/// A prepared default filter on `target` can hide it, so a reference to it can be absent.
 #[cfg(feature = "reference-loading")]
 pub fn reference_target_filtered(ir: &crate::ir::SchemaIr, target: &str) -> bool {
     let behavior = serde_json::to_value(&ir.behavior).expect("serializable schema behavior");
@@ -17,6 +16,12 @@ pub fn reference_target_filtered(ir: &crate::ir::SchemaIr, target: &str) -> bool
         policies.iter().any(|policy| policy.get("model").and_then(serde_json::Value::as_str) == Some(target)
             && policy.get("filter").is_some_and(|filter| !filter.is_null()))
     })
+}
+
+/// The loader result is optional for a reverse reference, a nullable key, or a filtered target.
+#[cfg(feature = "reference-loading")]
+pub fn reference_loader_nullable(ir: &crate::ir::SchemaIr, model: &crate::schema::Model, r: &crate::ir::RelationIr) -> Result<bool, String> {
+    Ok(!r.foreign_key || model.field(&r.from)?.nullable || reference_target_filtered(ir, &r.target))
 }
 
 #[cfg(test)]

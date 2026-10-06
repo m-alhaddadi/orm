@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { connect, loads, Registry, IntegrityError, NotLoaded, type Database } from "../src/index.js";
 import { INTERNAL } from "../src/model.js";
 import { QuerySet } from "../src/query.js";
+import { DATABASE_URL } from "./helpers.js";
 
 const source = `
 model Owner {
@@ -43,7 +44,7 @@ for (const dialect of ["sqlite", "postgres"]) {
   test(`${dialect}: explicit loads, identity, reload, absence, integrity, invalidation, context and races`, async () => {
     const registry = new Registry();
     const m = loads(`datasource db {\n provider = "${dialect}"\n}\n${source}`, { registry }) as Dynamic;
-    const url = dialect === "sqlite" ? "sqlite://:memory:" : process.env["ORM_REFERENCE_DATABASE_URL"] ?? "postgres://postgres:postgres@localhost/orm_test";
+    const url = dialect === "sqlite" ? "sqlite://:memory:" : DATABASE_URL;
     const db = await connect(url, { registry, default: false });
     const original = QuerySet.prototype.first;
     let calls = 0;

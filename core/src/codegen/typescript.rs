@@ -228,7 +228,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
                 RelKind::One => {
                     #[cfg(feature = "reference-loading")]
                     {
-                        let nullable = !r.foreign_key || m.field(&r.from)?.nullable || super::reference_target_filtered(ir, &r.target);
+                        let nullable = super::reference_loader_nullable(ir, m, r)?;
                         let t = if nullable { format!("{} | null", r.target) } else { r.target.clone() };
                         writeln!(body, "  {}(options?: {{ readonly reload?: boolean }}): Promise<{t}>;", reference_loader_name(&r.name)).unwrap();
                     }

@@ -18,6 +18,7 @@ import type { ManyRelatedSet, QuerySet, RelatedSet } from "./query.js";
 export const RELATED: unique symbol = Symbol("orm.related");
 /** The database an instance was read from (`using(db)`), which it writes back to. */
 export const DB: unique symbol = Symbol("orm.db");
+/** Hidden values (such as relation keys) that adapters read but ordinary property access does not show. */
 export const INTERNAL: unique symbol = Symbol.for("orm.internal");
 // Adapter selection happens once; baseline artifacts never import its runtime module.
 const referenceAdapter = (JSON.parse(native().nativeArtifact()) as { capabilities: string[] }).capabilities.includes("reference-loading")
