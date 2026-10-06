@@ -138,12 +138,13 @@ function validate(addon: Addon, profile?: string): void {
     abi: number; version: string; language: string; profile: string; backends: string[];
     capabilities: Record<string, boolean>; adapters: string[];
   };
-  if (meta.abi !== 1 || meta.version !== "0.1.0" || meta.language !== "node" ||
+  if (typeof meta !== "object" || meta === null || Array.isArray(meta) || meta.abi !== 1 || meta.version !== "0.1.0" || meta.language !== "node" ||
       !Array.isArray(meta.backends) || meta.backends.length === 0 ||
       new Set(meta.backends).size !== meta.backends.length || meta.backends.some(b => !["postgres", "sqlite"].includes(b)) ||
       typeof meta.capabilities !== "object" || meta.capabilities === null ||
-      Object.values(meta.capabilities).some(v => typeof v !== "boolean") ||
-      !Array.isArray(meta.adapters) || meta.adapters.some(a => typeof a !== "string" || meta.capabilities[a] !== true)) {
+      Array.isArray(meta.capabilities) || Object.values(meta.capabilities).some(v => typeof v !== "boolean") ||
+      !Array.isArray(meta.adapters) || meta.adapters.some(a => typeof a !== "string" || meta.capabilities[a] !== true) ||
+      new Set(meta.adapters).size !== meta.adapters.length) {
     throw new Error("incompatible orm native artifact; rebuild or install matching orm 0.1.0 packages");
   }
   if (profile) {
@@ -160,7 +161,7 @@ function validate(addon: Addon, profile?: string): void {
 function load(): Addon {
   const require = createRequire(import.meta.url);
   const selected = process.env["ORM_PROFILE"];
-  if (selected !== undefined && !(selected in profiles)) {
+  if (selected !== undefined && !Object.hasOwn(profiles, selected)) {
     throw new Error(`unknown ORM_PROFILE ${selected}; choose ${Object.keys(profiles).join(", ")}`);
   }
   const explicit = process.env["ORM_NATIVE"];

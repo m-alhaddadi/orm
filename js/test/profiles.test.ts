@@ -19,9 +19,17 @@ test("native profiles reject invalid selections and compatibility before use", (
   try {
     writeFileSync(path, `module.exports={setDecimalClass(){},profileMetadata(){return ${JSON.stringify(JSON.stringify(metadata))}}};`);
     run("sqlite");
-    assert.throws(() => run("unknown"), /unknown ORM_PROFILE/);
+    for (const selector of ["unknown", "__proto__", "constructor", "toString"]) {
+      assert.throws(() => run(selector), /unknown ORM_PROFILE/);
+    }
     assert.throws(() => run("postgres"), /incompatible orm native profile/);
     writeFileSync(path, `module.exports={profileMetadata(){return ${JSON.stringify(JSON.stringify({ ...metadata, abi: 2 }))}}};`);
     assert.throws(() => run("sqlite"), /incompatible orm native artifact/);
+    for (const invalid of [null, [], { ...metadata, capabilities: [] },
+      { ...metadata, adapters: ["reference-loading", "reference-loading"],
+        capabilities: { "reference-loading": true } }]) {
+      writeFileSync(path, `module.exports={profileMetadata(){return ${JSON.stringify(JSON.stringify(invalid))}}};`);
+      assert.throws(() => run("sqlite"), /incompatible orm native artifact/);
+    }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
