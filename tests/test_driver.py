@@ -46,12 +46,13 @@ async def test_bad_password_fails_at_connect(own):
 @pytest.mark.parametrize("mode", ["disable", "prefer", "require"])
 async def test_sslmodes(own, mode):
     rows = await own._fetch_text("SHOW ssl")
-    if mode == "require" and rows[0][0] != "on":
+    tls = rows[0][0] == "on"
+    if mode == "require" and not tls:
         pytest.skip("server has no TLS")
     other = await orm.connect(f"{BASE}?sslmode={mode}", default=False)
     try:
         used = await other._fetch_text("SELECT ssl::text FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
-        assert used[0][0] == ("false" if mode == "disable" else "true")
+        assert used[0][0] == ("true" if mode != "disable" and tls else "false")
     finally:
         await other.close()
 
