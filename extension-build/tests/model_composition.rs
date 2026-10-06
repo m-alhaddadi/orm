@@ -40,7 +40,7 @@ fn model_composition_compiles_and_executes() {
             "-p",
             "orm-engine",
             "--features",
-            "model-composition",
+            "model-composition,orm-core/generate-python,orm-core/generate-typescript",
             "--example",
             "composed",
         ])
