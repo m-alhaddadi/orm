@@ -200,6 +200,7 @@ pub async fn run_insert(conn: &dyn Executor, target: Target, insert: Insert) -> 
             model: insert.model,
             types: insert.types,
             rows: Box::new(ChainedRows::new(fetched)) as Box<dyn RowSet>,
+            shape: None,
         })
     }
     .await;
@@ -408,6 +409,7 @@ pub async fn run_mutation(conn: &dyn Executor, target: Target, plan: Mutation) -
                 model: plan.model,
                 types: plan.types,
                 rows: matched,
+                shape: None,
             });
         }
         let mut returned = vec![];
@@ -428,6 +430,7 @@ pub async fn run_mutation(conn: &dyn Executor, target: Target, plan: Mutation) -
             model: plan.model,
             types: plan.types,
             rows: Box::new(ChainedRows::new(returned)),
+            shape: None,
         })
     }
     .await;
