@@ -277,6 +277,19 @@ pub struct JsSchema {
     inner: Arc<schema::Schema>,
 }
 
+// A separate impl block: `#[napi]` registers every method of a block, ignoring `cfg` on items.
+#[cfg(feature = "file-storage")]
+#[napi]
+impl JsSchema {
+    /// Selected upload preflight: ordinary conversion/planning without SQL or I/O.
+    #[napi]
+    pub fn validate_file_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>) -> napi::Result<()> {
+        let values = convert_rows(env, &self.inner, &model, &fields, rows, true)?;
+        exec::plan_insert(&self.inner, Target::new(self.inner.dialect), &model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
+        Ok(())
+    }
+}
+
 #[napi]
 impl JsSchema {
     #[napi(constructor)]

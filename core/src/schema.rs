@@ -9,6 +9,8 @@ pub type Result<T> = std::result::Result<T, String>;
 pub struct Model {
     pub ir: ModelIr,
     pub pk: usize,
+    #[cfg(feature = "file-storage")]
+    pub file_fields: Vec<crate::file_storage::PreparedFileField>,
     #[cfg(feature = "composition")]
     pub native: crate::behavior::NativeModel,
     #[cfg(feature = "composition")]
@@ -41,7 +43,9 @@ impl Model {
             renamed_from: None,
             comment: None,
         };
-        Ok(Model { ir, pk: 0, field_index, relation_index: HashMap::new(),
+        Ok(Model {
+            #[cfg(feature = "file-storage")] file_fields: vec![],
+            ir, pk: 0, field_index, relation_index: HashMap::new(),
             #[cfg(feature = "composition")] native: crate::behavior::NativeModel::None,
             #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
             #[cfg(feature = "composition")] resolved_fields: vec![] })
@@ -60,6 +64,14 @@ impl Model {
             .get(name)
             .map(|&i| &self.ir.fields[i])
             .ok_or_else(|| format!("model {} has no field {name:?}", self.ir.name))
+    }
+
+    /// True if the selected file-storage codec owns the field.
+    pub fn is_file_field(&self, name: &str) -> bool {
+        #[cfg(feature = "file-storage")]
+        { self.file_fields.iter().any(|file| self.fields()[file.position].name == name) }
+        #[cfg(not(feature = "file-storage"))]
+        { let _ = name; false }
     }
 
     pub fn field_pos(&self, name: &str) -> Result<usize> {
@@ -128,6 +140,8 @@ impl Schema {
         if model_index.len() != ir.models.len() {
             return Err("duplicate model name in schema".into());
         }
+        #[cfg(feature = "file-storage")]
+        let mut file_fields = crate::file_storage::prepare(&ir)?.into_iter();
         let enums = ir.enums;
         let mut models = Vec::with_capacity(ir.models.len());
         for mut m in ir.models {
@@ -173,7 +187,9 @@ impl Schema {
                 }
                 relation_index.insert(r.name.clone(), (i, target));
             }
-            models.push(Model { ir: m, pk, field_index, relation_index,
+            models.push(Model {
+                #[cfg(feature = "file-storage")] file_fields: file_fields.next().expect("prepared file model"),
+                ir: m, pk, field_index, relation_index,
                 #[cfg(feature = "composition")] native: native.next().expect("prepared model"),
                 #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
             #[cfg(feature = "composition")] resolved_fields: vec![] });

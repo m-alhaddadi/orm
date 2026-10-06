@@ -2,7 +2,7 @@
 resolver = "2"
 members = ["contracts", "extension-build", "core", "engine", "cli", "bindings/python", "bindings/node"]
 # bench/ormcore is a separate workspace (Phase 0 harness).
-exclude = ["bench"]
+exclude = ["bench", "storage/reference", "storage/orm-extension"]
 
 [profile.release]
 lto = "fat"

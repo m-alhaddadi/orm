@@ -92,3 +92,24 @@ fn core_only_build_adds_no_composition() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn manifest_capability_selects_the_host_feature() {
+    let host = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let root = host.join("target/extension-proof-tests").join(format!("orm-extension-feature-test-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let output = root.join("build");
+    let config = root.join("config.json");
+    fs::write(&config, serde_json::to_vec(&serde_json::json!({
+        "host": host, "output": output, "offline": true, "prepare_only": true,
+        "bindings": ["python", "node"], "dependencies": {"file_storage": {"package": "orm-file-storage-extension", "path": host.join("storage/orm-extension")}}
+    })).unwrap()).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_orm-extension-build")).arg(config).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    for binding in ["python", "node"] {
+        let manifest: toml::Value = toml::from_str(&fs::read_to_string(output.join("bindings").join(binding).join("Cargo.toml")).unwrap()).unwrap();
+        assert!(manifest["features"]["default"].as_array().unwrap().contains(&toml::Value::String("file-storage".into())));
+        assert!(manifest["dependencies"]["orm-core"]["features"].as_array().unwrap().contains(&toml::Value::String("file-storage".into())));
+    }
+    fs::remove_dir_all(root).unwrap();
+}

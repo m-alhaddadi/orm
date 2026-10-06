@@ -292,6 +292,15 @@ pub fn plan_update_many(
         crate::behavior::update_values(m.native, &map, &mut rows, fields.len())?;
         rows
     };
+    #[cfg(feature = "file-storage")]
+    {
+        let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+        for row in &rows {
+            for (name, v) in fields.iter().zip(row) {
+                crate::file_storage::value(m, m.field_pos(name).map_err(query_err)?, v)?;
+            }
+        }
+    }
     let per_row = if target.caps.update_from_values { fields.len() } else { 2 * fields.len() - 1 };
     // Leave room for the filters' parameters.
     let mut chunk = target.caps.max_params.saturating_sub(params.len()) / per_row.max(1);

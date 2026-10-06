@@ -1,0 +1,5 @@
+[
+  {"v":1,"storage":"reports","key":"abc"},
+  {"v":1,"storage":"reports","key":"folder/a.xlsx","version":"v1","filename":"گزارش.xlsx","content_type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","size":9007199254740991},
+  {"v":1,"storage":"local","key":"empty","size":0}
+]

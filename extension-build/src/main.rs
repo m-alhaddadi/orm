@@ -137,6 +137,7 @@ fn build() -> Result<(), String> {
     let core_path = config.output.join("core/Cargo.toml");
     let mut core: toml::Value = toml::from_str(&fs::read_to_string(&core_path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     core["dependencies"]["orm-contracts"]["path"] = toml::Value::String(config.host.join("contracts").to_string_lossy().into());
+    core["dependencies"]["storage-reference"]["path"] = toml::Value::String(config.host.join("storage/reference").to_string_lossy().into());
     for (alias, dependency) in &config.dependencies {
         orm_extension_build::rust_path(&alias.replace('-', "_"))?;
         if alias.contains("::") || core["dependencies"].get(alias).is_some() { return Err(format!("invalid or occupied dependency alias {alias}")); }
@@ -242,6 +243,9 @@ fn main() -> Result<(), String> {
     }
     if !config.dependencies.is_empty() {
         // Features are selected through manifests, never through build-script cfg tricks.
+        let selected: Vec<String> = composition.manifests.iter().flat_map(|m| &m.capabilities)
+            .filter(|c| orm_contracts::extension::HOST_FEATURE_CAPABILITIES.contains(&c.as_str()))
+            .cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
         for binding in &config.bindings {
             let path = config.output.join("bindings").join(binding).join("Cargo.toml");
             let mut manifest: toml::Value = toml::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -251,6 +255,10 @@ fn main() -> Result<(), String> {
                 add_feature(&mut manifest, &["dependencies", "orm-engine", "features"], "composition")?;
             }
             add_feature(&mut manifest, &["dependencies", "orm-core", "features"], "composition")?;
+            for feature in &selected {
+                add_feature(&mut manifest, &["features", "default"], feature)?;
+                add_feature(&mut manifest, &["dependencies", "orm-core", "features"], feature)?;
+            }
             fs::write(path, toml::to_string(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         }
     }

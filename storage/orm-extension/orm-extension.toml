@@ -1,0 +1,20 @@
+id = "file-storage"
+version = "0.1.0"
+host_contract = 1
+schema_contract = 1
+languages = ["python", "typescript"]
+databases = ["postgres", "sqlite"]
+capabilities = ["schema-transformations", "file-storage"]
+
+[[attributes]]
+name = "storage.file"
+target = "field"
+[attributes.arguments.storage]
+kind = "string"
+required = true
+
+[[passes]]
+id = "file-storage.fields.v1"
+phase = "behavior"
+rust = "crate::lower"
+effects = ["behavior.file_fields", "behavior.field_adapters"]

@@ -30,34 +30,9 @@ fn section(name: &str) -> String {
     format!("{head}{}", "-".repeat(WIDTH.saturating_sub(head.len())))
 }
 
-/// `author_id` -> `authorId`: an underscore after a letter or digit is dropped and the
-/// next letter or digit upper-cased (leading and trailing underscores stay).
-pub fn camel(name: &str) -> String {
-    let chars: Vec<char> = name.chars().collect();
-    let mut out = String::with_capacity(name.len());
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '_' && i > 0 && chars[i - 1].is_ascii_alphanumeric() {
-            let mut j = i;
-            while j < chars.len() && chars[j] == '_' {
-                j += 1;
-            }
-            if j < chars.len() && chars[j].is_ascii_alphanumeric() {
-                out.extend(chars[j].to_uppercase());
-                i = j + 1;
-                continue;
-            }
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
+pub use crate::behavior::camel;
 
-/// Names the runtime gives meaning to on models and instances.
-const RESERVED: [&str; 12] =
-    ["objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "pk", "update", "delete", "refresh", "toJSON", "constructor", "toString", "then"];
+use crate::behavior::RESERVED_MEMBERS as RESERVED;
 
 fn element_type(f: &FieldIr) -> String {
     if let Some(h) = f.hints.get("typescript") {
@@ -92,6 +67,20 @@ fn value_type(f: &FieldIr) -> String {
 /// The type a column is written from (`bigint` columns take numbers, ...).
 fn input_type(f: &FieldIr) -> String {
     format!("In<{}>", value_type(f))
+}
+
+fn file_value_type(m: &Model, f: &FieldIr) -> String {
+    if m.is_file_field(&f.name) {
+        return if f.nullable { "Reference | null".into() } else { "Reference".into() };
+    }
+    value_type(f)
+}
+
+fn file_input_type(m: &Model, f: &FieldIr) -> String {
+    if m.is_file_field(&f.name) {
+        return format!("{} | Upload", file_value_type(m, f));
+    }
+    input_type(f)
 }
 
 fn has_server_value(f: &FieldIr) -> bool {
@@ -165,7 +154,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         let pk = m.pk_field();
         writeln!(body, "{}\n", section(name)).unwrap();
         for f in m.fields() {
-            let t = value_type(f);
+            let t = file_value_type(m, f);
             for (word, import) in [("Decimal", "Decimal"), ("JsonValue", "JsonValue")] {
                 if t.split(|c: char| !c.is_alphanumeric()).any(|w| w == word) {
                     used.insert(import);
@@ -177,7 +166,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         writeln!(body, "/** The column values of a {name} row. */").unwrap();
         writeln!(body, "export interface {name}Data {{").unwrap();
         for f in m.fields() {
-            writeln!(body, "  readonly {}: {};", camel(&f.name), value_type(f)).unwrap();
+            writeln!(body, "  readonly {}: {};", camel(&f.name), file_value_type(m, f)).unwrap();
         }
         writeln!(body, "}}\n").unwrap();
 
@@ -188,6 +177,11 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         )
         .unwrap();
         writeln!(body, "export interface {name} extends {name}Data, Instance<{name}Spec> {{").unwrap();
+        #[cfg(feature = "file-storage")]
+        for file in &m.file_fields {
+            let field = camel(&m.fields()[file.position].name);
+            writeln!(body, "  {field}SignedUrl(options?: {{ expiresIn?: number }}): Promise<string>;\n  {field}Open(): AsyncIterable<Uint8Array>;").unwrap();
+        }
         for r in &m.ir.relations {
             match r.kind {
                 RelKind::Many if r.through.is_some() => {
@@ -226,12 +220,12 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
                 Some(r) if !optional => one_of.push((f, r)),
                 Some(r) => {
                     let null = if f.nullable { " | null" } else { "" };
-                    writeln!(body, "  {}?: {};", camel(&f.name), input_type(f)).unwrap();
+                    writeln!(body, "  {}?: {};", camel(&f.name), file_input_type(m, f)).unwrap();
                     writeln!(body, "  {}?: {}{null};", camel(&r.name), related_ref(schema, r)?).unwrap();
                 }
                 None => {
                     let q = if optional { "?" } else { "" };
-                    writeln!(body, "  {}{q}: {};", camel(&f.name), input_type(f)).unwrap();
+                    writeln!(body, "  {}{q}: {};", camel(&f.name), file_input_type(m, f)).unwrap();
                 }
             }
         }
@@ -241,7 +235,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
             write!(
                 body,
                 " & (\n  | {{ {key}: {}; {rel}?: never }}\n  | {{ {rel}: {}; {key}?: never }}\n)",
-                input_type(f),
+                file_input_type(m, f),
                 related_ref(schema, r)?
             )
             .unwrap();
@@ -255,14 +249,14 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
             if m.native.computed().contains(&position) { continue; }
             #[cfg(not(feature = "composition"))]
             let _ = position;
-            let t = value_type(f);
+            let t = file_value_type(m, f);
             #[cfg(feature = "composition")]
             let expression = !m.native.validated().contains(&position);
             #[cfg(not(feature = "composition"))]
             let expression = true;
             if expression {
-                writeln!(body, "  {}?: {} | Expression<Compat<{t}>, \"{name}\" | \"~{name}\", {{}}>;", camel(&f.name), input_type(f)).unwrap();
-            } else { writeln!(body, "  {}?: {};", camel(&f.name), input_type(f)).unwrap(); }
+                writeln!(body, "  {}?: {} | Expression<Compat<{t}>, \"{name}\" | \"~{name}\", {{}}>;", camel(&f.name), file_input_type(m, f)).unwrap();
+            } else { writeln!(body, "  {}?: {};", camel(&f.name), file_input_type(m, f)).unwrap(); }
             if let Some(r) = belongs_to(m, &f.name) {
                 let null = if f.nullable { " | null" } else { "" };
                 writeln!(body, "  {}?: {}{null};", camel(&r.name), related_ref(schema, r)?).unwrap();
@@ -278,7 +272,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
             #[cfg(not(feature = "composition"))]
             let _ = position;
             let q = if f.primary_key { "" } else { "?" };
-            writeln!(body, "  {}{q}: {};", camel(&f.name), input_type(f)).unwrap();
+            writeln!(body, "  {}{q}: {};", camel(&f.name), file_input_type(m, f)).unwrap();
             if let Some(r) = belongs_to(m, &f.name) {
                 let null = if f.nullable { " | null" } else { "" };
                 writeln!(body, "  {}?: {}{null};", camel(&r.name), related_ref(schema, r)?).unwrap();
@@ -304,7 +298,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         )
         .unwrap();
         for f in m.fields() {
-            writeln!(body, "  readonly {}: Column<O extends true ? {} | null : {}, S>;", camel(&f.name), value_type(f), value_type(f))
+            writeln!(body, "  readonly {}: Column<O extends true ? {} | null : {}, S>;", camel(&f.name), file_value_type(m, f), file_value_type(m, f))
                 .unwrap();
         }
         for r in &m.ir.relations {
@@ -362,6 +356,20 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
     writeln!(out, "import {{ define, {imports} }} from {};\n", quote(runtime)).unwrap();
     writeln!(out, "const SCHEMA: SchemaIR = {ir_json};\n").unwrap();
     writeln!(out, "const models = define(SCHEMA);\n").unwrap();
+    #[cfg(feature = "file-storage")]
+    if !ir.behavior.file_fields.is_empty() {
+        out.push_str("import { type Reference, type Registry as StorageRegistry } from \"@orm/storage\";\nimport { FileField, type Upload } from \"@orm/file-storage\";\nimport { installModel } from \"@orm/file-storage/model\";\n");
+        let mut adapters = Vec::new();
+        for m in &schema.models {
+            if m.file_fields.is_empty() { continue; }
+            let fields = m.file_fields.iter().map(|f| {
+                let name = camel(&m.fields()[f.position].name);
+                format!("[{name:?}, new FileField({name:?}, {:?}, {})]", f.storage, f.nullable)
+            }).collect::<Vec<_>>().join(", ");
+            adapters.push(format!("installModel(models[{:?}]!._meta.Row.prototype, new Map([{fields}]), undefined, models[{:?}]!._meta)", m.ir.name, m.ir.name));
+        }
+        writeln!(out, "const FILE_ADAPTERS = [{}];\nexport function configureFileStorage(registry: StorageRegistry): void {{ for (const adapter of FILE_ADAPTERS) adapter.configure(registry); }}\n", adapters.join(", ")).unwrap();
+    }
     out.push_str(&body);
     Ok(out)
 }

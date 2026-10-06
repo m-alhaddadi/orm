@@ -1,0 +1,16 @@
+{
+  "name": "@orm/storage",
+  "version": "0.1.0",
+  "description": "Independent streaming object storage and durable references",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "exports": {
+    ".": { "types": "./dist/src/index.d.ts", "default": "./dist/src/index.js" },
+    "./s3": { "types": "./dist/src/s3.d.ts", "default": "./dist/src/s3.js" }
+  },
+  "files": ["dist/src"],
+  "scripts": { "build": "tsc -p tsconfig.json", "test": "npm run build && node --test dist/test/*.test.js" },
+  "peerDependencies": { "@aws-sdk/client-s3": "^3.0.0", "@aws-sdk/s3-request-presigner": "^3.0.0" },
+  "peerDependenciesMeta": { "@aws-sdk/client-s3": { "optional": true }, "@aws-sdk/s3-request-presigner": { "optional": true } },
+  "devDependencies": { "typescript": "^5.9.0", "@types/node": "^22.0.0", "@aws-sdk/client-s3": "^3.0.0", "@aws-sdk/s3-request-presigner": "^3.0.0" }
+}
