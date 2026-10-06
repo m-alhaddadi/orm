@@ -1,0 +1,17 @@
+{
+  "models": [
+    {"name":"OwnerParent","table":"extension_owner_parents","fields":[
+      {"name":"id","column":"id","type":"int","primary_key":true,"auto_increment":true},
+      {"name":"name","column":"name","type":"string"}]},
+    {"name":"OwnerChild","table":"extension_owner_children","fields":[
+      {"name":"id","column":"id","type":"int","primary_key":true},
+      {"name":"role","column":"role","type":"string"},
+      {"name":"name","column":"name","type":"string"}],
+      "relations":[{"name":"parent","kind":"one","target":"OwnerParent","from":"id","to":"id","foreign_key":true,"on_delete":"cascade"}]}
+  ],
+  "behavior": {
+    "schema_contract":1,
+    "field_storage":[{"model":"OwnerChild","field":"name","owner":"OwnerParent","column":"name"}],
+    "owner_links":[{"child":"OwnerChild","parent":"OwnerParent","child_key":"id","parent_key":"id"}]
+  }
+}

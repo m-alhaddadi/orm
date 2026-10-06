@@ -282,6 +282,16 @@ pub fn plan_update_many(
     if rows.iter().any(|r| r.len() != fields.len()) {
         return Err(Error::query("update_many row length does not match fields"));
     }
+    #[cfg(feature = "composition")]
+    let rows = {
+        let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+        let mut rows = rows;
+        let positions: Vec<_> = fields.iter().map(|name| m.field_pos(name).map_err(query_err)).collect::<Result<_>>()?;
+        let map = crate::behavior::input_map(m.fields().len(), &positions)?;
+        if positions.iter().skip(1).any(|p| m.native.computed().contains(p)) { return Err(Error::query("computed fields are read-only")); }
+        crate::behavior::update_values(m.native, &map, &mut rows, fields.len())?;
+        rows
+    };
     let per_row = if target.caps.update_from_values { fields.len() } else { 2 * fields.len() - 1 };
     // Leave room for the filters' parameters.
     let mut chunk = target.caps.max_params.saturating_sub(params.len()) / per_row.max(1);

@@ -22,3 +22,6 @@ bigdecimal = "0.4"
 
 [build-dependencies]
 napi-build = "2"
+
+[features]
+composition = ["orm-engine/composition", "orm-core/composition"]

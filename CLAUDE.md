@@ -12,7 +12,7 @@
 service postgresql start          # the test database (postgres:postgres@localhost/orm_test)
 . .venv/bin/activate && maturin develop
 python -m pytest -q               # Python end-to-end, SQL shape and typing tests
-cargo test -q && cargo clippy -q -p orm-core -p orm-engine -p orm-python -p orm-node
+cargo test -q && cargo clippy -q -p orm-core -p orm-engine -p orm-python -p orm-node -p orm-contracts -p orm-extension-build
 mypy --strict python/orm && pyright python/orm
 cd js && npm install && npm run build:native   # the TypeScript package (js/), Node addon
 npm test && npm run test:bun && npm run typecheck

@@ -1,0 +1,64 @@
+{
+  "baseline_commit": "3a710cab6169752b07834021cacc384aa803a368",
+  "candidate_source_sha256": "df4cedb35deadcbd9f530f9f658a3ca38cf5bd4c00c28e24bf86f1c0097644b5",
+  "candidate_scope": "interim contracts extraction, namespaced declaration capture, eager atomic definition; static extension wiring not implemented yet",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+  "profile": {
+    "release": true,
+    "lto": "fat",
+    "codegen_units": 1
+  },
+  "binaries": {
+    "baseline": {
+      "python": {
+        "bytes": 10493424,
+        "sha256": "97d37cb3ba036141f748c08b0bc2e07da1dcb2bda16890ef1e225ebc0300dfd0"
+      },
+      "node": {
+        "bytes": 9122224,
+        "sha256": "7b2a8f364e50b8969b910e1324d1158974e51fd54ba0181395a851d4e0b3bcc9"
+      }
+    },
+    "candidate": {
+      "python": {
+        "bytes": 10607792,
+        "sha256": "658a1e62a6e1a914a91353116d32c3e787b401d544ce3bffabd07c1977808af0"
+      },
+      "node": {
+        "bytes": 9228512,
+        "sha256": "833586837fd462b21cf536c9e9fef07a41326a86d006a5d7bb086ec3553bcd33"
+      }
+    }
+  },
+  "allocations": {
+    "baseline": {
+      "delete": {
+        "allocated_bytes_per_operation": 1151,
+        "allocations_per_operation": 18
+      },
+      "projection": {
+        "allocated_bytes_per_operation": 3251,
+        "allocations_per_operation": 28
+      },
+      "select": {
+        "allocated_bytes_per_operation": 2009,
+        "allocations_per_operation": 28
+      }
+    },
+    "candidate": {
+      "delete": {
+        "allocated_bytes_per_operation": 1151,
+        "allocations_per_operation": 18
+      },
+      "projection": {
+        "allocated_bytes_per_operation": 3251,
+        "allocations_per_operation": 28
+      },
+      "select": {
+        "allocated_bytes_per_operation": 2009,
+        "allocations_per_operation": 28
+      }
+    }
+  }
+}

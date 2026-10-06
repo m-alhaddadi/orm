@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import enum
 import json
 import types
@@ -46,6 +47,7 @@ class ModelMeta:
         self.pk: Field[Any] = pks[0]
         # Row tuples from the engine follow this order.
         self.field_names: tuple[str, ...] = tuple(self.fields)
+        self.input_fields: dict[str, Field[Any]] = self.fields
 
     def pk_ref(self) -> ColumnRef[Any]:
         return ColumnRef(self.model, (), self.pk)
@@ -72,14 +74,15 @@ class Registry:
     e.g. in migration tests.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, dialect: str | None = None) -> None:
         self._models: dict[str, type[Model]] = {}
         # Schema enums: their Python classes and IR, by name.
         self._enums: dict[str, type[enum.Enum]] = {}
         self._enum_ir: dict[str, dict[str, Any]] = {}
         # Schema-level IR (extensions, functions, extension catalog) from define().
-        self._dialect: str | None = None
+        self._dialect: str | None = dialect
         self._schema_extra: dict[str, list[Any]] = {}
+        self._behavior: dict[str, Any] = {}
         self._native: _native.Schema | None = None
 
     def register(self, model: type[Model]) -> None:
@@ -119,14 +122,113 @@ class Registry:
         if self._dialect is not None:
             out["dialect"] = self._dialect
         out.update(self._schema_extra)
-        return out
+        if self._behavior:
+            out["behavior"] = self._behavior
+        return copy.deepcopy(out)
+
+    def prepare(self) -> _native.Schema:
+        """Prepare class declarations after registering a complete dependency batch."""
+        if self._native is not None:
+            return self._native
+        snapshot = self._candidate()
+        prepared = json.loads(_native.prepare_schema(json.dumps(snapshot.ir())))
+        classes: dict[str, type] = {**snapshot._models, **snapshot._enums}
+        associations: list[tuple[type[Model], dict[str, Any], dict[str, Field[Any]], dict[str, Relation[Any, Any]]]] = []
+        for ir in prepared["models"]:
+            if ir["name"] not in snapshot._models:
+                raise TypeError("class preparation cannot add or rename models; use define() for transformed model identities")
+            model = snapshot._models[ir["name"]]
+            if model._meta.registry is not self:
+                continue
+            fields: dict[str, Field[Any]] = {}
+            for f in ir["fields"]:
+                name = f["name"]
+                if name in _RESERVED:
+                    raise TypeError(f"{ir['name']}.{name}: reserved model member")
+                existing = model._meta.fields.get(name)
+                if existing is None and hasattr(model, name):
+                    raise TypeError(f"{ir['name']}.{name}: generated field collides with an existing model member")
+                field = existing if existing is not None and existing.ir() == f else _field(f)
+                if field is not existing:
+                    original = existing or next((old for old in model._meta.fields.values() if old.column == f["column"]), None)
+                    if original is not None and callable(original.default):
+                        field.default = original.default
+                    field.__set_name__(model, name)
+                fields[name] = field
+            for old in model._meta.fields.keys() - fields.keys():
+                if old not in vars(model):
+                    raise TypeError("class preparation cannot remove inherited members; use define() for this logical view")
+            relations: dict[str, Relation[Any, Any]] = {}
+            for r in ir.get("relations", ()):
+                name = r["name"]
+                existing_relation = model._meta.relations.get(name)
+                if name in _RESERVED or (existing_relation is None and hasattr(model, name)):
+                    raise TypeError(f"{ir['name']}.{name}: generated relation collides with an existing model member")
+                relation = existing_relation if existing_relation is not None and existing_relation.ir() == r else _relation(r)
+                if relation is not existing_relation:
+                    relation.__set_name__(model, name)
+                relations[name] = relation
+            for old in model._meta.relations.keys() - relations.keys():
+                if old not in vars(model):
+                    raise TypeError("class preparation cannot remove inherited members; use define() for this logical view")
+            associations.append((model, ir, fields, relations))
+        methods_by_model: dict[str, dict[str, Any]] = {}
+        for method in prepared.get("behavior", {}).get("methods", ()):
+            model = snapshot._models[method["model"]]
+            if model._meta.registry is not self:
+                continue
+            name = method["name"]
+            if name in _RESERVED or hasattr(model, name):
+                raise TypeError(f"{method['model']}.{name}: generated method collides with an existing model member")
+            methods_by_model.setdefault(method["model"], {})[name] = getattr(_native, method["native_function"])
+        native = _native.Schema(json.dumps(prepared), classes)
+        snapshot._native = native
+        snapshot._behavior = prepared.get("behavior", {})
+        # Associations are published only after all native validation succeeds.
+        for model, ir, fields, relations in associations:
+            meta = model._meta
+            for name in meta.fields.keys() - fields.keys():
+                delattr(model, name)
+            for name, field in fields.items():
+                if meta.fields.get(name) is not field:
+                    setattr(model, name, field)
+            for name in meta.relations.keys() - relations.keys():
+                delattr(model, name)
+            for name, relation in relations.items():
+                if meta.relations.get(name) is not relation:
+                    setattr(model, name, relation)
+            meta.relations = relations
+            meta.fields = fields
+            meta.table = ir["table"]
+            meta.pk = next(field for field in fields.values() if field.primary_key)
+            meta.schema_ir = ir
+            meta.field_names = tuple(fields)
+            computed = {f["field"] for f in snapshot._behavior.get("result_fields", ()) if f["model"] == meta.name}
+            meta.input_fields = {k: v for k, v in fields.items() if k not in computed} if computed else fields
+            for name, function in methods_by_model.get(meta.name, {}).items():
+                setattr(model, name, staticmethod(function))
+            meta.registry = snapshot
+        self._native = native
+        self._behavior = copy.deepcopy(snapshot._behavior)
+        return native
+
+    def _candidate(self) -> Registry:
+        candidate = Registry()
+        candidate._models = self._models.copy()
+        candidate._enums = self._enums.copy()
+        candidate._enum_ir = self._enum_ir.copy()
+        candidate._dialect = self._dialect
+        candidate._schema_extra = copy.deepcopy(self._schema_extra)
+        candidate._behavior = copy.deepcopy(self._behavior)
+        return candidate
 
     def native(self) -> _native.Schema:
         if self._native is None:
-            classes: dict[str, type] = {**self._models, **self._enums}
-            self._native = _native.Schema(json.dumps(self.ir()), classes)
+            raise TypeError("registry changed; call registry.prepare() after declaring the complete model batch")
         return self._native
 
+
+_RESERVED = {"pk", "objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "update", "delete", "refresh"}
 
 registry = Registry()
 
@@ -189,8 +291,11 @@ def define(
     Returns the model classes and the schema's enum classes, by name. They join
     ``registry`` (the default one unless given); ``module`` sets their ``__module__``.
     """
-    ir: dict[str, Any] = json.loads(schema) if isinstance(schema, str) else schema
-    reg = registry if registry is not None else _default_registry()
+    ir: dict[str, Any] = json.loads(schema) if isinstance(schema, str) else json.loads(json.dumps(schema))
+    destination = registry if registry is not None else _default_registry()
+    context = json.dumps(destination.ir()) if destination._models else None
+    ir = json.loads(_native.prepare_schema(json.dumps(ir), context))
+    reg = destination._candidate()
     dialect = ir.get("dialect", "postgres")
     if reg._dialect is not None and reg._dialect != dialect:
         raise TypeError("schemas in one registry must target the same database")
@@ -202,6 +307,10 @@ def define(
         reg.register_enum(e, cls_e)
         out[e["name"]] = cls_e
     for m in ir["models"]:
+        if m["name"] in destination._models:
+            if m != destination._models[m["name"]]._meta.ir():
+                raise TypeError(f"extension changed existing model {m['name']}; define dependent schemas together in a new registry")
+            continue
         ns: dict[str, Any] = {f["name"]: _field(f) for f in m["fields"]}
         ns.update({r["name"]: _relation(r) for r in m.get("relations", ())})
         if module is not None:
@@ -209,14 +318,29 @@ def define(
         cls: type[Model] = types.new_class(
             m["name"], (Model,), {"table": m["table"], "registry": reg}, lambda body: body.update(ns)
         )
+        for method in ir.get("behavior", {}).get("methods", ()):
+            if method["model"] == m["name"]:
+                if method["name"] in ns or method["name"] in _RESERVED:
+                    raise TypeError(f"{m['name']}.{method['name']}: model method collision")
         cls._meta.schema_ir = m
+        computed = {f["field"] for f in ir.get("behavior", {}).get("result_fields", ()) if f["model"] == m["name"]}
+        if computed:
+            cls._meta.input_fields = {k: v for k, v in cls._meta.fields.items() if k not in computed}
         out[m["name"]] = cls
     for key in ("extensions", "functions", "catalog"):
         items = reg._schema_extra.setdefault(key, [])
         items.extend(x for x in ir.get(key, ()) if x not in items)
         if not items:
             del reg._schema_extra[key]
-    reg._native = None
+    reg._behavior = copy.deepcopy(ir.get("behavior", {}))
+    reg.prepare()
+    destination._models = reg._models.copy()
+    destination._enums = reg._enums.copy()
+    destination._enum_ir = reg._enum_ir.copy()
+    destination._dialect = reg._dialect
+    destination._schema_extra = {k: v.copy() for k, v in reg._schema_extra.items()}
+    destination._native = reg._native
+    destination._behavior = copy.deepcopy(reg._behavior)
     return out
 
 

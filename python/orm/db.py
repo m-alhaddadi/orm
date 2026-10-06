@@ -160,7 +160,7 @@ async def connect(
     (``"ilike"``, ``"update_from_values"``, ...) to test the SQL other databases get.
     """
     global _default
-    engine = await _native.connect(url, registry.native(), max_connections, list(_disable))
+    engine = await _native.connect(url, registry.prepare(), max_connections, list(_disable))
     db = Database(engine, url)
     if default:
         _default = db

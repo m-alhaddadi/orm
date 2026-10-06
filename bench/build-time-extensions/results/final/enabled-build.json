@@ -1,0 +1,118 @@
+{
+  "control": "independently handwritten native execution using the same Rust functions and host planning/result primitives",
+  "profile": {
+    "release": true,
+    "lto": "fat",
+    "codegen_units": 1
+  },
+  "builds": {
+    "sqlite/extension": {
+      "incremental_build_seconds": null,
+      "binaries": {
+        "python": {
+          "bytes": 11501584,
+          "sha256": "5a3b9671cba71ba789ea54baa75283ec8fe6fd1a01f84d1a1b93d2c55f02ccf9"
+        },
+        "node": {
+          "bytes": 10045280,
+          "sha256": "1f6de2a8e61ed09153fad5b4a183622eb8fe13ecabf122a4769919e6910f28a1"
+        }
+      },
+      "execution_sha256": "7db7930380fcbaa4c1f8581ada65489f484c913e0eec4d4ae01ea707d96915af",
+      "review_refresh_build_seconds": 190.84004562499467,
+      "refreshed_sources": []
+    },
+    "sqlite/builtin": {
+      "incremental_build_seconds": null,
+      "binaries": {
+        "python": {
+          "bytes": 11501504,
+          "sha256": "fbe8ffc94b726b1d3b0cab06d73f79fc21ca88a3a20f0c50cf4c261310ebb257"
+        },
+        "node": {
+          "bytes": 10045648,
+          "sha256": "0cc41cfeaa6ae697a7c2701243c59e59398f4cf8672bcd326cfd7ba218dcd187"
+        }
+      },
+      "execution_sha256": "16387a2b11cca842423c830ecbf794d958152856ef32d0b4e7aa6db03790da72",
+      "review_refresh_build_seconds": 173.88961979097803,
+      "refreshed_sources": []
+    },
+    "postgres/extension": {
+      "incremental_build_seconds": 129.9876004170219,
+      "binaries": {
+        "python": {
+          "bytes": 11501584,
+          "sha256": "1a137e17dc56bd4a4d3cfbecdea045793477615101180a8ed7107324715645ca"
+        },
+        "node": {
+          "bytes": 10045280,
+          "sha256": "15d0a84cdbf07345490fe15aabde95cb83134ccdae62d452680eac3e3b1f6ff3"
+        }
+      },
+      "generated_execution_sha256": "7db7930380fcbaa4c1f8581ada65489f484c913e0eec4d4ae01ea707d96915af",
+      "refreshed_sources": [],
+      "review_refresh_build_seconds": 123.3512848749815
+    },
+    "postgres/builtin": {
+      "incremental_build_seconds": 124.1328177920077,
+      "binaries": {
+        "python": {
+          "bytes": 11501472,
+          "sha256": "3dc62870fcfe69264b0efb26bf8afe7850eec5ee2ed14871ebb6899e9c9d8032"
+        },
+        "node": {
+          "bytes": 10045616,
+          "sha256": "0393c27367c81557d48e8a5f446738f4d829e99f1703cbae556897130b5a2713"
+        }
+      },
+      "handwritten_execution_sha256": "16387a2b11cca842423c830ecbf794d958152856ef32d0b4e7aa6db03790da72",
+      "refreshed_sources": [],
+      "review_refresh_build_seconds": 123.34570658300072
+    }
+  },
+  "host_sources_sha256": {
+    "core/src/features.rs": "730b26ccbd8588389765998f29f5ab1a8a2df9a8eb02f6ae2c421fd241c60b37",
+    "core/src/ir.rs": "254fd374877d7c11a261faf502657287b900d6d17d1c9b21b2773520b12c3bf5",
+    "core/src/dialect.rs": "edda6306708d9429639d63802b4bad020cfa5fd30ac4210078f34c716390d8f3",
+    "core/src/lib.rs": "bd1438bf182e7c27c5e94fcdefc81d9f045e42293daded34315a1b37d1e4c071",
+    "core/src/behavior.rs": "595b2b5096530c36c8536564864d00175dd4972597987287267035b398632f98",
+    "core/src/ownership.rs": "cff09aa3b67ff342c88275df5d44b145d8a2470c24a79db1c5ce756b07ad43f7",
+    "core/src/schema.rs": "f76cc868c1dcde591c86b68679718dcb04f2abc74abff219014c285b1401332c",
+    "core/src/ext.rs": "9bca5af6d849cb4dfc60af43cc1a262f2a20d3fe23c057a3d98c6396da17e1a6",
+    "core/src/codegen/typescript.rs": "ea6a6ef856355112d46ea5393a4387611f6f6b8648d044cee10d3b5e759fda42",
+    "core/src/codegen/mod.rs": "ca9448f00b9a04de116b8ce1ca305f6f66a1b9bad721c4e5d641e8c9ef4dc64d",
+    "core/src/codegen/python.rs": "9ef06dd71cec3c0965382fcb1b3f3147dfeac8ccb501b8f2c94a29ecfbf5a2ba",
+    "core/src/migrate/sqlite.rs": "398d7e8a9df2a644bb09c329566874c16596980c5cca5d96a747276405a3c7ef",
+    "core/src/migrate/pg.rs": "60d7bc0ea056e8459221470cda3d535db38220caa44d260764c443dc266a5e32",
+    "core/src/migrate/files.rs": "a0d687844289e9035c193a4e4c95bcf7dbc7b6b55b9c0f4caa7f366fc78eb0c5",
+    "core/src/migrate/mod.rs": "b7391c0099de905b381dc11e4628de43b60a428656d0212794c69ff58401edde",
+    "core/src/migrate/tests.rs": "06eba509ec61324c1a41e1cf03ea203f6d62427bef909cf2f3c2f175ebee1b65",
+    "core/src/migrate/diff.rs": "a712afb0135031e579e5021a908365ebce47e6f81c47652e31e5679e9e749ae4",
+    "core/src/migrate/model.rs": "9f68000702afb78d37673000c64d7e675e10577a0d478b740fb8dead26eac125",
+    "core/src/dsl/mod.rs": "8e90a1aa61cea819610729e84f090a1f5634fb4f7c16649e949a918a00bf5bae",
+    "core/src/dsl/tests.rs": "9a96e675643eb3ca0e346f617a3750a1b25c81cbdd267c439df886ea97ba7805",
+    "core/src/dsl/syntax.rs": "1346e6b3146d73b3037e518d2bd71457e6dffd54b06fbc9a403a8f6da84a8269",
+    "core/src/dsl/lower.rs": "e2e8c08faa7d2499e0356146b2dbc7379d640467446c80e4a1ecf95629b4bbbd",
+    "engine/src/advisory.rs": "6c6e5e6ed86c2a5768074d2f1fe76e2d7ce6c6064b63b5199e8b041d64a9d511",
+    "engine/src/exec.rs": "c30c2da6c0dfc859a13f384aa4bc9fddd6964527e6f87478ad053b7ab0966840",
+    "engine/src/error.rs": "890d9604805d16dc4a2333ded96d8564cce609d4669e6cda612334cc32dd9688",
+    "engine/src/lib.rs": "b46661ab63470b3be3699a418bb25b9999538ba1add7a50980e001bee1992647",
+    "engine/src/behavior.rs": "29aec64abb1f07d792670eba013691e93a33f1fb7efd385628da224646de867b",
+    "engine/src/ownership.rs": "1f4d793942e55138e85b34071106562d20e40bdfc8e4aedd29715199dd87cb93",
+    "engine/src/params.rs": "827313f6c2a1e33926f90afe071ac56bc1fb3d8ec896f8ca9c838ba46aba7c1b",
+    "engine/src/plan.rs": "b89b16a2cdc5dc232e88507a18fc06d5ad88d3c051fc4c5f1528316ed3658d72",
+    "engine/src/migrate.rs": "62a82af241ce552a7a24dde15db2db6a249bcf585a3fb5c5414a702a79a78b29",
+    "engine/src/db/sqlite.rs": "b276a6c781cec316fafdd9ba75e1a78b85f68e4dfee72e9129ca867d4691327a",
+    "engine/src/db/mod.rs": "6b2d6b14392dcd40b8cde8842733e3a67a8068a5c8bc012530537e9733297e13",
+    "engine/src/db/numeric.rs": "cf780012e395b377ab0c8482182a699b9d550148fd84039fd62e40fbaa859495",
+    "engine/src/db/postgres.rs": "b39f92eca4569ca3d97c7d6f8f26a55b2fd4c18692426af8a2688594af27ba7b",
+    "bindings/python/src/convert.rs": "6517eb0e18c7986c517f32bafbf30dbd90a1410a091c289d189a7f6679051050",
+    "bindings/python/src/lib.rs": "5ac398b300529a3ed1006e71388f179f4e39d4d85815207e34d3efb7df99b2d6",
+    "bindings/python/src/build.rs": "56da39593518b13734919842de1600f4822e502840024196337a98a7d83e9771",
+    "bindings/python/src/errors.rs": "493c097d127d5547bd74738ccc6e3f3baad65c7b4f55f81bfdd582dd857d2fe7",
+    "bindings/node/src/js.rs": "854e9ac4eb103b77a56e736da4d27660fde62875b8bcf754988c049c88757046",
+    "bindings/node/src/convert.rs": "8c9630c600170709496c8424dec84179afc769e7f4abf5dec6c159ee3841c090",
+    "bindings/node/src/lib.rs": "77a0732fc9030a88d3f45347063edbab42c84470fdabf438ea3b8e87a64b3bdb"
+  }
+}

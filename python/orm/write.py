@@ -63,14 +63,14 @@ def prepare_rows(
         for key, value in row.items():
             if isinstance(value, Expression):
                 raise TypeError(f"{meta.name}.{key}: insert takes plain values, not expressions")
-            if key in meta.fields:
+            if key in meta.input_fields:
                 values[key] = value
             elif isinstance(rel := meta.relations.get(key), BelongsTo):
                 values[rel.via] = None if value is None else getattr(value, rel.to)
             else:
                 raise TypeError(f"{meta.name} has no field {key!r}")
         provided.update(values)
-        for name, field in meta.fields.items():
+        for name, field in meta.input_fields.items():
             if name in values:
                 continue
             if callable(field.default):
@@ -97,7 +97,7 @@ def prepare_update_rows(model: type[Model], rows: Iterable[Mapping[str, Any]]) -
         for key, value in row.items():
             if isinstance(value, Expression):
                 raise TypeError(f"{meta.name}.{key}: update_many takes plain values, not expressions")
-            if key in meta.fields:
+            if key in meta.input_fields:
                 values[key] = value
             elif isinstance(rel := meta.relations.get(key), BelongsTo):
                 values[rel.via] = None if value is None else getattr(value, rel.to)
@@ -132,7 +132,7 @@ def assignments(model: type[Model], values: Mapping[str, Any], ctx: IRContext) -
         rel = meta.relations.get(name)
         if isinstance(rel, BelongsTo):
             name, value = rel.via, (None if value is None else getattr(value, rel.to))
-        if name not in meta.fields:
+        if name not in meta.input_fields:
             raise TypeError(f"{meta.name} has no field {name!r}")
         node = value._ir(ctx) if isinstance(value, Expression) else ctx.param(value)
         out.append({"field": name, "value": node})

@@ -1,0 +1,463 @@
+{
+  "source_commit": "360685a",
+  "performance_gate": "pending quiet-window paired measurements; no timing acceptance claimed",
+  "native_public_coverage": {
+    "sqlite": "Python and Node runtime/generated checks passed in native frontend proof",
+    "postgres": "Python and Node runtime/generated checks passed using proof artifacts after isolated cluster restart",
+    "original_native_frontend_exit": "101: PostgreSQL cluster unavailable; failed stage rerun successfully"
+  },
+  "disabled_allocations": {
+    "sqlite": {
+      "before": {
+        "sha256": "b9b3e0b85dbc91275f7a9a30ca19f0a8867cfb93b3ab673630e8713777ff3633",
+        "counts": {
+          "delete": {
+            "allocations": 18,
+            "bytes": 1151
+          },
+          "projection": {
+            "allocations": 28,
+            "bytes": 3251
+          },
+          "select": {
+            "allocations": 28,
+            "bytes": 2009
+          }
+        }
+      },
+      "after": {
+        "sha256": "e655754d5b6458a10fb2a3234fa70c033daa37a8a35d1933dbb7c081264e5567",
+        "counts": {
+          "delete": {
+            "allocations": 18,
+            "bytes": 1151
+          },
+          "projection": {
+            "allocations": 28,
+            "bytes": 3251
+          },
+          "select": {
+            "allocations": 28,
+            "bytes": 2009
+          }
+        }
+      }
+    },
+    "postgresql": {
+      "before": {
+        "sha256": "b9b3e0b85dbc91275f7a9a30ca19f0a8867cfb93b3ab673630e8713777ff3633",
+        "counts": {
+          "delete": {
+            "allocations": 18,
+            "bytes": 1151
+          },
+          "projection": {
+            "allocations": 28,
+            "bytes": 3251
+          },
+          "select": {
+            "allocations": 28,
+            "bytes": 2009
+          }
+        }
+      },
+      "after": {
+        "sha256": "e655754d5b6458a10fb2a3234fa70c033daa37a8a35d1933dbb7c081264e5567",
+        "counts": {
+          "delete": {
+            "allocations": 18,
+            "bytes": 1151
+          },
+          "projection": {
+            "allocations": 28,
+            "bytes": 3251
+          },
+          "select": {
+            "allocations": 28,
+            "bytes": 2009
+          }
+        }
+      }
+    }
+  },
+  "enabled_allocations": {
+    "sqlite": {
+      "builtin": {
+        "sha256": "1c37a279dcb7542a3f0e47d9a3af2ef5f5735d73e7fe49bfd56972a2695fa5a2",
+        "counts": {
+          "bulk-validate-50": {
+            "allocations": 151.0,
+            "bytes": 3400.0
+          },
+          "composed-plan": {
+            "allocations": 45.0,
+            "bytes": 4790.0
+          },
+          "computed-1": {
+            "allocations": 8.0,
+            "bytes": 241.0
+          },
+          "computed-1000": {
+            "allocations": 1007.0,
+            "bytes": 40201.0
+          },
+          "computed-50": {
+            "allocations": 57.0,
+            "bytes": 2201.0
+          },
+          "dynamic-plan": {
+            "allocations": 30.0,
+            "bytes": 3655.0
+          },
+          "field": {
+            "allocations": 2.0,
+            "bytes": 12.0
+          },
+          "plan": {
+            "allocations": 32.0,
+            "bytes": 3783.0
+          },
+          "proxy-plan": {
+            "allocations": 29.0,
+            "bytes": 2083.0
+          },
+          "record": {
+            "allocations": 0.0,
+            "bytes": 0.0
+          }
+        }
+      },
+      "extension": {
+        "sha256": "701f1d3cfe77a2ac3a0056bbafdc8da08d09594d315197e159af04e7f37857d0",
+        "counts": {
+          "bulk-validate-50": {
+            "allocations": 151.0,
+            "bytes": 3400.0
+          },
+          "composed-plan": {
+            "allocations": 45.0,
+            "bytes": 4790.0
+          },
+          "computed-1": {
+            "allocations": 8.0,
+            "bytes": 241.0
+          },
+          "computed-1000": {
+            "allocations": 1007.0,
+            "bytes": 40201.0
+          },
+          "computed-50": {
+            "allocations": 57.0,
+            "bytes": 2201.0
+          },
+          "dynamic-plan": {
+            "allocations": 30.0,
+            "bytes": 3655.0
+          },
+          "field": {
+            "allocations": 2.0,
+            "bytes": 12.0
+          },
+          "plan": {
+            "allocations": 32.0,
+            "bytes": 3783.0
+          },
+          "proxy-plan": {
+            "allocations": 29.0,
+            "bytes": 2083.0
+          },
+          "record": {
+            "allocations": 0.0,
+            "bytes": 0.0
+          }
+        }
+      }
+    },
+    "postgres": {
+      "builtin": {
+        "sha256": "efb8efd2568f3e358ed1b7ad8eab5b890fa0669c27b8767b8ee2aca7467db85a",
+        "counts": {
+          "bulk-validate-50": {
+            "allocations": 151.0,
+            "bytes": 3400.0
+          },
+          "composed-plan": {
+            "allocations": 45.0,
+            "bytes": 4790.0
+          },
+          "computed-1": {
+            "allocations": 8.0,
+            "bytes": 241.0
+          },
+          "computed-1000": {
+            "allocations": 1007.0,
+            "bytes": 40201.0
+          },
+          "computed-50": {
+            "allocations": 57.0,
+            "bytes": 2201.0
+          },
+          "dynamic-plan": {
+            "allocations": 30.0,
+            "bytes": 3655.0
+          },
+          "field": {
+            "allocations": 2.0,
+            "bytes": 12.0
+          },
+          "plan": {
+            "allocations": 32.0,
+            "bytes": 3783.0
+          },
+          "proxy-plan": {
+            "allocations": 29.0,
+            "bytes": 2083.0
+          },
+          "record": {
+            "allocations": 0.0,
+            "bytes": 0.0
+          }
+        }
+      },
+      "extension": {
+        "sha256": "37bfceb71fc882517f000b7f191cee4987d87d47fa0e445218ebf827e3e48961",
+        "counts": {
+          "bulk-validate-50": {
+            "allocations": 151.0,
+            "bytes": 3400.0
+          },
+          "composed-plan": {
+            "allocations": 45.0,
+            "bytes": 4790.0
+          },
+          "computed-1": {
+            "allocations": 8.0,
+            "bytes": 241.0
+          },
+          "computed-1000": {
+            "allocations": 1007.0,
+            "bytes": 40201.0
+          },
+          "computed-50": {
+            "allocations": 57.0,
+            "bytes": 2201.0
+          },
+          "dynamic-plan": {
+            "allocations": 30.0,
+            "bytes": 3655.0
+          },
+          "field": {
+            "allocations": 2.0,
+            "bytes": 12.0
+          },
+          "plan": {
+            "allocations": 32.0,
+            "bytes": 3783.0
+          },
+          "proxy-plan": {
+            "allocations": 29.0,
+            "bytes": 2083.0
+          },
+          "record": {
+            "allocations": 0.0,
+            "bytes": 0.0
+          }
+        }
+      }
+    }
+  },
+  "disabled_build": {
+    "before": {
+      "incremental_build_seconds": 76.62364612502279,
+      "binaries": {
+        "python": {
+          "bytes": 10493424,
+          "sha256": "97d37cb3ba036141f748c08b0bc2e07da1dcb2bda16890ef1e225ebc0300dfd0"
+        },
+        "node": {
+          "bytes": 9122224,
+          "sha256": "7b2a8f364e50b8969b910e1324d1158974e51fd54ba0181395a851d4e0b3bcc9"
+        }
+      }
+    },
+    "after": {
+      "incremental_build_seconds": 114.51160112497746,
+      "binaries": {
+        "python": {
+          "bytes": 11067808,
+          "sha256": "e52d3f591dca5f84dcedae13515bd9dba53c25201d5ac4ec165c964d9ed686e2"
+        },
+        "node": {
+          "bytes": 9616080,
+          "sha256": "4ab83c13e8546d9003c30765c3d28fd84d6eeb150d5631967070e907e48415b6"
+        }
+      },
+      "review_refresh_build_seconds": 92.6696455,
+      "refreshed_sources": []
+    }
+  },
+  "enabled_build": {
+    "control": "independently handwritten native execution using the same Rust functions and host planning/result primitives",
+    "profile": {
+      "release": true,
+      "lto": "fat",
+      "codegen_units": 1
+    },
+    "builds": {
+      "sqlite/extension": {
+        "incremental_build_seconds": 77.82402120799998,
+        "binaries": {
+          "python": {
+            "bytes": 11502672,
+            "sha256": "ede31cd53b79ed9c4e935b5a2aa3eb1721ce30168cdd12e400dc84593844d155"
+          },
+          "node": {
+            "bytes": 10045232,
+            "sha256": "fe3e32a909c000b5b6c6b19f7b230d327e42c48d6bc568e18c3dae38e9c12cad"
+          }
+        },
+        "generated_execution_sha256": "7db7930380fcbaa4c1f8581ada65489f484c913e0eec4d4ae01ea707d96915af"
+      },
+      "sqlite/builtin": {
+        "incremental_build_seconds": 69.15542958300011,
+        "binaries": {
+          "python": {
+            "bytes": 11503776,
+            "sha256": "4ec310a27fe4ee76687d13a9133ae9434b41c61daa977d9b6b35cc3e7f9bc717"
+          },
+          "node": {
+            "bytes": 10047632,
+            "sha256": "88df64cbd147364ae29dda3619bf5225e663556316f6bc464ddf8de14c96d5d1"
+          }
+        },
+        "handwritten_execution_sha256": "16387a2b11cca842423c830ecbf794d958152856ef32d0b4e7aa6db03790da72"
+      },
+      "postgres/extension": {
+        "incremental_build_seconds": 69.67873887499991,
+        "binaries": {
+          "python": {
+            "bytes": 11502672,
+            "sha256": "05392284b240d6eb9defabfa3c1a00655dd4ad57e266dea00c660ec5907e2ad7"
+          },
+          "node": {
+            "bytes": 10045232,
+            "sha256": "997096311f34b1c470f6a59eb90f7b3450de0f653f13835ca749324fe06e37d0"
+          }
+        },
+        "generated_execution_sha256": "7db7930380fcbaa4c1f8581ada65489f484c913e0eec4d4ae01ea707d96915af"
+      },
+      "postgres/builtin": {
+        "incremental_build_seconds": 66.56193987500001,
+        "binaries": {
+          "python": {
+            "bytes": 11503920,
+            "sha256": "49a4df18576d4b54dae3cea36783686db75f4f463155773c11b91a2d2f6f003a"
+          },
+          "node": {
+            "bytes": 10047200,
+            "sha256": "887426fe0a4504623bb5eb084e52c2800f53433902fd04afcfd233548414cff0"
+          }
+        },
+        "handwritten_execution_sha256": "16387a2b11cca842423c830ecbf794d958152856ef32d0b4e7aa6db03790da72"
+      }
+    }
+  },
+  "structural_audit": {
+    "disabled": {
+      "dependency_sha256": "b09a60145417ade593d580b52c1b848d0721d71f5fd9834d66dfe71207cb19a1"
+    },
+    "enabled": {
+      "dependency_sha256": "60bbd0a7f797878358617f09e42702f71eb25b521c5bdecbc906e4fcc9f7431d",
+      "artifact": {
+        "host_contract": 1,
+        "schema_contract": 1,
+        "passes": [],
+        "capabilities": [
+          "schema-transformations",
+          "physical-schema",
+          "native-string-values",
+          "native-string-records",
+          "native-string-results"
+        ],
+        "extensions": {
+          "example.native": "1.0.0"
+        },
+        "exports": [
+          "example.trim",
+          "example.username",
+          "example.display",
+          "example.record"
+        ],
+        "specializations": [
+          {
+            "model": "BenchItem",
+            "fingerprint": "28ba97b181bfe5dbd84ceab7c4e685b9f6741ed9379b95e578abc32966d12175",
+            "exports": [
+              "example.display",
+              "example.record",
+              "example.trim",
+              "example.username"
+            ]
+          }
+        ]
+      },
+      "execution_sha256": "7db7930380fcbaa4c1f8581ada65489f484c913e0eec4d4ae01ea707d96915af"
+    },
+    "builtin": {
+      "dependency_sha256": "bc50b9d6cdecd3342d440bca14346ae67e9ae223af9bf0d9c0c6231c8f4dd018",
+      "artifact": {
+        "host_contract": 1,
+        "schema_contract": 1,
+        "passes": [],
+        "capabilities": [
+          "schema-transformations",
+          "physical-schema",
+          "native-string-values",
+          "native-string-records",
+          "native-string-results"
+        ],
+        "extensions": {
+          "example.native": "1.0.0"
+        },
+        "exports": [
+          "example.trim",
+          "example.username",
+          "example.display",
+          "example.record"
+        ],
+        "specializations": [
+          {
+            "model": "BenchItem",
+            "fingerprint": "28ba97b181bfe5dbd84ceab7c4e685b9f6741ed9379b95e578abc32966d12175",
+            "exports": [
+              "example.display",
+              "example.record",
+              "example.trim",
+              "example.username"
+            ]
+          }
+        ]
+      },
+      "execution_sha256": "16387a2b11cca842423c830ecbf794d958152856ef32d0b4e7aa6db03790da72"
+    },
+    "conditional_sources": {
+      "core/src/schema.rs": {
+        "sha256": "f76cc868c1dcde591c86b68679718dcb04f2abc74abff219014c285b1401332c",
+        "composition_cfg_sites": 20
+      },
+      "engine/src/plan.rs": {
+        "sha256": "b89b16a2cdc5dc232e88507a18fc06d5ad88d3c051fc4c5f1528316ed3658d72",
+        "composition_cfg_sites": 36
+      },
+      "engine/src/exec.rs": {
+        "sha256": "c30c2da6c0dfc859a13f384aa4bc9fddd6964527e6f87478ad053b7ab0966840",
+        "composition_cfg_sites": 1
+      },
+      "engine/src/lib.rs": {
+        "sha256": "b46661ab63470b3be3699a418bb25b9999538ba1add7a50980e001bee1992647",
+        "composition_cfg_sites": 2
+      }
+    },
+    "scope": "Dependency trees prove selected runtime dependencies. Source cfg sites and generated direct calls are structural evidence; timing and separate allocation probes provide execution evidence. No claim of identical assembly is made."
+  }
+}

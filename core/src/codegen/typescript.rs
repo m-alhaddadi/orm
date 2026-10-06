@@ -216,7 +216,11 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         // key or the related row, exactly one of them
         writeln!(body, "export type {name}Insert = {{").unwrap();
         let mut one_of = vec![];
-        for f in m.fields() {
+        for (position, f) in m.fields().iter().enumerate() {
+            #[cfg(feature = "composition")]
+            if m.native.computed().contains(&position) { continue; }
+            #[cfg(not(feature = "composition"))]
+            let _ = position;
             let optional = f.nullable || has_server_value(f);
             match belongs_to(m, &f.name) {
                 Some(r) if !optional => one_of.push((f, r)),
@@ -246,9 +250,19 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
 
         // update: plain values or expressions over the model
         writeln!(body, "export interface {name}Update {{").unwrap();
-        for f in m.fields() {
+        for (position, f) in m.fields().iter().enumerate() {
+            #[cfg(feature = "composition")]
+            if m.native.computed().contains(&position) { continue; }
+            #[cfg(not(feature = "composition"))]
+            let _ = position;
             let t = value_type(f);
-            writeln!(body, "  {}?: {} | Expression<Compat<{t}>, \"{name}\" | \"~{name}\", {{}}>;", camel(&f.name), input_type(f)).unwrap();
+            #[cfg(feature = "composition")]
+            let expression = !m.native.validated().contains(&position);
+            #[cfg(not(feature = "composition"))]
+            let expression = true;
+            if expression {
+                writeln!(body, "  {}?: {} | Expression<Compat<{t}>, \"{name}\" | \"~{name}\", {{}}>;", camel(&f.name), input_type(f)).unwrap();
+            } else { writeln!(body, "  {}?: {};", camel(&f.name), input_type(f)).unwrap(); }
             if let Some(r) = belongs_to(m, &f.name) {
                 let null = if f.nullable { " | null" } else { "" };
                 writeln!(body, "  {}?: {}{null};", camel(&r.name), related_ref(schema, r)?).unwrap();
@@ -258,7 +272,11 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
 
         // updateMany rows: the primary key plus plain values
         writeln!(body, "export interface {name}UpdateRow {{").unwrap();
-        for f in m.fields() {
+        for (position, f) in m.fields().iter().enumerate() {
+            #[cfg(feature = "composition")]
+            if m.native.computed().contains(&position) { continue; }
+            #[cfg(not(feature = "composition"))]
+            let _ = position;
             let q = if f.primary_key { "" } else { "?" };
             writeln!(body, "  {}{q}: {};", camel(&f.name), input_type(f)).unwrap();
             if let Some(r) = belongs_to(m, &f.name) {
@@ -311,8 +329,17 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
              extends RelationPath<{name}Spec, S, H>,\n    {name}Fields<S, H, O> {{}}\n"
         )
         .unwrap();
-        writeln!(body, "export interface {name}Model extends ModelClass<{name}Spec>, {name}Fields<{}, [], false> {{}}\n", quote(name))
-            .unwrap();
+        let methods: Vec<_> = ir.behavior.methods.iter().filter(|method| method.model == *name).collect();
+        if methods.is_empty() {
+            writeln!(body, "export interface {name}Model extends ModelClass<{name}Spec>, {name}Fields<{}, [], false> {{}}\n", quote(name)).unwrap();
+        } else {
+            writeln!(body, "export interface {name}Model extends ModelClass<{name}Spec>, {name}Fields<{}, [], false> {{", quote(name)).unwrap();
+            for method in methods {
+                let output = if method.output.is_some() { "string" } else { "void" };
+                writeln!(body, "  {}(value: string): {output};", camel(&method.name)).unwrap();
+            }
+            writeln!(body, "}}\n").unwrap();
+        }
         writeln!(body, "export const {name} = models[{}] as unknown as {name}Model;\n", quote(name)).unwrap();
     }
 

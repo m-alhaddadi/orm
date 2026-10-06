@@ -458,7 +458,11 @@ impl Builder<'_> {
         let t = m.table().to_owned();
         let mut table = Table { name: t.clone(), comment: m.ir.comment.clone(), ..Default::default() };
 
-        for f in m.fields() {
+        for (position, f) in m.fields().iter().enumerate() {
+            #[cfg(feature = "composition")]
+            if m.native.computed().contains(&position) { continue; }
+            #[cfg(not(feature = "composition"))]
+            let _ = position;
             let ty = if schema.dialect == crate::dialect::Dialect::Sqlite {
                 match f.ty {
                     ColType::BigInt | ColType::Int | ColType::Bool => "INTEGER",

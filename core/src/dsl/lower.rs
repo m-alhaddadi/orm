@@ -231,6 +231,9 @@ const FIELD_ATTRS: &str = "@id, @unique, @default, @map, @db.*, @check, @comment
 pub struct Lowering<'l> {
     /// Reads an imported file (path as written in the schema).
     pub load: &'l dyn Fn(&str) -> std::result::Result<String, String>,
+    /// Model declarations selected for compiler contributions may derive identity.
+    /// Final identity validation runs after the selected passes.
+    pub deferred_identity: &'l HashSet<String>,
 }
 
 struct Ctx {
@@ -308,7 +311,7 @@ impl Lowering<'_> {
             .map(|m| (m.name.clone(), m.fields.iter().find(|f| f.primary_key).map(|f| f.name.clone())))
             .collect();
         for (m, decl) in lowered.iter_mut().zip(&models) {
-            if pks[&m.name].is_none() {
+            if pks[&m.name].is_none() && !self.deferred_identity.contains(&m.name) {
                 return err(decl.pos, format!("model {} has no @id field", decl.name));
             }
             for member in decl.members.iter().filter(|mm| model_names.contains_key(mm.ty.name.as_str())) {
@@ -1214,4 +1217,40 @@ fn param(pos: Pos, v: &Value) -> Result<String> {
         Value::Str(s) => format!("'{}'", s.replace('\'', "''")),
         other => sql_text(pos, other)?,
     })
+}
+
+/// Preserve namespaced behavioral declarations before ordinary schema lowering.
+/// Database type attributes keep their existing interpretation.
+pub(super) fn behavior_declarations(items: &mut [Item], file: &str) -> Result<Vec<crate::behavior::Declaration>> {
+    let mut out = vec![];
+    let mut collect = |attrs: &mut Vec<Attr>, model: &str, field: Option<&str>| -> Result<()> {
+        let mut ordinary = vec![];
+        for a in attrs.drain(..) {
+            if !a.name.contains('.') || a.name.starts_with("db.") {
+                ordinary.push(a);
+                continue;
+            }
+            let mut arguments = BTreeMap::new();
+            for (name, pos, value) in &a.args.named {
+                if arguments.insert(name.clone(), json_of(*pos, value)?).is_some() {
+                    return err(*pos, format!("@{}: duplicate argument {name}", a.name));
+                }
+            }
+            out.push(crate::behavior::Declaration {
+                lowered: false,
+                attribute: a.name, model: model.to_owned(), field: field.map(str::to_owned), arguments,
+                positional: a.args.positional.iter().map(|(pos, v)| json_of(*pos, v)).collect::<Result<_>>()?,
+                location: crate::behavior::SourceLocation { file: file.to_owned(), line: a.pos.line, column: a.pos.col },
+            });
+        }
+        *attrs = ordinary;
+        Ok(())
+    };
+    for item in items {
+        if let Item::Model(m) = item {
+            collect(&mut m.blocks, &m.name, None)?;
+            for member in &mut m.members { collect(&mut member.attrs, &m.name, Some(&member.name))?; }
+        }
+    }
+    Ok(out)
 }

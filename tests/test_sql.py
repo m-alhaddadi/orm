@@ -328,3 +328,17 @@ def test_many_to_many_filter_is_one_exists_through_the_join_table():
 def test_has_one_joins_on_the_other_side():
     sql = User.objects.select_related(User.profile).sql()
     assert 'LEFT JOIN "profiles" AS "j1" ON "j1"."user_id" = "users"."id"' in sql
+
+
+def test_cte_reads_each_column_once(tmp_path):
+    import orm
+
+    (tmp_path / "loud.toml").write_text('name = "hstore"\n[types.loud]\nsql = "text"\nvalue = "text"\nread = "({} || \'!\')"\n')
+    source = (
+        f'import "{tmp_path / "loud.toml"}"\n'
+        'datasource db {\n  provider = "postgresql"\n  extensions = [hstore]\n}\n'
+        'model Doc {\n  id Int @id\n  word Unsupported("loud")\n}\n'
+    )
+    Doc = orm.loads(source, registry=orm.Registry())["Doc"]
+    sql = Doc.objects.from_(Doc.objects.filter(Doc.id > 0).cte("recent")).sql()
+    assert sql.count("|| '!'") == 1, sql

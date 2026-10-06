@@ -9,6 +9,12 @@ pub type Result<T> = std::result::Result<T, String>;
 pub struct Model {
     pub ir: ModelIr,
     pub pk: usize,
+    #[cfg(feature = "composition")]
+    pub native: crate::behavior::NativeModel,
+    #[cfg(feature = "composition")]
+    pub resolved_fields: Vec<crate::behavior::ResolvedField>,
+    #[cfg(feature = "composition")]
+    pub owner: crate::behavior::OwnerId,
     field_index: HashMap<String, usize>,
     /// relation name -> (index into `ir.relations`, target model index)
     relation_index: HashMap<String, (usize, usize)>,
@@ -35,7 +41,10 @@ impl Model {
             renamed_from: None,
             comment: None,
         };
-        Ok(Model { ir, pk: 0, field_index, relation_index: HashMap::new() })
+        Ok(Model { ir, pk: 0, field_index, relation_index: HashMap::new(),
+            #[cfg(feature = "composition")] native: crate::behavior::NativeModel::None,
+            #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
+            #[cfg(feature = "composition")] resolved_fields: vec![] })
     }
 
     pub fn table(&self) -> &str {
@@ -81,11 +90,35 @@ pub struct Schema {
     pub functions: Vec<FunctionIr>,
     pub catalog: Vec<ExtensionIr>,
     model_index: HashMap<String, usize>,
+    #[cfg(feature = "composition")]
+    pub native_models: Vec<crate::behavior::NativeModel>,
+    #[cfg(feature = "composition")]
+    storage: Option<Box<Schema>>,
+    #[cfg(feature = "composition")]
+    pub owner_links: Vec<crate::behavior::PreparedOwnerLink>,
 }
 
 impl Schema {
-    pub fn from_ir(ir: SchemaIr) -> Result<Self> {
+    pub fn from_ir(ir: SchemaIr) -> Result<Self> { Self::from_ir_impl(ir, true) }
+
+    fn from_ir_impl(mut ir: SchemaIr, behavioral: bool) -> Result<Self> {
+        if behavioral { crate::behavior::prepare(&mut ir, None)?; }
+        #[cfg(feature = "composition")]
+        let native_models = if behavioral { crate::behavior::bind(&mut ir)? } else { vec![crate::behavior::NativeModel::None; ir.models.len()] };
+        #[cfg(feature = "composition")]
+        let storage = match ir.behavior.storage.take() {
+            Some(storage) => {
+                let physical = serde_json::from_value(serde_json::json!({
+                    "models": storage.models, "enums": ir.enums, "dialect": ir.dialect,
+                    "extensions": ir.extensions, "catalog": ir.catalog, "functions": ir.functions,
+                })).map_err(|e| e.to_string())?;
+                Some(Box::new(Self::from_ir_impl(physical, false)?))
+            }
+            None => None,
+        };
         crate::features::validate(&ir)?;
+        #[cfg(feature = "composition")]
+        let mut native = native_models.iter().copied();
         let model_index: HashMap<String, usize> = ir
             .models
             .iter()
@@ -115,6 +148,7 @@ impl Schema {
             }
             let field_index: HashMap<String, usize> =
                 m.fields.iter().enumerate().map(|(i, f)| (f.name.clone(), i)).collect();
+            if field_index.len() != m.fields.len() { return Err(format!("model {} has duplicate field names", m.name)); }
             let pks: Vec<usize> = m
                 .fields
                 .iter()
@@ -139,7 +173,10 @@ impl Schema {
                 }
                 relation_index.insert(r.name.clone(), (i, target));
             }
-            models.push(Model { ir: m, pk, field_index, relation_index });
+            models.push(Model { ir: m, pk, field_index, relation_index,
+                #[cfg(feature = "composition")] native: native.next().expect("prepared model"),
+                #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
+            #[cfg(feature = "composition")] resolved_fields: vec![] });
         }
         // Validate relation targets now that every model is indexed.
         for m in &models {
@@ -157,6 +194,8 @@ impl Schema {
                 }
             }
         }
+        #[cfg(feature = "composition")]
+        let owner_links = crate::ownership::resolve(&mut models, storage.as_deref(), &ir.behavior.field_storage, &ir.behavior.owner_links)?;
         Ok(Schema {
             dialect: ir.dialect,
             models,
@@ -165,7 +204,17 @@ impl Schema {
             functions: ir.functions,
             catalog: ir.catalog,
             model_index,
+            #[cfg(feature = "composition")] native_models,
+            #[cfg(feature = "composition")] storage,
+            #[cfg(feature = "composition")] owner_links,
         })
+    }
+
+    /// Schema used by physical migrations; logical views retain their storage.
+    pub fn physical(&self) -> &Schema {
+        #[cfg(feature = "composition")]
+        if let Some(storage) = &self.storage { return storage; }
+        self
     }
 
     pub fn model_idx(&self, name: &str) -> Result<usize> {

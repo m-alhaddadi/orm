@@ -1,0 +1,36 @@
+[package]
+name = "example-native"
+version = "1.0.0"
+edition = "2021"
+[workspace]
+[dependencies]
+orm-contracts = { path = "../../../../contracts" }
+[package.metadata.orm-extension]
+id = "example.native"
+version = "1.0.0"
+host_contract = 1
+schema_contract = 1
+languages = ["python", "typescript"]
+databases = ["postgres", "sqlite"]
+[[package.metadata.orm-extension.exports]]
+id = "example.trim"
+rust = "native_rules::trim"
+kind = "string_transform"
+input = "string"
+output = "string"
+[[package.metadata.orm-extension.exports]]
+id = "example.username"
+rust = "native_rules::username"
+kind = "string_validator"
+input = "string"
+[[package.metadata.orm-extension.exports]]
+id = "example.display"
+rust = "native_rules::display"
+kind = "string_computed"
+input = "string"
+output = "string"
+[[package.metadata.orm-extension.exports]]
+id = "example.record"
+rust = "native_rules::record"
+kind = "string_record_validator"
+input = "string"
