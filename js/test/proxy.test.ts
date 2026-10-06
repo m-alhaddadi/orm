@@ -11,6 +11,7 @@ for (const dialect of ["sqlite", "postgres"]) {
   test(`proxy rows, client defaults, writes and relation targets (${dialect})`, { skip: !enabled }, async () => {
     const registry = new Registry();
     const models = loads((dialect === "sqlite" ? 'datasource db { provider = "sqlite" }\n' : "") + source, { registry });
+    assert.throws(() => loads(source.replace("references: [id]", "references: [missing]"), { registry: new Registry() }), /missing.*after extension lowering/);
     const User = models.User!, Active = models.Active!, Post = models.Post!;
     const url = dialect === "sqlite" ? "sqlite://:memory:" : process.env.ORM_TEST_DATABASE_URL ?? "postgres://postgres:postgres@localhost/orm_test";
     const db = await connect(url, { registry, default: false });
@@ -22,8 +23,10 @@ for (const dialect of ["sqlite", "postgres"]) {
       assert.equal(rows[0]!.name, null);
       assert.equal(rows[0]!.status, "old");
       assert.equal(await Active.objects.using(db).count(), 3);
-      const created = await Active.objects.using(db).insert({ id: 4 }) as { name: string; status: string };
+      const created = await Active.objects.using(db).insert({ id: 4 }) as { name: string; status: string; settings: unknown; active: boolean; volume: number };
       assert.equal(created.name, "client"); assert.equal(created.status, "active");
+      assert.deepEqual(created.settings, { labels: ["proxy", null], limit: 3 });
+      assert.equal(created.active, true); assert.equal(created.volume, 7);
       const root = await User.objects.using(db).insert({ id: 5 }) as { name: null; status: string };
       assert.equal(root.name, null); assert.equal(root.status, "old");
       const changed = await Active.objects.using(db).update({ name: null, status: "old" }, { returning: true }) as { name: null; status: string }[];

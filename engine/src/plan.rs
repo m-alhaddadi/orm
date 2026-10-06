@@ -2006,7 +2006,7 @@ pub fn plan_insert(
     #[cfg(feature = "proxy-models")]
     let (fields, rows) = crate::proxy::insert_defaults(&schema.proxy_models[schema.model_idx(model).map_err(query_err)?], m, fields, rows)?;
     #[cfg(feature = "proxy-models")]
-    let fields = fields.as_slice();
+    let fields = fields.as_ref();
     #[cfg(feature = "composition")]
     crate::ownership::require_local_write(m)?;
     #[cfg(feature = "composition")]

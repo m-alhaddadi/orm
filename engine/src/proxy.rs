@@ -101,8 +101,9 @@ fn value(default: &ClientDefault) -> Value {
 
 /// Explicit SQL NULL is Some(typed null); None is an omitted value. Schema
 /// defaults fill omission before native transforms/validation or SQL planning.
-pub fn insert_defaults(proxy: &PreparedProxy, model: &orm_core::schema::Model, fields: &[String],
-    mut rows: Vec<Vec<Option<Value>>>) -> Result<(Vec<String>, Vec<Vec<Option<Value>>>)> {
+pub fn insert_defaults<'a>(proxy: &PreparedProxy, model: &orm_core::schema::Model, fields: &'a [String],
+    mut rows: Vec<Vec<Option<Value>>>) -> Result<(std::borrow::Cow<'a, [String]>, Vec<Vec<Option<Value>>>)> {
+    if proxy.defaults.is_empty() { return Ok((std::borrow::Cow::Borrowed(fields), rows)); }
     let mut fields = fields.to_vec();
     if rows.iter().any(|r| r.len() != fields.len()) { return Err(Error::query("insert row length does not match fields")); }
     for (position, default) in &proxy.defaults {
@@ -113,5 +114,5 @@ pub fn insert_defaults(proxy: &PreparedProxy, model: &orm_core::schema::Model, f
         };
         for row in &mut rows { if row[slot].is_none() { row[slot] = Some(value(default)); } }
     }
-    Ok((fields, rows))
+    Ok((std::borrow::Cow::Owned(fields), rows))
 }

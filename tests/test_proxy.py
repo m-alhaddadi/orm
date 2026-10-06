@@ -18,6 +18,8 @@ async def test_proxy_warning_rows_defaults_writes_and_relation_targets(dialect, 
         source = 'datasource db { provider = "sqlite" }\n' + source
     registry = orm.Registry()
     models = orm.loads(source, registry=registry)
+    with pytest.raises(orm.SchemaError, match="missing.*after extension lowering"):
+        orm.loads(source.replace("references: [id]", "references: [missing]"), registry=orm.Registry())
     User, Active, Post, Status = (models[k] for k in ("User", "Active", "Post", "Status"))
     assert not Active._meta.fields["name"].has_server_value
     assert Active._meta.fields["name"].has_insert_default
@@ -40,6 +42,8 @@ async def test_proxy_warning_rows_defaults_writes_and_relation_targets(dialect, 
         assert not capfd.readouterr().err
         new = await Active.objects.using(db).insert(id=4)
         assert new.name == "client" and new.status is Status.ACTIVE
+        assert new.settings == {"labels": ["proxy", None], "limit": 3}
+        assert new.active is True and new.volume == 7
         changed = await Active.objects.using(db).filter(Active.id == 4).update(name=None, status=Status.OLD).returning()
         assert changed[0].name is None and changed[0].status is Status.OLD
         physical = await User.objects.using(db).insert(id=5)

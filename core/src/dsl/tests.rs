@@ -526,3 +526,19 @@ fn imported_models_use_main_extension_definitions() {
     assert!(compile_file(&dir.join("schema.prisma")).unwrap_err().contains("extension imports belong in the main schema"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+#[test]
+fn behavioral_arguments_preserve_names_null_and_nested_json() {
+    let mut items = syntax::parse(r#"model View {
+      @@proxy.of(User)
+      @@proxy.subset("state", [ACTIVE, OLD])
+      @@proxy.default("payload", {enabled: true, labels: ["null", null, 3]})
+    }"#).unwrap();
+    let declarations = super::lower::behavior_declarations(&mut items, "views.prisma").unwrap();
+    assert_eq!(declarations[0].positional, vec![serde_json::json!("User")]);
+    assert_eq!(declarations[1].positional[1], serde_json::json!(["ACTIVE", "OLD"]));
+    assert_eq!(declarations[2].positional[1], serde_json::json!({"enabled":true,"labels":["null",null,3]}));
+    assert_eq!(declarations[2].location.file, "views.prisma");
+    assert!(syntax::parse(r#"model V { @@proxy.default("x", {key:1,key:2}) }"#).is_err());
+    let mut items = syntax::parse(r#"model V { @@proxy.default("x", now()) }"#).unwrap();
+    assert!(super::lower::behavior_declarations(&mut items, "v.prisma").is_err());
+}

@@ -110,3 +110,14 @@ fn explicit_defaults_replace_inherited_and_shape_violations_remain_allowed() {
     let roundtrip: SchemaIr = serde_json::from_value(serialized).unwrap();
     assert_eq!(roundtrip.behavior.proxy_models[1].defaults["name"], json!(null));
 }
+#[test]
+fn logical_nullable_broadening_preserves_physical_not_null() {
+    let mut ir = schema();
+    ir.models[0].fields[1].nullable = false;
+    let mut declaration = ir.models[0].fields[1].clone();
+    declaration.nullable = true;
+    ir.models[1].fields.push(declaration);
+    lower_specs(&mut ir, &[spec("Active", "User")]).unwrap();
+    assert!(ir.models[1].fields[1].nullable);
+    assert!(!ir.behavior.storage.as_ref().unwrap().models[0].fields[1].nullable);
+}

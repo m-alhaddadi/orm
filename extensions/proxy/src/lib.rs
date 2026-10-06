@@ -14,10 +14,12 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         let spec = ProxyModel { model: d.model.clone(), parent: parent.into(), storage_owner: String::new(), fields: vec![], defaults: BTreeMap::new() };
         if specs.insert(d.model.clone(), spec).is_some() { return Err(format!("{}: duplicate proxy source", d.model)); }
     }
+    let mut overrides = BTreeSet::new();
     for d in declarations.iter().filter(|d| d.attribute != "proxy.of") {
         let error = |message: &str| format!("{}:{}:{}: @@{}: {message}", d.location.file, d.location.line, d.location.column, d.attribute);
         let spec = specs.get_mut(&d.model).ok_or_else(|| error("override requires @@proxy.of on the same model"))?;
         let field = d.positional.first().and_then(|v| v.as_str()).ok_or_else(|| error("requires an inherited field name"))?;
+        if !overrides.insert((&d.model, field, &d.attribute)) { return Err(error("duplicate proxy override")); }
         if d.attribute == "proxy.default" {
             let value = d.positional.get(1).ok_or_else(|| error("requires a literal client default"))?;
             if spec.defaults.insert(field.into(), value.clone()).is_some() { return Err(error("duplicate client default")); }
@@ -91,6 +93,9 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
         let source = ir.models.iter().find(|m| m.name == spec.parent).expect("checked source");
         let mut model: ModelIr = copy(source)?;
         let placeholder = ir.models.iter().find(|m| m.name == spec.model).expect("checked model");
+        if !placeholder.relations.is_empty() {
+            return Err(format!("{}: proxy relation overrides are unsupported; inherited relations retain their logical targets", spec.model));
+        }
         if !placeholder.indexes.is_empty() || !placeholder.constraints.is_empty()
             || !placeholder.triggers.is_empty() || placeholder.renamed_from.is_some() {
             return Err(format!("{}: proxies cannot declare physical objects", spec.model));
@@ -100,12 +105,16 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
             let inherited = source.fields.iter().find(|f| f.name == declared.name)
                 .ok_or_else(|| format!("{}.{}: a proxy cannot add a stored field", spec.model, declared.name))?;
             let mut comparable = declared.clone();
+            if declared.primary_key && declared.nullable != inherited.nullable {
+                return Err(format!("{}.{}: proxy cannot change primary key shape", spec.model, declared.name));
+            }
             comparable.nullable = inherited.nullable;
             comparable.comment = inherited.comment.clone();
             comparable.hints = inherited.hints.clone();
             if serde_json::to_value(&comparable).map_err(|e| e.to_string())? != serde_json::to_value(inherited).map_err(|e| e.to_string())? {
                 return Err(format!("{}.{}: proxy override changes physical type, encoding, identity or constraint; use a logical proxy declaration", spec.model, declared.name));
             }
+            model.fields.iter_mut().find(|f| f.name == declared.name).expect("inherited field").nullable = declared.nullable;
         }
         model.name = spec.model.clone();
         model.comment = placeholder.comment.clone();
@@ -118,6 +127,13 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
             storage_owner: inherited.map(|p| p.storage_owner.clone()).unwrap_or_else(|| source.name.clone()),
             fields: inherited.map(|p| p.fields.clone()).unwrap_or_default(),
             defaults: inherited.map(|p| p.defaults.clone()).unwrap_or_default() };
+        for declared in &placeholder.fields {
+            if let Some(contract) = prepared.fields.iter_mut().find(|p| p.field == declared.name) {
+                contract.non_null = !declared.nullable;
+            } else if !declared.nullable && source.fields.iter().any(|f| f.name == declared.name && f.nullable) {
+                prepared.fields.push(ProxyField {field:declared.name.clone(),non_null:true,subset:None});
+            }
+        }
         let mut seen = BTreeSet::new();
         for contract in &spec.fields {
             if !seen.insert(&contract.field) { return Err(format!("{}.{}: duplicate proxy shape", spec.model, contract.field)); }
