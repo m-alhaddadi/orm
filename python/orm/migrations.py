@@ -89,7 +89,7 @@ def _native_schema(schema: Schema) -> _native.Schema:
     if isinstance(schema, _native.Schema):
         return schema
     if isinstance(schema, Registry):
-        return schema.native()
+        return schema.prepare()
     return _native.Schema(_native.compile_schema_file(os.fspath(schema)))
 
 

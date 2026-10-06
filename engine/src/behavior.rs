@@ -39,18 +39,19 @@ pub struct Computation {
 
 struct ComputedRows {
     inner: Box<dyn RowSet>,
-    values: Vec<(usize, Vec<Option<String>>)>,
+    /// Indexed by result column; `Some` holds the computed values of that column.
+    values: Vec<Option<Vec<Option<String>>>>,
 }
 impl RowSet for ComputedRows {
     fn len(&self) -> usize { self.inner.len() }
     fn cell(&self, row: usize, col: usize, ty: ValueType) -> DbResult<Cell<'_>> {
-        if let Some((_, values)) = self.values.iter().find(|(column, _)| *column == col) {
+        if let Some(Some(values)) = self.values.get(col) {
             return Ok(match &values[row] { Some(v) => Cell::Text(v), None => Cell::Null });
         }
         self.inner.cell(row, col, ty)
     }
     fn value(&self, row: usize, col: usize, ty: ValueType) -> DbResult<Value> {
-        if let Some((_, values)) = self.values.iter().find(|(column, _)| *column == col) {
+        if let Some(Some(values)) = self.values.get(col) {
             return Ok(Value::String(values[row].clone()));
         }
         self.inner.value(row, col, ty)
@@ -60,10 +61,10 @@ impl RowSet for ComputedRows {
 }
 fn rows(rows: Box<dyn RowSet>, types: &[ValueType], computations: &[Computation]) -> DbResult<Box<dyn RowSet>> {
     if computations.is_empty() { return Ok(rows); }
-    let mut values = Vec::with_capacity(computations.len());
+    let mut values = vec![None; computations.iter().map(|c| c.column + 1).max().unwrap_or(0)];
     for c in computations {
         let ty = types.get(c.dependency).copied().ok_or_else(|| DbError::other("invalid computed output shape"))?;
-        values.push((c.column, generated::compute(c.kind, c.field, rows.as_ref(), c.dependency, ty)?));
+        values[c.column] = Some(generated::compute(c.kind, c.field, rows.as_ref(), c.dependency, ty)?);
     }
     Ok(Box::new(ComputedRows { inner: rows, values }))
 }

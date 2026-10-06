@@ -1012,14 +1012,19 @@ impl<'s> Planner<'s> {
     }
 
     fn read_field(&self, model: usize, alias: &str, field: &FieldIr) -> Result<SExpr> {
+        let value = self.stored_field(model, alias, field)?;
+        Ok(match &field.read_sql { Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), value), None => value })
+    }
+
+    /// The stored value, without `read_sql`: CTE columns hold stored values, and the outer read applies `read_sql`.
+    fn stored_field(&self, model: usize, alias: &str, field: &FieldIr) -> Result<SExpr> {
         #[cfg(feature = "composition")]
         if model < self.schema.models.len() {
-            let value = crate::ownership::column(self.schema, self.model(model), alias, field)?;
-            return Ok(match &field.read_sql { Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), value), None => value });
+            return crate::ownership::column(self.schema, self.model(model), alias, field);
         }
         #[cfg(not(feature = "composition"))]
         let _ = model;
-        Ok(read_col(alias, field))
+        Ok(col(alias, &field.column))
     }
 
     fn value(&mut self, e: &Expr, hint: Hint<'s>) -> Result<SExpr> {
@@ -1380,7 +1385,7 @@ impl<'s> Planner<'s> {
                         #[cfg(feature = "composition")]
                         if root.native.computed().contains(&_position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
                         if cte {
-                            stmt.expr_as(self.read_field(self.root, &alias, f)?, Alias::new(&f.column));
+                            stmt.expr_as(self.stored_field(self.root, &alias, f)?, Alias::new(&f.column));
                         } else {
                             stmt.expr(self.read_field(self.root, &alias, f)?);
                         }

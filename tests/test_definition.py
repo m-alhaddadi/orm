@@ -65,3 +65,14 @@ def test_definition_owns_input_schema():
     User = orm.define(ir, registry=registry)["User"]
     ir["models"][0]["table"] = "mutated"
     assert User._meta.registry.ir()["models"][0]["table"] == "users"
+
+
+def test_migrations_prepare_class_declarations(tmp_path):
+    from orm.migrations import Migrations
+
+    registry = orm.Registry()
+
+    class Author(orm.Model, registry=registry):
+        id = Integer(primary_key=True)
+
+    assert 'CREATE TABLE "author"' in Migrations(tmp_path, registry).plan().up[0].sql

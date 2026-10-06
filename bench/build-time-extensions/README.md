@@ -90,8 +90,9 @@ The native probe found identical allocations/requested bytes per operation:
 | Projection | 28 | 3,251 |
 | Returning delete | 18 | 1,151 |
 
-Native Python artifact size increased from 10,493,424 to 10,607,792 bytes (+1.1%);
-Node increased from 9,122,224 to 9,228,512 bytes (+1.2%). Build/setup/artifact
+Measured at 360685a (`results/final-structural.json`, `disabled_build`):
+the disabled native Python artifact grew from 10,493,424 to 11,067,808 bytes (+5.5%),
+and Node grew from 9,122,224 to 9,616,080 bytes (+5.4%). Build/setup/artifact
 costs are distinct from warm execution costs. Initial incremental release builds
 took 112 seconds for the baseline and 100 seconds for the candidate; those
 cache-dependent measurements do not establish a build-time improvement.

@@ -312,10 +312,10 @@ pub fn check_requirements(ir: &SchemaIr, artifact: &Artifact) -> Result<(), Stri
         return Err(format!("schema contract {} unavailable (artifact {}); rebuild native artifact", r.schema_contract, artifact.schema_contract));
     }
     if r.storage.is_some() && !artifact.capabilities.iter().any(|c| c == "physical-schema") {
-        return Err("physical schema contributions are not compiled into this artifact; rebuild".into());
+        return Err(format!("physical schema contributions are not compiled into this artifact (capabilities {:?}); rebuild", artifact.capabilities));
     }
     for pass in &r.completed_passes {
-        if !artifact.passes.contains(pass) { return Err(format!("lowering pass {pass} unavailable; rebuild native artifact")); }
+        if !artifact.passes.contains(pass) { return Err(format!("lowering pass {pass} unavailable (artifact has {:?}); rebuild native artifact", artifact.passes)); }
     }
     for (id, version) in &r.extensions {
         if artifact.extensions.get(id) != Some(version) {
@@ -335,7 +335,7 @@ pub fn check_requirements(ir: &SchemaIr, artifact: &Artifact) -> Result<(), Stri
     for specialization in &r.specializations {
         for export in &specialization.exports {
             if !artifact.exports.contains(export) {
-                return Err(format!("{} requires missing export {export}; rebuild native artifact", specialization.model));
+                return Err(format!("{} requires missing export {export} (artifact has {:?}); rebuild native artifact", specialization.model, artifact.exports));
             }
         }
         if !artifact.specializations.contains(specialization) {
@@ -475,4 +475,50 @@ pub fn specialization_storage(model: &crate::ir::ModelIr, requirements: &Require
     let mut physical: crate::ir::ModelIr = serde_json::from_value(serde_json::to_value(model).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     physical.fields.retain(|f| !computed.contains(&f.name));
     Ok(vec![physical])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(languages: &[&str], databases: &[&str]) -> Manifest {
+        serde_json::from_value(serde_json::json!({
+            "id": "app", "version": "1.0.0", "host_contract": HOST_CONTRACT, "schema_contract": SCHEMA_CONTRACT,
+            "languages": languages, "databases": databases,
+            "attributes": [{"name": "app.trim", "target": "field"}],
+        })).unwrap()
+    }
+    fn schema(dialect: crate::dialect::Dialect) -> SchemaIr {
+        let mut ir = SchemaIr { dialect, ..SchemaIr::default() };
+        ir.behavior.declarations.push(Declaration {
+            attribute: "app.trim".into(), model: "User".into(), field: Some("name".into()),
+            arguments: BTreeMap::new(), positional: vec![],
+            location: SourceLocation { file: "schema.prisma".into(), line: 3, column: 7 }, lowered: false,
+        });
+        ir
+    }
+
+    #[test]
+    fn unsupported_database_names_the_declaration() {
+        let error = validate_declarations(&schema(crate::dialect::Dialect::Sqlite), &[manifest(&["python"], &["postgres"])], None).unwrap_err();
+        assert!(error.starts_with("schema.prisma:3:7: @app.trim:") && error.contains("does not support sqlite"), "{error}");
+    }
+
+    #[test]
+    fn unsupported_language_fails() {
+        let error = validate_declarations(&schema(crate::dialect::Dialect::Sqlite), &[manifest(&["python"], &["sqlite"])], Some("typescript")).unwrap_err();
+        assert!(error.contains("does not support this language binding"), "{error}");
+        assert!(validate_declarations(&schema(crate::dialect::Dialect::Sqlite), &[manifest(&["python"], &["sqlite"])], Some("python")).is_ok());
+    }
+
+    #[test]
+    fn unknown_metadata_and_wrong_export_types_fail() {
+        let mut value = serde_json::to_value(manifest(&["python"], &["sqlite"])).unwrap();
+        value["unknown"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Manifest>(value).unwrap_err().to_string().contains("unknown field"));
+        let mut export = serde_json::json!({"id": "app.x", "rust": "crate::x", "kind": "string_validator", "input": "string"});
+        assert!(serde_json::from_value::<Export>(export.clone()).is_ok());
+        export["kind"] = "integer_validator".into();
+        assert!(serde_json::from_value::<Export>(export).unwrap_err().to_string().contains("unknown variant"));
+    }
 }

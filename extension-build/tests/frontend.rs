@@ -63,3 +63,32 @@ fn main() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn core_only_build_adds_no_composition() {
+    let host = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let root = host.join("target/extension-proof-tests").join(format!("orm-core-only-test-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let output = root.join("build");
+    let config = root.join("config.json");
+    fs::write(&config, serde_json::to_vec(&serde_json::json!({
+        "host": host, "output": output, "offline": true, "prepare_only": true, "bindings": ["python"]
+    })).unwrap()).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_orm-extension-build")).arg(config).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let artifact: serde_json::Value = serde_json::from_slice(&fs::read(output.join("artifact.json")).unwrap()).unwrap();
+    assert_eq!(artifact["extensions"], serde_json::json!({}));
+    assert_eq!(fs::read_to_string(output.join("manifests.json")).unwrap().trim(), "[]");
+    for generated in ["engine-composition.rs", "python-methods.rs", "core/build.rs", "core/composition-inputs.json"] {
+        assert!(!output.join(generated).exists(), "{generated}");
+    }
+    for manifest in ["core/Cargo.toml", "engine/Cargo.toml", "bindings/python/Cargo.toml"] {
+        // The build rewrites relative paths, so compare only the dependency names and features.
+        let table = |path: PathBuf| fs::read_to_string(path).unwrap().parse::<toml::Table>().unwrap();
+        let (built, source) = (table(output.join(manifest)), table(host.join(manifest)));
+        let names = |t: &toml::Table| t.get("dependencies").and_then(|d| d.as_table()).map(|d| d.keys().cloned().collect::<Vec<_>>());
+        assert_eq!(names(&built), names(&source), "{manifest}");
+        assert_eq!(built.get("features"), source.get("features"), "{manifest}");
+    }
+    fs::remove_dir_all(root).unwrap();
+}

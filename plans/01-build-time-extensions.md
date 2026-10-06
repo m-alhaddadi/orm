@@ -1,6 +1,6 @@
 # Build-time extension system
 
-Status: specification for implementation; the extension APIs described here are not shipped behavior.
+Status: ~~specification for implementation~~ Triaged 2026-10-06 (`~/projects/worktrees/orm/plans/01-build-time-extensions/issues/review-01-build-time-extensions.md`; fixes in the triage commit on top of 51a22ce); the extension APIs described here are not shipped behavior.
 
 ## Problem Statement
 
