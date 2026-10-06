@@ -86,10 +86,10 @@ Use the frontend for a changed selection rather than editing generated files.
 A crate declares `[package.metadata.orm-extension]`, either inline or as
 `manifest = "orm-extension.toml"` referencing a resource inside its package.
 The version must match its Cargo package version. Required fields include `id`,
-`version`, `host_contract`, and `schema_contract`. Optional lists describe
-`languages` (`python`, `typescript`), `databases` (`postgres`, `sqlite`), host
-`capabilities`, semver extension `dependencies`, `attributes`, `passes`, and
-`exports`. Unknown metadata fields are errors.
+`version`, `host_contract`, `schema_contract`, `languages` (`python`,
+`typescript`), and `databases` (`postgres`, `sqlite`). Optional lists describe
+host `capabilities`, semver extension `dependencies`, `attributes`, `passes`,
+and `exports`. Unknown metadata fields are errors.
 
 An attribute declares its `name`, `target` (`model` or `field`), and typed `arguments`
 (`string`, `integer`, `boolean`, `list`). Source declarations use namespaced

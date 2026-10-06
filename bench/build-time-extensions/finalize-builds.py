@@ -49,12 +49,13 @@ for group in ([args.only] if args.only else ['disabled','controls']):
         if group=='controls':
             extension=base/key.split('/')[0]/'extension'
             env.update(ORM_CORE_COMPOSITION=str(extension/'composition.rs'),ORM_ENGINE_COMPOSITION=str(workspace/'engine-composition.rs'),ORM_PYTHON_METHODS=str(extension/'python-methods.rs'),ORM_NODE_METHODS=str(extension/'node-methods.rs'))
-        if changed:
-            start=time.perf_counter()
-            subprocess.run(['cargo','build','--release','--offline','--locked','--manifest-path',str(workspace/'Cargo.toml'),'-p','orm-python','-p','orm-node'],env=env,check=True)
-            report['builds'][key].update(metadata(workspace,target,time.perf_counter()-start))
+        # Copying sources is not a completion marker: an interrupted prior run
+        # may have copied them without finishing or packaging the build.
+        start=time.perf_counter()
+        subprocess.run(['cargo','build','--release','--offline','--locked','--manifest-path',str(workspace/'Cargo.toml'),'-p','orm-python','-p','orm-node'],env=env,check=True)
+        report['builds'][key].update(metadata(workspace,target,time.perf_counter()-start))
         report['builds'][key]['refreshed_sources'] = changed
-        if group=='controls' and (changed or (root/'bench/build-time-extensions/native-enabled.rs').read_bytes() != (workspace/'engine/examples/extension_probe.rs').read_bytes()):
+        if group=='controls':
             shutil.copy2(root/'bench/build-time-extensions/native-enabled.rs',workspace/'engine/examples/extension_probe.rs')
             for instrumented in (False,True):
                 subprocess.run(['cargo','build','--release','--offline','--locked','--manifest-path',str(workspace/'Cargo.toml'),'-p','orm-engine','--features','composition,allocation-probe' if instrumented else 'composition','--example','extension_probe'],env=env,check=True)
@@ -63,7 +64,7 @@ for group in ([args.only] if args.only else ['disabled','controls']):
         for key in ['before','after']:
             workspace=base/key
             probe=workspace/'native-benchmark'
-            shutil.copytree(root/'bench/build-time-extensions/native',probe)
+            shutil.copytree(root/'bench/build-time-extensions/native',probe,dirs_exist_ok=True)
             manifest=probe/'Cargo.toml'
             manifest.write_text(manifest.read_text().replace('../../../core','../core').replace('../../../engine','../engine'))
             env=dict(os.environ,CARGO_TARGET_DIR=str(root/'target'))
