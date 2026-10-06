@@ -2,6 +2,8 @@
 import asyncio
 import json
 import os
+import subprocess
+import sys
 import orm
 from orm import _native
 from orm._capabilities import ADAPTERS
@@ -17,6 +19,13 @@ os.environ["ORM_PROFILE"] = _selector
 assert hasattr(_native, "cli") == metadata["capabilities"]["cli"]
 assert hasattr(_native, "generate_python") == metadata["capabilities"]["generate-python"]
 assert hasattr(_native, "generate_typescript") is False  # only Node exposes its generator
+
+
+cli = subprocess.run([sys.executable, "-m", "orm", "--help"], capture_output=True, text=True)
+if metadata["capabilities"]["cli"]:
+    assert cli.returncode == 0 and "generate" in cli.stdout, cli.stdout + cli.stderr
+else:
+    assert cli.returncode != 0 and "install orm[tooling]" in cli.stderr, cli.stderr
 
 
 def source(backend):

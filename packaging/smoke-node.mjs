@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { connect, loads, Registry } from "orm";
 const require = createRequire(import.meta.url);
 const { native, nativeAdapters } = await import(new URL("./native.js", pathToFileURL(require.resolve("orm"))));
@@ -14,6 +15,14 @@ assert.equal(native(), addon);
 process.env.ORM_PROFILE = selector;
 assert.equal(typeof addon.cli === "function", metadata.capabilities.cli);
 assert.equal(typeof addon.generateTypescript === "function", metadata.capabilities["generate-typescript"]);
+const cli = spawnSync(process.execPath, [fileURLToPath(new URL("./cli.js", pathToFileURL(require.resolve("orm")))), "--help"], { encoding: "utf8" });
+if (metadata.capabilities.cli) {
+  assert.equal(cli.status, 0, cli.stdout + cli.stderr);
+  assert.match(cli.stdout, /generate/);
+} else {
+  assert.notEqual(cli.status, 0);
+  assert.match(cli.stderr, /install @orm\/native-tooling/);
+}
 const source = backend => `datasource db { provider = "${backend}" }
 model Probe {
   id BigInt @id @default(autoincrement())
