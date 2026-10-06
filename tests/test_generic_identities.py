@@ -87,6 +87,8 @@ async def test_retirement_migration_requires_reference_cleanup(tmp_path, url, pr
     runner = Migrator(db, Migrations(directory, old))
     try:
         await db.drop_tables()
+        # The migration ledger outlives drop_tables on a shared database.
+        await db.execute("DROP TABLE IF EXISTS orm_migrations")
         await runner.upgrade("1")
         await models["Tag"].objects.using(db).insert(id=1, kind=models["ContentType"].Post, object_id=9)
         schema.write_text(header + tag)
@@ -103,4 +105,5 @@ async def test_retirement_migration_requires_reference_cleanup(tmp_path, url, pr
             await db.execute('INSERT INTO identity08_migration_tags (id, kind, object_id) VALUES (2, 1, 9)')
     finally:
         await db.drop_tables()
+        await db.execute("DROP TABLE IF EXISTS orm_migrations")
         await db.close()
