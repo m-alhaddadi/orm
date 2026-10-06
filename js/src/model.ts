@@ -28,6 +28,7 @@ export type IRField = {
   enum?: string;
   primary_key?: boolean;
   auto_increment?: boolean;
+  hints?: Readonly<Record<string, string>>;
   unique?: boolean;
   default?: unknown;
   default_now?: boolean;
@@ -85,6 +86,7 @@ type Row = Record<PropertyKey, unknown> & { [RELATED]?: Record<string, unknown>;
 
 /** Schema information about one model (`User._meta`). */
 export class ModelMeta implements Source {
+  declare attachInputFields?: readonly FieldMeta[];
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
   readonly fieldList: FieldMeta[] = [];
@@ -115,12 +117,15 @@ export class ModelMeta implements Source {
         enumName: f.enum,
         primaryKey: f.primary_key ?? false,
         unique: f.unique ?? false,
-        hasServerValue: !!(f.auto_increment || f.default !== undefined || f.default_now || f.default_sql),
+        hasServerValue: !!(f.auto_increment || f.default !== undefined || f.default_now || f.default_sql || f.hints?.["composition.key-default"] === "true"),
       };
       checkName(ir.name, fm.name, this.fields);
       this.fields.set(fm.name, fm);
       this.fieldByIr.set(fm.ir, fm);
       this.fieldList.push(fm);
+    }
+    if (ir.fields.some((f) => f.primary_key && f.hints?.["composition.child"] === "true")) {
+      this.attachInputFields = ir.fields.filter((f) => f.hints?.["composition.local"] === "true").map((f) => this.fieldByIr.get(f.name)!);
     }
     for (const r of ir.relations ?? []) {
       const kind: RelationKind = r.through

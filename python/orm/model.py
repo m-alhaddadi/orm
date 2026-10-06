@@ -25,6 +25,9 @@ __all__ = ["Model", "ModelMeta", "Registry", "registry", "define", "load", "load
 class ModelMeta:
     """Schema information about one model (``User._meta``)."""
 
+    if TYPE_CHECKING:
+        attach_fields: dict[str, Field[Any]]
+
     def __init__(self, model: type[Model], table: str, registry: Registry) -> None:
         self.model = model
         self.name = model.__name__
@@ -203,6 +206,8 @@ class Registry:
             meta.pk = next(field for field in fields.values() if field.primary_key)
             meta.schema_ir = ir
             meta.field_names = tuple(fields)
+            if meta.pk.primary_key and ir["fields"][0].get("hints", {}).get("composition.child") == "true":
+                meta.attach_fields = {f["name"]: fields[f["name"]] for f in ir["fields"] if f.get("hints", {}).get("composition.local") == "true"}
             computed = {f["field"] for f in snapshot._behavior.get("result_fields", ()) if f["model"] == meta.name}
             meta.input_fields = {k: v for k, v in fields.items() if k not in computed} if computed else fields
             for name, function in methods_by_model.get(meta.name, {}).items():
@@ -246,7 +251,7 @@ def _field(ir: dict[str, Any]) -> Field[Any]:
         "index": ir.get("index", False),
         "column": ir["column"],
         "default_now": ir.get("default_now", False),
-        "server_default": "default_sql" in ir,
+        "server_default": "default_sql" in ir or ir.get("hints", {}).get("composition.key-default") == "true",
     }
     if "default" in ir:
         kwargs["default"] = ir["default"]

@@ -90,6 +90,7 @@ export interface NativeEngine {
     params: unknown[],
     tx: NativeTransaction | null,
   ): Promise<unknown>;
+  attach(model: string, parentId: unknown, fields: string[], rows: unknown[][], tx: NativeTransaction | null): Promise<unknown>;
   updateMany(
     model: string,
     fields: string[],

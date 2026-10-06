@@ -354,7 +354,7 @@ fn generate(args: &Args, host: Host, schema: &Path) -> Result<()> {
                         return Err(Failure::Failed(format!("multiple schema modules would write {}; put each schema in its own directory", target.display())));
                     }
                     let (relative, import) = module_paths(target_abs.parent().unwrap(), &shared_abs)?;
-                    let facade = codegen::python::facade(unit, &relative, &import);
+                    let facade = codegen::python::facade(unit, &relative, &import, &compiled);
                     files.push((target.clone(), facade.module));
                     files.push((target.with_extension("pyi"), facade.stub));
                 }

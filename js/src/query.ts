@@ -38,7 +38,7 @@ import { NotLoaded, QueryError, TransactionRequired } from "./errors.js";
 import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
 import { DB, RELATED, registerQueries, type ModelClass, type ModelMeta } from "./model.js";
 import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
-import { assignments, prepareRows, prepareUpdateRows } from "./write.js";
+import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
 import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./select.js";
 
@@ -991,6 +991,13 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
 
   /** `INSERT` many rows with one statement; gives the new instances in input order (rows
    * skipped by `doNothing` are left out). */
+  async attach(parentId: In<M["pk"]>, values: M extends { readonly attach: infer A extends object } ? A : Partial<M["insert"]>): Promise<M["row"]> {
+    const prepared = prepareAttach(this.meta, values);
+    const db = this.db();
+    const res = await db_wait(db, (tx) => db.engine.attach(this.meta.name, parentId, prepared.fields, prepared.rows, tx));
+    return (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][])[0]!;
+  }
+
   insertMany(rows: readonly M["insert"][], options?: InsertOptions<M>): Promise<M["row"][]> {
     return this.insertRows(rows, options);
   }

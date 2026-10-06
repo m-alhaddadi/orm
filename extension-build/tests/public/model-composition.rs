@@ -15,15 +15,23 @@ async fn check(url: &str) {
     } else {
         Dialect::Postgres
     };
-    let source = "datasource db { provider = \"sqlite\" }\nmodel Person {\n id Int @id @default(autoincrement())\n name String\n}\nmodel Employee {\n id Int @id\n salary Int @check(\"salary > 0\")\n @@composition.model(parent: \"Person\", parentRef: \"person\", childRef: \"employee\")\n}\nmodel Manager {\n id Int @id\n level Int @check(\"level > 0\")\n @@composition.model(parent: \"Employee\", parentRef: \"employee\", childRef: \"manager\")\n}";
+    let source = "datasource db { provider = \"sqlite\" }\nmodel Person {\n id Int @id @default(autoincrement())\n name String\n}\nmodel Employee {\n salary Int @check(\"salary > 0\")\n @@composition.model(parent: \"Person\", parentRef: \"person\", childRef: \"employee\")\n}\nmodel Manager {\n level Int @check(\"level > 0\")\n @@composition.model(parent: \"Employee\", parentRef: \"employee\", childRef: \"manager\")\n}";
     let source = if dialect == Dialect::Postgres {
         source.replace("\"sqlite\"", "\"postgresql\"")
     } else {
         source.into()
     };
-    let source=format!("{source}\nmodel Customer {{\n id Int @id\n points Int\n @@composition.model(parent: \"Person\", parentRef: \"person\", childRef: \"customer\")\n}}");
+    let source=format!("{source}\nmodel Customer {{\n points Int\n @@composition.model(parent: \"Person\", parentRef: \"person\", childRef: \"customer\")\n}}");
     let ir = dsl::compile(&source, None).unwrap();
+    let encoded=serde_json::to_string(&ir).unwrap();
     let schema = Schema::from_ir(ir).unwrap();
+    let ir=serde_json::from_str(&encoded).unwrap();
+    let py=orm_core::codegen::python::generate(&ir,&schema,"composition.prisma").unwrap();
+    let ts=orm_core::codegen::typescript::generate(&ir,&schema,"composition.prisma","orm").unwrap();
+    assert!(py.stub.contains("class ManagerAttach(TypedDict):\n    level: int"));
+    assert!(py.stub.contains("async def attach(self, parent_id: int, values: ManagerAttach) -> Manager"));
+    assert!(ts.contains("export interface ManagerAttach {\n  level: In<number>;\n}"));
+    assert!(ts.contains("readonly attach: ManagerAttach;"));
     let target = Target::new(dialect);
     let db = db::connect(url, 1).await.unwrap();
     for statement in migrate::create_all(&schema).unwrap() {

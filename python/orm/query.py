@@ -653,6 +653,12 @@ class QuerySet(Generic[M]):
         fields, rows, provided = prepare_rows(self._model, [values])
         return InsertOne(self, fields, rows, provided)
 
+    async def attach(self, parent_id: Any, values: Mapping[str, Any]) -> M:
+        """Attach local child values to an existing parent without altering it."""
+        from .composition import attach
+
+        return await attach(self, parent_id, values)
+
     def insert_many(self, rows: Iterable[Mapping[str, Any]]) -> InsertMany[M]:
         """``INSERT`` many rows with one statement; ``await`` gives the new instances."""
         fields, aligned, provided = prepare_rows(self._model, rows)

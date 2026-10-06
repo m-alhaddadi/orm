@@ -89,7 +89,7 @@ fn value_type(f: &FieldIr) -> String {
 }
 
 fn has_server_value(f: &FieldIr) -> bool {
-    f.auto_increment || f.default.is_some() || f.default_now || f.default_sql.is_some()
+    f.auto_increment || f.default.is_some() || f.default_now || f.default_sql.is_some() || f.hints.get("composition.key-default").is_some_and(|v| v == "true")
 }
 
 /// Generates `models.py` / `models.pyi` for `ir` (already validated as `schema`).
@@ -105,6 +105,8 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     exported.extend(names.iter().map(|n| n.to_string()));
     exported.extend(names.iter().flat_map(|n| [format!("{n}Insert"), format!("{n}Update"), format!("{n}UpdateRow")]));
     exported.extend(names.iter().map(|n| format!("{n}QuerySet")));
+    let composed_names: Vec<_> = schema.models.iter().filter(|m| m.pk_field().hints.get("composition.child").is_some_and(|v| v == "true")).map(|m| &m.ir.name).collect();
+    exported.extend(composed_names.iter().map(|n| format!("{n}Attach")));
     let all = exported.iter().map(|n| format!("    \"{n}\",\n")).collect::<String>();
 
     // -- models.py -------------------------------------------------------------------
@@ -125,8 +127,9 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     py.push_str("\n# Typed per model in models.pyi; plain aliases at runtime so the names can be imported.\n");
     let qs: Vec<String> = names.iter().map(|n| format!("{n}QuerySet")).collect();
     if !qs.is_empty() { writeln!(py, "{} = QuerySet", qs.join(" = ")).unwrap(); }
-    let dicts: Vec<String> =
+    let mut dicts: Vec<String> =
         names.iter().flat_map(|n| [format!("{n}Insert"), format!("{n}Update"), format!("{n}UpdateRow")]).collect();
+    dicts.extend(composed_names.iter().map(|n| format!("{n}Attach")));
     if !dicts.is_empty() { writeln!(py, "{} = dict\n", dicts.join(" = ")).unwrap(); }
     writeln!(py, "__all__ = [\n{all}]").unwrap();
 
@@ -224,6 +227,16 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
                 None => writeln!(body, "    {}: {t}", f.name).unwrap(),
             }
         }
+        if composed_names.contains(&&m.ir.name) {
+            writeln!(body, "\nclass {name}Attach(TypedDict):").unwrap();
+            let local: Vec<_> = m.fields().iter().filter(|f| f.hints.get("composition.local").is_some_and(|v| v == "true")).collect();
+            if local.is_empty() { writeln!(body, "    pass").unwrap(); }
+            for field in local {
+                let ty = value_type(field);
+                let ty = if field.nullable || has_server_value(field) { format!("NotRequired[{ty}]") } else { ty };
+                writeln!(body, "    {}: {ty}", field.name).unwrap();
+            }
+        }
         writeln!(body, "\nclass {name}Update(TypedDict, total=False):").unwrap();
         for (position, f) in m.fields().iter().enumerate() {
             #[cfg(feature = "composition")]
@@ -261,6 +274,10 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
             }
         }
         writeln!(body, "\nclass {name}QuerySet(QuerySet[{name}]):").unwrap();
+        if composed_names.contains(&&m.ir.name) {
+            let key_type = value_type(m.pk_field());
+            writeln!(body, "    async def attach(self, parent_id: {key_type}, values: {name}Attach) -> {name}: ...  # type: ignore[override]").unwrap();
+        }
         writeln!(
             body,
             "    def insert(self, **values: Unpack[{name}Insert]) -> InsertOne[{name}]: ...  # type: ignore[override]"
@@ -332,10 +349,11 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
 
 /// A module exposing only declarations owned by one source file. All modules load
 /// the same generated runtime by path, so even circular relations share classes.
-pub fn facade(unit: &crate::dsl::SchemaUnit, shared_path: &str, stub_import: &str) -> Generated {
+pub fn facade(unit: &crate::dsl::SchemaUnit, shared_path: &str, stub_import: &str, schema: &Schema) -> Generated {
     let mut names = unit.enums.clone();
     for name in &unit.models {
         names.extend([name.clone(), format!("{name}Insert"), format!("{name}Update"), format!("{name}UpdateRow"), format!("{name}QuerySet")]);
+        if schema.models.iter().any(|m| m.ir.name == *name && m.pk_field().hints.get("composition.child").is_some_and(|v| v == "true")) { names.push(format!("{name}Attach")); }
     }
     let path = serde_json::to_string(shared_path).unwrap();
     let exports = serde_json::to_string(&names).unwrap();

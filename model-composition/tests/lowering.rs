@@ -26,6 +26,26 @@ fn chains_and_siblings_keep_physical_storage_separate() {
     );
     let physical = ir.behavior.storage.as_ref().unwrap();
     assert_eq!(physical.models[0].fields.len(), 2);
+    assert_eq!(
+        ir.models[0].fields[0]
+            .hints
+            .get("composition.key-default")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        ir.models[0].fields[1]
+            .hints
+            .get("composition.local")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert!(!ir.models[0].fields[2]
+        .hints
+        .contains_key("composition.local"));
+    assert!(!physical.models[0].fields[0]
+        .hints
+        .contains_key("composition.key-default"));
     assert_eq!(physical.models[2].fields.len(), 2);
     assert!(physical.models[1].fields[0].auto_increment);
     assert!(!physical.models[0].fields[0].auto_increment);

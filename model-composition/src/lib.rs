@@ -148,6 +148,13 @@ fn lower_one(ir: &mut SchemaIr, c: &Composition) -> Result<(), String> {
     key.unique = false;
     key.index = false;
     key.renamed_from = None;
+    for hint in [
+        "composition.child",
+        "composition.local",
+        "composition.key-default",
+    ] {
+        key.hints.remove(hint);
+    }
     if child
         .fields
         .iter()
@@ -214,11 +221,35 @@ fn lower_one(ir: &mut SchemaIr, c: &Composition) -> Result<(), String> {
             owner: owner.map(|m| m.owner.clone()).unwrap_or(c.parent.clone()),
             column: owner.map(|m| m.column.clone()).unwrap_or(f.column.clone()),
         });
-        inherited.push(f.clone());
+        let mut inherited_field = f.clone();
+        inherited_field.hints.remove("composition.local");
+        inherited.push(inherited_field);
     }
     let child = &mut ir.models[child_idx];
     child.fields.retain(|f| !f.primary_key);
-    child.fields.insert(0, key.clone());
+    for field in &mut child.fields {
+        field
+            .hints
+            .insert("composition.local".into(), "true".into());
+    }
+    let mut logical_key = key.clone();
+    logical_key
+        .hints
+        .insert("composition.child".into(), "true".into());
+    if root_key.auto_increment
+        || root_key.default.is_some()
+        || root_key.default_now
+        || root_key.default_sql.is_some()
+        || root_key
+            .hints
+            .get("composition.key-default")
+            .is_some_and(|v| v == "true")
+    {
+        logical_key
+            .hints
+            .insert("composition.key-default".into(), "true".into());
+    }
+    child.fields.insert(0, logical_key);
     child.fields.extend(inherited);
     child
         .relations

@@ -104,3 +104,19 @@ export function assignments(meta: ModelMeta, values: object, ctx: IRContext): IR
     value: wrap(value).ir(ctx),
   }));
 }
+
+/** Validate explicit local-only attachment using definition-prepared inputs. */
+export function prepareAttach(meta: ModelMeta, row: object): { fields: string[]; rows: unknown[][] } {
+  const local = meta.attachInputFields;
+  if (local === undefined) throw new TypeError(`${meta.name} is not a composed child`);
+  const values = normalize(meta, row, "attach", false);
+  const allowed = new Set(local.map((f) => f.ir));
+  for (const name of values.keys()) {
+    if (!allowed.has(name)) throw new TypeError(`${meta.name}.${name}: attach accepts only local child fields`);
+  }
+  for (const field of local) {
+    if (!values.has(field.ir) && !(field.hasServerValue || field.nullable)) throw new TypeError(`${meta.name}.${field.name} is required`);
+  }
+  const fields = local.filter((f) => values.has(f.ir)).map((f) => f.ir);
+  return { fields, rows: [fields.map((f) => values.get(f))] };
+}
