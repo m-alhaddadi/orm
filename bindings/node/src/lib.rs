@@ -260,6 +260,7 @@ fn update_many_plan(
     params_: Unknown<'_>,
     returning: bool,
     batch_size: Option<u32>,
+    without_defaults: bool,
 ) -> napi::Result<(Vec<sea_query::UpdateStatement>, exec::UpdateMany)> {
     let values = convert_rows(env, schema, model, fields, rows, false)?
         .into_iter()
@@ -268,7 +269,7 @@ fn update_many_plan(
     let filters: Vec<ir::Expr> =
         serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
     let p = params(env, params_)?;
-    exec::plan_update_many(schema, target, model, fields, values, &filters, &p, returning, batch_size.map(|n| n as usize))
+    exec::plan_update_many(schema, target, model, fields, values, &filters, &p, returning, batch_size.map(|n| n as usize), without_defaults)
         .map_err(engine_err)
 }
 
@@ -317,7 +318,7 @@ impl JsSchema {
     ) -> napi::Result<Vec<String>> {
         let target = Target::new(self.inner.dialect).without(&disable).map_err(query_err)?;
         let (stmts, _) =
-            update_many_plan(env, &self.inner, target, &model, &fields, rows, &filters_json, params_, false, batch_size)?;
+            update_many_plan(env, &self.inner, target, &model, &fields, rows, &filters_json, params_, false, batch_size, false)?;
         Ok(stmts.iter().map(|s| db::to_string(target.dialect, s)).collect())
     }
 
@@ -496,9 +497,11 @@ impl Engine {
         returning: bool,
         batch_size: Option<u32>,
         tx: Option<&Transaction>,
+        without_defaults: Option<bool>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
         let (_, um) = update_many_plan(
             env, &self.schema, self.target, &model, &fields, rows, &filters_json, params_, returning, batch_size,
+            without_defaults.unwrap_or(false),
         )?;
         let conn = self.conn(tx);
         let own_tx = tx.is_none();

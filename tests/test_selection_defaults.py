@@ -1,11 +1,15 @@
 """Partial output shapes and compiled defaults on both supported databases."""
+import json
 import os
 
 import pytest
 import orm
+from orm import _native
+
+QUERY_DEFAULTS = "query-defaults" in json.loads(_native.native_artifact()).get("capabilities", [])
 
 
-def schema(dialect):
+def schema(dialect, defaults=True):
     def field(name, kind="string", **flags):
         return {"name": name, "column": name, "type": kind, **flags}
     return {
@@ -22,19 +26,56 @@ def schema(dialect):
         "behavior": {"schema_contract": 1, "query_defaults": [
             {"model": "SelectedAuthor", "filter": {"t": "col", "path": [], "name": "visible"}, "fields": ["name", "note"]},
             {"model": "SelectedBook", "fields": ["title"], "related": [["author"]]},
-        ]},
+        ]} if defaults else {},
     }
 
 
-@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
-async def test_selection_defaults(dialect):
+async def open_db(dialect, defaults):
     registry = orm.Registry()
-    classes = orm.define(schema(dialect), registry=registry)
-    Author, Book = classes["SelectedAuthor"], classes["SelectedBook"]
+    classes = orm.define(schema(dialect, defaults), registry=registry)
     url = "sqlite://:memory:" if dialect == "sqlite" else os.environ.get("ORM_TEST_DATABASE_URL", "postgres://postgres:postgres@localhost/orm_test")
     db = await orm.connect(url, registry=registry, default=False)
     await db.drop_tables()
     await db.create_tables()
+    return db, classes["SelectedAuthor"], classes["SelectedBook"]
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+async def test_partial_selection(dialect):
+    db, Author, Book = await open_db(dialect, defaults=False)
+    a, b = Author.objects.using(db), Book.objects.using(db)
+    try:
+        author = await a.insert(name="ann", bio="large", note=None)
+        await a.insert(name="bob", bio="large")
+        await b.insert(title="one", author_id=author.pk)
+        partial = await a.only(Author.name, Author.note).order_by(Author.id).first()
+        assert partial.to_dict() == {"name": "ann", "note": None}
+        assert partial.pk == author.pk
+        with pytest.raises(orm.NotLoaded):
+            partial.bio
+        with pytest.raises(TypeError):
+            a.only(Author.name, Author.name)
+        await partial.update(name="changed")
+        assert partial.to_dict() == {"name": "changed", "note": None}
+        await partial.refresh(Author.bio)
+        assert partial.to_dict() == {"name": "changed", "note": None, "bio": "large"}
+        assert [o.name async for batch in a.only(Author.name).batches(1) for o in batch] == ["changed", "bob"]
+        assert (await partial.books.using(db).get()).title == "one"
+        full = await a.only().order_by(Author.id).first()
+        assert "_orm_internal" not in full.__dict__ and full.bio == "large"
+        book = await b.only(Book.title).get()
+        with pytest.raises(orm.NotLoaded):
+            book.author
+        assert (await b.select_related(Book.author).only(Book.title).get()).author.name == "changed"
+    finally:
+        await db.drop_tables()
+        await db.close()
+
+
+@pytest.mark.skipif(not QUERY_DEFAULTS, reason="needs a native build with the query-defaults feature")
+@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+async def test_selection_defaults(dialect):
+    db, Author, Book = await open_db(dialect, defaults=True)
     a, b = Author.objects.using(db), Book.objects.using(db)
     try:
         with pytest.raises(ValueError):
@@ -72,17 +113,24 @@ async def test_selection_defaults(dialect):
         await joined[1].update(author_id=visible.pk)
         with pytest.raises(orm.NotLoaded):
             joined[1].author
+        await joined[1].update(author_id=hidden.pk)
+        assert joined[1]._field_value("author_id") == hidden.pk
+        assert await b.filter(Book.author.name == "hidden").update_many([{"id": joined[1].pk, "title": "t"}]) == 0
         bypassed = await b.without_defaults().select_related(Book.author).order_by(Book.id)
         assert bypassed[0].author.name == "changed" and bypassed[0].author.visible is True
-        await joined[1].update(author_id=hidden.pk)
+        assert bypassed[1].author.name == "hidden"
         assert await a.in_bulk() == {visible.pk: partial}
         changed_return = await a.only(Author.name).update(name="again").returning()
         assert changed_return[0].to_dict() == {"name": "again"}
+        default_return = await a.filter(Author.id == visible.pk).update(note="n").returning()
+        assert default_return[0].to_dict() == {"name": "again", "note": "n"}
         cleared = await b.without_related().first()
         with pytest.raises(orm.NotLoaded):
             cleared.author
         prefetched = await a.prefetch_related(Author.books).get()
         assert prefetched.books.cached[0].title == "one"
+        bypassed_prefetch = await a.without_defaults().prefetch_related(Author.books).filter(Author.id == visible.pk).get()
+        assert bypassed_prefetch.books.cached[0].title == "one" and bypassed_prefetch.books.cached[0].author_id == visible.pk
         assert await a.filter(Author.books.title == "one").count() == 1
         written = await a.only().update(visible=False).returning()
         assert len(written) == 1 and written[0].visible is False

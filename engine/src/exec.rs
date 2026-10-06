@@ -278,6 +278,7 @@ pub fn plan_update_many(
     params: &dyn Params,
     returning: bool,
     batch_size: Option<usize>,
+    without_defaults: bool,
 ) -> Result<(Vec<UpdateStatement>, UpdateMany)> {
     if rows.iter().any(|r| r.len() != fields.len()) {
         return Err(Error::query("update_many row length does not match fields"));
@@ -298,7 +299,7 @@ pub fn plan_update_many(
     if let Some(n) = batch_size {
         chunk = chunk.min(n);
     }
-    let (stmts, types) = plan::plan_update_many(schema, target, model, fields, &rows, chunk, filters, params, returning)?;
+    let (stmts, types) = plan::plan_update_many(schema, target, model, fields, &rows, chunk, filters, params, returning, without_defaults)?;
     let model_idx = schema.model_idx(model).map_err(query_err)?;
     let statements = stmts.iter().map(|s| db::build(target.dialect, s)).collect();
     Ok((stmts, UpdateMany { statements, returning: types.map(|t| (model_idx, t)) }))

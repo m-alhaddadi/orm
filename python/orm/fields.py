@@ -91,7 +91,6 @@ class Field(Generic[T]):
         if obj is None:
             return ColumnRef(owner, (), self)
         # Only reached when the value is absent from the instance __dict__.
-        from .errors import NotLoaded
         raise NotLoaded(f"{owner.__name__}.{self.name} was not loaded")
 
     if TYPE_CHECKING:
@@ -302,7 +301,8 @@ class BelongsTo(Relation[M, P]):
         key = cast("Model", obj)._field_value(self.via)
         if self.name in d:
             related = d[self.name]
-            if related is None:
+            # A default-filtered target joins as absent even when the key is set.
+            if related is None and (key is None or cast("type[Model]", self.target)._meta.default_filter is not None):
                 return None
             if related is not None and related._field_value(self.to) == key:
                 return related

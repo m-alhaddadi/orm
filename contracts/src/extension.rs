@@ -382,9 +382,12 @@ pub fn capture_storage(ir: &mut SchemaIr) -> Result<(), String> {
     Ok(())
 }
 
+/// The capability, and Cargo feature, of compiled query defaults.
+pub const QUERY_DEFAULTS: &str = "query-defaults";
+
 pub const HOST_CAPABILITIES: &[&str] = &[
     "schema-transformations", "physical-schema", "native-string-values",
-    "native-string-records", "native-string-results", "query-defaults",
+    "native-string-records", "native-string-results", QUERY_DEFAULTS,
 ];
 
 /// Combine one new declaration batch with an immutable definition context. Lowered

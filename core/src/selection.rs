@@ -9,6 +9,7 @@ pub struct PreparedDefaults {
 }
 
 pub fn prepare(models: &mut [Model], defaults: &[QueryDefaults]) -> Result<(), String> {
+    let mut filters = Vec::with_capacity(defaults.len());
     for d in defaults {
         let model = models.iter().find(|m| m.ir.name == d.model).ok_or_else(|| format!("unknown query-default model {}", d.model))?;
         if defaults.iter().filter(|x| x.model == d.model).count() != 1 { return Err(format!("duplicate query defaults for {}", d.model)); }
@@ -18,6 +19,7 @@ pub fn prepare(models: &mut [Model], defaults: &[QueryDefaults]) -> Result<(), S
         }
         let filter = d.filter.clone().map(serde_json::from_value::<Expr>).transpose().map_err(|e| format!("{} default filter: {e}", d.model))?;
         if let Some(filter) = &filter { validate_filter(model, filter)?; }
+        filters.push(filter);
         for path in &d.related {
             let mut current = model;
             if path.is_empty() { return Err("empty default relation path".into()); }
@@ -40,9 +42,9 @@ pub fn prepare(models: &mut [Model], defaults: &[QueryDefaults]) -> Result<(), S
         stack.pop(); Ok(())
     }
     for d in defaults { visit(models, defaults, &d.model, &mut vec![])?; }
-    for d in defaults {
+    for (d, filter) in defaults.iter().zip(filters) {
         let model = models.iter_mut().find(|m| m.ir.name == d.model).expect("validated model");
-        model.query_defaults = PreparedDefaults { filter: d.filter.clone().map(serde_json::from_value).transpose().map_err(|e| e.to_string())?, fields: d.fields.clone(), related: d.related.clone() };
+        model.query_defaults = PreparedDefaults { filter, fields: d.fields.clone(), related: d.related.clone() };
     }
     Ok(())
 }

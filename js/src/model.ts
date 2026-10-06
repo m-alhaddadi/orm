@@ -16,8 +16,9 @@ import type { ManyRelatedSet, QuerySet, RelatedSet } from "./query.js";
 
 /** Where an instance keeps its loaded relations. */
 export const RELATED: unique symbol = Symbol("orm.related");
-/** The database an instance was read from (`using(db)`), which it writes back to. */
+/** Private helper values (identity, relation keys) of a partial instance. */
 export const INTERNAL: unique symbol = Symbol("orm.internal");
+/** The database an instance was read from (`using(db)`), which it writes back to. */
 export const DB: unique symbol = Symbol("orm.db");
 
 export type IRField = {
@@ -86,7 +87,7 @@ type Row = Record<PropertyKey, unknown> & { [RELATED]?: Record<string, unknown>;
 
 /** Schema information about one model (`User._meta`). */
 export class ModelMeta implements Source {
-  /** Prepared once at definition for the bulk-write primitive. */
+  /** The schema default filter IR, if any; set once by `define()`. */
   defaultFilter: unknown;
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
@@ -98,6 +99,8 @@ export class ModelMeta implements Source {
   readonly pk: FieldMeta;
   /** Makes instances: `new meta.Row()`, then the fields are assigned in schema order. */
   readonly Row: new () => Row;
+  /** Makes partial instances: like `Row`, but an absent field throws `NotLoaded`. */
+  readonly PartialRow: new () => Row;
   /** The prototype of paths that reach this model (`User.posts` for `Post`). */
   readonly pathProto: object;
   readonly model: ModelClass<ModelSpec> & Record<string, unknown>;
@@ -148,6 +151,7 @@ export class ModelMeta implements Source {
     this.pk = pks[0]!;
     this.pathProto = this.makePathProto();
     this.Row = this.makeRow();
+    this.PartialRow = this.makePartialRow();
     const model = Object.create(this.pathProto) as Record<PropertyKey, unknown>;
     model[PATH] = { root: this, path: [], names: [], target: ir.name } satisfies PathState;
     const name = ir.name;
@@ -211,12 +215,6 @@ export class ModelMeta implements Source {
   private makeRow(): new () => Row {
     const meta = this;
     const proto: Record<string, unknown> = {};
-    for (const f of this.fieldList) {
-      Object.defineProperty(proto, f.name, {
-        get() { throw new NotLoaded(`${meta.name}.${f.name} was not loaded`); },
-        set(this: Row, value: unknown) { Object.defineProperty(this, f.name, { value, writable: true, configurable: true, enumerable: true }); },
-      });
-    }
     for (const r of this.relations.values()) {
       Object.defineProperty(proto, r.name, { get: relationGetter(meta, r), enumerable: false });
     }
@@ -255,9 +253,25 @@ export class ModelMeta implements Source {
     return Row;
   }
 
+  /** Field accessors live only here, so whole-model rows keep plain assignment. */
+  private makePartialRow(): new () => Row {
+    const meta = this;
+    const proto = Object.create(this.Row.prototype) as Record<string, unknown>;
+    for (const f of this.fieldList) {
+      Object.defineProperty(proto, f.name, {
+        get() { throw new NotLoaded(`${meta.name}.${f.name} was not loaded`); },
+        set(this: Row, value: unknown) { Object.defineProperty(this, f.name, { value, writable: true, configurable: true, enumerable: true }); },
+      });
+    }
+    const PartialRow = function (this: Row) {} as unknown as new () => Row;
+    (PartialRow as unknown as { prototype: object }).prototype = proto;
+    Object.defineProperty(PartialRow, "name", { value: meta.name });
+    return PartialRow;
+  }
+
   /** The instance for the row in `values` starting at `start`. */
   instance(values: unknown[], start: number, db: Database | undefined, shape?: NativeShape): Row {
-    const o = new this.Row();
+    const o = shape ? new this.PartialRow() : new this.Row();
     const fields = this.fieldList;
     if (shape) {
       const internal: Record<string, unknown> = {};
@@ -323,8 +337,10 @@ function relationGetter(meta: ModelMeta, r: RelationMeta): (this: Row) => unknow
         const loaded = this[RELATED];
         if (loaded && r.name in loaded) {
           const value = loaded[r.name] as Row | null;
-          const to = registry.get(r.target).fieldByIr.get(r.to)!.name;
-          if (value === null || fieldValue(value, to) === key) {
+          const target = registry.get(r.target);
+          const to = target.fieldByIr.get(r.to)!.name;
+          // A default-filtered target joins as absent even when the key is set.
+          if (value === null ? key === null || target.defaultFilter !== undefined : fieldValue(value, to) === key) {
             return value;
           }
         } else if (key === null) {
@@ -387,24 +403,35 @@ function invalidateChangedKeys(o: Row, fresh: Row): void {
   }
 }
 
-function apply(o: Row, fresh: Row): void {
+/** The row query; a partial instance keeps its public shape plus `extra`. */
+function loadedQuery(o: Row, extra: readonly string[] = []): QuerySet<ModelSpec> {
+  const query = rowQuery(o);
+  if (!o[INTERNAL]) return query;
+  const loaded = metaOf(o).fieldList.filter((f) => Object.hasOwn(o, f.name)).map((f) => f.ir);
+  return query.onlyFields([...new Set([...loaded, ...extra])]);
+}
+
+function replaceFrom(o: Row, fresh: Row): void {
   invalidateChangedKeys(o, fresh);
-  for (const f of metaOf(o).fieldList) {
-    if (!o[INTERNAL] || Object.hasOwn(o, f.name)) o[f.name] = fresh[f.name];
-    else if (Object.hasOwn(o[INTERNAL] as object, f.name)) (o[INTERNAL] as Record<string, unknown>)[f.name] = fresh[f.name];
+  const fields = metaOf(o).fieldList;
+  if (!o[INTERNAL] && !fresh[INTERNAL]) {
+    for (const f of fields) o[f.name] = fresh[f.name];
+    return;
   }
+  for (const f of fields) { delete o[f.name]; if (Object.hasOwn(fresh, f.name)) o[f.name] = fresh[f.name]; }
+  if (fresh[INTERNAL]) o[INTERNAL] = fresh[INTERNAL]; else delete o[INTERNAL];
 }
 
 async function instanceUpdate(this: Row, values: object): Promise<void> {
   if (!Object.keys(values).length) {
     return;
   }
-  const rows = (await rowQuery(this).update(values as never, { returning: true })) as Row[];
+  const rows = (await loadedQuery(this).update(values as never, { returning: true })) as Row[];
   if (!rows.length) {
     const meta = metaOf(this);
     throw new (meta.model.DoesNotExist)(`${meta.name} ${show(this["pk"])} no longer exists`);
   }
-  apply(this, rows[0]!);
+  replaceFrom(this, rows[0]!);
 }
 
 async function instanceDelete(this: Row): Promise<void> {
@@ -412,15 +439,8 @@ async function instanceDelete(this: Row): Promise<void> {
 }
 
 async function instanceRefresh(this: Row, ...fields: readonly Column<unknown, string>[]): Promise<void> {
-  const meta = metaOf(this);
-  const query = rowQuery(this);
-  const requested = fields.length ? query.only(...fields).state.modelFields ?? [] : [];
-  const publicFields = meta.fieldList.filter((f) => Object.hasOwn(this, f.name)).map((f) => f.ir);
-  const selection = [...new Set([...publicFields, ...requested])];
-  const fresh = (await (this[INTERNAL] ? query.onlyFields(selection) : query).get()) as Row;
-  invalidateChangedKeys(this, fresh);
-  for (const f of meta.fieldList) { delete this[f.name]; if (Object.hasOwn(fresh, f.name)) this[f.name] = fresh[f.name]; }
-  if (fresh[INTERNAL]) this[INTERNAL] = fresh[INTERNAL]; else delete this[INTERNAL];
+  const requested = fields.length ? rowQuery(this).only(...fields).state.modelFields ?? [] : [];
+  replaceFrom(this, (await loadedQuery(this, requested).get()) as Row);
 }
 
 // -- registry -------------------------------------------------------------------------------------
@@ -437,7 +457,6 @@ export class Registry {
   private readonly extra: Record<string, unknown[]> = {};
   private behavior: Record<string, unknown> = {};
   private nativeSchema: NativeSchema | undefined;
-
 
   get(name: string): ModelMeta {
     const m = this.models.get(name);

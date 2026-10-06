@@ -82,6 +82,7 @@ fn update_many_plan<'py>(
     params: &[Bound<'py, PyAny>],
     returning: bool,
     batch_size: Option<usize>,
+    without_defaults: bool,
 ) -> PyResult<(Vec<sea_query::UpdateStatement>, exec::UpdateMany)> {
     let values = convert_rows(schema, model, fields, rows, false)?
         .into_iter()
@@ -89,7 +90,7 @@ fn update_many_plan<'py>(
         .collect();
     let filters: Vec<ir::Expr> =
         serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
-    exec::plan_update_many(schema, target, model, fields, values, &filters, &PyParams(params), returning, batch_size)
+    exec::plan_update_many(schema, target, model, fields, values, &filters, &PyParams(params), returning, batch_size, without_defaults)
         .map_err(engine_err)
 }
 
@@ -141,7 +142,7 @@ impl PySchema {
     ) -> PyResult<Vec<String>> {
         let target = Target::new(self.inner.dialect).without(&disable).map_err(query_err)?;
         let (stmts, _) =
-            update_many_plan(&self.inner, target, model, &fields, rows, filters_json, &params, false, batch_size)?;
+            update_many_plan(&self.inner, target, model, &fields, rows, filters_json, &params, false, batch_size, false)?;
         Ok(stmts.iter().map(|s| db::to_string(target.dialect, s)).collect())
     }
 
@@ -312,7 +313,7 @@ impl Engine {
     /// own values, among the rows matching `filters_json` (JSON list of filter IR, values
     /// in `params`). Big inputs run as several statements in one transaction (inside `tx`
     /// when given). Returns the number of rows updated, or the rows with `returning`.
-    #[pyo3(signature = (model, fields, rows, filters_json, params, returning = false, batch_size = None, tx = None, db = None))]
+    #[pyo3(signature = (model, fields, rows, filters_json, params, returning = false, batch_size = None, tx = None, db = None, without_defaults = false))]
     #[allow(clippy::too_many_arguments)]
     fn update_many<'py>(
         &self,
@@ -326,11 +327,12 @@ impl Engine {
         batch_size: Option<usize>,
         tx: Option<&Bound<'py, Transaction>>,
         db: Option<Bound<'py, PyAny>>,
+        without_defaults: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let classes = self.classes.clone();
         let db = db.map(Bound::unbind);
         let (_, um) = update_many_plan(
-            &self.schema, self.target, model, &fields, rows, filters_json, &params, returning, batch_size,
+            &self.schema, self.target, model, &fields, rows, filters_json, &params, returning, batch_size, without_defaults,
         )?;
         let conn = self.conn(tx);
         let own_tx = tx.is_none();

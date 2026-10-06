@@ -1657,9 +1657,9 @@ impl<'s> Planner<'s> {
 
     // -- statements ---------------------------------------------------------------------
 
-    /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
-    /// columns.
-    fn instance_shape(&self, model: usize, names: Option<&[String]>) -> Result<Option<orm_core::behavior::ResultShape>> {
+    /// The output shape for public `names` plus private `extra` helpers; `None` keeps the
+    /// whole-model row and its fast materialization path.
+    fn instance_shape(&self, model: usize, names: Option<&[String]>, extra: &[String]) -> Result<Option<orm_core::behavior::ResultShape>> {
         use orm_core::behavior::{FieldId, ModelId, ResultField, ResultShape};
         let Some(names) = names else { return Ok(None) };
         let m = self.model(model);
@@ -1669,6 +1669,7 @@ impl<'s> Planner<'s> {
             if positions.as_slice().contains(&pos) { return Err(Error::query("duplicate model field")); }
             positions.push(pos);
         }
+        if positions.len() == m.fields().len() && positions.iter().enumerate().all(|(i, &p)| i == p) { return Ok(None); }
         let public = positions.len();
         // Identity and relation keys remain private when omitted by the caller.
         let mut helpers = vec![m.pk];
@@ -1678,9 +1679,11 @@ impl<'s> Planner<'s> {
                 if relation.target == m.ir.name { helpers.push(m.field_pos(&relation.to).map_err(query_err)?); }
             }
         }
-        #[cfg(feature = "composition")]
-        for &f in &positions { if let Some(d) = m.native.dependency(f) { helpers.push(d); } }
+        for name in extra { helpers.push(m.field_pos(name).map_err(query_err)?); }
         for pos in helpers { if !positions.as_slice().contains(&pos) { positions.push(pos); } }
+        // Computed fields need their inputs, including computed helpers.
+        #[cfg(feature = "composition")]
+        for i in 0..positions.len() { if let Some(d) = m.native.dependency(positions[i]) { if !positions.contains(&d) { positions.push(d); } } }
         Ok(Some(ResultShape { model: ModelId(model), fields: positions.into_iter().enumerate().map(|(slot, field)| ResultField {
             field: FieldId { model: ModelId(model), position: field }, physical: Some(slot), public: slot < public,
             dependencies: {
@@ -1692,6 +1695,8 @@ impl<'s> Planner<'s> {
         }).collect() }))
     }
 
+    /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
+    /// columns.
     fn build_select(&mut self, q: &Select) -> Result<SelectPlan> {
         #[cfg(feature = "query-defaults")]
         let q = &{
@@ -1728,23 +1733,12 @@ impl<'s> Planner<'s> {
         let alias = self.root_alias().to_owned();
         let mut stmt = Query::select();
         let mut types = vec![];
-        let mut shape = self.instance_shape(self.root, q.model_fields.as_deref())?;
-        if let Some(shape) = &mut shape {
-            for name in &q.model_helpers {
-                let position = root.field_pos(name).map_err(query_err)?;
-                if !shape.fields.iter().any(|f| f.field.position == position) {
-                    let slot = shape.fields.len();
-                    shape.fields.push(orm_core::behavior::ResultField { field: orm_core::behavior::FieldId { model: orm_core::behavior::ModelId(self.root), position }, physical: Some(slot), public: false, dependencies: vec![] });
-                }
-            }
-        }
+        let shape = self.instance_shape(self.root, q.model_fields.as_deref(), &q.model_helpers)?;
         let positions = shape_positions(root, shape.as_ref());
-        for &_position in &positions {
-            let f = &root.fields()[_position];
-            #[cfg(not(feature = "composition"))]
-            let _ = _position;
+        for &position in &positions {
+            let f = &root.fields()[position];
             #[cfg(feature = "composition")]
-            if root.native.computed().contains(&_position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
+            if root.native.computed().contains(&position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
             stmt.expr(self.read_field(self.root, &alias, f)?);
             types.push(f.value_type());
         }
@@ -1763,7 +1757,7 @@ impl<'s> Planner<'s> {
                 ),
             };
             #[cfg(feature = "query-defaults")]
-            let joined_shape = self.instance_shape(model, if q.without_defaults { None } else { m.query_defaults.fields.as_deref() })?;
+            let joined_shape = self.instance_shape(model, if q.without_defaults { None } else { m.query_defaults.fields.as_deref() }, &[])?;
             #[cfg(not(feature = "query-defaults"))]
             let joined_shape = None;
             let joined_positions = shape_positions(m, joined_shape.as_ref());
@@ -1775,12 +1769,10 @@ impl<'s> Planner<'s> {
                 pk_pos: joined_positions.iter().position(|&f| f == m.pk).expect("identity selected"),
                 shape: joined_shape,
             });
-            for &_position in &joined_positions {
-                let f = &m.fields()[_position];
-                #[cfg(not(feature = "composition"))]
-                let _ = _position;
+            for &position in &joined_positions {
+                let f = &m.fields()[position];
                 #[cfg(feature = "composition")]
-                if m.native.computed().contains(&_position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
+                if m.native.computed().contains(&position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
                 stmt.expr(self.read_field(model, &alias, f)?);
                 types.push(f.value_type());
             }
@@ -1796,7 +1788,7 @@ impl<'s> Planner<'s> {
         }
         let mut prefetch = vec![];
         for node in &q.prefetch {
-            let mut plan = plan_prefetch(self.schema, self.target, self.params, self.root, node)?;
+            let mut plan = plan_prefetch(self.schema, self.target, self.params, self.root, node, q.without_defaults)?;
             plan.key_pos = positions.iter().position(|&f| f == plan.key_pos).expect("selected relation helper");
             prefetch.push(plan);
         }
@@ -1848,7 +1840,7 @@ impl<'s> Planner<'s> {
     fn return_shape(&self, names: Option<&[String]>, _without_defaults: bool) -> Result<Option<orm_core::behavior::ResultShape>> {
         #[cfg(feature = "query-defaults")]
         let names = names.or_else(|| if _without_defaults { None } else { self.model(self.root).query_defaults.fields.as_deref() });
-        self.instance_shape(self.root, names)
+        self.instance_shape(self.root, names, &[])
     }
 
     pub fn update(&mut self, q: &Update) -> Result<(UpdateStatement, Option<ReturnColumns>)> {
@@ -1955,6 +1947,7 @@ fn plan_prefetch(
     params: &dyn Params,
     parent: usize,
     node: &Prefetch,
+    without_defaults: bool,
 ) -> Result<PrefetchPlan> {
     let pm = schema.model(parent);
     let (rel, child) = pm.relation(&node.relation).map_err(query_err)?;
@@ -1970,6 +1963,7 @@ fn plan_prefetch(
     }
     let many = rel.kind == RelKind::Many;
     let mut q = node.query.clone();
+    q.without_defaults |= without_defaults;
     let pk_order = Order { expr: Expr::Col { path: vec![], name: cm.pk_field().name.clone() }, desc: false };
     let sliced = q.limit.is_some() || q.offset.is_some();
     let slice = match sliced {
@@ -2237,6 +2231,7 @@ pub fn plan_update_many(
     filters: &[Expr],
     params: &dyn Params,
     returning: bool,
+    without_defaults: bool,
 ) -> Result<(Vec<UpdateStatement>, Option<Vec<ValueType>>)> {
     let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
     let m = schema.model(planner.root);
@@ -2251,7 +2246,7 @@ pub fn plan_update_many(
     if returning {
         planner.require(planner.caps.returning, "update_many().returning()")?;
     }
-    let where_ = planner.apply_filters(filters, true)?;
+    let where_ = planner.apply_filters(filters, without_defaults)?;
     let pk_col = col(&table, &cols[0].column);
     let mut stmts = vec![];
     for chunk in rows.chunks(chunk_rows.max(1)) {

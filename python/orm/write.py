@@ -46,6 +46,11 @@ __all__ = [
 ]
 
 
+def _key_of(value: Any, name: str) -> Any:
+    """The key field ``name`` of a related instance, loaded or private."""
+    return value._field_value(name) if hasattr(value, "_field_value") else getattr(value, name)
+
+
 def prepare_rows(
     model: type[Model], rows: Iterable[Mapping[str, Any]]
 ) -> tuple[list[str], list[list[Any]], set[str]]:
@@ -66,7 +71,7 @@ def prepare_rows(
             if key in meta.input_fields:
                 values[key] = value
             elif isinstance(rel := meta.relations.get(key), BelongsTo):
-                values[rel.via] = None if value is None else (value._field_value(rel.to) if hasattr(value, "_field_value") else getattr(value, rel.to))
+                values[rel.via] = None if value is None else _key_of(value, rel.to)
             else:
                 raise TypeError(f"{meta.name} has no field {key!r}")
         provided.update(values)
@@ -100,7 +105,7 @@ def prepare_update_rows(model: type[Model], rows: Iterable[Mapping[str, Any]]) -
             if key in meta.input_fields:
                 values[key] = value
             elif isinstance(rel := meta.relations.get(key), BelongsTo):
-                values[rel.via] = None if value is None else (value._field_value(rel.to) if hasattr(value, "_field_value") else getattr(value, rel.to))
+                values[rel.via] = None if value is None else _key_of(value, rel.to)
             else:
                 raise TypeError(f"{meta.name} has no field {key!r}")
         if values.get(pk) is None:
@@ -131,7 +136,7 @@ def assignments(model: type[Model], values: Mapping[str, Any], ctx: IRContext) -
     for name, value in values.items():
         rel = meta.relations.get(name)
         if isinstance(rel, BelongsTo):
-            name, value = rel.via, (None if value is None else (value._field_value(rel.to) if hasattr(value, "_field_value") else getattr(value, rel.to)))
+            name, value = rel.via, (None if value is None else _key_of(value, rel.to))
         if name not in meta.input_fields:
             raise TypeError(f"{meta.name} has no field {name!r}")
         node = value._ir(ctx) if isinstance(value, Expression) else ctx.param(value)
@@ -412,14 +417,12 @@ class UpdateMany(Generic[M]):
             return [] if returning else 0
         params: list[Any] = []
         ir = self._qs._mutation_ir("update", params)
-        if default_filter := self._qs._default_filter_ir():
-            ir["filters"].append(default_filter)
         if "with" in ir:
             raise QueryError("update_many() filters can't read CTEs")
         db = resolve(self._qs._db)
         return await db._update_many(
             self._qs.model._meta.name, self._fields, self._rows, ir["filters"], params, returning, self._batch_size,
-            self._qs._db,
+            self._qs._db, self._qs._without_defaults,
         )
 
     def returning(self) -> _UpdateManyReturning[M]:

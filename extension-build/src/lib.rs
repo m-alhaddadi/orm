@@ -1,4 +1,5 @@
 //! Build frontend for fixed native composition. Cargo owns package resolution.
+pub use orm_contracts::extension::QUERY_DEFAULTS;
 use orm_contracts::extension::{Manifest, Pass, HOST_CONTRACT, SCHEMA_CONTRACT};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -9,6 +10,11 @@ pub struct Composition {
 }
 
 impl Composition {
+    /// Whether any selected extension declares `capability`.
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.manifests.iter().any(|m| m.capabilities.iter().any(|c| c == capability))
+    }
+
     pub fn resolve(mut manifests: Vec<Manifest>) -> Result<Self, String> {
         manifests.sort_by(|a, b| a.id.cmp(&b.id));
         let mut extensions = BTreeMap::new();
@@ -94,7 +100,7 @@ impl Composition {
             ..Default::default()
         };
         let mut artifact = artifact;
-        if self.manifests.iter().any(|m| m.capabilities.iter().any(|c| c == "query-defaults")) { artifact.capabilities.push("query-defaults".into()); }
+        if self.has_capability(QUERY_DEFAULTS) { artifact.capabilities.push(QUERY_DEFAULTS.into()); }
         if let Some(native) = native {
             artifact.specializations = native.specializations.clone();
             artifact.capabilities.extend(["native-string-values", "native-string-records", "native-string-results"].into_iter().map(str::to_owned));

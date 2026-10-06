@@ -10,7 +10,7 @@ from os import PathLike
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from . import _native
-from .errors import DoesNotExist, MultipleObjectsReturned
+from .errors import DoesNotExist, MultipleObjectsReturned, NotLoaded
 from .expr import ColumnRef
 from .fields import BY_TYPE, Array, BelongsTo, Enum, Field, HasMany, HasOne, ManyToMany, Relation, String
 
@@ -405,7 +405,6 @@ class Model:
         internal = self.__dict__.get("_orm_internal", {})
         if name in internal:
             return internal[name]
-        from .errors import NotLoaded
         raise NotLoaded(f"{type(self).__name__}.{name} was not loaded")
 
     def to_dict(self) -> dict[str, Any]:
@@ -419,45 +418,16 @@ class Model:
     def _row_query(self) -> QuerySet[Self]:
         return type(self).objects.without_defaults().using(self.__dict__.get("_db")).filter(self._meta.pk_ref() == self.pk)
 
-    def _apply_row(self, row: tuple[Any, ...]) -> None:
-        values = dict(zip(self._meta.field_names, row))
-        for name, relation in self._meta.relations.items():
-            source = relation.via if isinstance(relation, BelongsTo) else getattr(relation, "from_", None)
-            if source and self._field_value(source) != values[source]:
-                self.__dict__.pop(name, None)
-        if "_orm_internal" in self.__dict__:
-            loaded = set(self.__dict__) & self._meta.fields.keys()
-            self.__dict__.update({n: values[n] for n in loaded})
-            self.__dict__["_orm_internal"].update({n: values[n] for n in self.__dict__["_orm_internal"]})
-        else:
-            self.__dict__.update(values)
-
-    async def update(self, **values: Any) -> None:
-        """``UPDATE ... SET <values> WHERE pk = ... RETURNING *``.
-
-        Values may be expressions (``views=Post.views + 1``); the instance is refreshed
-        from the returned row, so it shows what the database stored.
-        """
-        if not values:
-            return
-        rows = await self._row_query().update(**values).returning()
-        if not rows:
-            raise self.DoesNotExist(f"{type(self).__name__} {self.pk!r} no longer exists")
-        self._apply_row(tuple(rows[0].__dict__[n] for n in self._meta.field_names))
-
-    async def delete(self) -> None:
-        """``DELETE ... WHERE pk = ...``. The instance keeps its last values."""
-        await self._row_query().delete()
-
-    async def refresh(self, *fields: ColumnRef[Any]) -> None:
-        """Reload column values from the database."""
+    def _loaded_query(self, *extra: str) -> QuerySet[Self]:
+        """The row query; a partial instance keeps its public shape plus ``extra``."""
         query = self._row_query()
-        requested = query.only(*fields)._model_fields if fields else ()
-        if "_orm_internal" in self.__dict__:
-            names = [n for n in self._meta.field_names if n in self.__dict__]
-            names.extend(n for n in requested or () if n not in names)
-            query = query._clone(_model_fields=tuple(names))
-        fresh = await query.get()
+        if "_orm_internal" not in self.__dict__:
+            return query
+        names = [n for n in self._meta.field_names if n in self.__dict__]
+        names.extend(n for n in extra if n not in names)
+        return query._clone(_model_fields=tuple(names))
+
+    def _replace_from(self, fresh: Model) -> None:
         for name, relation in self._meta.relations.items():
             source = relation.via if isinstance(relation, BelongsTo) else getattr(relation, "from_", None)
             if source and self._field_value(source) != fresh._field_value(source):
@@ -469,6 +439,28 @@ class Model:
             self.__dict__["_orm_internal"] = fresh.__dict__["_orm_internal"]
         else:
             self.__dict__.pop("_orm_internal", None)
+
+    async def update(self, **values: Any) -> None:
+        """``UPDATE ... SET <values> WHERE pk = ... RETURNING`` the loaded fields.
+
+        Values may be expressions (``views=Post.views + 1``); the instance is refreshed
+        from the returned row, so it shows what the database stored.
+        """
+        if not values:
+            return
+        rows = await self._loaded_query().update(**values).returning()
+        if not rows:
+            raise self.DoesNotExist(f"{type(self).__name__} {self.pk!r} no longer exists")
+        self._replace_from(rows[0])
+
+    async def delete(self) -> None:
+        """``DELETE ... WHERE pk = ...``. The instance keeps its last values."""
+        await self._row_query().delete()
+
+    async def refresh(self, *fields: ColumnRef[Any]) -> None:
+        """Reload column values from the database."""
+        requested = self._row_query().only(*fields)._model_fields or () if fields else ()
+        self._replace_from(await self._loaded_query(*requested).get())
 
     # -- dunder --------------------------------------------------------------------------
 

@@ -1,8 +1,7 @@
-import { fieldValue } from "./model.js";
 /** Rows and assignments for INSERT / UPDATE statements. */
 
 import { Expression, ParamRef, wrap, type IR, type IRContext } from "./expr.js";
-import type { ModelMeta } from "./model.js";
+import { fieldValue, type ModelMeta } from "./model.js";
 
 /** Values of one row by TypeScript name, a to-one relation (`author: user`) giving its
  * key column. Expressions are refused unless `expressions`. */

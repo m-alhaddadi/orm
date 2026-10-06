@@ -61,9 +61,10 @@ class Database:
         returning: bool,
         batch_size: int | None,
         db: Database | None = None,
+        without_defaults: bool = False,
     ) -> Any:
         return await self._engine.update_many(
-            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx(), db
+            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx(), db, without_defaults
         )
 
     @asynccontextmanager

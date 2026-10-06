@@ -211,7 +211,7 @@ class QuerySet(Generic[M]):
                 raise TypeError("only() takes root model columns")
             names.append(field._field.name)
         if len(set(names)) != len(names):
-            raise ValueError("duplicate model field")
+            raise TypeError("duplicate model field")
         return self._clone(_model_fields=tuple(names) if fields else self._model._meta.field_names)
 
     def filter(self, *conditions: ConditionLike) -> Self:
@@ -547,11 +547,6 @@ class QuerySet(Generic[M]):
         if values is not None:
             ir["set"] = assignments(self._model, values, ctx)
         return ctx.finish(ir)
-
-    def _default_filter_ir(self) -> IR | None:
-        if self._without_defaults:
-            return None
-        return self._model._meta.default_filter
 
     def _native(self) -> Any:
         return self._model._meta.registry.native()
@@ -928,7 +923,7 @@ class ManyRelatedSet(QuerySet[M]):
         keys = []
         for o in objs:
             if isinstance(o, target):
-                keys.append(o.__dict__[to])
+                keys.append(o._field_value(to))
             elif hasattr(o, "_meta"):
                 raise TypeError(f"{self._relation.model.__name__}.{self._relation.name} links {target.__name__}, not {o!r}")
             else:

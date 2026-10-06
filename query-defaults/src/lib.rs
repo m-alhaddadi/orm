@@ -6,7 +6,7 @@ use std::collections::HashMap;
 pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
     let declarations = &ir.behavior.declarations;
     let mut resolved: HashMap<String, QueryDefaults> = ir.behavior.query_defaults.iter().map(|d| (d.model.clone(), d.clone())).collect();
-    fn resolve(ir: &SchemaIr, name: &str, resolved: &mut HashMap<String, QueryDefaults>, stack: &mut Vec<String>) -> Result<QueryDefaults, String> {
+    fn resolve(ir: &SchemaIr, metadata: &Value, name: &str, resolved: &mut HashMap<String, QueryDefaults>, stack: &mut Vec<String>) -> Result<QueryDefaults, String> {
         if let Some(d) = resolved.get(name) { return Ok(d.clone()); }
         if stack.iter().any(|n| n == name) { return Err(format!("query-default inheritance cycle: {} -> {name}", stack.join(" -> "))); }
         stack.push(name.into());
@@ -15,12 +15,9 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         if ds.len() > 1 { return Err(format!("duplicate query.defaults on {name}")); }
         let d = ds.first().copied();
         let proxy = ir.behavior.declarations.iter().find(|d| d.model == name && (d.attribute == "proxy.of" || d.attribute == "proxy.model" || d.attribute == "composition.model"));
-        // Read additive metadata through its serialized contract so this consumer can
-        // compile independently before the proxy contract is merged.
-        let metadata = serde_json::to_value(&ir.behavior).map_err(|e| e.to_string())?;
         let proxy_parent = metadata.get("proxy_models").and_then(Value::as_array).and_then(|models| models.iter().find(|m| m["model"] == name)).and_then(|m| m.get("parent"));
         let parent = d.and_then(|d| d.arguments.get("parent")).or(proxy_parent).or_else(|| proxy.and_then(|d| d.arguments.get("parent").or_else(|| d.positional.first()))).and_then(Value::as_str);
-        let inherited = match parent { Some(p) => resolve(ir, p, resolved, stack)?, None => QueryDefaults::default() };
+        let inherited = match parent { Some(p) => resolve(ir, metadata, p, resolved, stack)?, None => QueryDefaults::default() };
         let mut out = inherited.clone(); out.model = name.into(); out.parent = parent.map(str::to_owned);
         if let Some(d) = d {
             if let Some(source) = d.arguments.get("filter") {
@@ -43,7 +40,10 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         stack.pop(); resolved.insert(name.into(), out.clone()); Ok(out)
     }
     if !declarations.iter().any(|d| d.attribute.starts_with("query.")) && resolved.is_empty() { return Ok(()); }
-    for model in &ir.models { resolve(ir, &model.name, &mut resolved, &mut vec![])?; }
+    // Read additive metadata through its serialized contract so this consumer can
+    // compile independently before the proxy contract is merged.
+    let metadata = serde_json::to_value(&ir.behavior).map_err(|e| e.to_string())?;
+    for model in &ir.models { resolve(ir, &metadata, &model.name, &mut resolved, &mut vec![])?; }
     ir.behavior.query_defaults = ir.models.iter().map(|m| resolved.remove(&m.name).expect("resolved model")).collect();
     Ok(())
 }
@@ -76,13 +76,18 @@ impl<'a> Parser<'a> {
     fn peek(&self) -> &str { self.tokens.get(self.pos).map(String::as_str).unwrap_or("") }
     fn take(&mut self) -> Result<String, String> { let t = self.tokens.get(self.pos).cloned().ok_or("incomplete default filter")?; self.pos += 1; Ok(t) }
     fn boolean(&mut self, min: u8) -> Result<Value, String> {
-        let mut left = self.comparison()?;
+        let mut left = self.unary()?;
         loop {
             let (precedence, tag) = match self.peek() { "or" | "||" => (1, "or"), "and" | "&&" => (2, "and"), _ => break };
             if precedence < min { break; }
             self.take()?; let right = self.boolean(precedence + 1)?; left = json!({"t":tag,"items":[left,right]});
         }
         Ok(left)
+    }
+    /// `not` binds looser than comparisons, as in Python and TypeScript.
+    fn unary(&mut self) -> Result<Value, String> {
+        if matches!(self.peek(), "!" | "not") { self.take()?; return Ok(json!({"t":"not","item":self.unary()?})); }
+        self.comparison()
     }
     fn comparison(&mut self) -> Result<Value, String> {
         let left = self.atom()?;
@@ -96,7 +101,6 @@ impl<'a> Parser<'a> {
         let token = self.take()?;
         Ok(match token.as_str() {
             "(" => { let value = self.boolean(0)?; if self.take()? != ")" { return Err("expected ')'".into()); } value },
-            "!" | "not" => json!({"t":"not","item":self.atom()?}),
             "parent.default_filter" => self.parent.cloned().ok_or("parent.default_filter has no inherited filter")?,
             "null" => Value::Null,
             "true" | "false" => json!({"t":"const","value":token == "true"}),
@@ -111,7 +115,7 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    pub(super) fn ir() -> SchemaIr {
+    fn ir() -> SchemaIr {
         serde_json::from_value(json!({"models":[
             {"name":"Parent","table":"p","fields":[{"name":"id","column":"id","type":"int","primary_key":true},{"name":"visible","column":"visible","type":"bool"},{"name":"bio","column":"bio","type":"text"}]},
             {"name":"Child","table":"p","fields":[{"name":"id","column":"id","type":"int","primary_key":true},{"name":"visible","column":"visible","type":"bool"},{"name":"bio","column":"bio","type":"text"}]}
@@ -137,24 +141,19 @@ mod tests {
         assert!(Parser::parse("visible == true trailing", None).is_err());
         assert!(Parser::parse("name == \"quoted value\" or id >= 4", None).is_ok());
     }
-}
-
-#[cfg(test)]
-mod reset_tests {
-    use super::*;
     #[test]
     fn inheritance_clear_and_replacement_are_distinct() {
-        let mut schema = crate::tests::ir();
+        let mut schema = ir();
         schema.behavior.declarations[1].arguments.remove("filter");
         schema.behavior.declarations[1].arguments.remove("fields");
         lower(&mut schema).unwrap();
         assert_eq!(schema.behavior.query_defaults[0].filter, schema.behavior.query_defaults[1].filter);
         assert_eq!(schema.behavior.query_defaults[0].fields, schema.behavior.query_defaults[1].fields);
-        let mut schema = crate::tests::ir();
+        let mut schema = ir();
         schema.behavior.declarations[1].arguments.insert("filter".into(), json!("id == 1"));
         lower(&mut schema).unwrap();
         assert_eq!(schema.behavior.query_defaults[1].filter.as_ref().unwrap()["t"], "cmp");
-        let mut schema = crate::tests::ir();
+        let mut schema = ir();
         schema.behavior.declarations.retain(|d| d.attribute != "query.selectOut");
         schema.behavior.declarations[1].arguments.insert("filter".into(), json!("none"));
         schema.behavior.declarations[1].arguments.insert("related".into(), json!([]));
@@ -162,5 +161,16 @@ mod reset_tests {
         assert!(schema.behavior.query_defaults[1].filter.is_none());
         assert!(schema.behavior.query_defaults[1].fields.is_none());
         assert!(schema.behavior.query_defaults[1].related.is_empty());
+    }
+    #[test]
+    fn operator_precedence_and_null() {
+        let not = Parser::parse("not id == 1", None).unwrap();
+        assert_eq!((not["t"].as_str(), not["item"]["t"].as_str()), (Some("not"), Some("cmp")));
+        assert_eq!(Parser::parse("! visible", None).unwrap()["item"]["t"], "col");
+        assert_eq!(Parser::parse("a or b and c", None).unwrap()["items"][1]["t"], "and");
+        assert_eq!(Parser::parse("a and b or c", None).unwrap()["items"][0]["t"], "and");
+        assert_eq!(Parser::parse("a != null", None).unwrap()["neg"], true);
+        assert_eq!(Parser::parse("a == null", None).unwrap()["neg"], false);
+        assert!(Parser::parse("a < null", None).is_err());
     }
 }

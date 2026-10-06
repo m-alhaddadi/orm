@@ -1,4 +1,3 @@
-import { fieldValue } from "./model.js";
 /**
  * Query sets: immutable query builders. Nothing runs until a terminal method is called:
  * `all()`, `first()`, `get()`, `count()`, `insert()`, `update()`, ... (or `for await`).
@@ -37,7 +36,7 @@ import {
 } from "./expr.js";
 import { NotLoaded, QueryError, TransactionRequired } from "./errors.js";
 import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
-import { DB, RELATED, registerQueries, type Instance, type ModelClass, type ModelMeta } from "./model.js";
+import { DB, fieldValue, RELATED, registerQueries, type Instance, type ModelClass, type ModelMeta } from "./model.js";
 import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
 import { assignments, prepareRows, prepareUpdateRows } from "./write.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
@@ -425,15 +424,16 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
 
   // -- building -------------------------------------------------------------------------------
 
-  /** Keep rows matching all `conditions`. */
-  /** Partial model instances; no arguments restores all public fields. */
   /** @internal Preserve an exact public shape, including zero fields. */
   onlyFields(names: readonly string[]): this { return this.clone({ modelFields: names }); }
 
+  /** Bypass schema filter, selection and loading defaults; keep caller filters. */
   withoutDefaults(): this { return this.clone({ withoutDefaults: true }); }
 
+  /** Clear default and explicitly requested eager reference loading. */
   withoutRelated(): this { return this.clone({ withoutRelated: true, related: [] }); }
 
+  /** Partial model instances; no arguments restores all public fields. */
   only(): QuerySet<M, M["row"], S, P, X>;
   only(...fields: readonly Column<unknown, string>[]): QuerySet<M, Partial<M["row"]> & Instance<M>, S, P, X>;
   only(...fields: readonly Column<unknown, string>[]): QuerySet<M, Partial<M["row"]> & Instance<M>, S, P, X> {
@@ -445,6 +445,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return this.clone({ modelFields: fields.length ? names : this.meta.fieldList.map((f) => f.ir) }) as never;
   }
 
+  /** Keep rows matching all `conditions`. */
   filter<const C extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: C
   ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
@@ -668,7 +669,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       if (objs.length < size) {
         return;
       }
-      last = (objs[objs.length - 1] as Record<string, unknown>)[this.meta.pk.name];
+      last = fieldValue(objs[objs.length - 1] as object, this.meta.pk.name);
     }
   }
 
@@ -708,7 +709,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     const ctx = this.context(params, outer, ctes);
     const ir: IR = { op, model: this.rootName() };
     if (s.withoutDefaults) ir["without_defaults"] = true;
-    if (s.withoutRelated) ir["without_related"] = true
+    if (s.withoutRelated) ir["without_related"] = true;
     if (s.modelFields !== undefined) ir["model_fields"] = s.modelFields;
     if (s.modelHelpers?.length) ir["model_helpers"] = s.modelHelpers;
     if (s.from) {
@@ -783,7 +784,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     }
     const ctx = new IRContext(this.meta, params);
     const ir: IR = { op, model: this.meta.name, filters: s.filters.map((f) => f.ir(ctx)) };
-    if (s.withoutDefaults) ir["without_defaults"] = true
+    if (s.withoutDefaults) ir["without_defaults"] = true;
     if (s.modelFields !== undefined) ir["model_fields"] = s.modelFields;
     if (values !== undefined) {
       ir["set"] = assignments(this.meta, values, ctx);
@@ -999,14 +1000,12 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     }
     const params: unknown[] = [];
     const ir = this.mutationIr("update", params);
-    const policy = !this.state.withoutDefaults && this.meta.defaultFilter;
-    if (policy) (ir["filters"] as unknown[]).push(policy);
     if ("with" in ir) {
       throw new QueryError("updateMany() filters can't read CTEs");
     }
     const db = this.db();
     const res = await db_wait(db, (tx) =>
-      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx),
+      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx, this.state.withoutDefaults),
     );
     return returning ? (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][]) : (res as number);
   }
@@ -1352,7 +1351,7 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
         if (m !== this.meta) {
           throw new TypeError(`${this.relation.name} links ${this.meta.name} rows, not ${String(o)}`);
         }
-        keys.push((o as Record<string, unknown>)[to]);
+        keys.push(fieldValue(o, to));
       } else {
         keys.push(o);
       }

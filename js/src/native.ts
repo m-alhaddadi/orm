@@ -103,6 +103,7 @@ export interface NativeEngine {
     returning: boolean,
     batchSize: number | null,
     tx: NativeTransaction | null,
+    withoutDefaults: boolean,
   ): Promise<unknown>;
   begin(tx: NativeTransaction | null): Promise<NativeTransaction>;
   advisoryLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, tx: NativeTransaction): Promise<boolean>;
