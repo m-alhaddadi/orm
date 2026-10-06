@@ -29,3 +29,6 @@ pub mod behavior;
 
 #[cfg(feature = "composition")]
 pub mod ownership;
+
+#[cfg(feature = "generic-relations")]
+pub mod generic;

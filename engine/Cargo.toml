@@ -32,3 +32,4 @@ blake2 = "0.10"
 
 [features]
 composition = ["orm-core/composition"]
+generic-relations = ["orm-core/generic-relations"]

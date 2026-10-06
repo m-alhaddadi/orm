@@ -25,3 +25,6 @@ pub mod behavior;
 pub mod ownership;
 
 pub mod identity;
+
+#[cfg(feature = "generic-relations")]
+pub mod generic;
