@@ -95,6 +95,18 @@ fn has_server_value(f: &FieldIr) -> bool {
 /// Generates `models.py` / `models.pyi` for `ir` (already validated as `schema`).
 /// `source` names the schema file in the header comment.
 pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generated, String> {
+    #[cfg(feature = "reference-loading")]
+    for m in &schema.models {
+        let mut seen: BTreeSet<String> = m.fields().iter().map(|f| f.name.clone())
+            .chain(m.ir.relations.iter().map(|r| r.name.clone()))
+            .chain(ir.behavior.methods.iter().filter(|method| method.model == m.ir.name).map(|method| method.name.clone())).collect();
+        for r in m.ir.relations.iter().filter(|r| r.kind == RelKind::One) {
+            let method = format!("load_{}", r.name);
+            if !seen.insert(method.clone()) {
+                return Err(format!("{}.{method}: reference loader collides with an existing member", m.ir.name));
+            }
+        }
+    }
     let ir_json = super::embedded_schema_json(ir)?;
     if ir_json.contains("\"\"\"") {
         return Err("schema text contains \"\"\" which can't be embedded in the generated module".into());
@@ -118,6 +130,9 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
          from orm import QuerySet, define\n\n",
     );
     writeln!(py, "_SCHEMA = r\"\"\"\n{ir_json}\n\"\"\"\n").unwrap();
+    #[cfg(feature = "reference-loading")]
+    writeln!(py, "_models = define(_SCHEMA, module=__name__, required_capabilities=(\"reference-loading\",))").unwrap();
+    #[cfg(not(feature = "reference-loading"))]
     writeln!(py, "_models = define(_SCHEMA, module=__name__)").unwrap();
     for n in enums.iter().chain(&names) {
         writeln!(py, "{n} = _models[\"{n}\"]").unwrap();
@@ -180,10 +195,18 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
                 }
                 RelKind::One => {
                     let nullable = m.field(&r.from)?.nullable;
+                    #[cfg(feature = "reference-loading")]
+                    let nullable = nullable || super::reference_target_filtered(ir, &r.target);
                     let t = if nullable { format!("{} | None", r.target) } else { r.target.clone() };
                     writeln!(body, "    {}: f.BelongsTo[{t}, _{}Path]", r.name, r.target).unwrap();
                 }
             }
+        }
+        #[cfg(feature = "reference-loading")]
+        for r in m.ir.relations.iter().filter(|r| r.kind == RelKind::One) {
+            let nullable = !r.foreign_key || m.field(&r.from)?.nullable || super::reference_target_filtered(ir, &r.target);
+            let t = if nullable { format!("{} | None", r.target) } else { r.target.clone() };
+            writeln!(body, "    async def load_{}(self, *, reload: bool = False) -> {t}: ...", r.name).unwrap();
         }
         writeln!(body, "\n    objects: ClassVar[{name}QuerySet]\n").unwrap();
         writeln!(

@@ -11,13 +11,17 @@ import { DoesNotExist, MultipleObjectsReturned, NotLoaded } from "./errors.js";
 import { Column, PATH, RelationPath, type PathState, type Source } from "./expr.js";
 import { camel, type ColType, type FieldMeta, type ModelSpec, type RelationKind, type RelationMeta } from "./meta.js";
 import { call, native, type NativeSchema } from "./native.js";
-import type { Database } from "./db.js";
+import { resolve, type Database } from "./db.js";
 import type { ManyRelatedSet, QuerySet, RelatedSet } from "./query.js";
 
 /** Where an instance keeps its loaded relations. */
 export const RELATED: unique symbol = Symbol("orm.related");
 /** The database an instance was read from (`using(db)`), which it writes back to. */
 export const DB: unique symbol = Symbol("orm.db");
+export const INTERNAL: unique symbol = Symbol.for("orm.internal");
+// Adapter selection happens once; baseline artifacts never import its runtime module.
+const referenceAdapter = (JSON.parse(native().nativeArtifact()) as { capabilities: string[] }).capabilities.includes("reference-loading")
+  ? await import("./references.js") : undefined;
 
 export type IRField = {
   name: string;
@@ -81,7 +85,7 @@ export interface Instance<M extends ModelSpec> {
   refresh(): Promise<void>;
 }
 
-type Row = Record<PropertyKey, unknown> & { [RELATED]?: Record<string, unknown>; [DB]?: Database | undefined };
+export type Row = Record<PropertyKey, unknown> & { [RELATED]?: Record<string, unknown>; [DB]?: Database | undefined };
 
 /** Schema information about one model (`User._meta`). */
 export class ModelMeta implements Source {
@@ -209,7 +213,11 @@ export class ModelMeta implements Source {
     const meta = this;
     const proto: Record<string, unknown> = {};
     for (const r of this.relations.values()) {
-      Object.defineProperty(proto, r.name, { get: relationGetter(meta, r), enumerable: false });
+      const baseline = relationGetter(meta, r);
+      Object.defineProperty(proto, r.name, {
+        get: referenceAdapter ? referenceAdapter.getter(meta, r, baseline, INTERNAL, RELATED) : baseline,
+        enumerable: false,
+      });
     }
     Object.defineProperties(proto, {
       pk: {
@@ -217,9 +225,9 @@ export class ModelMeta implements Source {
           return this[meta.pk.name];
         },
       },
-      update: { value: instanceUpdate, writable: true },
+      update: { value: instanceUpdate, writable: true, configurable: true },
       delete: { value: instanceDelete, writable: true },
-      refresh: { value: instanceRefresh, writable: true },
+      refresh: { value: instanceRefresh, writable: true, configurable: true },
       toJSON: {
         value(this: Row) {
           const out: Record<string, unknown> = {};
@@ -238,6 +246,7 @@ export class ModelMeta implements Source {
       },
       [Symbol.toStringTag]: { value: meta.name },
     });
+    referenceAdapter?.install(meta, proto, { DB, RELATED, INTERNAL, resolve, related, instanceUpdate, instanceRefresh });
     // A plain constructor: V8 gives every instance of a model the same shape.
     const Row = function (this: Row) {} as unknown as new () => Row;
     (Row as unknown as { prototype: object }).prototype = proto;
@@ -517,8 +526,12 @@ export const registry = new Registry();
  */
 export function define(
   schema: string | SchemaIR,
-  options: { readonly registry?: Registry } = {},
+  options: { readonly registry?: Registry; readonly requiredCapabilities?: readonly string[] } = {},
 ): Record<string, ModelClass<ModelSpec> & Record<string, unknown>> {
+  const available = (JSON.parse(native().nativeArtifact()) as { capabilities: string[] }).capabilities;
+  for (const capability of options.requiredCapabilities ?? []) {
+    if (!available.includes(capability)) throw new TypeError(`generated models require ${capability}; rebuild/select a compatible native artifact`);
+  }
   let ir: SchemaIR = JSON.parse(typeof schema === "string" ? schema : JSON.stringify(schema)) as SchemaIR;
   const destination = options.registry ?? registry;
   const context = [...destination].length ? JSON.stringify(destination.ir()) : undefined;
@@ -545,7 +558,7 @@ export function define(
       if (method.model === m.name) {
         const name = camel(method.name);
         checkName(m.name, name, meta.fields);
-        if (meta.relations.has(name) || Object.prototype.hasOwnProperty.call(meta.model, name)) throw new TypeError(`${m.name}.${name}: model method collision`);
+        if (meta.relations.has(name) || Object.prototype.hasOwnProperty.call(meta.model, name) || Object.prototype.hasOwnProperty.call(meta.Row.prototype, name)) throw new TypeError(`${m.name}.${name}: model method collision`);
         const fn = (native() as unknown as Record<string, (value: string) => unknown>)[method.native_function];
         if (typeof fn !== "function") throw new TypeError(`${m.name}.${name}: missing native method; rebuild`);
         Object.defineProperty(meta.model, name, { value: (value: string) => call(() => fn(value)), enumerable: true });

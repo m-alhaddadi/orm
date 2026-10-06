@@ -6,9 +6,17 @@ mod composition { include!(env!("ORM_CORE_COMPOSITION")); }
 
 pub fn artifact() -> Artifact {
     #[cfg(feature = "composition")]
-    { composition::artifact() }
+    let artifact = composition::artifact();
     #[cfg(not(feature = "composition"))]
-    { Artifact::default() }
+    let artifact = Artifact::default();
+    #[cfg(feature = "reference-loading")]
+    {
+        let mut artifact = artifact;
+        artifact.capabilities.push("reference-loading".into());
+        artifact
+    }
+    #[cfg(not(feature = "reference-loading"))]
+    { artifact }
 }
 
 pub fn prepare(ir: &mut crate::ir::SchemaIr, language: Option<&str>) -> Result<(), String> {

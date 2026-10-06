@@ -46,6 +46,7 @@ class User(Model):
     posts: f.HasMany[Post, _PostPath]
     comments: f.HasMany[Comment, _CommentPath]
     profile: f.HasOne[Profile | None, _ProfilePath]
+    async def load_profile(self, *, reload: bool = False) -> Profile | None: ...
 
     objects: ClassVar[UserQuerySet]
 
@@ -94,6 +95,7 @@ class Profile(Model):
     links: f.Array[list[str]]
 
     user: f.BelongsTo[User, _UserPath]
+    async def load_user(self, *, reload: bool = False) -> User: ...
 
     objects: ClassVar[ProfileQuerySet]
 
@@ -153,6 +155,7 @@ class Post(Model):
     comments: f.HasMany[Comment, _CommentPath]
     tags: f.ManyToMany[Tag, _TagPath]
     post_tags: f.HasMany[PostTag, _PostTagPath]
+    async def load_author(self, *, reload: bool = False) -> User: ...
 
     objects: ClassVar[PostQuerySet]
 
@@ -219,6 +222,8 @@ class Comment(Model):
 
     post: f.BelongsTo[Post, _PostPath]
     author: f.BelongsTo[User | None, _UserPath]
+    async def load_post(self, *, reload: bool = False) -> Post: ...
+    async def load_author(self, *, reload: bool = False) -> User | None: ...
 
     objects: ClassVar[CommentQuerySet]
 
@@ -318,6 +323,8 @@ class PostTag(Model):
 
     post: f.BelongsTo[Post, _PostPath]
     tag: f.BelongsTo[Tag, _TagPath]
+    async def load_post(self, *, reload: bool = False) -> Post: ...
+    async def load_tag(self, *, reload: bool = False) -> Tag: ...
 
     objects: ClassVar[PostTagQuerySet]
 

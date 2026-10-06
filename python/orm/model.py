@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 
     from .query import QuerySet
 
+_reference_adapter: types.ModuleType | None = None
+if "reference-loading" in json.loads(_native.native_artifact()).get("capabilities", ()):
+    from . import _references
+    _reference_adapter = _references
+
 __all__ = ["Model", "ModelMeta", "Registry", "registry", "define", "load", "loads"]
 
 
@@ -171,6 +176,8 @@ class Registry:
             for old in model._meta.relations.keys() - relations.keys():
                 if old not in vars(model):
                     raise TypeError("class preparation cannot remove inherited members; use define() for this logical view")
+            if _reference_adapter is not None:
+                _reference_adapter.validate(model, fields, relations, prepared.get("behavior", {}))
             associations.append((model, ir, fields, relations))
         methods_by_model: dict[str, dict[str, Any]] = {}
         for method in prepared.get("behavior", {}).get("methods", ()):
@@ -208,6 +215,8 @@ class Registry:
             for name, function in methods_by_model.get(meta.name, {}).items():
                 setattr(model, name, staticmethod(function))
             meta.registry = snapshot
+            if _reference_adapter is not None:
+                _reference_adapter.install(model)
         self._native = native
         self._behavior = copy.deepcopy(snapshot._behavior)
         return native
@@ -283,7 +292,7 @@ def _enum(ir: dict[str, Any], module: str | None) -> type[enum.Enum]:
 
 
 def define(
-    schema: str | dict[str, Any], *, registry: Registry | None = None, module: str | None = None
+    schema: str | dict[str, Any], *, registry: Registry | None = None, module: str | None = None, required_capabilities: tuple[str, ...] = ()
 ) -> dict[str, Any]:
     """Build model classes from a compiled schema (the JSON IR ``orm compile`` and
     :func:`load` produce). Generated ``models.py`` modules call this.
@@ -291,6 +300,10 @@ def define(
     Returns the model classes and the schema's enum classes, by name. They join
     ``registry`` (the default one unless given); ``module`` sets their ``__module__``.
     """
+    available = json.loads(_native.native_artifact()).get("capabilities", ())
+    for capability in required_capabilities:
+        if capability not in available:
+            raise TypeError(f"generated models require {capability}; rebuild/select a compatible native artifact")
     ir: dict[str, Any] = json.loads(schema) if isinstance(schema, str) else json.loads(json.dumps(schema))
     destination = registry if registry is not None else _default_registry()
     context = json.dumps(destination.ir()) if destination._models else None
