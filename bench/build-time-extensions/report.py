@@ -10,11 +10,14 @@ ap.add_argument('--directory', type=Path, default=Path('bench/build-time-extensi
 ap.add_argument('--out', type=Path)
 ap.add_argument('--repetitions', type=int, default=3)
 ap.add_argument('--check', action='store_true', help='require warm upper confidence bounds below accepted cost')
+ap.add_argument('--native-profile', action='store_true', help='label the equivalent handwritten versus extension comparison')
 ap.add_argument('--max-cost-percent', type=float, default=1.0, help='exclusive accepted warm cost (default: 1%%)')
 args = ap.parse_args()
 rng = random.Random(84130)
-lines = ['# Build-time extension refactor: old versus current', '',
-    '| Runtime / backend / workload | Old µs | Current µs | Change | Paired 95% interval | Run changes |',
+title = 'handwritten versus extension' if args.native_profile else 'old versus current'
+baseline, candidate = ('Handwritten', 'Extension') if args.native_profile else ('Old', 'Current')
+lines = [f'# Build-time extension refactor: {title}', '',
+    f'| Runtime / backend / workload | {baseline} µs | {candidate} µs | Change | Paired 95% interval | Run changes |',
     '|---|---:|---:|---:|---:|---|']
 regressions, inconclusive, within_margin = [], [], []
 margin = args.max_cost_percent

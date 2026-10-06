@@ -60,7 +60,7 @@ impl Inputs {
     pub fn guard_data(&self, composition: &Path) -> Result<Vec<u8>, String> {
         serde_json::to_vec_pretty(&serde_json::json!({"composition":composition,"files":self.files,"directories":self.directories})).map_err(|e|e.to_string())
     }
-    pub fn guard(&self, _composition: &Path) -> String {
+    pub fn guard_source() -> String {
         // Identical source across profiles. A cached build-script executable must
         // read the current workspace's inputs, never compiled-in paths from another.
         r#"use sha2::{Digest, Sha256};

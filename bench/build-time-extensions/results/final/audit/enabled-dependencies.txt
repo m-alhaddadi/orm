@@ -1,0 +1,304 @@
+orm-python v0.1.0 (/tmp/orm-controls-v2/sqlite/extension/bindings/python)
+bigdecimal v0.4.11
+libm v0.2.16
+num-bigint v0.4.8
+num-integer v0.1.47
+num-traits v0.2.19
+num-traits v0.2.19
+num-integer v0.1.47 (*)
+num-traits v0.2.19
+chrono v0.4.45
+iana-time-zone v0.1.65
+core-foundation-sys v0.8.7
+num-traits v0.2.19
+orm-app-native-rules v1.0.0 (/private/tmp/orm-controls-v2/sqlite/extension/modules/native_rules)
+orm-contracts v0.1.0 (/Users/mha/projects/orm/contracts)
+serde v1.0.229
+serde_core v1.0.229
+serde_derive v1.0.229 (proc-macro)
+proc-macro2 v1.0.107
+unicode-ident v1.0.26
+quote v1.0.47
+proc-macro2 v1.0.107 (*)
+syn v3.0.6
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+unicode-ident v1.0.26
+serde_json v1.0.151
+itoa v1.0.18
+memchr v2.8.3
+serde_core v1.0.229
+zmij v1.0.23
+orm-cli v0.1.0 (/tmp/orm-controls-v2/sqlite/extension/cli)
+orm-core v0.1.0 (/tmp/orm-controls-v2/sqlite/extension/core)
+orm-app-native-rules v1.0.0 (/private/tmp/orm-controls-v2/sqlite/extension/modules/native_rules) (*)
+orm-contracts v0.1.0 (/Users/mha/projects/orm/contracts) (*)
+serde v1.0.229 (*)
+serde_json v1.0.151 (*)
+toml v0.8.23
+serde v1.0.229 (*)
+serde_spanned v0.6.9
+serde v1.0.229 (*)
+toml_datetime v0.6.11
+serde v1.0.229 (*)
+toml_edit v0.22.27
+indexmap v2.14.2
+equivalent v1.0.2
+hashbrown v0.17.1
+serde v1.0.229 (*)
+serde_spanned v0.6.9 (*)
+toml_datetime v0.6.11 (*)
+toml_write v0.1.2
+winnow v0.7.15
+orm-engine v0.1.0 (/tmp/orm-controls-v2/sqlite/extension/engine)
+bigdecimal v0.4.11 (*)
+blake2 v0.10.6
+digest v0.10.7
+block-buffer v0.10.4
+generic-array v0.14.7
+typenum v1.20.1
+crypto-common v0.1.7
+generic-array v0.14.7 (*)
+typenum v1.20.1
+subtle v2.6.1
+bytes v1.12.1
+chrono v0.4.45 (*)
+deadpool-postgres v0.14.2
+async-trait v0.1.92 (proc-macro)
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+syn v3.0.6 (*)
+deadpool v0.13.1
+deadpool-runtime v0.3.1
+tokio v1.53.1
+bytes v1.12.1
+libc v0.2.189
+mio v1.2.3
+libc v0.2.189
+pin-project-lite v0.2.17
+socket2 v0.6.5
+libc v0.2.189
+tokio v1.53.1 (*)
+tokio v1.53.1 (*)
+tokio-postgres v0.7.18
+async-trait v0.1.92 (proc-macro) (*)
+byteorder v1.5.0
+bytes v1.12.1
+fallible-iterator v0.2.0
+futures-channel v0.3.34
+futures-core v0.3.34
+futures-sink v0.3.34
+futures-util v0.3.34
+futures-core v0.3.34
+futures-macro v0.3.34 (proc-macro)
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+syn v3.0.6 (*)
+futures-sink v0.3.34
+futures-task v0.3.34
+pin-project-lite v0.2.17
+slab v0.4.12
+log v0.4.34
+parking_lot v0.12.5
+lock_api v0.4.14
+scopeguard v1.2.0
+parking_lot_core v0.9.12
+cfg-if v1.0.5
+libc v0.2.189
+smallvec v1.16.2
+percent-encoding v2.3.2
+phf v0.13.1
+phf_shared v0.13.1
+siphasher v1.0.4
+pin-project-lite v0.2.17
+postgres-protocol v0.6.12
+base64 v0.22.1
+byteorder v1.5.0
+bytes v1.12.1
+fallible-iterator v0.2.0
+hmac v0.13.0
+digest v0.11.3
+block-buffer v0.12.1
+hybrid-array v0.4.15
+typenum v1.20.1
+const-oid v0.10.2
+crypto-common v0.2.2
+hybrid-array v0.4.15 (*)
+ctutils v0.4.2
+cmov v0.5.4
+md-5 v0.11.0
+cfg-if v1.0.5
+digest v0.11.3 (*)
+memchr v2.8.3
+rand v0.10.3
+chacha20 v0.10.2
+cfg-if v1.0.5
+rand_core v0.10.1
+getrandom v0.4.3
+cfg-if v1.0.5
+libc v0.2.189
+rand_core v0.10.1
+rand_core v0.10.1
+sha2 v0.11.0
+cfg-if v1.0.5
+cpufeatures v0.3.1
+libc v0.2.189
+digest v0.11.3 (*)
+stringprep v0.1.5
+unicode-bidi v0.3.18
+unicode-normalization v0.1.25
+tinyvec v1.13.3
+unicode-properties v0.1.4
+postgres-types v0.2.14
+bytes v1.12.1
+chrono v0.4.45 (*)
+fallible-iterator v0.2.0
+postgres-protocol v0.6.12 (*)
+serde_core v1.0.229
+serde_json v1.0.151 (*)
+uuid v1.26.1
+rand v0.10.3 (*)
+socket2 v0.6.5 (*)
+tokio v1.53.1 (*)
+tokio-util v0.7.19
+bytes v1.12.1
+futures-core v0.3.34
+futures-sink v0.3.34
+libc v0.2.189
+pin-project-lite v0.2.17
+tokio v1.53.1 (*)
+whoami v2.1.3
+libc v0.2.189
+objc2-system-configuration v0.3.2
+objc2-core-foundation v0.3.2
+bitflags v2.13.2
+tracing v0.1.44
+pin-project-lite v0.2.17
+tracing-attributes v0.1.31 (proc-macro)
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+syn v2.0.119
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+unicode-ident v1.0.26
+tracing-core v0.1.36
+once_cell v1.21.4
+orm-app-native-rules v1.0.0 (/private/tmp/orm-controls-v2/sqlite/extension/modules/native_rules) (*)
+orm-core v0.1.0 (/tmp/orm-controls-v2/sqlite/extension/core) (*)
+rusqlite v0.37.0
+bitflags v2.13.2
+fallible-iterator v0.3.0
+fallible-streaming-iterator v0.1.9
+hashlink v0.10.0
+hashbrown v0.15.5
+foldhash v0.1.5
+libsqlite3-sys v0.35.0
+smallvec v1.16.2
+rustls v0.23.45
+once_cell v1.21.4
+ring v0.17.14
+cfg-if v1.0.5
+getrandom v0.2.17
+cfg-if v1.0.5
+libc v0.2.189
+libc v0.2.189
+untrusted v0.9.0
+rustls-pki-types v1.15.1
+zeroize v1.9.0
+rustls-webpki v0.103.15
+ring v0.17.14 (*)
+rustls-pki-types v1.15.1 (*)
+untrusted v0.9.0
+subtle v2.6.1
+zeroize v1.9.0
+sea-query v1.0.2
+bigdecimal v0.4.11 (*)
+chrono v0.4.45 (*)
+itoa v1.0.18
+ordered-float v4.6.0
+num-traits v0.2.19
+sea-query-derive v1.0.0 (proc-macro)
+darling v0.20.11
+darling_core v0.20.11
+fnv v1.0.7
+ident_case v1.0.1
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+syn v2.0.119 (*)
+darling_macro v0.20.11 (proc-macro)
+darling_core v0.20.11 (*)
+quote v1.0.47 (*)
+syn v2.0.119 (*)
+heck v0.4.1
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+syn v2.0.119 (*)
+thiserror v2.0.21
+thiserror-impl v2.0.21 (proc-macro)
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+syn v3.0.6 (*)
+serde_json v1.0.151 (*)
+uuid v1.26.1
+serde v1.0.229 (*)
+serde_json v1.0.151 (*)
+sha2 v0.10.9
+cfg-if v1.0.5
+cpufeatures v0.2.17
+libc v0.2.189
+digest v0.10.7 (*)
+tokio v1.53.1 (*)
+tokio-postgres v0.7.18 (*)
+tokio-postgres-rustls v0.14.0
+rustls v0.23.45 (*)
+sha2 v0.11.0 (*)
+tokio v1.53.1 (*)
+tokio-postgres v0.7.18 (*)
+tokio-rustls v0.26.6
+rustls v0.23.45 (*)
+tokio v1.53.1 (*)
+x509-cert v0.2.5
+const-oid v0.9.6
+der v0.7.10
+const-oid v0.9.6
+der_derive v0.7.3 (proc-macro)
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+syn v2.0.119 (*)
+flagset v0.4.7
+spki v0.7.3
+der v0.7.10 (*)
+uuid v1.26.1
+webpki-roots v1.0.9
+rustls-pki-types v1.15.1 (*)
+serde_json v1.0.151 (*)
+tokio v1.53.1 (*)
+toml v0.8.23 (*)
+orm-core v0.1.0 (/tmp/orm-controls-v2/sqlite/extension/core) (*)
+orm-engine v0.1.0 (/tmp/orm-controls-v2/sqlite/extension/engine) (*)
+pyo3 v0.29.3
+chrono v0.4.45 (*)
+libc v0.2.189
+once_cell v1.21.4
+pyo3-ffi v0.29.3
+libc v0.2.189
+pyo3-macros v0.29.3 (proc-macro)
+proc-macro2 v1.0.107 (*)
+pyo3-macros-backend v0.29.3
+heck v0.5.0
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+syn v2.0.119 (*)
+quote v1.0.47 (*)
+syn v2.0.119 (*)
+uuid v1.26.1
+pyo3-async-runtimes v0.29.0
+futures-channel v0.3.34 (*)
+futures-util v0.3.34 (*)
+once_cell v1.21.4
+pin-project-lite v0.2.17
+pyo3 v0.29.3 (*)
+tokio v1.53.1 (*)
+sea-query v1.0.2 (*)
+serde_json v1.0.151 (*)
+uuid v1.26.1

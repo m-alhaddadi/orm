@@ -1,0 +1,98 @@
+{
+  "disabled": {
+    "dependency_sha256": "c11dcbad50ae51faa95310d5c13e3b91d26e74af9ea0a4742347f02efff68d5d"
+  },
+  "enabled": {
+    "dependency_sha256": "25975de9dc48ff1117a39608cb93ecf9f1354ef7d670d5abd03eb8f9825c2dd5",
+    "artifact": {
+      "host_contract": 1,
+      "schema_contract": 1,
+      "passes": [],
+      "capabilities": [
+        "schema-transformations",
+        "physical-schema",
+        "native-string-values",
+        "native-string-records",
+        "native-string-results"
+      ],
+      "extensions": {
+        "example.native": "1.0.0"
+      },
+      "exports": [
+        "example.trim",
+        "example.username",
+        "example.display",
+        "example.record"
+      ],
+      "specializations": [
+        {
+          "model": "BenchItem",
+          "fingerprint": "28ba97b181bfe5dbd84ceab7c4e685b9f6741ed9379b95e578abc32966d12175",
+          "exports": [
+            "example.display",
+            "example.record",
+            "example.trim",
+            "example.username"
+          ]
+        }
+      ]
+    },
+    "execution_sha256": "7db7930380fcbaa4c1f8581ada65489f484c913e0eec4d4ae01ea707d96915af"
+  },
+  "builtin": {
+    "dependency_sha256": "bec9458233b72bc015f7f887499d824e982b24a14e3dc49855f991f7a4d27d08",
+    "artifact": {
+      "host_contract": 1,
+      "schema_contract": 1,
+      "passes": [],
+      "capabilities": [
+        "schema-transformations",
+        "physical-schema",
+        "native-string-values",
+        "native-string-records",
+        "native-string-results"
+      ],
+      "extensions": {
+        "example.native": "1.0.0"
+      },
+      "exports": [
+        "example.trim",
+        "example.username",
+        "example.display",
+        "example.record"
+      ],
+      "specializations": [
+        {
+          "model": "BenchItem",
+          "fingerprint": "28ba97b181bfe5dbd84ceab7c4e685b9f6741ed9379b95e578abc32966d12175",
+          "exports": [
+            "example.display",
+            "example.record",
+            "example.trim",
+            "example.username"
+          ]
+        }
+      ]
+    },
+    "execution_sha256": "16387a2b11cca842423c830ecbf794d958152856ef32d0b4e7aa6db03790da72"
+  },
+  "conditional_sources": {
+    "core/src/schema.rs": {
+      "sha256": "f76cc868c1dcde591c86b68679718dcb04f2abc74abff219014c285b1401332c",
+      "composition_cfg_sites": 20
+    },
+    "engine/src/plan.rs": {
+      "sha256": "b89b16a2cdc5dc232e88507a18fc06d5ad88d3c051fc4c5f1528316ed3658d72",
+      "composition_cfg_sites": 36
+    },
+    "engine/src/exec.rs": {
+      "sha256": "c30c2da6c0dfc859a13f384aa4bc9fddd6964527e6f87478ad053b7ab0966840",
+      "composition_cfg_sites": 1
+    },
+    "engine/src/lib.rs": {
+      "sha256": "b46661ab63470b3be3699a418bb25b9999538ba1add7a50980e001bee1992647",
+      "composition_cfg_sites": 2
+    }
+  },
+  "scope": "Dependency trees prove selected runtime dependencies. Source cfg sites and generated direct calls are structural evidence; timing and separate allocation probes provide execution evidence. No claim of identical assembly is made."
+}

@@ -89,6 +89,9 @@ Rebuilding an emitted workspace requires its composition environment paths:
 `ORM_CORE_COMPOSITION`, and for native behaviors `ORM_ENGINE_COMPOSITION`,
 `ORM_PYTHON_METHODS`, `ORM_NODE_METHODS`. A generated build guard rejects changed
 recorded configuration/source inputs and asks for a fresh frontend output.
+The guard reads `core/composition-inputs.json` from its current workspace, so
+revisiting an older profile through a shared Cargo cache retains the correct
+composition and stale-input checks.
 Use the frontend for a changed selection rather than editing generated files.
 
 ## Extension metadata and source syntax

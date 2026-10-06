@@ -13,6 +13,7 @@ ap=argparse.ArgumentParser()
 ap.add_argument('--disabled',type=Path,required=True)
 ap.add_argument('--controls',type=Path,required=True)
 ap.add_argument('--only',choices=['disabled','controls'])
+ap.add_argument('--keys',nargs='+',help='specific artifact keys to refresh')
 args=ap.parse_args()
 root=Path(__file__).resolve().parents[2]
 suffix='dylib' if sys.platform=='darwin' else 'so'
@@ -41,6 +42,7 @@ for group in ([args.only] if args.only else ['disabled','controls']):
     base=getattr(args,group).resolve()
     report=json.loads((base/'build.json').read_text())
     keys=['after'] if group=='disabled' else ['sqlite/extension','sqlite/builtin','postgres/extension','postgres/builtin']
+    if args.keys: keys = args.keys
     for key in keys:
         workspace=base/key
         changed = refresh_sources(workspace)

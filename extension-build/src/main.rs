@@ -266,7 +266,7 @@ fn main() -> Result<(), String> {
         core.as_table_mut().unwrap().insert("build-dependencies".into(), toml::Value::try_from(serde_json::json!({"sha2":"0.10","serde_json":"1"})).map_err(|e| e.to_string())?);
         fs::write(&core_path, toml::to_string(&core).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         fs::write(config.output.join("core/composition-inputs.json"), inputs.guard_data(&config.output.join("composition.rs"))?).map_err(|e|e.to_string())?;
-        fs::write(config.output.join("core/build.rs"), inputs.guard(&config.output.join("composition.rs"))).map_err(|e| e.to_string())?;
+        fs::write(config.output.join("core/build.rs"), orm_extension_build::inputs::Inputs::guard_source()).map_err(|e| e.to_string())?;
         fs::write(config.output.join("source-identities.json"), serde_json::to_vec_pretty(&inputs.identities).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     }
     if !config.dependencies.is_empty() {
