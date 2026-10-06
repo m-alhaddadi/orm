@@ -989,15 +989,17 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return rows[0] ?? null;
   }
 
-  /** `INSERT` many rows with one statement; gives the new instances in input order (rows
-   * skipped by `doNothing` are left out). */
-  async attach(parentId: In<M["pk"]>, values: M extends { readonly attach: infer A extends object } ? A : Partial<M["insert"]>): Promise<M["row"]> {
+  /** Attaches local child values to an existing parent, without a change to the parent.
+   * Only composed child models accept it. */
+  async attach(parentId: In<M["pk"]>, values: M extends { readonly attach: infer A extends object } ? A : never): Promise<M["row"]> {
     const prepared = prepareAttach(this.meta, values);
     const db = this.db();
     const res = await db_wait(db, (tx) => db.engine.attach(this.meta.name, parentId, prepared.fields, prepared.rows, tx));
     return (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][])[0]!;
   }
 
+  /** `INSERT` many rows with one statement; gives the new instances in input order (rows
+   * skipped by `doNothing` are left out). */
   insertMany(rows: readonly M["insert"][], options?: InsertOptions<M>): Promise<M["row"][]> {
     return this.insertRows(rows, options);
   }

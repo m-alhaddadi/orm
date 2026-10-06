@@ -1,12 +1,13 @@
 //! Engine-managed writes for shared-primary-key model composition.
 use crate::{
-    db::{self, Executor, RowSet},
+    db::{self, Executor, RowSet, Transaction},
     error::{query_err, Error, Result},
     exec::{ChainedRows, Outcome},
     params::NoParams,
     plan,
 };
 use orm_core::{
+    behavior::{OwnerId, PreparedOwnerLink},
     dialect::Target,
     ir::{Delete, FieldIr, Select, Update, ValueType},
     schema::Schema,
@@ -34,6 +35,36 @@ pub struct Insert {
 pub fn is_composed(schema: &Schema, model: &str) -> Result<bool> {
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
     Ok(schema.owner_links.iter().any(|l| l.child == m.owner))
+}
+
+/// The owner links from `owner` up to the root, leaf first.
+fn owner_chain(schema: &Schema, owner: OwnerId) -> Vec<&PreparedOwnerLink> {
+    let mut chain = vec![];
+    let mut current = owner;
+    while let Some(link) = schema.owner_links.iter().find(|l| l.child == current) {
+        chain.push(link);
+        current = link.parent;
+    }
+    chain
+}
+
+/// An unfiltered select of the whole logical model.
+fn model_select(model: &str) -> Result<Select> {
+    serde_json::from_value(serde_json::json!({ "model": model })).map_err(|e| query_err(e.to_string()))
+}
+
+/// Ends `tx` by the result; a nested `tx` is a savepoint, so the outer scope stays open.
+async fn finish<T>(tx: std::sync::Arc<dyn Transaction>, result: Result<T>) -> Result<T> {
+    match result {
+        Ok(out) => {
+            tx.commit().await?;
+            Ok(out)
+        }
+        Err(error) => {
+            tx.rollback().await?;
+            Err(error)
+        }
+    }
 }
 
 /// Complete-child creation. The physical identity is allocated only at the root.
@@ -71,13 +102,7 @@ pub fn prepare_insert(
     let mut rows = rows;
     crate::behavior::insert_values(logical.native, &map, &mut rows, fields.len())?;
     let mut chain = vec![logical.owner];
-    while let Some(link) = schema
-        .owner_links
-        .iter()
-        .find(|l| l.child == *chain.last().unwrap())
-    {
-        chain.push(link.parent);
-    }
+    chain.extend(owner_chain(schema, logical.owner).iter().map(|l| l.parent));
     chain.reverse();
     let owners = &schema.physical().models;
     let mut prepared = vec![];
@@ -108,9 +133,7 @@ pub fn prepare_insert(
         }
         prepared.push(steps);
     }
-    let query: Select = serde_json::from_value(serde_json::json!({"model":model}))
-        .map_err(|e| query_err(e.to_string()))?;
-    let read = plan::plan_select(schema, target, &query, &NoParams)?.stmt;
+    let read = plan::plan_select(schema, target, &model_select(model)?, &NoParams)?.stmt;
     Ok(Insert {
         rows: prepared,
         read,
@@ -180,16 +203,7 @@ pub async fn run_insert(conn: &dyn Executor, target: Target, insert: Insert) -> 
         })
     }
     .await;
-    match result {
-        Ok(out) => {
-            tx.commit().await?;
-            Ok(out)
-        }
-        Err(error) => {
-            tx.rollback().await?;
-            Err(error)
-        }
-    }
+    finish(tx, result).await
 }
 
 struct Assignment {
@@ -226,10 +240,8 @@ fn mutation(
 ) -> Result<Mutation> {
     let model_idx = schema.model_idx(model).map_err(query_err)?;
     let logical = schema.model(model_idx);
-    let query: Select = serde_json::from_value(serde_json::json!({"model":model}))
-        .map_err(|e| query_err(e.to_string()))?;
+    let mut query = model_select(model)?;
     let read = plan::plan_select(schema, target, &query, &NoParams)?.stmt;
-    let mut query = query;
     query.filters = filters;
     query.with = with;
     let mut matched = match prepared_match {
@@ -240,10 +252,9 @@ fn mutation(
     // the matched snapshot; an incompatible concurrent writer causes rollback.
     if target.dialect == orm_core::dialect::Dialect::Postgres {
         let owners = &schema.physical().models;
-        let mut current = logical.owner;
         let mut alias = logical.table().to_owned();
         let mut locks = vec![Alias::new(&alias)];
-        while let Some(link) = schema.owner_links.iter().find(|l| l.child == current) {
+        for link in owner_chain(schema, logical.owner) {
             let parent = &owners[link.parent.0];
             let next_alias = format!("__write_owner_{}", link.parent.0);
             matched.join_as(
@@ -256,11 +267,10 @@ fn mutation(
                 ))
                 .eq(Expr::col((
                     Alias::new(&alias),
-                    Alias::new(&owners[current.0].fields()[link.child_key].column),
+                    Alias::new(&owners[link.child.0].fields()[link.child_key].column),
                 ))),
             );
             locks.push(Alias::new(&next_alias));
-            current = link.parent;
             alias = next_alias;
         }
         matched.lock_with_tables(LockType::Update, locks);
@@ -421,16 +431,7 @@ pub async fn run_mutation(conn: &dyn Executor, target: Target, plan: Mutation) -
         })
     }
     .await;
-    match result {
-        Ok(out) => {
-            tx.commit().await?;
-            Ok(out)
-        }
-        Err(error) => {
-            tx.rollback().await?;
-            Err(error)
-        }
-    }
+    finish(tx, result).await
 }
 
 /// Attach only local columns to a physically existing immediate parent. The FK

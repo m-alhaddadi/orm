@@ -1,4 +1,4 @@
-//! Optional shared-primary-key schema lowering. Execution uses host owner primitives.
+//! Optional shared-primary-key schema lowering. The engine `composed` module executes writes.
 use orm_contracts::{
     extension::{capture_storage, FieldStorage, OwnerLink},
     ir::*,
@@ -120,8 +120,14 @@ fn check_member(model: &ModelIr, name: &str) -> Result<(), String> {
     Ok(())
 }
 fn lower_one(ir: &mut SchemaIr, c: &Composition) -> Result<(), String> {
-    let parent_idx = ir.models.iter().position(|m| m.name == c.parent).unwrap();
-    let child_idx = ir.models.iter().position(|m| m.name == c.child).unwrap();
+    let index = |name: &str| {
+        ir.models
+            .iter()
+            .position(|m| m.name == name)
+            .ok_or_else(|| format!("{name}: unknown composition model"))
+    };
+    let parent_idx = index(&c.parent)?;
+    let child_idx = index(&c.child)?;
     let parent = &ir.models[parent_idx];
     let child = &ir.models[child_idx];
     if parent.table == child.table {
@@ -257,7 +263,12 @@ fn lower_one(ir: &mut SchemaIr, c: &Composition) -> Result<(), String> {
     ir.models[parent_idx]
         .relations
         .push(relation(&c.child_ref, &c.child, &key.name, false));
-    let physical = &mut ir.behavior.storage.as_mut().unwrap().models;
+    let physical = &mut ir
+        .behavior
+        .storage
+        .as_mut()
+        .ok_or("composition requires captured physical storage")?
+        .models;
     let parent = physical
         .iter_mut()
         .find(|m| m.name == c.parent)

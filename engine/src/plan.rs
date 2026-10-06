@@ -1770,21 +1770,32 @@ impl<'s> Planner<'s> {
         let root = self.model(self.root);
         let positions = q.set.iter().map(|a| root.field_pos(&a.field).map_err(query_err)).collect::<Result<Vec<_>>>()?;
         if positions.iter().collect::<std::collections::BTreeSet<_>>().len() != positions.len() { return Err(Error::query("duplicate update field")); }
+        self.set_values(q)
+    }
+
+    /// `SET` values in `q.set` order, after the model's native field and record checks.
+    #[cfg(feature = "composition")]
+    fn set_values(&mut self, q: &Update) -> Result<Vec<SExpr>> {
+        let root = self.model(self.root);
+        let positions: Vec<_> = q.set.iter().map(|a| root.field_pos(&a.field).map_err(query_err)).collect::<Result<_>>()?;
         if positions.iter().any(|p| root.native.computed().contains(p)) { return Err(Error::query("computed fields are read-only")); }
-        let map = crate::behavior::input_map(root.fields().len(), &positions)?;
-        let mut values = vec![];
-        for (assignment, &position) in q.set.iter().zip(&positions) {
-            let field = &root.fields()[position];
-            values.push(if let Expr::Param { i } = assignment.value {
-                let mut value = self.params.value(self.param(i)?, Some(field.value_type()))?;
+        let map = if root.native.has_records() { crate::behavior::input_map(root.fields().len(), &positions)? } else { vec![] };
+        let mut values = Vec::with_capacity(q.set.len());
+        for (a, &position) in q.set.iter().zip(&positions) {
+            let f = &root.fields()[position];
+            values.push(if let Expr::Param { i } = &a.value {
+                let mut value = self.params.value(self.param(*i)?, Some(f.value_type()))?;
                 crate::behavior::field(root.native, position, &mut value)?;
                 Some(value)
-            } else { crate::behavior::expression(root.native, position)?; None });
+            } else {
+                crate::behavior::expression(root.native, position)?;
+                None
+            });
         }
         crate::behavior::record(root.native, &map, values.as_slice())?;
-        q.set.iter().zip(values).map(|(assignment,value)| {
-            let field = self.model(self.root).field(&assignment.field).map_err(query_err)?;
-            match value { Some(value) => Ok(bind(value, Some(field))), None => self.value(&assignment.value, Hint {ty:Some(field.value_type()),field:Some(field)}) }
+        q.set.iter().zip(values).map(|(a, value)| {
+            let f = root.field(&a.field).map_err(query_err)?;
+            match value { Some(value) => Ok(bind(value, Some(f))), None => self.value(&a.value, Hint { ty: Some(f.value_type()), field: Some(f) }) }
         }).collect()
     }
 
@@ -1798,30 +1809,8 @@ impl<'s> Planner<'s> {
             return Err(Error::query("update() needs at least one field"));
         }
         #[cfg(feature = "composition")]
-        {
-            let mut values = Vec::with_capacity(q.set.len());
-            let positions: Vec<_> = q.set.iter().map(|a| root.field_pos(&a.field).map_err(query_err)).collect::<Result<_>>()?;
-            let map = if root.native.has_records() { crate::behavior::input_map(root.fields().len(), &positions)? } else { vec![] };
-            for a in &q.set {
-                let f = root.field(&a.field).map_err(query_err)?;
-                let position = root.field_pos(&a.field).map_err(query_err)?;
-                if root.native.computed().contains(&position) { return Err(Error::query("computed fields are read-only")); }
-                let value = if let Expr::Param { i } = &a.value {
-                    let mut value = self.params.value(self.param(*i)?, Some(f.value_type()))?;
-                    crate::behavior::field(root.native, position, &mut value)?;
-                    Some(value)
-                } else {
-                    crate::behavior::expression(root.native, position)?;
-                    None
-                };
-                values.push(value);
-            }
-            crate::behavior::record(root.native, &map, values.as_slice())?;
-            for (a, value) in q.set.iter().zip(values) {
-                let f = root.field(&a.field).map_err(query_err)?;
-                let v = match value { Some(value) => bind(value, Some(f)), None => self.value(&a.value, Hint { ty: Some(f.value_type()), field: Some(f) })? };
-                stmt.value(Alias::new(&f.column), v);
-            }
+        for (a, v) in q.set.iter().zip(self.set_values(q)?) {
+            stmt.value(Alias::new(&root.field(&a.field).map_err(query_err)?.column), v);
         }
         #[cfg(not(feature = "composition"))]
         for a in &q.set {

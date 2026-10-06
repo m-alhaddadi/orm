@@ -15,7 +15,7 @@ async fn check(url: &str) {
     } else {
         Dialect::Postgres
     };
-    let source = "datasource db { provider = \"sqlite\" }\nmodel Person {\n id Int @id @default(autoincrement())\n name String\n}\nmodel Employee {\n salary Int @check(\"salary > 0\")\n @@composition.model(parent: \"Person\", parentRef: \"person\", childRef: \"employee\")\n}\nmodel Manager {\n level Int @check(\"level > 0\")\n @@composition.model(parent: \"Employee\", parentRef: \"employee\", childRef: \"manager\")\n}";
+    let source = "datasource db { provider = \"sqlite\" }\nmodel Person {\n id Int @id @default(autoincrement())\n name String @check(\"name <> 'BADROOT'\")\n}\nmodel Employee {\n salary Int @check(\"salary > 0\")\n @@composition.model(parent: \"Person\", parentRef: \"person\", childRef: \"employee\")\n}\nmodel Manager {\n level Int @check(\"level > 0\")\n @@composition.model(parent: \"Employee\", parentRef: \"employee\", childRef: \"manager\")\n}";
     let source = if dialect == Dialect::Postgres {
         source.replace("\"sqlite\"", "\"postgresql\"")
     } else {
@@ -113,6 +113,46 @@ async fn check(url: &str) {
         vec![vec![Some("overwrite".into())]]
     )
     .is_err());
+    // A second attach fails on the shared PK; an attach to a missing parent fails on the FK.
+    for parent in [1i32, 999] {
+        let again = composed::prepare_attach(
+            &schema,
+            target,
+            "Customer",
+            parent.into(),
+            &["points".into()],
+            vec![vec![Some(5i32.into())]],
+        )
+        .unwrap();
+        assert!(composed::run_insert(db.as_ref(), target, again)
+            .await
+            .is_err());
+    }
+    // A failure at the root, middle, or leaf insert rolls back every table.
+    for (name, salary, level) in [("BADROOT", 5i32, 1i32), ("middle", 0, 1), ("leaf", 5, 0)] {
+        let plan = exec::plan_insert(
+            &schema,
+            target,
+            "Manager",
+            &["name".into(), "salary".into(), "level".into()],
+            vec![vec![Some(name.into()), Some(salary.into()), Some(level.into())]],
+            None,
+            &NoParams,
+        )
+        .unwrap();
+        assert!(exec::run(db.as_ref(), target, plan).await.is_err());
+    }
+    for table in ["person", "employee", "manager", "customer"] {
+        assert_eq!(
+            db.query(format!("SELECT COUNT(*) FROM {table}"), vec![])
+                .await
+                .unwrap()
+                .get_i64(0, 0)
+                .unwrap(),
+            1,
+            "{table}"
+        );
+    }
     let bad = exec::plan_insert(
         &schema,
         target,
@@ -158,6 +198,13 @@ async fn check(url: &str) {
             .unwrap(),
         21
     );
+    // A filter on an inherited field reports the count of logical rows.
+    let update = orm_engine::parse_op(r#"{"op":"update","model":"Manager","filters":[{"t":"cmp","op":"eq","l":{"t":"col","path":[],"name":"salary"},"r":{"t":"int","value":21}}],"set":[{"field":"level","value":{"t":"int","value":4}}]}"#).unwrap();
+    let plan = orm_engine::plan::Planner::plan(&schema, target, &update, &NoParams).unwrap();
+    let Outcome::Affected(count) = exec::run(db.as_ref(), target, plan).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(count, 1);
     let explicit = exec::plan_insert(
         &schema,
         target,

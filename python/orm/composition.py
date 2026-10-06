@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from .expr import Expression
 
 if TYPE_CHECKING:
-    from .fields import Field
     from .model import Model
     from .query import QuerySet
 
@@ -17,7 +16,7 @@ async def attach(qs: QuerySet[M], parent_id: Any, values: Mapping[str, Any]) -> 
     from .db import resolve
 
     meta = qs.model._meta
-    fields: dict[str, Field[Any]] | None = getattr(meta, "attach_fields", None)
+    fields = meta.attach_fields
     if fields is None:
         raise TypeError(f"{meta.name} is not a composed child")
     local: dict[str, Any] = {}
