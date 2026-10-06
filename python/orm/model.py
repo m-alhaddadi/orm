@@ -28,6 +28,15 @@ if "reference-loading" in json.loads(_native.native_artifact()).get("capabilitie
 __all__ = ["Model", "ModelMeta", "Registry", "registry", "define", "load", "loads"]
 
 
+_ABSENT = object()
+
+
+def _peek(row: Model, name: str) -> Any:
+    """A key value or ``_ABSENT``; an absent key never equals a loaded one."""
+    data = row.__dict__
+    return data[name] if name in data else data.get("_orm_internal", {}).get(name, _ABSENT)
+
+
 class ModelMeta:
     """Schema information about one model (``User._meta``)."""
 
@@ -461,7 +470,7 @@ class Model:
     def _replace_from(self, fresh: Model) -> None:
         for name, relation in self._meta.relations.items():
             source = relation.via if isinstance(relation, BelongsTo) else getattr(relation, "from_", None)
-            if source and self._field_value(source) != fresh._field_value(source):
+            if source and _peek(self, source) != _peek(fresh, source):
                 self.__dict__.pop(name, None)
         for name in self._meta.field_names:
             self.__dict__.pop(name, None)

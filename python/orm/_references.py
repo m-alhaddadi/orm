@@ -89,18 +89,18 @@ def install(model: Any) -> None:
     dependencies = tuple((name, r.via if isinstance(r, BelongsTo) else r.from_) for name, r in references)
     sources = tuple(source for _, source in dependencies)
     reverse_names = tuple(name for name, r in references if isinstance(r, HasOne))
-    apply = model._apply_row
-    if getattr(apply, "_reference_adapter", False):
-        apply = apply._reference_base
-    def apply_row(self: Any, row: tuple[Any, ...]) -> None:
+    replace = model._replace_from
+    if getattr(replace, "_reference_adapter", False):
+        replace = replace._reference_base
+    def replace_from(self: Any, fresh: Any) -> None:
         before = {source: peek_key(self, source) for source in sources}
-        apply(self, row)
+        replace(self, fresh)
         for name, source in dependencies:
             if before[source] != peek_key(self, source):
                 invalidate_reference(self, name)
-    apply_row._reference_adapter = True  # type: ignore[attr-defined]
-    apply_row._reference_base = apply  # type: ignore[attr-defined]
-    setattr(model, "_apply_row", apply_row)
+    replace_from._reference_adapter = True  # type: ignore[attr-defined]
+    replace_from._reference_base = replace  # type: ignore[attr-defined]
+    setattr(model, "_replace_from", replace_from)
     baseline_refresh = model.refresh
     if getattr(baseline_refresh, "_reference_adapter", False):
         baseline_refresh = baseline_refresh._reference_base
