@@ -23,3 +23,5 @@ pub mod behavior;
 
 #[cfg(feature = "composition")]
 pub mod ownership;
+
+pub mod identity;

@@ -65,3 +65,24 @@ fn schema_module_output_collisions_fail_before_writing() {
     assert!(!dir.join("_orm_models.py").exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn identity_cli_allocates_explicitly_and_compile_never_mutates() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.test-tmp").join(format!("orm-cli-identities-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("schema.prisma");
+    std::fs::write(&path, "model Post {\nid Int @id\n}\nmodel Tag {\nid Int @id\nkind ContentType\nobject_id Int\n}").unwrap();
+    assert!(!orm(&dir, &["compile"]).status.success());
+    let generated = orm(&dir, &["identities"]);
+    assert!(generated.status.success(), "{}", text(&generated.stderr));
+    let before = std::fs::read(dir.join("schema.identities.json")).unwrap();
+    for args in [&["compile"][..], &["check"][..], &["generate", "python"][..], &["generate", "typescript"][..]] {
+        let out = orm(&dir, args); assert!(out.status.success(), "{}", text(&out.stderr));
+    }
+    assert_eq!(std::fs::read(dir.join("schema.identities.json")).unwrap(), before);
+    let py = std::fs::read_to_string(dir.join("models.pyi")).unwrap();
+    let ts = std::fs::read_to_string(dir.join("models.ts")).unwrap();
+    assert!(py.contains("class ContentType(IntEnum)"));
+    assert!(ts.contains("Post: 1"), "{ts}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -6,3 +6,8 @@ bench/log-*.txt
 node_modules/
 *.node
 js/dist/
+
+# Worktree-owned isolated acceptance artifacts
+.test-tmp/
+.mypy_cache/
+.pytest_cache/
