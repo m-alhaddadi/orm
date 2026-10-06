@@ -1,0 +1,36 @@
+[package]
+name = "orm-query-defaults"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[workspace]
+[dependencies]
+orm-contracts = { path = "../contracts" }
+serde_json = "1"
+[package.metadata.orm-extension]
+id = "orm.query-defaults"
+version = "0.1.0"
+host_contract = 1
+schema_contract = 1
+capabilities = ["query-defaults"]
+languages = ["python", "typescript"]
+databases = ["postgres", "sqlite"]
+[[package.metadata.orm-extension.attributes]]
+name = "query.defaults"
+target = "model"
+[package.metadata.orm-extension.attributes.arguments.filter]
+kind = "string"
+[package.metadata.orm-extension.attributes.arguments.fields]
+kind = "list"
+[package.metadata.orm-extension.attributes.arguments.related]
+kind = "list"
+[package.metadata.orm-extension.attributes.arguments.parent]
+kind = "string"
+[[package.metadata.orm-extension.attributes]]
+name = "query.selectOut"
+target = "field"
+[[package.metadata.orm-extension.passes]]
+id = "query.defaults.lower"
+phase = "behavior"
+rust = "query_defaults::lower"
+effects = ["query-defaults"]

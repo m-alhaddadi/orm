@@ -175,7 +175,7 @@ pub async fn run_write(conn: &dyn Executor, schema: &Schema, target: Target, pla
             let step = plan.steps.iter().position(|s| s.owner == field.storage.owner).expect("prepared returning owner");
             (step, field.storage.column, field.physical_type)
         }).collect();
-        Ok(Outcome::Rows { model: plan.model.0, rows: Box::new(OwnerRows { rows: returned, fields }), types: logical.fields().iter().map(|f| f.value_type()).collect() })
+        Ok(Outcome::Rows { model: plan.model.0, rows: Box::new(OwnerRows { rows: returned, fields }), types: logical.fields().iter().map(|f| f.value_type()).collect(), shape: None })
     }.await;
     match result {
         Ok(out) => { tx.commit().await?; Ok(out) },

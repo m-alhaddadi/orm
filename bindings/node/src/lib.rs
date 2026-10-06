@@ -144,8 +144,9 @@ fn output_js(js: Js, schema: &schema::Schema, output: &Output) -> napi::Result<V
         }
     };
     match output {
-        Output::Instances { model, joins } => {
+        Output::Instances { model, shape, joins } => {
             js.set(obj, "model", name(*model)?)?;
+            js.set(obj, "shape", shape_js(js, shape.as_ref())?)?;
             let arr = js.array_of(joins.iter().map(|j| {
                 let o = js.object()?;
                 js.set(o, "parent", js.number(j.parent.map(|p| p as f64).unwrap_or(-1.0))?)?;
@@ -153,6 +154,7 @@ fn output_js(js: Js, schema: &schema::Schema, output: &Output) -> napi::Result<V
                 js.set(o, "model", name(j.model)?)?;
                 js.set(o, "start", js.number(j.start as f64)?)?;
                 js.set(o, "pk", js.number(j.pk_pos as f64)?)?;
+                js.set(o, "shape", shape_js(js, j.shape.as_ref())?)?;
                 Ok(o)
             }))?;
             js.set(obj, "joins", arr)?;
@@ -205,13 +207,14 @@ fn outcome_js(env: &Env, schema: &schema::Schema, out: Outcome) -> napi::Result<
         Outcome::Count(n) => js.number(n as f64)?,
         Outcome::Exists(b) => js.boolean(b)?,
         Outcome::Affected(n) => js.number(n as f64)?,
-        Outcome::Rows { model, rows, types } => {
+        Outcome::Rows { model, rows, types, shape } => {
             let o = js.object()?;
             js.set(o, "model", match model_name(schema, model) {
                 Some(n) => js.str(n)?,
                 None => js.null()?,
             })?;
             js.set(o, "rows", rows_js(c, rows.as_ref(), &types)?)?;
+            js.set(o, "shape", shape_js(js, shape.as_ref())?)?;
             o
         }
     }))
@@ -722,3 +725,14 @@ pub fn generate_typescript(path: String, runtime: Option<String>) -> napi::Resul
 
 #[cfg(feature = "composition")]
 mod methods { include!(env!("ORM_NODE_METHODS")); }
+
+fn shape_js(js: Js, shape: Option<&orm_core::behavior::ResultShape>) -> napi::Result<V> {
+    let Some(shape) = shape else { return js.null() };
+    js.array_of(shape.fields.iter().map(|f| {
+        let o = js.object()?;
+        js.set(o, "field", js.number(f.field.position as f64)?)?;
+        js.set(o, "slot", js.number(f.physical.expect("selected slot") as f64)?)?;
+        js.set(o, "public", js.boolean(f.public)?)?;
+        Ok(o)
+    }))
+}

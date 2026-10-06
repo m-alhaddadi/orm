@@ -180,6 +180,8 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
                 }
                 RelKind::One => {
                     let nullable = m.field(&r.from)?.nullable;
+                    #[cfg(feature = "query-defaults")]
+                    let nullable = nullable || schema.model(schema.model_idx(&r.target)?).query_defaults.filter.is_some();
                     let t = if nullable { format!("{} | None", r.target) } else { r.target.clone() };
                     writeln!(body, "    {}: f.BelongsTo[{t}, _{}Path]", r.name, r.target).unwrap();
                 }

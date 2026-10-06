@@ -22,3 +22,5 @@ bigdecimal = "0.4"
 
 [features]
 composition = ["orm-engine/composition", "orm-core/composition"]
+
+query-defaults = ["orm-engine/query-defaults", "orm-core/query-defaults"]

@@ -94,6 +94,7 @@ impl Composition {
             ..Default::default()
         };
         let mut artifact = artifact;
+        if self.manifests.iter().any(|m| m.capabilities.iter().any(|c| c == "query-defaults")) { artifact.capabilities.push("query-defaults".into()); }
         if let Some(native) = native {
             artifact.specializations = native.specializations.clone();
             artifact.capabilities.extend(["native-string-values", "native-string-records", "native-string-results"].into_iter().map(str::to_owned));

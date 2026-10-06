@@ -185,7 +185,7 @@ fn main() -> Result<(), String> {
         let schema_inputs = config.output.join("schema-inputs.json");
         let mut command = Command::new("cargo");
         command.args(["run", "--quiet", "--locked", "--manifest-path"]).arg(config.output.join("Cargo.toml"))
-            .args(["-p", "orm-core", "--features", "composition", "--example", "orm_extension_normalize"]);
+            .args(["-p", "orm-core", "--features", if composition.manifests.iter().any(|m| m.capabilities.iter().any(|c| c == "query-defaults")) { "composition,query-defaults" } else { "composition" }, "--example", "orm_extension_normalize"]);
         if config.offline { command.arg("--offline"); }
         command.arg("--").arg(base.join(&selected.schema)).arg(&normalized).arg(&schema_inputs)
             .env("ORM_CORE_COMPOSITION", config.output.join("composition.rs"));
@@ -219,10 +219,10 @@ fn main() -> Result<(), String> {
             let mut manifest: toml::Value = toml::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             if native.is_some() {
                 for (alias, dependency) in &config.dependencies { manifest["dependencies"].as_table_mut().unwrap().insert(alias.clone(), dependency.clone()); }
-                manifest["features"].as_table_mut().unwrap().insert("default".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
-                manifest["dependencies"]["orm-engine"].as_table_mut().unwrap().insert("features".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
+                manifest["features"].as_table_mut().unwrap().insert("default".into(), toml::Value::Array(composition_features(&composition)));
+                manifest["dependencies"]["orm-engine"].as_table_mut().unwrap().insert("features".into(), toml::Value::Array(composition_features(&composition)));
             }
-            manifest["dependencies"]["orm-core"].as_table_mut().unwrap().insert("features".into(), toml::Value::Array(vec![toml::Value::String("composition".into())]));
+            manifest["dependencies"]["orm-core"].as_table_mut().unwrap().insert("features".into(), toml::Value::Array(composition_features(&composition)));
             fs::write(path, toml::to_string(&manifest).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         }
     }
@@ -264,4 +264,10 @@ fn main() -> Result<(), String> {
     }
     println!("{}", config.output.display());
     Ok(())
+}
+
+fn composition_features(composition: &orm_extension_build::Composition) -> Vec<toml::Value> {
+    let mut features = vec![toml::Value::String("composition".into())];
+    if composition.manifests.iter().any(|m| m.capabilities.iter().any(|c| c == "query-defaults")) { features.push(toml::Value::String("query-defaults".into())); }
+    features
 }

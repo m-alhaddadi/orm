@@ -159,9 +159,13 @@ class QuerySet(Generic[M]):
     ``exclude(User.posts.published == False)`` keeps users with no unpublished post.
     """
 
-    __slots__ = ("_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db", "_from", "_joins", "_result")
+    __slots__ = ("_model_helpers", "_without_defaults", "_without_related", "_model_fields", "_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db", "_from", "_joins", "_result")
 
     def __init__(self, model: type[M]) -> None:
+        self._model_helpers: tuple[str, ...] = ()
+        self._without_defaults = False
+        self._without_related = False
+        self._model_fields: tuple[str, ...] | None = None
         self._model = model
         self._filters: tuple[Condition, ...] = ()
         self._order: tuple[Ordering, ...] = ()
@@ -190,6 +194,25 @@ class QuerySet(Generic[M]):
 
     def all(self) -> Self:
         return self._clone()
+
+    def without_defaults(self) -> Self:
+        """Bypass schema filter, selection and loading defaults; retain caller filters."""
+        return self._clone(_without_defaults=True)
+
+    def without_related(self) -> Self:
+        """Clear default and explicitly requested eager reference loading."""
+        return self._clone(_without_related=True, _related=())
+
+    def only(self, *fields: ColumnRef[Any]) -> Self:
+        """Return partial model instances. No arguments restores all public fields."""
+        names = []
+        for field in fields:
+            if not isinstance(field, ColumnRef) or field._root is not self._model or field._path:
+                raise TypeError("only() takes root model columns")
+            names.append(field._field.name)
+        if len(set(names)) != len(names):
+            raise ValueError("duplicate model field")
+        return self._clone(_model_fields=tuple(names) if fields else self._model._meta.field_names)
 
     def filter(self, *conditions: ConditionLike) -> Self:
         """Keep rows matching all ``conditions``."""
@@ -460,6 +483,14 @@ class QuerySet(Generic[M]):
         CTEs). In a subquery (``outer``) or a CTE (``ctes``), related loading is left out."""
         ctx = self._context(params, outer, ctes)
         ir: dict[str, Any] = {"op": op, "model": self._root_name()}
+        if self._without_defaults:
+            ir["without_defaults"] = True
+        if self._without_related:
+            ir["without_related"] = True
+        if self._model_fields is not None:
+            ir["model_fields"] = list(self._model_fields)
+        if self._model_helpers:
+            ir["model_helpers"] = list(self._model_helpers)
         if self._from is not None:
             ir["from"] = self._from.name
         if self._joins:
@@ -508,10 +539,19 @@ class QuerySet(Generic[M]):
         if self._from is not None or self._joins:
             raise QueryError(f"{op}() writes the model's table; it can't run on a query set with from_() or join()")
         ctx = IRContext(self._model, params)
-        ir = {"op": op, "model": self._model._meta.name, "filters": [f._ir(ctx) for f in self._filters]}
+        ir: dict[str, Any] = {"op": op, "model": self._model._meta.name, "filters": [f._ir(ctx) for f in self._filters]}
+        if self._without_defaults:
+            ir["without_defaults"] = True
+        if self._model_fields is not None:
+            ir["model_fields"] = list(self._model_fields)
         if values is not None:
             ir["set"] = assignments(self._model, values, ctx)
         return ctx.finish(ir)
+
+    def _default_filter_ir(self) -> IR | None:
+        if self._without_defaults:
+            return None
+        return self._model._meta.default_filter
 
     def _native(self) -> Any:
         return self._model._meta.registry.native()
@@ -617,12 +657,12 @@ class QuerySet(Generic[M]):
             raise QueryError("in_bulk() can't be used on a sliced query set")
         name = col._field.name
         if ids is None:
-            return {o.__dict__[name]: o for o in await self._fetch()}
+            return {o._field_value(name): o for o in await self._clone(_model_helpers=(*self._model_helpers, name))._fetch()}
         keys = list(dict.fromkeys(ids))
         out: dict[Any, M] = {}
         for i in range(0, len(keys), IN_BULK_CHUNK):
-            for o in await self.filter(col.in_(keys[i : i + IN_BULK_CHUNK]))._fetch():
-                out[o.__dict__[name]] = o
+            for o in await self.filter(col.in_(keys[i : i + IN_BULK_CHUNK]))._clone(_model_helpers=(*self._model_helpers, name))._fetch():
+                out[o._field_value(name)] = o
         return out
 
     def update(self, **values: Any) -> Update[M]:
@@ -789,7 +829,7 @@ class RelatedSet(QuerySet[M]):
         super().__init__(relation.target)
         self._relation = relation
         self._instance = instance
-        key = instance.__dict__.get(relation.from_)
+        key = instance._field_value(relation.from_)
         via: ColumnRef[Any] = ColumnRef(relation.target, (), relation.target._meta.fields[relation.via])
         self._filters = (as_condition(via == key),)
 
@@ -824,7 +864,7 @@ class RelatedSet(QuerySet[M]):
         return super().insert_many({**r, **link} for r in rows)
 
     def _link(self) -> dict[str, Any]:
-        return {self._relation.via: self._instance.__dict__[self._relation.from_]}
+        return {self._relation.via: self._instance._field_value(self._relation.from_)}
 
 
 class ManyRelatedSet(QuerySet[M]):
@@ -853,7 +893,7 @@ class ManyRelatedSet(QuerySet[M]):
 
     @property
     def _key(self) -> Any:
-        return self._instance.__dict__.get(self._relation.from_)
+        return self._instance._field_value(self._relation.from_)
 
     @property
     def cached(self) -> list[M]:

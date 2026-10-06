@@ -1,3 +1,4 @@
+import { fieldValue } from "./model.js";
 /** Rows and assignments for INSERT / UPDATE statements. */
 
 import { Expression, ParamRef, wrap, type IR, type IRContext } from "./expr.js";
@@ -23,7 +24,7 @@ function normalize(meta: ModelMeta, row: object, what: string, expressions: bool
     if (rel?.kind === "belongsTo") {
       const target = meta.registry.get(rel.target);
       const to = target.fieldByIr.get(rel.to)!.name;
-      values.set(rel.from, value === null ? null : (value as Record<string, unknown>)[to]);
+      values.set(rel.from, value === null ? null : fieldValue(value as object, to));
       continue;
     }
     throw new TypeError(`${meta.name} has no field ${JSON.stringify(key)}`);

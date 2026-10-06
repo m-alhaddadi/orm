@@ -494,7 +494,7 @@ fn outcome_to_py(
         Outcome::Count(n) => n.into_py_any(py),
         Outcome::Exists(v) => v.into_py_any(py),
         Outcome::Affected(n) => n.into_py_any(py),
-        Outcome::Rows { model, rows, types } => b.model_rows(model, rows.as_ref(), &types)?.into_py_any(py),
+        Outcome::Rows { model, rows, types, shape } => b.model_rows(model, shape.as_ref(), rows.as_ref(), &types)?.into_py_any(py),
     }
 }
 

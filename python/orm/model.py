@@ -48,6 +48,7 @@ class ModelMeta:
         # Row tuples from the engine follow this order.
         self.field_names: tuple[str, ...] = tuple(self.fields)
         self.input_fields: dict[str, Field[Any]] = self.fields
+        self.default_filter: dict[str, Any] | None = None
 
     def pk_ref(self) -> ColumnRef[Any]:
         return ColumnRef(self.model, (), self.pk)
@@ -202,6 +203,7 @@ class Registry:
             meta.table = ir["table"]
             meta.pk = next(field for field in fields.values() if field.primary_key)
             meta.schema_ir = ir
+            meta.default_filter = next((d.get("filter") for d in prepared.get("behavior", {}).get("query_defaults", ()) if d["model"] == meta.name), None)
             meta.field_names = tuple(fields)
             computed = {f["field"] for f in snapshot._behavior.get("result_fields", ()) if f["model"] == meta.name}
             meta.input_fields = {k: v for k, v in fields.items() if k not in computed} if computed else fields
@@ -228,7 +230,7 @@ class Registry:
         return self._native
 
 
-_RESERVED = {"pk", "objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "update", "delete", "refresh"}
+_RESERVED = {"pk", "objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "update", "delete", "refresh", "to_dict", "_field_value", "_orm_internal"}
 
 registry = Registry()
 
@@ -394,17 +396,41 @@ class Model:
 
     @property
     def pk(self) -> Any:
-        return self.__dict__.get(self._meta.pk.name)
+        return self.__dict__.get(self._meta.pk.name, self.__dict__.get("_orm_internal", {}).get(self._meta.pk.name))
+
+    def _field_value(self, name: str) -> Any:
+        """Internal key access for relation loaders; never marks a field loaded."""
+        if name in self.__dict__:
+            return self.__dict__[name]
+        internal = self.__dict__.get("_orm_internal", {})
+        if name in internal:
+            return internal[name]
+        from .errors import NotLoaded
+        raise NotLoaded(f"{type(self).__name__}.{name} was not loaded")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize public loaded scalar fields, retaining loaded NULL values."""
+        return {n: self.__dict__[n] for n in self._meta.field_names if n in self.__dict__}
 
     # -- writes --------------------------------------------------------------------------
     # Each method is one statement on this row (matched by primary key), run on the
     # database the instance was read from.
 
     def _row_query(self) -> QuerySet[Self]:
-        return type(self).objects.using(self.__dict__.get("_db")).filter(self._meta.pk_ref() == self.pk)
+        return type(self).objects.without_defaults().using(self.__dict__.get("_db")).filter(self._meta.pk_ref() == self.pk)
 
     def _apply_row(self, row: tuple[Any, ...]) -> None:
-        self.__dict__.update(zip(self._meta.field_names, row))
+        values = dict(zip(self._meta.field_names, row))
+        for name, relation in self._meta.relations.items():
+            source = relation.via if isinstance(relation, BelongsTo) else getattr(relation, "from_", None)
+            if source and self._field_value(source) != values[source]:
+                self.__dict__.pop(name, None)
+        if "_orm_internal" in self.__dict__:
+            loaded = set(self.__dict__) & self._meta.fields.keys()
+            self.__dict__.update({n: values[n] for n in loaded})
+            self.__dict__["_orm_internal"].update({n: values[n] for n in self.__dict__["_orm_internal"]})
+        else:
+            self.__dict__.update(values)
 
     async def update(self, **values: Any) -> None:
         """``UPDATE ... SET <values> WHERE pk = ... RETURNING *``.
@@ -423,10 +449,26 @@ class Model:
         """``DELETE ... WHERE pk = ...``. The instance keeps its last values."""
         await self._row_query().delete()
 
-    async def refresh(self) -> None:
+    async def refresh(self, *fields: ColumnRef[Any]) -> None:
         """Reload column values from the database."""
-        fresh = await self._row_query().get()
-        self._apply_row(tuple(fresh.__dict__[n] for n in self._meta.field_names))
+        query = self._row_query()
+        requested = query.only(*fields)._model_fields if fields else ()
+        if "_orm_internal" in self.__dict__:
+            names = [n for n in self._meta.field_names if n in self.__dict__]
+            names.extend(n for n in requested or () if n not in names)
+            query = query._clone(_model_fields=tuple(names))
+        fresh = await query.get()
+        for name, relation in self._meta.relations.items():
+            source = relation.via if isinstance(relation, BelongsTo) else getattr(relation, "from_", None)
+            if source and self._field_value(source) != fresh._field_value(source):
+                self.__dict__.pop(name, None)
+        for name in self._meta.field_names:
+            self.__dict__.pop(name, None)
+        self.__dict__.update({n: fresh.__dict__[n] for n in self._meta.field_names if n in fresh.__dict__})
+        if "_orm_internal" in fresh.__dict__:
+            self.__dict__["_orm_internal"] = fresh.__dict__["_orm_internal"]
+        else:
+            self.__dict__.pop("_orm_internal", None)
 
     # -- dunder --------------------------------------------------------------------------
 

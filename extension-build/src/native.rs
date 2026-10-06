@@ -213,8 +213,10 @@ pub fn generate_with_sources(schema: &mut SchemaIr, specs: &[NativeSpec], manife
         let links: Vec<_> = schema.behavior.owner_links.iter().filter(|l| owner_names.contains(l.child.as_str())).collect();
         let ownership_json = serde_json::to_string(&ownership).map_err(|e| e.to_string())?;
         let links_json = serde_json::to_string(&links).map_err(|e| e.to_string())?;
+        let policies: Vec<_> = schema.behavior.query_defaults.iter().filter(|d| d.model == model.name).collect();
+        let policies_json = serde_json::to_string(&policies).map_err(|e| e.to_string())?;
         let versions: BTreeMap<_, _> = manifests.iter().map(|m| (&m.id, &m.version)).collect();
-        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&serde_json::json!({"model": model, "enums": relevant_enums, "physical_schema": physical, "field_storage": ownership, "owner_links": links, "dialect": schema.dialect, "configuration": spec, "extensions": versions, "composition": manifests, "sources": sources, "host_contract": orm_contracts::extension::HOST_CONTRACT})).map_err(|e| e.to_string())?));
+        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&serde_json::json!({"model": model, "enums": relevant_enums, "physical_schema": physical, "field_storage": ownership, "owner_links": links, "query_defaults": policies, "dialect": schema.dialect, "configuration": spec, "extensions": versions, "composition": manifests, "sources": sources, "host_contract": orm_contracts::extension::HOST_CONTRACT})).map_err(|e| e.to_string())?));
         ids.sort(); ids.dedup();
         let specialization = Specialization { model: spec.model.clone(), fingerprint, exports: ids };
         let specialization_json = serde_json::to_string(&specialization).map_err(|e| e.to_string())?;
@@ -238,6 +240,8 @@ pub fn generate_with_sources(schema: &mut SchemaIr, specs: &[NativeSpec], manife
     if serde_json::to_string(&physical).map_err(|e| e.to_string())? != {physical_json:?} || serde_json::to_string(&ownership).map_err(|e| e.to_string())? != {ownership_json:?} || serde_json::to_string(&links).map_err(|e| e.to_string())? != {links_json:?} {{
         return Err(format!("{{}}: stale native storage specialization; rebuild", m.name));
     }}
+    let policies: Vec<_> = ir.behavior.query_defaults.iter().filter(|d| d.model == m.name).collect();
+    if serde_json::to_string(&policies).map_err(|e| e.to_string())? != {policies_json:?} {{ return Err(format!("{{}}: stale native query-default specialization; rebuild", m.name)); }}
     let requirement = serde_json::from_str({specialization_json:?}).expect("generated specialization");
     if !ir.behavior.specializations.contains(&requirement) {{ ir.behavior.specializations.push(requirement); }}
     let methods: Vec<crate::behavior::MethodDeclaration> = serde_json::from_str({methods_json:?}).expect("generated model methods");

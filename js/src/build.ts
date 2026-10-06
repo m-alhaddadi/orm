@@ -50,11 +50,11 @@ export class Builder {
     const joined: (Obj | null)[] = new Array(joins.length);
     for (let r = 0; r < n; r++) {
       const base = r * width;
-      const root = meta.instance(values, base, this.db);
+      const root = meta.instance(values, base, this.db, out.shape);
       for (let i = 0; i < joins.length; i++) {
         const j = joins[i]!;
         // A LEFT JOIN without a match gives NULLs, the primary key included.
-        const child = values[base + j.start + j.pk] === null ? null : j.meta.instance(values, base + j.start, this.db);
+        const child = values[base + j.start + j.pk] === null ? null : j.meta.instance(values, base + j.start, this.db, j.shape);
         joined[i] = child;
         const parent = j.parent < 0 ? root : joined[j.parent];
         if (parent) {
@@ -104,7 +104,7 @@ export class Builder {
 
   /** Instances for rows a write returned. */
   returned(res: NativeReturned): Obj[] {
-    return this.instances({ model: res.model, joins: [] }, res.rows);
+    return this.instances({ model: res.model, shape: res.shape ?? null, joins: [] }, res.rows);
   }
 
   /** Puts the related objects of `f` on `parents` (built from `parentRows`, in order). */

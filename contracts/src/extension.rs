@@ -31,6 +31,8 @@ pub struct Declaration {
 #[serde(deny_unknown_fields)]
 pub struct Requirements {
     #[serde(default)]
+    pub query_defaults: Vec<QueryDefaults>,
+    #[serde(default)]
     pub schema_contract: u32,
     #[serde(default)]
     pub declarations: Vec<Declaration>,
@@ -55,7 +57,7 @@ pub struct Requirements {
 }
 impl Requirements {
     pub fn is_empty(&self) -> bool {
-        self.declarations.is_empty() && self.extensions.is_empty() && self.specializations.is_empty()
+        self.query_defaults.is_empty() && self.declarations.is_empty() && self.extensions.is_empty() && self.specializations.is_empty()
             && self.lowered_models.is_empty() && self.completed_passes.is_empty() && self.result_fields.is_empty() && self.storage.is_none() && self.field_storage.is_empty() && self.owner_links.is_empty() && self.methods.is_empty() && self.schema_contract == 0
     }
 }
@@ -382,7 +384,7 @@ pub fn capture_storage(ir: &mut SchemaIr) -> Result<(), String> {
 
 pub const HOST_CAPABILITIES: &[&str] = &[
     "schema-transformations", "physical-schema", "native-string-values",
-    "native-string-records", "native-string-results",
+    "native-string-records", "native-string-results", "query-defaults",
 ];
 
 /// Combine one new declaration batch with an immutable definition context. Lowered
@@ -441,6 +443,7 @@ pub fn merge_definition(mut context: SchemaIr, mut incoming: SchemaIr) -> Result
     c.lowered_models.extend(n.lowered_models);
     c.lowered_models.sort(); c.lowered_models.dedup();
     c.declarations.extend(n.declarations);
+    c.query_defaults.extend(n.query_defaults);
     c.specializations.extend(n.specializations);
     c.result_fields.extend(n.result_fields);
     c.methods.extend(n.methods);
@@ -475,4 +478,15 @@ pub fn specialization_storage(model: &crate::ir::ModelIr, requirements: &Require
     let mut physical: crate::ir::ModelIr = serde_json::from_value(serde_json::to_value(model).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     physical.fields.retain(|f| !computed.contains(&f.name));
     Ok(vec![physical])
+}
+
+/// Resolved schema policies. `filter` is query expression JSON, never SQL text.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryDefaults {
+    pub model: String,
+    #[serde(default)] pub parent: Option<String>,
+    #[serde(default)] pub filter: Option<serde_json::Value>,
+    #[serde(default)] pub fields: Option<Vec<String>>,
+    #[serde(default)] pub related: Vec<Vec<String>>,
 }

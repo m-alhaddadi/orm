@@ -37,7 +37,7 @@ pub enum Outcome {
     /// Rows affected by an UPDATE / DELETE without `RETURNING`.
     Affected(u64),
     /// Rows of `model` returned by a write (`RETURNING` every column).
-    Rows { model: usize, rows: Box<dyn RowSet>, types: Vec<ValueType> },
+    Rows { model: usize, rows: Box<dyn RowSet>, types: Vec<ValueType>, shape: Option<orm_core::behavior::ResultShape> },
 }
 
 /// Runs `plan` on `conn` (the pool or a transaction).
@@ -65,7 +65,7 @@ pub async fn run(conn: &dyn Executor, target: Target, plan: Plan) -> Result<Outc
         }
         Plan::Insert(s, (model, types)) => {
             let (sql, args) = db::build(d, &s);
-            Outcome::Rows { model, rows: conn.query(sql, args).await?, types }
+            Outcome::Rows { model, rows: conn.query(sql, args).await?, types, shape: None }
         }
     })
 }
@@ -87,11 +87,11 @@ async fn count_or_rows(
     conn: &dyn Executor,
     sql: String,
     args: Vec<Value>,
-    returning: Option<(usize, Vec<ValueType>)>,
+    returning: Option<plan::Returned>,
 ) -> Result<Outcome> {
     Ok(match returning {
         None => Outcome::Affected(conn.execute(sql, args).await?),
-        Some((model, types)) => Outcome::Rows { model, rows: conn.query(sql, args).await?, types },
+        Some((model, types, shape)) => Outcome::Rows { model, rows: conn.query(sql, args).await?, types, shape },
     })
 }
 
@@ -338,7 +338,7 @@ pub async fn run_update_many(conn: &dyn Executor, um: UpdateMany, own_tx: bool) 
     }
     Ok(match um.returning {
         None => Outcome::Affected(count),
-        Some((model, types)) => Outcome::Rows { model, rows: Box::new(ChainedRows::new(fetched)), types },
+        Some((model, types)) => Outcome::Rows { model, rows: Box::new(ChainedRows::new(fetched)), types, shape: None },
     })
 }
 

@@ -108,7 +108,9 @@ fn belongs_to<'a>(m: &'a Model, field: &str) -> Option<&'a RelationIr> {
 }
 
 /// The hop kind of a relation, for loaded-relation types.
-fn hop_kind(m: &Model, r: &RelationIr) -> Result<&'static str, String> {
+fn hop_kind(_schema: &Schema, m: &Model, r: &RelationIr) -> Result<&'static str, String> {
+    #[cfg(feature = "query-defaults")]
+    if r.kind == RelKind::One && _schema.model(_schema.model_idx(&r.target)?).query_defaults.filter.is_some() { return Ok("opt"); }
     Ok(match r.kind {
         RelKind::Many if r.through.is_some() => "m2m",
         RelKind::Many => "many",
@@ -177,7 +179,11 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         writeln!(body, "/** The column values of a {name} row. */").unwrap();
         writeln!(body, "export interface {name}Data {{").unwrap();
         for f in m.fields() {
-            writeln!(body, "  readonly {}: {};", camel(&f.name), value_type(f)).unwrap();
+            #[cfg(feature = "query-defaults")]
+            let optional = m.query_defaults.fields.as_ref().is_some_and(|fields| !fields.contains(&f.name));
+            #[cfg(not(feature = "query-defaults"))]
+            let optional = false;
+            writeln!(body, "  readonly {}{}: {};", camel(&f.name), if optional { "?" } else { "" }, value_type(f)).unwrap();
         }
         writeln!(body, "}}\n").unwrap();
 
@@ -308,7 +314,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
                 .unwrap();
         }
         for r in &m.ir.relations {
-            let kind = hop_kind(m, r)?;
+            let kind = hop_kind(schema, m, r)?;
             let scope = if matches!(kind, "many" | "m2m") { "S | Many" } else { "S" };
             let opt = if kind == "opt" { "true" } else { "O" };
             writeln!(

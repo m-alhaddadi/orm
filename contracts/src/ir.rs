@@ -551,6 +551,8 @@ pub enum Expr {
     InSelect { item: Box<Expr>, select: Box<Select>, #[serde(default)] neg: bool },
     /// An integer written into the SQL (window function offsets, `ntile` buckets).
     Int { value: i64 },
+    /// Bound schema-policy string literal.
+    Text { value: String },
     /// A field of an enclosing query's root model (or CTE), `depth` queries up:
     /// `outer(User.id)` in a subquery of a `User` query.
     Outer { depth: usize, name: String },
@@ -671,6 +673,15 @@ pub struct Order {
 /// the same related row, while separate entries are independent (Django semantics).
 #[derive(Deserialize, Debug, Clone)]
 pub struct Select {
+    /// Public model fields; helpers are selected separately by the planner.
+    #[serde(default)]
+    pub model_fields: Option<Vec<String>>,
+    #[serde(default)]
+    pub model_helpers: Vec<String>,
+    #[serde(default)]
+    pub without_defaults: bool,
+    #[serde(default)]
+    pub without_related: bool,
     /// The root model, or a CTE of this statement when the query reads a CTE that has no
     /// model.
     pub model: String,
@@ -756,6 +767,10 @@ pub struct Assignment {
 
 #[derive(Deserialize, Debug)]
 pub struct Update {
+    #[serde(default)]
+    pub model_fields: Option<Vec<String>>,
+    #[serde(default)]
+    pub without_defaults: bool,
     pub model: String,
     #[serde(default)]
     pub with: Vec<Cte>,
@@ -769,6 +784,10 @@ pub struct Update {
 
 #[derive(Deserialize, Debug)]
 pub struct Delete {
+    #[serde(default)]
+    pub model_fields: Option<Vec<String>>,
+    #[serde(default)]
+    pub without_defaults: bool,
     pub model: String,
     #[serde(default)]
     pub with: Vec<Cte>,

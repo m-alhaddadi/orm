@@ -23,3 +23,6 @@ pub mod behavior;
 
 #[cfg(feature = "composition")]
 pub mod ownership;
+
+# [cfg(feature = "query-defaults")]
+pub mod selection;

@@ -9,6 +9,8 @@ pub type Result<T> = std::result::Result<T, String>;
 pub struct Model {
     pub ir: ModelIr,
     pub pk: usize,
+    #[cfg(feature = "query-defaults")]
+    pub query_defaults: crate::selection::PreparedDefaults,
     #[cfg(feature = "composition")]
     pub native: crate::behavior::NativeModel,
     #[cfg(feature = "composition")]
@@ -41,7 +43,8 @@ impl Model {
             renamed_from: None,
             comment: None,
         };
-        Ok(Model { ir, pk: 0, field_index, relation_index: HashMap::new(),
+        Ok(Model { ir, pk: 0,
+            #[cfg(feature = "query-defaults")] query_defaults: Default::default(), field_index, relation_index: HashMap::new(),
             #[cfg(feature = "composition")] native: crate::behavior::NativeModel::None,
             #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
             #[cfg(feature = "composition")] resolved_fields: vec![] })
@@ -173,7 +176,8 @@ impl Schema {
                 }
                 relation_index.insert(r.name.clone(), (i, target));
             }
-            models.push(Model { ir: m, pk, field_index, relation_index,
+            models.push(Model { ir: m, pk,
+                #[cfg(feature = "query-defaults")] query_defaults: Default::default(), field_index, relation_index,
                 #[cfg(feature = "composition")] native: native.next().expect("prepared model"),
                 #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
             #[cfg(feature = "composition")] resolved_fields: vec![] });
@@ -194,6 +198,10 @@ impl Schema {
                 }
             }
         }
+        #[cfg(not(feature = "query-defaults"))]
+        if !ir.behavior.query_defaults.is_empty() { return Err("query defaults require an enabled query-defaults artifact; rebuild".into()); }
+        #[cfg(feature = "query-defaults")]
+        crate::selection::prepare(&mut models, &ir.behavior.query_defaults)?;
         #[cfg(feature = "composition")]
         let owner_links = crate::ownership::resolve(&mut models, storage.as_deref(), &ir.behavior.field_storage, &ir.behavior.owner_links)?;
         Ok(Schema {
