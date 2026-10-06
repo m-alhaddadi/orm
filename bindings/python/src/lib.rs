@@ -308,6 +308,25 @@ impl Engine {
         })
     }
 
+    /// Attach local values to an existing shared-key parent.
+    #[cfg(feature = "model-composition")]
+    #[pyo3(signature = (model, parent_id, fields, rows, tx = None, db = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn attach<'py>(&self, py: Python<'py>, model: &str, parent_id: &Bound<'py, PyAny>, fields: Vec<String>, rows: &Bound<'py, PyList>, tx: Option<&Bound<'py, Transaction>>, db: Option<Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyAny>> {
+        let model_idx = self.schema.model_idx(model).map_err(schema_err)?;
+        let identity = py_to_value(parent_id, Some(self.schema.model(model_idx).pk_field().value_type()))?;
+        let values = convert_rows(&self.schema, model, &fields, rows, true)?;
+        let plan = orm_engine::composed::prepare_attach(&self.schema, self.target, model, identity, &fields, values).map_err(engine_err)?;
+        let target = self.target;
+        let conn = self.conn(tx);
+        let classes = self.classes.clone();
+        let db = db.map(Bound::unbind);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let out = orm_engine::composed::run_insert(conn.as_ref(), target, plan).await.map_err(engine_err)?;
+            Python::attach(|py| outcome_to_py(py, out, &classes, db, None))
+        })
+    }
+
     /// Updates each row (a sequence aligned with `fields`, the primary key first) to its
     /// own values, among the rows matching `filters_json` (JSON list of filter IR, values
     /// in `params`). Big inputs run as several statements in one transaction (inside `tx`

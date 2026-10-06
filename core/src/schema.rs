@@ -103,6 +103,10 @@ impl Schema {
 
     fn from_ir_impl(mut ir: SchemaIr, behavioral: bool) -> Result<Self> {
         if behavioral { crate::behavior::prepare(&mut ir, None)?; }
+        #[cfg(not(feature = "model-composition"))]
+        if ir.behavior.extensions.contains_key("composition") {
+            return Err("model-composition is absent from this native artifact; rebuild with model-composition enabled".into());
+        }
         #[cfg(feature = "composition")]
         let native_models = if behavioral { crate::behavior::bind(&mut ir)? } else { vec![crate::behavior::NativeModel::None; ir.models.len()] };
         #[cfg(feature = "composition")]

@@ -67,6 +67,10 @@ pub async fn run(conn: &dyn Executor, target: Target, plan: Plan) -> Result<Outc
             let (sql, args) = db::build(d, &s);
             Outcome::Rows { model, rows: conn.query(sql, args).await?, types }
         }
+        #[cfg(feature = "model-composition")]
+        Plan::ComposedInsert(insert) => return crate::composed::run_insert(conn, target, *insert).await,
+        #[cfg(feature = "model-composition")]
+        Plan::ComposedMutation(plan) => return crate::composed::run_mutation(conn, target, *plan).await,
     })
 }
 
@@ -79,6 +83,10 @@ pub fn sql(target: Target, plan: &Plan) -> String {
         Plan::Update(s, _) => db::to_string(d, s),
         Plan::Delete(s, _) => db::to_string(d, s),
         Plan::Insert(s, _) => db::to_string(d, s),
+        #[cfg(feature = "model-composition")]
+        Plan::ComposedInsert(_) => "-- Composed insert executes ancestor inserts and a final read in one transaction".into(),
+        #[cfg(feature = "model-composition")]
+        Plan::ComposedMutation(_) => "-- Composed mutation captures identities and writes owners in one transaction".into(),
     }
 }
 
@@ -247,6 +255,11 @@ pub fn plan_insert(
     conflict: Option<Conflict>,
     params: &dyn Params,
 ) -> Result<Plan> {
+    #[cfg(feature = "model-composition")]
+    if crate::composed::is_composed(schema, model)? {
+        if conflict.is_some() { return Err(Error::query("composed inserts do not support on_conflict")); }
+        return Ok(Plan::ComposedInsert(Box::new(crate::composed::prepare_insert(schema, target, model, fields, rows)?)));
+    }
     let model_idx = schema.model_idx(model).map_err(query_err)?;
     let on_conflict = conflict.map(|c| match c {
         Conflict::Nothing { target } => plan::OnConflict::Nothing(target),

@@ -16,3 +16,5 @@ toml = "0.8"
 
 [features]
 composition = []
+
+model-composition = ["composition"]

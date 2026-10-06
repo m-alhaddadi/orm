@@ -655,6 +655,27 @@ pub fn connect<'env>(
     })
 }
 
+#[cfg(feature = "model-composition")]
+#[napi]
+impl Engine {
+    /// Attach local values to an existing shared-key parent.
+    #[napi(ts_return_type = "Promise<unknown>")]
+    pub fn attach<'env>(&self, env: &'env Env, model: String, parent_id: Unknown<'_>, fields: Vec<String>, rows: Unknown<'_>, tx: Option<&Transaction>) -> napi::Result<PromiseRaw<'env, Raw>> {
+        let model_idx = self.schema.model_idx(&model).map_err(schema_err)?;
+        let identity = conv(env)?.value(parent_id.raw(), Some(self.schema.model(model_idx).pk_field().value_type())).map_err(engine_err)?;
+        let values = convert_rows(env, &self.schema, &model, &fields, rows, true)?;
+        let plan = orm_engine::composed::prepare_attach(&self.schema, self.target, &model, identity, &fields, values).map_err(engine_err)?;
+        let target = self.target;
+        let conn = self.conn(tx);
+        let schema = self.schema.clone();
+        env.spawn_future_with_callback(
+            async move { orm_engine::composed::run_insert(conn.as_ref(), target, plan).await.map_err(engine_err) },
+            move |env, out| outcome_js(env, &schema, out),
+        )
+    }
+
+}
+
 // -- schema compiler ------------------------------------------------------------------------------
 
 /// Compiles schema-language source to the schema IR (JSON). `path` is where it came

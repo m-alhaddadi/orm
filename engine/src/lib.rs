@@ -29,3 +29,6 @@ pub mod behavior;
 
 #[cfg(feature = "composition")]
 pub mod ownership;
+
+#[cfg(feature = "model-composition")]
+pub mod composed;

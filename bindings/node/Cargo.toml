@@ -25,3 +25,5 @@ napi-build = "2"
 
 [features]
 composition = ["orm-engine/composition", "orm-core/composition"]
+
+model-composition = ["composition", "orm-core/model-composition", "orm-engine/model-composition"]
