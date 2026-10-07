@@ -26,7 +26,7 @@ pub fn generate_with_sources(schema: &mut SchemaIr, specs: &[NativeSpec], manife
     let mut core = String::from("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum NativeModel { None,\n");
     for i in 0..specs.len() { core.push_str(&format!("S{i},\n")); }
     core.push_str("}\nimpl NativeModel { pub fn computed(self) -> &'static [usize] { match self { Self::None => &[],\n");
-    let mut engine = String::from("use orm_core::behavior::NativeModel;\nuse sea_query::Value;\nuse crate::error::{Error, Result};\n");
+    let mut engine = String::from("use orm_core::behavior::NativeModel;\nuse sea_query::Value;\n#[allow(unused_imports)]\nuse crate::error::{Error, Result};\n");
     let mut field_arms = String::new();
     let mut field_helpers = String::new();
     let mut record_helpers = String::new();
@@ -285,6 +285,7 @@ pub fn generate_with_sources(schema: &mut SchemaIr, specs: &[NativeSpec], manife
     engine.push_str("pub fn compute(kind: NativeModel, position: usize, rows: &dyn crate::db::RowSet, column: usize, ty: orm_core::ir::ValueType) -> crate::db::DbResult<Vec<Option<String>>> { match (kind, position) {\n");
     engine.push_str(&computation_arms);
     engine.push_str("_ => Err(crate::db::DbError::other(\"missing compiled computation\")),\n} }\n");
-    python.push_str(&format!("pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {{ {registration} Ok(()) }}\n"));
+    let module = if registration.is_empty() { "_m" } else { "m" };
+    python.push_str(&format!("pub fn register({module}: &Bound<'_, PyModule>) -> PyResult<()> {{ {registration} Ok(()) }}\n"));
     Ok(Sources { core, engine, specializations, python, node })
 }
