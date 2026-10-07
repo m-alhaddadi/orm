@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::syntax::{err, Args, Attr, EnumDecl, Item, Member, ModelDecl, Pos, Props, Result, TypeRef, Value};
+use crate::behavior::ArgumentKind;
 use crate::ext::{ExtensionDef, TypeDef};
 use crate::ir::{
     ColType, ConstraintIr, Deferrable, EnumIr, EnumStorage, EnumValueIr, ExcludeElementIr, ExtensionIr, FieldIr,
@@ -1220,16 +1221,21 @@ fn param(pos: Pos, v: &Value) -> Result<String> {
 }
 
 /// A behavioral declaration argument as literal JSON: a bare identifier is a string.
-fn declaration_value(pos: Pos, value: &Value) -> Result<serde_json::Value> {
+/// Bare names, `null` and objects are literals only for arguments of kind `value`
+/// (or of an attribute no compiled manifest declares, which validation rejects later).
+fn declaration_value(pos: Pos, value: &Value, kind: Option<ArgumentKind>) -> Result<serde_json::Value> {
+    if kind.is_some_and(|k| k != ArgumentKind::Value) {
+        return json_of(pos, value);
+    }
     Ok(match value {
         Value::Path(path, None) if path.as_slice() == ["null"] => serde_json::Value::Null,
         Value::Path(path, None) => serde_json::Value::String(path.join(".")),
         Value::Path(_, Some(_)) => return err(pos, "behavioral arguments require literal values, not function calls"),
-        Value::List(items) => serde_json::Value::Array(items.iter().map(|(p, v)| declaration_value(*p, v)).collect::<Result<_>>()?),
+        Value::List(items) => serde_json::Value::Array(items.iter().map(|(p, v)| declaration_value(*p, v, None)).collect::<Result<_>>()?),
         Value::Object(entries) => {
             let mut object = serde_json::Map::new();
             for (key, pos, value) in entries {
-                if object.insert(key.clone(), declaration_value(*pos, value)?).is_some() {
+                if object.insert(key.clone(), declaration_value(*pos, value, None)?).is_some() {
                     return err(*pos, format!("duplicate behavioral object key {key}"));
                 }
             }
@@ -1241,7 +1247,7 @@ fn declaration_value(pos: Pos, value: &Value) -> Result<serde_json::Value> {
 
 /// Preserve namespaced behavioral declarations before ordinary schema lowering.
 /// Database type attributes keep their existing interpretation.
-pub(super) fn behavior_declarations(items: &mut [Item], file: &str) -> Result<Vec<crate::behavior::Declaration>> {
+pub(super) fn behavior_declarations(items: &mut [Item], file: &str, manifests: &[crate::behavior::Manifest]) -> Result<Vec<crate::behavior::Declaration>> {
     let mut out = vec![];
     let mut collect = |attrs: &mut Vec<Attr>, model: &str, field: Option<&str>| -> Result<()> {
         let mut ordinary = vec![];
@@ -1250,16 +1256,20 @@ pub(super) fn behavior_declarations(items: &mut [Item], file: &str) -> Result<Ve
                 ordinary.push(a);
                 continue;
             }
+            let declared = manifests.iter().flat_map(|m| &m.attributes).find(|d| d.name == a.name);
             let mut arguments = BTreeMap::new();
             for (name, pos, value) in &a.args.named {
-                if arguments.insert(name.clone(), declaration_value(*pos, value)?).is_some() {
+                let kind = declared.and_then(|d| d.arguments.get(name)).map(|arg| arg.kind);
+                if arguments.insert(name.clone(), declaration_value(*pos, value, kind)?).is_some() {
                     return err(*pos, format!("@{}: duplicate argument {name}", a.name));
                 }
             }
             out.push(crate::behavior::Declaration {
                 lowered: false,
                 attribute: a.name, model: model.to_owned(), field: field.map(str::to_owned), arguments,
-                positional: a.args.positional.iter().map(|(pos, v)| declaration_value(*pos, v)).collect::<Result<_>>()?,
+                positional: a.args.positional.iter().enumerate()
+                    .map(|(i, (pos, v))| declaration_value(*pos, v, declared.and_then(|d| d.positional.get(i)).map(|arg| arg.kind)))
+                    .collect::<Result<_>>()?,
                 location: crate::behavior::SourceLocation { file: file.to_owned(), line: a.pos.line, column: a.pos.col },
             });
         }

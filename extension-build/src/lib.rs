@@ -125,8 +125,9 @@ impl Composition {
 use crate::ir::SchemaIr;
 use crate::behavior::{{Artifact, Manifest, SCHEMA_CONTRACT, validate_declarations, validate_requirements, capture_storage}};
 pub fn artifact() -> Artifact {{ serde_json::from_str({artifact:?}).expect("generated artifact") }}
+pub fn manifests() -> Vec<Manifest> {{ serde_json::from_str({manifests:?}).expect("generated manifests") }}
 pub fn prepare(ir: &mut SchemaIr, language: Option<&str>) -> Result<(), String> {{
-    let manifests: Vec<Manifest> = serde_json::from_str({manifests:?}).expect("generated manifests");
+    let manifests = manifests();
     validate_declarations(ir, &manifests, language)?;
     let expected: Vec<String> = serde_json::from_str({ids:?}).expect("generated pass IDs");
     if !ir.behavior.completed_passes.is_empty() && ir.behavior.completed_passes != expected {{ return Err("incompatible lowering state; rebuild schema and native artifact".into()); }}

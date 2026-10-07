@@ -18,7 +18,7 @@ async def test_proxy_warning_rows_defaults_writes_and_relation_targets(dialect, 
         source = 'datasource db { provider = "sqlite" }\n' + source
     registry = orm.Registry()
     models = orm.loads(source, registry=registry)
-    with pytest.raises(orm.SchemaError, match="missing.*after extension lowering"):
+    with pytest.raises(orm.SchemaError, match=r":\d+:\d+: relation \w+\.\w+: \w+ has no field missing after extension lowering"):
         orm.loads(source.replace("references: [id]", "references: [missing]"), registry=orm.Registry())
     User, Active, Post, Status = (models[k] for k in ("User", "Active", "Post", "Status"))
     assert not Active._meta.fields["name"].has_server_value

@@ -534,12 +534,36 @@ fn behavioral_arguments_preserve_names_null_and_nested_json() {
       @@proxy.subset("state", [ACTIVE, OLD])
       @@proxy.default("payload", {enabled: true, labels: ["null", null, 3]})
     }"#).unwrap();
-    let declarations = super::lower::behavior_declarations(&mut items, "views.prisma").unwrap();
+    let declarations = super::lower::behavior_declarations(&mut items, "views.prisma", &[]).unwrap();
     assert_eq!(declarations[0].positional, vec![serde_json::json!("User")]);
     assert_eq!(declarations[1].positional[1], serde_json::json!(["ACTIVE", "OLD"]));
     assert_eq!(declarations[2].positional[1], serde_json::json!({"enabled":true,"labels":["null",null,3]}));
     assert_eq!(declarations[2].location.file, "views.prisma");
     assert!(syntax::parse(r#"model V { @@proxy.default("x", {key:1,key:2}) }"#).is_err());
     let mut items = syntax::parse(r#"model V { @@proxy.default("x", now()) }"#).unwrap();
-    assert!(super::lower::behavior_declarations(&mut items, "v.prisma").is_err());
+    assert!(super::lower::behavior_declarations(&mut items, "v.prisma", &[]).is_err());
+}
+
+#[test]
+fn behavioral_literal_forms_need_an_argument_of_kind_value() {
+    let manifest: crate::behavior::Manifest = serde_json::from_value(serde_json::json!({
+        "id": "test", "version": "1", "host_contract": 1, "schema_contract": 1, "languages": [], "databases": [],
+        "attributes": [{"name": "test.mark", "target": "model",
+            "arguments": {"name": {"kind": "string"}, "tags": {"kind": "list"}, "payload": {"kind": "value"}},
+            "positional": [{"kind": "string"}, {"kind": "value"}]}]
+    })).unwrap();
+    let lower = |source: &str| {
+        let mut items = syntax::parse(source).unwrap();
+        super::lower::behavior_declarations(&mut items, "t.prisma", std::slice::from_ref(&manifest))
+    };
+    let ok = lower(r#"model V { @@test.mark("a", Name, name: "x", tags: ["x", 1], payload: {labels: [null, Open]}) }"#).unwrap();
+    assert_eq!(ok[0].positional[1], serde_json::json!("Name"));
+    assert_eq!(ok[0].arguments["payload"], serde_json::json!({"labels": [null, "Open"]}));
+    for strict in [r#"@@test.mark(Name)"#, r#"@@test.mark(null)"#, r#"@@test.mark(name: Name)"#,
+                   r#"@@test.mark(tags: [Open])"#, r#"@@test.mark(tags: ["x", null])"#, r#"@@test.mark(name: {k: 1})"#] {
+        let error = lower(&format!("model V {{ {strict} }}")).unwrap_err();
+        assert_eq!(error.msg, "expected a literal", "{strict}");
+    }
+    // An attribute no compiled manifest declares keeps the literal forms; validation names the missing extension.
+    assert!(lower(r#"model V { @@other.mark(Name, null, {k: 1}) }"#).is_ok());
 }

@@ -161,7 +161,7 @@ fn compile_project_mode(source: &str, origin: Option<&Path>, update: Option<Iden
         }
     }
     let label = origin.display().to_string();
-    let mut declarations = lower::behavior_declarations(&mut items, &label).map_err(|e| loader.located(e))?;
+    let mut declarations = lower::behavior_declarations(&mut items, &label, &crate::behavior::manifests()).map_err(|e| loader.located(e))?;
     for declaration in &mut declarations {
         let location = &mut declaration.location;
         if let Some((start, _, file)) = loader.locations.iter().find(|(start, end, _)| location.line >= *start && location.line < *end) {
@@ -196,7 +196,19 @@ fn compile_project_mode(source: &str, origin: Option<&Path>, update: Option<Iden
         catalog_inputs.borrow_mut().push(PathBuf::from(path));
         std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))
     };
-    let deferred_identity = declarations.iter().filter(|d| d.field.is_none()).map(|d| d.model.clone()).collect();
+    let deferred_identity: std::collections::HashSet<String> = declarations.iter().filter(|d| d.field.is_none()).map(|d| d.model.clone()).collect();
+    // Checks after extension lowering report the model or relation member position.
+    let mut positions = std::collections::HashMap::new();
+    for item in &items {
+        if let syntax::Item::Model(m) = item {
+            positions.insert((m.name.clone(), None), m.pos);
+            for member in &m.members { positions.insert((m.name.clone(), Some(member.name.clone())), member.pos); }
+        }
+    }
+    let at = |model: &str, member: Option<&str>, msg: String| match positions.get(&(model.to_owned(), member.map(str::to_owned))) {
+        Some(pos) => loader.located(syntax::Error { pos: *pos, msg }),
+        None => msg,
+    };
     let mut ir = lower::Lowering { load: &load, deferred_identity: &deferred_identity }.lower(items).map_err(|e| loader.located(e))?;
     ir.identities = identities;
     if !declarations.is_empty() {
@@ -207,12 +219,12 @@ fn compile_project_mode(source: &str, origin: Option<&Path>, update: Option<Iden
         crate::behavior::prepare(&mut ir, None)?;
         for model in &ir.models {
             if !model.fields.iter().any(|field| field.primary_key) {
-                return Err(format!("model {} has no @id field after extension lowering", model.name));
+                return Err(at(&model.name, None, format!("model {} has no @id field after extension lowering", model.name)));
             }
             for relation in &model.relations {
                 if let Some(target) = ir.models.iter().find(|m| m.name == relation.target) {
                     if !target.fields.iter().any(|f| f.name == relation.to) {
-                        return Err(format!("relation {}.{}: {} has no field {} after extension lowering", model.name, relation.name, relation.target, relation.to));
+                        return Err(at(&model.name, Some(&relation.name), format!("relation {}.{}: {} has no field {} after extension lowering", model.name, relation.name, relation.target, relation.to)));
                     }
                 }
             }

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
     let declarations = &ir.behavior.declarations;
     let mut resolved: HashMap<String, QueryDefaults> = ir.behavior.query_defaults.iter().map(|d| (d.model.clone(), d.clone())).collect();
-    fn resolve(ir: &SchemaIr, metadata: &Value, name: &str, resolved: &mut HashMap<String, QueryDefaults>, stack: &mut Vec<String>) -> Result<QueryDefaults, String> {
+    fn resolve(ir: &SchemaIr, name: &str, resolved: &mut HashMap<String, QueryDefaults>, stack: &mut Vec<String>) -> Result<QueryDefaults, String> {
         if let Some(d) = resolved.get(name) { return Ok(d.clone()); }
         if stack.iter().any(|n| n == name) { return Err(format!("query-default inheritance cycle: {} -> {name}", stack.join(" -> "))); }
         stack.push(name.into());
@@ -14,10 +14,11 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         let ds: Vec<_> = ir.behavior.declarations.iter().filter(|d| d.model == name && d.attribute == "query.defaults").collect();
         if ds.len() > 1 { return Err(format!("duplicate query.defaults on {name}")); }
         let d = ds.first().copied();
-        let proxy = ir.behavior.declarations.iter().find(|d| d.model == name && (d.attribute == "proxy.of" || d.attribute == "proxy.model" || d.attribute == "composition.model"));
-        let proxy_parent = metadata.get("proxy_models").and_then(Value::as_array).and_then(|models| models.iter().find(|m| m["model"] == name)).and_then(|m| m.get("parent"));
-        let parent = d.and_then(|d| d.arguments.get("parent")).or(proxy_parent).or_else(|| proxy.and_then(|d| d.arguments.get("parent").or_else(|| d.positional.first()))).and_then(Value::as_str);
-        let inherited = match parent { Some(p) => resolve(ir, metadata, p, resolved, stack)?, None => QueryDefaults::default() };
+        // The proxy pass (logical phase) fills `proxy_models` before this behavior pass.
+        let proxy_parent = ir.behavior.proxy_models.iter().find(|p| p.model == name).map(|p| p.parent.as_str());
+        let composed_parent = ir.behavior.declarations.iter().find(|d| d.model == name && d.attribute == "composition.model").and_then(|d| d.arguments.get("parent")).and_then(Value::as_str);
+        let parent = d.and_then(|d| d.arguments.get("parent")).and_then(Value::as_str).or(proxy_parent).or(composed_parent);
+        let inherited = match parent { Some(p) => resolve(ir, p, resolved, stack)?, None => QueryDefaults::default() };
         let mut out = inherited.clone(); out.model = name.into(); out.parent = parent.map(str::to_owned);
         if let Some(d) = d {
             if let Some(source) = d.arguments.get("filter") {
@@ -40,10 +41,7 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         stack.pop(); resolved.insert(name.into(), out.clone()); Ok(out)
     }
     if !declarations.iter().any(|d| d.attribute.starts_with("query.")) && resolved.is_empty() { return Ok(()); }
-    // Read additive metadata through its serialized contract so this consumer can
-    // compile independently before the proxy contract is merged.
-    let metadata = serde_json::to_value(&ir.behavior).map_err(|e| e.to_string())?;
-    for model in &ir.models { resolve(ir, &metadata, &model.name, &mut resolved, &mut vec![])?; }
+    for model in &ir.models { resolve(ir, &model.name, &mut resolved, &mut vec![])?; }
     ir.behavior.query_defaults = ir.models.iter().map(|m| resolved.remove(&m.name).expect("resolved model")).collect();
     Ok(())
 }
@@ -161,6 +159,26 @@ mod tests {
         assert!(schema.behavior.query_defaults[1].filter.is_none());
         assert!(schema.behavior.query_defaults[1].fields.is_none());
         assert!(schema.behavior.query_defaults[1].related.is_empty());
+    }
+    #[test]
+    fn proxy_and_composed_models_inherit_through_typed_parents() {
+        let mut schema = ir();
+        schema.behavior.declarations.retain(|d| d.model != "Child");
+        schema.behavior.proxy_models.push(serde_json::from_value(json!({"model":"Child","parent":"Parent"})).unwrap());
+        lower(&mut schema).unwrap();
+        assert_eq!(schema.behavior.query_defaults[1].parent.as_deref(), Some("Parent"));
+        assert_eq!(schema.behavior.query_defaults[1].filter, schema.behavior.query_defaults[0].filter);
+        let mut schema = ir();
+        schema.behavior.declarations.retain(|d| d.model != "Child");
+        schema.behavior.declarations.push(serde_json::from_value(json!({"model":"Child","attribute":"composition.model","field":null,"arguments":{"parent":"Parent","parentRef":"p","childRef":"c"},"positional":[],"location":{"file":"test","line":4,"column":1}})).unwrap());
+        lower(&mut schema).unwrap();
+        assert_eq!(schema.behavior.query_defaults[1].parent.as_deref(), Some("Parent"));
+        // An untyped proxy declaration is no parent source; only the lowered contract is.
+        let mut schema = ir();
+        schema.behavior.declarations.retain(|d| d.model != "Child");
+        schema.behavior.declarations.push(serde_json::from_value(json!({"model":"Child","attribute":"proxy.model","field":null,"arguments":{"parent":"Parent"},"positional":[],"location":{"file":"test","line":4,"column":1}})).unwrap());
+        lower(&mut schema).unwrap();
+        assert!(schema.behavior.query_defaults[1].parent.is_none());
     }
     #[test]
     fn operator_precedence_and_null() {

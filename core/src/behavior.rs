@@ -23,6 +23,14 @@ pub fn artifact() -> Artifact {
     artifact
 }
 
+/// The manifests compiled into this artifact; none without composition.
+pub fn manifests() -> Vec<Manifest> {
+    #[cfg(feature = "composition")]
+    { composition::manifests() }
+    #[cfg(not(feature = "composition"))]
+    { Vec::new() }
+}
+
 pub fn prepare(ir: &mut crate::ir::SchemaIr, language: Option<&str>) -> Result<(), String> {
     if ir.behavior.storage.is_none() && (!ir.behavior.field_storage.is_empty() || !ir.behavior.owner_links.is_empty()) { return Err("storage ownership contributions require an explicit physical schema".into()); }
     #[cfg(feature = "composition")]

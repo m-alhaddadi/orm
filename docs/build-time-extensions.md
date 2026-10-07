@@ -103,7 +103,9 @@ Required fields include `id`, `version`, `host_contract`, `schema_contract`, `la
 Optional lists describe host `capabilities`, semver extension `dependencies`, `attributes`, `passes`, and `exports`.
 Unknown metadata fields are errors.
 
-An attribute declares its `name`, `target` (`model` or `field`), and typed `arguments` (`string`, `integer`, `boolean`, `list`).
+An attribute declares its `name`, `target` (`model` or `field`), and typed `arguments` (`string`, `integer`, `boolean`, `list`, `value`).
+Only a `value` argument takes a bare name (as a string), `null` and objects; the other kinds take strict literals, also inside a list.
+The extension pass checks the shape of a `value` argument.
 Source declarations use namespaced attributes, for example `name String @app.rename(to: "public_name")` or `@@app.proxy(parent: "User")`.
 Names, arguments and source locations are preserved in schema requirements.
 Unknown namespaces request a rebuild; `@db.*` keeps its existing database meaning.

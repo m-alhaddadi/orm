@@ -31,8 +31,9 @@ effects = ["orm.proxy.logical-models"]
 [[package.metadata.orm-extension.attributes]]
 name = "proxy.of"
 target = "model"
+# `value`: the source model is a bare name, `@@proxy.of(User)`; the pass checks it is a string.
 [[package.metadata.orm-extension.attributes.positional]]
-kind = "string"
+kind = "value"
 required = true
 
 [[package.metadata.orm-extension.attributes]]
@@ -48,8 +49,9 @@ target = "model"
 [[package.metadata.orm-extension.attributes.positional]]
 kind = "string"
 required = true
+# `value`: members are bare enum names, `[ACTIVE]`; the pass checks a list of names.
 [[package.metadata.orm-extension.attributes.positional]]
-kind = "list"
+kind = "value"
 required = true
 
 [[package.metadata.orm-extension.attributes]]

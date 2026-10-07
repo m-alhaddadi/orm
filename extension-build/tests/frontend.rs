@@ -20,7 +20,7 @@ use orm_core::{dsl, schema::Schema, migrate};
 fn main() {
     let ir = dsl::compile("model User {\n id Int @id\n name String @example.rename(to: \"public_name\")\n secret String? @example.hide\n}\nmodel UserView {\n @@example.proxy(parent: \"User\")\n}", None).unwrap();
     let missing_identity = dsl::compile("model User {\n id Int @id\n}\nmodel UserView {\n id Int @example.hide\n @@example.proxy(parent: \"User\")\n}", None).err().unwrap();
-    assert!(missing_identity.contains("UserView has no @id field after extension lowering"));
+    assert!(missing_identity.ends_with(":4:1: model UserView has no @id field after extension lowering"), "{missing_identity}");
     assert_eq!(ir.models[0].fields[1].name, "public_name");
     assert_eq!(ir.models[0].fields[1].column, "name");
     let json = serde_json::to_string(&ir).unwrap();

@@ -422,9 +422,13 @@ pub fn validate_declarations(ir: &SchemaIr, manifests: &[Manifest], language: Op
         if (d.field.is_some()) != (a.target == AttributeTarget::Field) {
             return Err(fail(d, "invalid declaration target".into()));
         }
+        // Only `value` arguments take null and objects, also inside a list.
+        fn literal(v: &serde_json::Value) -> bool {
+            match v { serde_json::Value::Null | serde_json::Value::Object(_) => false, serde_json::Value::Array(items) => items.iter().all(literal), _ => true }
+        }
         let matches = |v: &serde_json::Value, arg: &Argument| match arg.kind {
             ArgumentKind::String => v.is_string(), ArgumentKind::Integer => v.is_i64(),
-            ArgumentKind::Boolean => v.is_boolean(), ArgumentKind::List => v.is_array(),
+            ArgumentKind::Boolean => v.is_boolean(), ArgumentKind::List => v.is_array() && literal(v),
             ArgumentKind::Value => true,
         };
         for (name, value) in &d.arguments {
@@ -686,6 +690,21 @@ mod tests {
     fn unsupported_database_names_the_declaration() {
         let error = validate_declarations(&schema(crate::dialect::Dialect::Sqlite), &[manifest(&["python"], &["postgres"])], None).unwrap_err();
         assert!(error.starts_with("schema.prisma:3:7: @app.trim:") && error.contains("does not support sqlite"), "{error}");
+    }
+
+    #[test]
+    fn only_value_arguments_take_null_and_objects() {
+        let mut manifest = manifest(&["python"], &["sqlite"]);
+        manifest.attributes[0].arguments = serde_json::from_value(serde_json::json!({"tags": {"kind": "list"}, "payload": {"kind": "value"}})).unwrap();
+        let check = |name: &str, value: serde_json::Value| {
+            let mut ir = schema(crate::dialect::Dialect::Sqlite);
+            ir.behavior.declarations[0].arguments.insert(name.into(), value);
+            validate_declarations(&ir, std::slice::from_ref(&manifest), None)
+        };
+        assert!(check("tags", serde_json::json!(["a", [1]])).is_ok());
+        assert!(check("tags", serde_json::json!(["a", null])).unwrap_err().contains("wrong type for tags"));
+        assert!(check("tags", serde_json::json!([{"k": 1}])).is_err());
+        assert!(check("payload", serde_json::json!({"labels": [null]})).is_ok());
     }
 
     #[test]
