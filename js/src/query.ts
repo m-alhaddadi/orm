@@ -39,6 +39,7 @@ import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
 import { DB, fieldValue, RELATED, registerQueries, type Instance, type ModelClass, type ModelMeta } from "./model.js";
 import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
 import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
+import { allowedWrites } from "./protection.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
 import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./select.js";
 
@@ -1036,7 +1037,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     }
     const db = this.db();
     const res = await db_wait(db, (tx) =>
-      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx, this.state.withoutDefaults),
+      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx, this.state.withoutDefaults, allowedWrites()),
     );
     return returning ? (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][]) : (res as number);
   }
@@ -1059,7 +1060,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   async attach(parentId: In<M["pk"]>, values: M extends { readonly attach: infer A extends object } ? A : never): Promise<M["row"]> {
     const prepared = prepareAttach(this.meta, values);
     const db = this.db();
-    const res = await db_wait(db, (tx) => db.engine.attach(this.meta.name, parentId, prepared.fields, prepared.rows, tx));
+    const res = await db_wait(db, (tx) => db.engine.attach(this.meta.name, parentId, prepared.fields, prepared.rows, tx, allowedWrites()));
     return (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][])[0]!;
   }
 
@@ -1120,7 +1121,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     }
     const db = this.db();
     const res = await db_wait(db, (tx) =>
-      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx),
+      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowedWrites()),
     );
     return new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][];
   }

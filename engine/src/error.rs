@@ -15,6 +15,8 @@ pub enum Error {
     Db(DbError),
     /// A parameter value of the wrong type for its column (a `TypeError`).
     Value(String),
+    /// A write to a `@@protected_write` model (named here) outside a scope that allows it.
+    WriteProtected(String),
     /// An error a binding raised itself while converting its values (e.g. a Python
     /// exception), handed back to it unchanged.
     Binding(Box<dyn std::error::Error + Send + Sync>),
@@ -34,6 +36,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Query(m) | Error::Schema(m) | Error::Migration(m) | Error::Value(m) => f.write_str(m),
+            Error::WriteProtected(m) => write!(f, "{m} is write-protected (@@protected_write); write it inside a scope that allows writes to {m}"),
             Error::Db(e) => write!(f, "{e}"),
             Error::Binding(e) => write!(f, "{e}"),
         }

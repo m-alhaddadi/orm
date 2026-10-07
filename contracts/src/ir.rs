@@ -143,6 +143,9 @@ pub struct ModelIr {
     pub renamed_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub comment: Option<String>,
+    /// `@@protected_write`: ORM writes need a scope that allows them. No DDL, no snapshot.
+    #[serde(skip_serializing_if = "crate::ir::is_false", default)]
+    pub protected_write: bool,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

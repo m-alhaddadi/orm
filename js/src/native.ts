@@ -85,7 +85,7 @@ export interface NativeSchema {
 }
 
 export interface NativeEngine {
-  run(opJson: string, params: unknown[], tx: NativeTransaction | null): Promise<unknown>;
+  run(opJson: string, params: unknown[], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<unknown>;
   insert(
     model: string,
     fields: string[],
@@ -95,8 +95,9 @@ export interface NativeEngine {
     set: string | null,
     params: unknown[],
     tx: NativeTransaction | null,
+    allowed?: readonly string[],
   ): Promise<unknown>;
-  attach(model: string, parentId: unknown, fields: string[], rows: unknown[][], tx: NativeTransaction | null): Promise<unknown>;
+  attach(model: string, parentId: unknown, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<unknown>;
   updateMany(
     model: string,
     fields: string[],
@@ -107,6 +108,7 @@ export interface NativeEngine {
     batchSize: number | null,
     tx: NativeTransaction | null,
     withoutDefaults: boolean,
+    allowed?: readonly string[],
   ): Promise<unknown>;
   begin(tx: NativeTransaction | null): Promise<NativeTransaction>;
   advisoryLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, tx: NativeTransaction): Promise<boolean>;

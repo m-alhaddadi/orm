@@ -61,6 +61,8 @@ export {
   QueryError,
   SchemaError,
   TransactionRequired,
+  WriteProtected,
 } from "./errors.js";
+export { allowWrites } from "./protection.js";
 export { Migration, MigrationError, Migrations, Migrator } from "./migrations.js";
 export type { Plan, Status, Step, SchemaSource } from "./migrations.js";

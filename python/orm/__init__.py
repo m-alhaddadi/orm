@@ -22,6 +22,7 @@ from .errors import (
     QueryError,
     SchemaError,
     TransactionRequired,
+    WriteProtected,
 )
 from .expr import (
     ColumnRef,
@@ -44,6 +45,7 @@ from .expr import (
     window,
 )
 from .model import Model, Registry, define, load, loads, registry
+from .protection import allow_writes
 from .query import ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet
 from .cte import Cte, CteColumn
 from .select import Row, Select
@@ -106,4 +108,6 @@ __all__ = [
     "NotLoaded",
     "NotConnected",
     "TransactionRequired",
+    "WriteProtected",
+    "allow_writes",
 ]

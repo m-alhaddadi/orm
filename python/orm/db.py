@@ -10,6 +10,7 @@ from typing import Any
 
 from . import _native
 from .errors import NotConnected, QueryError, TransactionRequired
+from .protection import allowed_writes
 from .model import Registry, registry
 
 __all__ = ["Database", "connect", "get_database"]
@@ -36,7 +37,7 @@ class Database:
         self, ir: dict[str, Any], params: list[Any], row_cls: type | None = None, db: Database | None = None
     ) -> Any:
         """Runs a query; instances it builds get ``db`` to write back to (``using()``)."""
-        return await self._engine.run(json.dumps(ir), params, self._tx(), row_cls, db)
+        return await self._engine.run(json.dumps(ir), params, self._tx(), row_cls, db, allowed_writes())
 
     async def _insert(
         self,
@@ -49,7 +50,7 @@ class Database:
         db: Database | None = None,
     ) -> list[Any]:
         set_json, params = (json.dumps(set_[0]), set_[1]) if set_ is not None else (None, [])
-        return await self._engine.insert(model, fields, rows, conflict, update, set_json, params, self._tx(), db)
+        return await self._engine.insert(model, fields, rows, conflict, update, set_json, params, self._tx(), db, allowed_writes())
 
     async def _update_many(
         self,
@@ -64,7 +65,8 @@ class Database:
         without_defaults: bool = False,
     ) -> Any:
         return await self._engine.update_many(
-            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx(), db, without_defaults
+            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx(), db, without_defaults,
+            allowed_writes(),
         )
 
     @asynccontextmanager

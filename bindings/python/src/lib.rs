@@ -37,7 +37,8 @@ use orm_engine::db::{self, Driver, Executor};
 use orm_engine::exec::{self, Conflict, Outcome};
 use orm_engine::plan::{self, Planner};
 use orm_engine::migrate as engine_migrate;
-use orm_engine::parse_op;
+use orm_engine::{parse_op, protect};
+use orm_core::ir::Operation;
 
 /// Marker for "use the column's server default" in insert rows.
 #[pyclass(frozen, module = "orm._native", name = "_Default")]
@@ -268,7 +269,8 @@ impl Engine {
     /// instances (prefetched relations attached), or of `row_cls(values)` rows for
     /// `select(...)` columns; count -> int; exists -> bool; update / delete -> rows
     /// affected (with `returning` -> instances). Instances get `db` as `_db`.
-    #[pyo3(signature = (op_json, params, tx = None, row_cls = None, db = None))]
+    /// `allowed` names the models the current `allow_writes` scope allows to write.
+    #[pyo3(signature = (op_json, params, tx = None, row_cls = None, db = None, allowed = vec![]))]
     #[allow(clippy::too_many_arguments)]
     fn run<'py>(
         &self,
@@ -278,8 +280,12 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
         row_cls: Option<Bound<'py, PyAny>>,
         db: Option<Bound<'py, PyAny>>,
+        allowed: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let op = parse_op(op_json).map_err(engine_err)?;
+        if let Operation::Update(ir::Update { model, .. }) | Operation::Delete(ir::Delete { model, .. }) = &op {
+            protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
+        }
         let target = self.target;
         let plan = Planner::plan(&self.schema, target, &op, &PyParams(&params)).map_err(engine_err)?;
         let conn = self.conn(tx);
@@ -298,7 +304,7 @@ impl Engine {
     /// `update` fields from the new row and apply the `set` assignments (JSON list of
     /// `{"field", "value"}` IR, parameters in `params`), or are skipped if `update` is
     /// None.
-    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None))]
+    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![]))]
     #[allow(clippy::too_many_arguments)]
     fn insert<'py>(
         &self,
@@ -312,7 +318,9 @@ impl Engine {
         params: Vec<Bound<'py, PyAny>>,
         tx: Option<&Bound<'py, Transaction>>,
         db: Option<Bound<'py, PyAny>>,
+        allowed: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
             Some(json) => serde_json::from_str(json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
             None => vec![],
@@ -336,9 +344,10 @@ impl Engine {
 
     /// Attach local values to an existing shared-key parent.
     #[cfg(feature = "model-composition")]
-    #[pyo3(signature = (model, parent_id, fields, rows, tx = None, db = None))]
+    #[pyo3(signature = (model, parent_id, fields, rows, tx = None, db = None, allowed = vec![]))]
     #[allow(clippy::too_many_arguments)]
-    fn attach<'py>(&self, py: Python<'py>, model: &str, parent_id: &Bound<'py, PyAny>, fields: Vec<String>, rows: &Bound<'py, PyList>, tx: Option<&Bound<'py, Transaction>>, db: Option<Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyAny>> {
+    fn attach<'py>(&self, py: Python<'py>, model: &str, parent_id: &Bound<'py, PyAny>, fields: Vec<String>, rows: &Bound<'py, PyList>, tx: Option<&Bound<'py, Transaction>>, db: Option<Bound<'py, PyAny>>, allowed: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
+        protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let model_idx = self.schema.model_idx(model).map_err(schema_err)?;
         let identity = py_to_value(parent_id, Some(self.schema.model(model_idx).pk_field().value_type()))?;
         let values = convert_rows(&self.schema, model, &fields, rows, true)?;
@@ -357,7 +366,7 @@ impl Engine {
     /// own values, among the rows matching `filters_json` (JSON list of filter IR, values
     /// in `params`). Big inputs run as several statements in one transaction (inside `tx`
     /// when given). Returns the number of rows updated, or the rows with `returning`.
-    #[pyo3(signature = (model, fields, rows, filters_json, params, returning = false, batch_size = None, tx = None, db = None, without_defaults = false))]
+    #[pyo3(signature = (model, fields, rows, filters_json, params, returning = false, batch_size = None, tx = None, db = None, without_defaults = false, allowed = vec![]))]
     #[allow(clippy::too_many_arguments)]
     fn update_many<'py>(
         &self,
@@ -372,7 +381,9 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
         db: Option<Bound<'py, PyAny>>,
         without_defaults: bool,
+        allowed: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let classes = self.classes.clone();
         let db = db.map(Bound::unbind);
         let (_, um) = update_many_plan(
@@ -666,6 +677,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("IntegrityError", py.get_type::<errors::IntegrityError>())?;
     m.add("LockNotAvailable", py.get_type::<errors::LockNotAvailable>())?;
     m.add("QueryError", py.get_type::<errors::QueryError>())?;
+    m.add("WriteProtected", py.get_type::<errors::WriteProtected>())?;
     m.add("SchemaError", py.get_type::<errors::SchemaError>())?;
     m.add("MigrationError", py.get_type::<errors::MigrationError>())?;
     Ok(())

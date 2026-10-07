@@ -27,6 +27,7 @@ from .expr import (
     not_,
 )
 from .fields import HasMany, ManyToMany
+from .protection import allowed_writes
 from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, prepare_rows, assignments
 
 if TYPE_CHECKING:
@@ -816,7 +817,7 @@ class Prepared(Generic[M]):
         if qs._lock is not None:
             qs._check_lock()
         db = resolve(qs._db)
-        return db._engine.run(c.json, params, db._tx(), None, qs._db)
+        return db._engine.run(c.json, params, db._tx(), None, qs._db, allowed_writes())
 
     def __call__(self, **values: Any) -> Awaitable[list[M]]:
         """The rows, like awaiting the query set."""

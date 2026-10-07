@@ -44,6 +44,7 @@ impl Model {
             triggers: vec![],
             renamed_from: None,
             comment: None,
+            protected_write: false,
         };
         Ok(Model {
             #[cfg(feature = "file-storage")] file_fields: vec![],

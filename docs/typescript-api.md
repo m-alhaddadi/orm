@@ -233,6 +233,24 @@ when it throws. The current transaction follows the async call chain through
 `AsyncLocalStorage`, so queries inside it need no handle. Nested calls are savepoints.
 A transaction that is never finished is rolled back when it is garbage-collected.
 
+### Protected writes
+
+`@@protected_write` is an application-level check in the ORM. It does not protect the database.
+Raw SQL (`db.execute`), migrations, other ORM processes without this schema, and other database clients can still write.
+For database-level protection, use `@@trigger` or database grants.
+
+```ts
+await allowWrites([Post], async () => { await post.update({ title: "new" }); });
+await Post.objects.filter(...).update({ title: "x" });   // throws WriteProtected
+```
+
+Every ORM write to a `@@protected_write` model fails outside `allowWrites(models, fn)` with `WriteProtected`:
+`insert`, `insertMany`, upserts, `update`, `updateMany`, `delete`, instance writes and composed writes.
+The check is on the table that the SQL writes, so `post.tags.add()` needs `allowWrites([PostTag], ...)` when `PostTag` is protected.
+The scope follows the async call chain through `AsyncLocalStorage`, like the transaction: work started inside `fn` gets it.
+A nested call adds its models to the outer ones. `allowWrites` starts no transaction and gives what `fn` gives.
+See `docs/schema.md`, "Protected writes".
+
 ### Locks
 
 * `qs.lock({ exclusive, nowait, skipLocked })` adds `FOR UPDATE` / `FOR SHARE` on the
@@ -260,8 +278,8 @@ A package that changes writes and reads from outside the ORM (for example
 
 Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,
 `IntegrityError`, `LockNotAvailable`, `QueryError`, `SchemaError`, `NotConnected`,
-`NotLoaded`, `TransactionRequired`, `DoesNotExist`, `MultipleObjectsReturned` and
-`MigrationError`. Values of the wrong type throw a `TypeError` before any SQL runs.
+`NotLoaded`, `TransactionRequired`, `DoesNotExist`, `MultipleObjectsReturned`,
+`MigrationError` and `WriteProtected`. Values of the wrong type throw a `TypeError` before any SQL runs.
 
 ## Migrations and the CLI
 

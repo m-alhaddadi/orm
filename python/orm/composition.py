@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from .expr import Expression
+from .protection import allowed_writes
 
 if TYPE_CHECKING:
     from .model import Model
@@ -35,5 +36,5 @@ async def attach(qs: QuerySet[M], parent_id: Any, values: Mapping[str, Any]) -> 
             raise ValueError(f"{meta.name}.{name} is required")
     names = list(local)
     db = resolve(qs._db)
-    rows = await db._engine.attach(meta.name, parent_id, names, [[local[n] for n in names]], db._tx(), qs._db)
+    rows = await db._engine.attach(meta.name, parent_id, names, [[local[n] for n in names]], db._tx(), qs._db, allowed_writes())
     return cast(M, rows[0])

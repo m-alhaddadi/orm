@@ -552,6 +552,26 @@ async with db.transaction():          # commit on success, rollback on exception
 The current transaction lives in a `ContextVar`, so queries inside the block use it
 without passing it around. Tasks started inside the block inherit it.
 
+### Protected writes
+
+`@@protected_write` is an application-level check in the ORM. It does not protect the database.
+Raw SQL (`db.execute`), migrations, other ORM processes without this schema, and other database clients can still write.
+For database-level protection, use `@@trigger` or database grants.
+
+```python
+with orm.allow_writes(Post):               # a sync `with`: it does no I/O
+    await post.update(title="new")
+
+await Post.objects.filter(...).update(title="x")   # raises orm.WriteProtected
+```
+
+Every ORM write to a `@@protected_write` model fails outside `orm.allow_writes(...)` with `orm.WriteProtected`:
+`insert`, `insert_many`, upserts, `update`, `update_many`, `delete`, instance writes and composed writes.
+The check is on the table that the SQL writes, so `post.tags.add()` needs `allow_writes(PostTag)` when `PostTag` is protected.
+The scope is a `ContextVar`, like the transaction: tasks started inside it get it.
+A nested scope adds its models to the outer ones. `allow_writes` starts no transaction.
+See `docs/schema.md`, "Protected writes".
+
 ### Locks
 
 ```python

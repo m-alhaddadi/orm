@@ -483,6 +483,7 @@ fn model_fields(m: &ModelDecl, models: &HashMap<&str, &ModelDecl>, ctx: &Ctx) ->
         triggers: vec![],
         renamed_from: None,
         comment: None,
+        protected_write: false,
     };
     // model-level attributes that aren't schema objects; the rest come after relations
     for a in &m.blocks {
@@ -496,6 +497,8 @@ fn model_fields(m: &ModelDecl, models: &HashMap<&str, &ModelDecl>, ctx: &Ctx) ->
             "map" => ir.table = text(a)?,
             "comment" => ir.comment = Some(text(a)?),
             "renamed_from" => ir.renamed_from = Some(text(a)?),
+            "protected_write" if a.args.positional.is_empty() && a.args.named.is_empty() => ir.protected_write = true,
+            "protected_write" => return err(a.pos, format!("{}: @@protected_write takes no arguments", m.name)),
             _ => {}
         }
     }
@@ -1055,7 +1058,7 @@ fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
         }
     };
     match b.name.as_str() {
-        "map" | "comment" | "renamed_from" => {}
+        "map" | "comment" | "renamed_from" | "protected_write" => {}
         "index" => {
             extra_positional(1)?;
             let columns: Vec<IndexColumnIr> = keys(b.pos, first, &what, false)?.into_iter().map(|(k, _)| k).collect();
