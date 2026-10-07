@@ -118,6 +118,13 @@ fn build() -> Result<(), String> {
     }
     for dir in ["core", "engine", "cli"] { copy_tree(&config.host.join(dir), &config.output.join(dir))?; }
     for binding in &config.bindings { copy_tree(&config.host.join("bindings").join(binding), &config.output.join("bindings").join(binding))?; }
+    // The orm-core and orm-engine tests read these host files; copy them so the snapshot tests run.
+    for file in ["examples/blog/schema.prisma", "examples/sqlite/schema.prisma", "docs/prisma-syntax.md", "docs/schema.md", "PLAN.md"] {
+        let (from, to) = (config.host.join(file), config.output.join(file));
+        if !from.is_file() { continue; }
+        fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
+        fs::copy(from, to).map_err(|e| e.to_string())?;
+    }
     for (binding, selected) in &config.binding_features {
         if !config.bindings.contains(binding) { return Err(format!("binding_features names unselected binding {binding}")); }
         let path = config.output.join("bindings").join(binding).join("Cargo.toml");
