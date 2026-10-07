@@ -73,6 +73,14 @@ inconclusive. None has a lower bound establishing a cost of 1% or more.
 These results predate the complete implementation and must not be used as
 final performance evidence. Fresh disabled and enabled controls are pending.
 
+The enabled gate ran on 2026-10-08 after the Q61 fixes (`results/jury-4/gate/`):
+`controls.py`, then `run.py --native-profile` and `report.py --native-profile --check`,
+3 processes per runtime and backend, handwritten control against the extension build.
+It has **not passed** (measured): no warm case has a lower bound at or above 1%,
+4 of 44 have an upper bound below 1%, and 40 are inconclusive.
+Five other build sessions shared the machine (load average 11 to 23), so the
+intervals are wide; the gate stays unmet until a quiet-machine run passes.
+
 The first matrix is retained in `results/initial/`. A focused old-versus-old
 control produced about a 42% apparent construction gain when results were
 discarded. Retaining results removed that artifact. The refined matrix uses
@@ -92,7 +100,9 @@ The native probe found identical allocations/requested bytes per operation:
 
 Measured at 360685a (`results/final-structural.json`, `disabled_build`):
 the disabled native Python artifact grew from 10,493,424 to 11,067,808 bytes (+5.5%),
-and Node grew from 9,122,224 to 9,616,080 bytes (+5.4%). Build/setup/artifact
+and Node grew from 9,122,224 to 9,616,080 bytes (+5.4%).
+The cause is serde decoder code for the extension contract types and the larger IR,
+not extension execution code; `results/jury-4/size.md` attributes it with `size.py`. Build/setup/artifact
 costs are distinct from warm execution costs. Initial incremental release builds
 took 112 seconds for the baseline and 100 seconds for the candidate; those
 cache-dependent measurements do not establish a build-time improvement.

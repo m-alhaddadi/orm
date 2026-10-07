@@ -1056,24 +1056,24 @@ impl<'s> Planner<'s> {
     }
 
     #[cfg(not(feature = "composition"))]
-    fn read_field(&self, _model: usize, alias: &str, field: &FieldIr) -> Result<SExpr> {
+    fn read_field(&self, _model: usize, alias: &str, _position: usize, field: &FieldIr) -> Result<SExpr> {
         Ok(read_col(alias, field))
     }
 
     #[cfg(feature = "composition")]
-    fn read_field(&self, model: usize, alias: &str, field: &FieldIr) -> Result<SExpr> {
-        let value = self.stored_field(model, alias, field)?;
+    fn read_field(&self, model: usize, alias: &str, position: usize, field: &FieldIr) -> Result<SExpr> {
+        let value = self.stored_field(model, alias, position, field)?;
         Ok(match &field.read_sql { Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), value), None => value })
     }
 
     /// The stored value, without `read_sql`: CTE columns hold stored values, and the outer read applies `read_sql`.
-    fn stored_field(&self, model: usize, alias: &str, field: &FieldIr) -> Result<SExpr> {
+    fn stored_field(&self, model: usize, alias: &str, position: usize, field: &FieldIr) -> Result<SExpr> {
         #[cfg(feature = "composition")]
         if model < self.schema.models.len() {
-            return crate::ownership::column(self.schema, self.model(model), alias, field);
+            return crate::ownership::column_at(self.schema, self.model(model), alias, position);
         }
         #[cfg(not(feature = "composition"))]
-        let _ = model;
+        let _ = (model, position);
         Ok(col(alias, &field.column))
     }
 
@@ -1437,9 +1437,9 @@ impl<'s> Planner<'s> {
                         #[cfg(feature = "composition")]
                         if root.native.computed().contains(&_position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
                         if cte {
-                            stmt.expr_as(self.stored_field(self.root, &alias, f)?, Alias::new(&f.column));
+                            stmt.expr_as(self.stored_field(self.root, &alias, _position, f)?, Alias::new(&f.column));
                         } else {
-                            stmt.expr(self.read_field(self.root, &alias, f)?);
+                            stmt.expr(self.read_field(self.root, &alias, _position, f)?);
                         }
                         types.push(f.value_type());
                     }
@@ -1737,28 +1737,33 @@ impl<'s> Planner<'s> {
 
     /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
     /// columns.
-    fn build_select(&mut self, q: &Select) -> Result<SelectPlan> {
-        #[cfg(feature = "query-defaults")]
-        let q = &{
-            let mut q = q.clone();
-            let defaults = &self.model(self.root).query_defaults;
-            if !q.without_defaults {
-                if q.model_fields.is_none() { q.model_fields = defaults.fields.clone(); }
-                if !q.without_related && q.columns.is_none() {
-                    for path in orm_core::selection::expanded_related(self.schema.models.as_slice(), self.root).map_err(query_err)? {
-                        if !q.select_related.contains(&path) { q.select_related.push(path); }
-                    }
-                    for prefix in q.select_related.clone() {
-                        let target = self.schema.walk(self.root, &prefix).map_err(query_err)?;
-                        for suffix in orm_core::selection::expanded_related(self.schema.models.as_slice(), target).map_err(query_err)? {
-                            let mut path = prefix.clone(); path.extend(suffix);
-                            if !q.select_related.contains(&path) { q.select_related.push(path); }
-                        }
-                    }
+    /// `q` with the root and joined query defaults; borrowed when no default applies.
+    #[cfg(feature = "query-defaults")]
+    fn with_query_defaults<'q>(&self, q: &'q Select) -> Result<std::borrow::Cow<'q, Select>> {
+        let mut q = std::borrow::Cow::Borrowed(q);
+        if q.without_defaults { return Ok(q); }
+        let defaults = &self.model(self.root).query_defaults;
+        if q.model_fields.is_none() && defaults.fields.is_some() { q.to_mut().model_fields = defaults.fields.clone(); }
+        if !q.without_related && q.columns.is_none() {
+            for path in orm_core::selection::expanded_related(self.schema.models.as_slice(), self.root).map_err(query_err)? {
+                if !q.select_related.contains(&path) { q.to_mut().select_related.push(path); }
+            }
+            for i in 0..q.select_related.len() {
+                let target = self.schema.walk(self.root, &q.select_related[i]).map_err(query_err)?;
+                for suffix in orm_core::selection::expanded_related(self.schema.models.as_slice(), target).map_err(query_err)? {
+                    let mut path = q.select_related[i].clone(); path.extend(suffix);
+                    if !q.select_related.contains(&path) { q.to_mut().select_related.push(path); }
                 }
             }
-            q
-        };
+        }
+        Ok(q)
+    }
+
+    fn build_select(&mut self, q: &Select) -> Result<SelectPlan> {
+        #[cfg(feature = "query-defaults")]
+        let defaulted = self.with_query_defaults(q)?;
+        #[cfg(feature = "query-defaults")]
+        let q = defaulted.as_ref();
         if let Some(items) = &q.columns {
             return self.select_columns(q, items, false);
         }
@@ -1779,7 +1784,7 @@ impl<'s> Planner<'s> {
             let f = &root.fields()[position];
             #[cfg(feature = "composition")]
             if root.native.computed().contains(&position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
-            stmt.expr(self.read_field(self.root, &alias, f)?);
+            stmt.expr(self.read_field(self.root, &alias, position, f)?);
             types.push(f.value_type());
         }
         let mut joins: Vec<JoinShape> = vec![];
@@ -1813,7 +1818,7 @@ impl<'s> Planner<'s> {
                 let f = &m.fields()[position];
                 #[cfg(feature = "composition")]
                 if m.native.computed().contains(&position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
-                stmt.expr(self.read_field(model, &alias, f)?);
+                stmt.expr(self.read_field(model, &alias, position, f)?);
                 types.push(f.value_type());
             }
         }

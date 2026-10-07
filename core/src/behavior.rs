@@ -4,7 +4,15 @@ pub use orm_contracts::extension::*;
 #[cfg(feature = "composition")]
 mod composition { include!(env!("ORM_CORE_COMPOSITION")); }
 
-pub fn artifact() -> Artifact {
+pub fn artifact() -> Artifact { compiled_artifact().clone() }
+
+/// Every schema preparation checks the artifact; build it once per process.
+fn compiled_artifact() -> &'static Artifact {
+    static ARTIFACT: std::sync::OnceLock<Artifact> = std::sync::OnceLock::new();
+    ARTIFACT.get_or_init(build_artifact)
+}
+
+fn build_artifact() -> Artifact {
     #[cfg(feature = "composition")]
     let mut artifact = composition::artifact();
     #[cfg(not(feature = "composition"))]
@@ -37,7 +45,7 @@ pub fn prepare(ir: &mut crate::ir::SchemaIr, language: Option<&str>) -> Result<(
     { composition::prepare(ir, language)?; }
     #[cfg(not(feature = "composition"))]
     { validate_declarations(ir, &[], language)?; }
-    check_requirements(ir, &artifact())
+    check_requirements(ir, compiled_artifact())
 }
 
 #[cfg(feature = "composition")]
