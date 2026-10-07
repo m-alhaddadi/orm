@@ -6,7 +6,12 @@ use crate::{error::{query_err, Error, Result}};
 /// A logical column read through its immutable storage owner. Shared-key ancestor
 /// reads use ordinary bound SQL; there is no extension callback or hidden I/O.
 pub fn column(schema: &Schema, model: &Model, alias: &str, field: &FieldIr) -> Result<SimpleExpr> {
-    let resolved = &model.resolved_fields[model.field_pos(&field.name).map_err(query_err)?];
+    column_at(schema, model, alias, model.field_pos(&field.name).map_err(query_err)?)
+}
+
+/// `column` for the field at `position` of `model`.
+pub fn column_at(schema: &Schema, model: &Model, alias: &str, position: usize) -> Result<SimpleExpr> {
+    let resolved = &model.resolved_fields[position];
     let owners = &schema.physical().models;
     if resolved.storage.owner == model.owner {
         let column = &owners[resolved.storage.owner.0].fields()[resolved.storage.column].column;

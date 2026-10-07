@@ -124,16 +124,20 @@ impl Composition {
         let mut source = format!(r#"
 use crate::ir::SchemaIr;
 use crate::behavior::{{Artifact, Manifest, SCHEMA_CONTRACT, validate_declarations, validate_requirements, capture_storage}};
+use std::sync::OnceLock;
+// Every schema preparation reads these constants; parse each once per process.
 pub fn artifact() -> Artifact {{ serde_json::from_str({artifact:?}).expect("generated artifact") }}
-pub fn manifests() -> Vec<Manifest> {{ serde_json::from_str({manifests:?}).expect("generated manifests") }}
+fn manifest_list() -> &'static [Manifest] {{ static M: OnceLock<Vec<Manifest>> = OnceLock::new(); M.get_or_init(|| serde_json::from_str({manifests:?}).expect("generated manifests")) }}
+pub fn manifests() -> Vec<Manifest> {{ manifest_list().to_vec() }}
+fn pass_ids() -> &'static [String] {{ static P: OnceLock<Vec<String>> = OnceLock::new(); P.get_or_init(|| serde_json::from_str({ids:?}).expect("generated pass IDs")) }}
 pub fn prepare(ir: &mut SchemaIr, language: Option<&str>) -> Result<(), String> {{
-    let manifests = manifests();
-    validate_declarations(ir, &manifests, language)?;
-    let expected: Vec<String> = serde_json::from_str({ids:?}).expect("generated pass IDs");
+    let manifests = manifest_list();
+    validate_declarations(ir, manifests, language)?;
+    let expected = pass_ids();
     if !ir.behavior.completed_passes.is_empty() && ir.behavior.completed_passes != expected {{ return Err("incompatible lowering state; rebuild schema and native artifact".into()); }}
     if !ir.behavior.completed_passes.is_empty() && ir.behavior.declarations.iter().all(|d| d.lowered) && ir.models.iter().all(|m| ir.behavior.lowered_models.contains(&m.name)) {{
         {binding}
-        validate_requirements(ir, &manifests, language)?;
+        validate_requirements(ir, manifests, language)?;
         return Ok(());
     }}
 "#);
@@ -150,9 +154,10 @@ pub fn prepare(ir: &mut SchemaIr, language: Option<&str>) -> Result<(), String> 
     ir.behavior.lowered_models = ir.models.iter().map(|m| m.name.clone()).collect();
     if !ir.behavior.is_empty() {{
         ir.behavior.schema_contract = SCHEMA_CONTRACT;
-        ir.behavior.extensions = serde_json::from_str({:?}).expect("generated versions");
+        static VERSIONS: OnceLock<std::collections::BTreeMap<String, String>> = OnceLock::new();
+        ir.behavior.extensions = VERSIONS.get_or_init(|| serde_json::from_str({:?}).expect("generated versions")).clone();
     }}
-    validate_requirements(ir, &manifests, language)?;
+    validate_requirements(ir, manifests, language)?;
     Ok(())
 }}
 "#, serde_json::to_string(&versions).map_err(|e| e.to_string())?));
