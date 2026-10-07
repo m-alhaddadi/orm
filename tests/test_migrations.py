@@ -151,9 +151,24 @@ def test_migrations_from_a_schema_file(tmp_path):
     assert m is not None and (m.path / "snapshot.json").is_file()
 
 
+def _without_pass_state(module: str) -> list[object]:
+    """A composition artifact records its lowering passes in the embedded schema;
+    the blog schema uses no extension, so the rest must equal the default output."""
+    lines: list[object] = list(module.splitlines())
+    at = lines.index('_SCHEMA = r"""') + 1
+    schema = json.loads(str(lines[at]))
+    assert not schema.pop("behavior", {}).get("declarations")
+    lines[at] = schema
+    return lines
+
+
 def test_generated_blog_module_is_current():
     module, stub = orm._native.generate_python(str(ROOT / "examples/blog/schema.prisma"))
-    assert (ROOT / "examples/blog/models.py").read_text() == module, "run `python -m orm generate`"
+    committed = (ROOT / "examples/blog/models.py").read_text()
+    if json.loads(orm._native.profile_metadata())["capabilities"].get("composition"):
+        assert _without_pass_state(committed) == _without_pass_state(module), "run `python -m orm generate`"
+    else:
+        assert committed == module, "run `python -m orm generate`"
     assert (ROOT / "examples/blog/models.pyi").read_text() == stub, "run `python -m orm generate`"
 
 

@@ -136,8 +136,21 @@ test("migrations from a schema file", () => {
 test("the generated models are current", async () => {
   const { native } = await import("../src/native.js");
   const schema = join(ROOT, "examples/blog/schema.prisma");
-  assert.equal(readFileSync(join(ROOT, "examples/blog/models.ts"), "utf8"), native().generateTypescript(schema, "orm"), "run `orm generate typescript`");
-  assert.equal(readFileSync(join(ROOT, "js/test/blog/models.ts"), "utf8"), native().generateTypescript(schema, "../../src/index.js"));
+  // A composition artifact records its lowering passes in the embedded schema;
+  // the blog schema uses no extension, so the rest must equal the default output.
+  const composition = (JSON.parse(native().profileMetadata()) as { capabilities: Record<string, boolean> }).capabilities.composition;
+  const comparable = (module: string): unknown[] => {
+    if (!composition) return [module];
+    const lines: unknown[] = module.split("\n");
+    const at = lines.findIndex((line) => typeof line === "string" && line.startsWith("const SCHEMA: SchemaIR = "));
+    const schema = JSON.parse((lines[at] as string).slice("const SCHEMA: SchemaIR = ".length).replace(/;$/, "")) as { behavior?: { declarations?: unknown[] } };
+    assert.equal(schema.behavior?.declarations?.length ?? 0, 0);
+    delete schema.behavior;
+    lines[at] = schema;
+    return lines;
+  };
+  assert.deepEqual(comparable(readFileSync(join(ROOT, "examples/blog/models.ts"), "utf8")), comparable(native().generateTypescript(schema, "orm")), "run `orm generate typescript`");
+  assert.deepEqual(comparable(readFileSync(join(ROOT, "js/test/blog/models.ts"), "utf8")), comparable(native().generateTypescript(schema, "../../src/index.js")));
 });
 
 test("the CLI", () => {
