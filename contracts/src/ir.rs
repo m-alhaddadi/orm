@@ -695,6 +695,9 @@ pub struct Order {
     pub expr: Expr,
     #[serde(default)]
     pub desc: bool,
+    /// `NULLS FIRST` / `NULLS LAST`; the database default when absent.
+    #[serde(default)]
+    pub nulls: Option<Nulls>,
 }
 
 /// One entry per `filter()` call. Entries are AND-ed, but each is planned on its own:

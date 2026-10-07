@@ -395,6 +395,7 @@ followers User[]  @relation(through: Follow, through_fields: [followee, follower
 ```
 @@index([author_id])
 @@index([author_id, created_at(sort: Desc, nulls: last)], where: raw("published"), name: "x")
+@@index([author_id, -created_at(nulls: last)])   // -field is sort: Desc
 @@index([title(ops: raw("gin_trgm_ops"))], type: Gin)
 @@index([sql("lower(email)", collate: "C")], unique: true)
 @@index([floor], include: [name], nulls_not_distinct: true)
@@ -411,6 +412,10 @@ followers User[]  @relation(through: Follow, through_fields: [followee, follower
 * Index keys are field names or `sql("expression")`, with options `sort: Asc|Desc`,
   `nulls: first|last`, `ops: <operator class>` (a name or `raw("...")`),
   `collate: "..."`, and `op: "..."` in `@@exclude`.
+* `-field` is the short form of `field(sort: Desc)`, and gives the same migration.
+  An expression key keeps `sort: Desc`.
+  `@@unique` takes no order, because a unique constraint has none:
+  use `@@index([a, -b], unique: true)`.
 * `@@index([field])` with one plain key is that column's index.
 * `type:` is the access method (default btree for indexes, gist for exclusions):
   Prisma's `BTree`, `Hash`, `Gist`, `Gin`, `SpGist`, `Brin`, or any other method

@@ -1,7 +1,52 @@
 //! Optional compiler for model query policies; execution uses prepared host IR.
-use orm_contracts::{extension::QueryDefaults, ir::SchemaIr};
+use orm_contracts::{extension::{OrderKey, QueryDefaults}, ir::{Nulls, SchemaIr}};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+/// The options of a policy, in `@@query.defaults(<option>: ...)` and `@@query.<option>(...)`.
+const OPTIONS: [&str; 5] = ["filter", "fields", "related", "order", "parent"];
+
+/// Each option a model sets, with the declaration that sets it. One option has one source.
+fn options(ir: &SchemaIr, name: &str) -> Result<BTreeMap<&'static str, Value>, String> {
+    let mut out: BTreeMap<&'static str, (Value, String)> = BTreeMap::new();
+    let mut attributes: Vec<&str> = vec![];
+    for d in ir.behavior.declarations.iter().filter(|d| d.model == name && d.field.is_none() && d.attribute.starts_with("query.")) {
+        let at = format!("{}:{}", d.location.file, d.location.line);
+        if attributes.contains(&d.attribute.as_str()) { return Err(format!("{at}: {name}: @@{} is given twice", d.attribute)); }
+        attributes.push(&d.attribute);
+        let given: Vec<(&'static str, Value, String)> = match d.attribute.trim_start_matches("query.") {
+            "defaults" => OPTIONS.iter().filter_map(|o| d.arguments.get(*o).map(|v| (*o, v.clone(), format!("@@query.defaults({o}:) at {at}")))).collect(),
+            "order" => vec![("order", Value::Array(d.positional.clone()), format!("@@query.order at {at}"))],
+            other => match OPTIONS.iter().find(|o| **o == other) {
+                Some(o) => vec![(*o, d.positional.first().cloned().ok_or_else(|| format!("{at}: @@{} needs a value", d.attribute))?, format!("@@{} at {at}", d.attribute))],
+                None => continue,
+            },
+        };
+        for (option, value, source) in given {
+            if let Some((_, first)) = out.get(option) { return Err(format!("{name}: {option} is set by both {first} and {source}; keep one")); }
+            out.insert(option, (value, source));
+        }
+    }
+    Ok(out.into_iter().map(|(k, (v, _))| (k, v)).collect())
+}
+
+/// `"-created_at nulls last"`: a field, `-` for descending, and an optional nulls position.
+fn order_key(model: &orm_contracts::ir::ModelIr, source: &Value) -> Result<OrderKey, String> {
+    let source = source.as_str().ok_or_else(|| format!("{}: an order column is a string such as \"-created_at\"", model.name))?;
+    let mut words = source.split_whitespace();
+    let first = words.next().ok_or_else(|| format!("{}: empty order column", model.name))?;
+    let (desc, field) = match first.strip_prefix('-') { Some(f) => (true, f), None => (false, first) };
+    if !model.fields.iter().any(|f| f.name == field) {
+        return Err(format!("{}: order column {field:?} is not a field of the model", model.name));
+    }
+    let nulls = match (words.next(), words.next(), words.next()) {
+        (None, None, None) => None,
+        (Some("nulls"), Some("first"), None) => Some(Nulls::First),
+        (Some("nulls"), Some("last"), None) => Some(Nulls::Last),
+        _ => return Err(format!("{}: order column {source:?}: write \"[-]field [nulls first|last]\"", model.name)),
+    };
+    Ok(OrderKey { field: field.to_owned(), desc, nulls })
+}
 
 pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
     let declarations = &ir.behavior.declarations;
@@ -11,27 +56,26 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         if stack.iter().any(|n| n == name) { return Err(format!("query-default inheritance cycle: {} -> {name}", stack.join(" -> "))); }
         stack.push(name.into());
         let model = ir.models.iter().find(|m| m.name == name).ok_or_else(|| format!("unknown policy parent {name}"))?;
-        let ds: Vec<_> = ir.behavior.declarations.iter().filter(|d| d.model == name && d.attribute == "query.defaults").collect();
-        if ds.len() > 1 { return Err(format!("duplicate query.defaults on {name}")); }
-        let d = ds.first().copied();
+        let options = options(ir, name)?;
         // The proxy pass (logical phase) fills `proxy_models` before this behavior pass.
         let proxy_parent = ir.behavior.proxy_models.iter().find(|p| p.model == name).map(|p| p.parent.as_str());
         let composed_parent = ir.behavior.declarations.iter().find(|d| d.model == name && d.attribute == "composition.model").and_then(|d| d.arguments.get("parent")).and_then(Value::as_str);
-        let parent = d.and_then(|d| d.arguments.get("parent")).and_then(Value::as_str).or(proxy_parent).or(composed_parent);
+        let parent = options.get("parent").and_then(Value::as_str).or(proxy_parent).or(composed_parent);
         let inherited = match parent { Some(p) => resolve(ir, p, resolved, stack)?, None => QueryDefaults::default() };
         let mut out = inherited.clone(); out.model = name.into(); out.parent = parent.map(str::to_owned);
-        if let Some(d) = d {
-            if let Some(source) = d.arguments.get("filter") {
-                let source = source.as_str().ok_or("filter must be a string")?;
-                out.filter = if source == "none" { None } else { Some(Parser::parse(source, inherited.filter.as_ref())?) };
-            }
-            if let Some(fields) = d.arguments.get("fields") {
-                let fields = strings(fields)?;
-                out.fields = if fields == ["*"] { None } else { Some(fields) };
-            }
-            if let Some(related) = d.arguments.get("related") {
-                out.related = strings(related)?.into_iter().map(|s| s.split('.').map(str::to_owned).collect()).collect();
-            }
+        if let Some(source) = options.get("filter") {
+            let source = source.as_str().ok_or("filter must be a string")?;
+            out.filter = if source == "none" { None } else { Some(Parser::parse(source, inherited.filter.as_ref())?) };
+        }
+        if let Some(fields) = options.get("fields") {
+            let fields = strings(fields)?;
+            out.fields = if fields == ["*"] { None } else { Some(fields) };
+        }
+        if let Some(related) = options.get("related") {
+            out.related = strings(related)?.into_iter().map(|s| s.split('.').map(str::to_owned).collect()).collect();
+        }
+        if let Some(order) = options.get("order") {
+            out.order = order.as_array().ok_or("order must be a list of strings")?.iter().map(|k| order_key(model, k)).collect::<Result<_, _>>()?;
         }
         let excluded: Vec<&str> = ir.behavior.declarations.iter().filter(|d| d.model == name && d.attribute == "query.selectOut").filter_map(|d| d.field.as_deref()).collect();
         if !excluded.is_empty() {
@@ -185,6 +229,75 @@ mod tests {
         schema.behavior.declarations.push(serde_json::from_value(json!({"model":"Child","attribute":"proxy.model","field":null,"arguments":{"parent":"Parent"},"positional":[],"location":{"file":"test","line":4,"column":1}})).unwrap());
         lower(&mut schema).unwrap();
         assert!(schema.behavior.query_defaults[1].parent.is_none());
+    }
+    fn declare(schema: &mut SchemaIr, model: &str, attribute: &str, arguments: Value, positional: Value) {
+        let line = schema.behavior.declarations.len() + 1;
+        schema.behavior.declarations.push(serde_json::from_value(json!({"model":model,"attribute":attribute,"field":null,"arguments":arguments,"positional":positional,"location":{"file":"test","line":line,"column":1}})).unwrap());
+    }
+    #[test]
+    fn one_attribute_per_option_matches_the_defaults_form() {
+        let mut long = ir();
+        long.behavior.declarations[0].arguments.insert("related".into(), json!([]));
+        long.behavior.declarations[0].arguments.insert("order".into(), json!(["-bio nulls last", "id"]));
+        lower(&mut long).unwrap();
+        let mut short = ir();
+        short.behavior.declarations.retain(|d| d.model != "Parent");
+        declare(&mut short, "Parent", "query.filter", json!({}), json!(["visible == true"]));
+        declare(&mut short, "Parent", "query.fields", json!({}), json!([["id", "visible"]]));
+        declare(&mut short, "Parent", "query.related", json!({}), json!([[]]));
+        declare(&mut short, "Parent", "query.order", json!({}), json!(["-bio nulls last", "id"]));
+        let child = short.behavior.declarations.iter().position(|d| d.model == "Child").unwrap();
+        short.behavior.declarations[child].arguments.remove("parent");
+        declare(&mut short, "Child", "query.parent", json!({}), json!(["Parent"]));
+        lower(&mut short).unwrap();
+        assert_eq!(serde_json::to_value(&long.behavior.query_defaults).unwrap(), serde_json::to_value(&short.behavior.query_defaults).unwrap());
+        let order = serde_json::to_value(&short.behavior.query_defaults[1].order).unwrap();
+        assert_eq!(order, json!([{"field":"bio","desc":true,"nulls":"last"},{"field":"id"}]), "the child inherits the order");
+    }
+    #[test]
+    fn an_option_has_one_source() {
+        let mut schema = ir();
+        declare(&mut schema, "Parent", "query.filter", json!({}), json!(["id > 1"]));
+        let error = lower(&mut schema).unwrap_err();
+        assert!(error.contains("Parent: filter is set by both @@query.defaults(filter:) at test:1 and @@query.filter at test:4"), "{error}");
+        let mut schema = ir();
+        declare(&mut schema, "Parent", "query.order", json!({}), json!(["id"]));
+        declare(&mut schema, "Parent", "query.order", json!({}), json!(["-id"]));
+        assert!(lower(&mut schema).unwrap_err().contains("@@query.order is given twice"));
+        let mut schema = ir();
+        schema.behavior.declarations[0].arguments.insert("order".into(), json!(["id"]));
+        declare(&mut schema, "Parent", "query.order", json!({}), json!(["-id"]));
+        assert!(lower(&mut schema).unwrap_err().contains("order is set by both @@query.defaults(order:)"));
+    }
+    #[test]
+    fn default_order_columns_and_clearing() {
+        let order = |child: Value| {
+            let mut schema = ir();
+            schema.behavior.declarations[0].arguments.insert("order".into(), json!(["-id"]));
+            declare(&mut schema, "Child", "query.order", json!({}), child);
+            lower(&mut schema).map(|_| serde_json::to_value(&schema.behavior.query_defaults[1].order).unwrap())
+        };
+        assert_eq!(order(json!([])).unwrap(), json!([]), "@@query.order() clears the inherited order");
+        assert_eq!(order(json!(["visible nulls first"])).unwrap(), json!([{"field":"visible","nulls":"first"}]));
+        assert!(order(json!(["nope"])).unwrap_err().contains("\"nope\" is not a field of the model"));
+        assert!(order(json!(["id desc"])).unwrap_err().contains("write \"[-]field [nulls first|last]\""));
+        assert!(order(json!(["-id nulls"])).is_err());
+        let mut schema = ir();
+        schema.behavior.declarations[1].arguments.insert("order".into(), json!([]));
+        schema.behavior.declarations[0].arguments.insert("order".into(), json!(["id"]));
+        lower(&mut schema).unwrap();
+        assert!(schema.behavior.query_defaults[1].order.is_empty(), "order: [] clears it too");
+        assert_eq!(schema.behavior.query_defaults[0].order.len(), 1);
+    }
+    #[test]
+    fn a_proxy_inherits_the_default_order() {
+        let mut schema = ir();
+        schema.behavior.declarations.retain(|d| d.model != "Child");
+        declare(&mut schema, "Parent", "query.order", json!({}), json!(["-visible", "id"]));
+        schema.behavior.proxy_models.push(serde_json::from_value(json!({"model":"Child","parent":"Parent"})).unwrap());
+        lower(&mut schema).unwrap();
+        assert_eq!(schema.behavior.query_defaults[1].order, schema.behavior.query_defaults[0].order);
+        assert_eq!(schema.behavior.query_defaults[1].order.len(), 2);
     }
     #[test]
     fn operator_precedence_and_null() {

@@ -91,6 +91,7 @@ one runs it (a query set is a *thenable*, like Prisma's and Drizzle's queries, a
 | `.count()` / `.exists()` | `Promise<number>` / `Promise<boolean>` |
 | `.inBulk(keys?, { field })` | `Promise<Map<key, R>>` |
 | `.batches(size)` / `.iterate(size)` | async generators that walk the primary key (keyset pagination) |
+| `.paginate({ first, after })` / `.paginate({ last, before })` | one page by keyset: `{ items, hasNext, hasPrevious, nextCursor, previousCursor }` |
 | `.sql()` | the SQL with values inlined, for reading |
 
 **The result cache.** A query set runs on its first `await`; awaiting the same query set
@@ -113,7 +114,9 @@ The builders are `filter(...)`, `exclude(...)`, `orderBy(...)`, `limit(n)`, `off
 Comparisons are methods: `.eq .ne .lt .lte .gt .gte .between .in .notIn .isNull
 .isNotNull`. String columns also have `.contains .icontains .startsWith .endsWith .like
 .ilike`, and arrays have `.has .hasAll .hasAny .containedBy`. Arithmetic is `.add .sub
-.mul .div`, and orderings are `.asc() / .desc()`. Conditions combine with `and()`,
+.mul .div`, and orderings are `.asc() / .desc()`. `.asc({ nulls: "first" })` and `.desc({ nulls: "last" })` place NULLs. `orderBy` also takes field names, with
+`-` for descending: `orderBy("-createdAt", "id")`. A name that is not a field of the
+model is a type error and a `TypeError`. Conditions combine with `and()`,
 `or()`, `not()`, or the methods of the same names. A boolean column is a condition by
 itself (`filter(Post.published)`).
 
@@ -126,6 +129,19 @@ The types check the following:
 * A to-many column (`User.posts.views`) works in filters, where it becomes `EXISTS`, but
   not in `orderBy()` or as a plain `select()` column, because those would repeat rows.
   Aggregates over it are fine.
+
+### Cursor pagination
+
+```ts
+const page = await Post.objects.orderBy("-createdAt").paginate({ first: 20 });
+const next = await Post.objects.orderBy("-createdAt").paginate({ first: 20, after: page.nextCursor });
+const back = await Post.objects.orderBy("-createdAt").paginate({ last: 20, before: page.previousCursor });
+```
+
+The rules are the same as Python's `paginate()` (see [`python-api.md`](python-api.md)).
+A nullable order column needs `{ nulls }`: `Post.rank.desc({ nulls: "last" })`.
+A cursor from Python works in TypeScript for the same schema and order, and the other way.
+A `Date` keeps milliseconds only. On Postgres, a `DateTime` order column with two values in one millisecond can skip or repeat rows: store such timestamps at millisecond precision, or order by another column.
 
 ### Relation filters
 

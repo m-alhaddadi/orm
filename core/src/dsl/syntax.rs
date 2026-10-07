@@ -171,7 +171,7 @@ impl<'a> Lexer<'a> {
             }
             return Ok((pos, Tok::Str(s)));
         }
-        for p in ["@@", "[]", "@", "{", "}", "(", ")", "[", "]", ",", ":", "?", ".", "="] {
+        for p in ["@@", "[]", "@", "{", "}", "(", ")", "[", "]", ",", ":", "?", ".", "=", "-"] {
             if self.rest.starts_with(p) {
                 for _ in 0..p.len() {
                     self.bump();
@@ -213,6 +213,8 @@ pub enum Value {
     Bool(bool),
     /// `name`, `Cascade`, `now()`, `raw("...")`, `created_at(sort: Desc)`
     Path(Vec<String>, Option<Args>),
+    /// `-created_at`: a descending index key; only index key lists take it.
+    Desc(Box<Value>),
     List(Vec<(Pos, Value)>),
     Object(Vec<(String, Pos, Value)>),
 }
@@ -586,6 +588,12 @@ impl Parser<'_> {
         }
         if self.is("{") {
             return Ok(Value::Object(self.object()?));
+        }
+        if self.eat("-")? {
+            return match self.value()? {
+                v @ Value::Path(..) => Ok(Value::Desc(Box::new(v))),
+                _ => err(pos, "`-` goes before a field name, e.g. -created_at"),
+            };
         }
         match self.advance()? {
             (_, Tok::Str(s)) => Ok(Value::Str(s)),

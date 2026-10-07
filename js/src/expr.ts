@@ -331,12 +331,14 @@ export abstract class Expression<T, S extends string = never, P = {}> extends No
 
   // Ordering ---------------------------------------------------------------------------------
 
-  asc(): Ordering<S, P> {
-    return new Ordering(this, false);
+  /** Ascending; `{ nulls: "first" | "last" }` places NULLs (the database's default otherwise). */
+  asc(options?: OrderOptions): Ordering<S, P> {
+    return new Ordering(this, false, options?.nulls);
   }
 
-  desc(): Ordering<S, P> {
-    return new Ordering(this, true);
+  /** Descending; `{ nulls: "first" | "last" }` places NULLs (the database's default otherwise). */
+  desc(options?: OrderOptions): Ordering<S, P> {
+    return new Ordering(this, true, options?.nulls);
   }
 }
 
@@ -969,6 +971,11 @@ export class RelationPath<M extends ModelSpec, S extends string, H extends reado
   }
 }
 
+/** Where NULLs go in an ordering. */
+export interface OrderOptions {
+  readonly nulls?: "first" | "last" | undefined;
+}
+
 export class Ordering<S extends string = never, P = {}> {
   /** @internal */
   declare readonly "~types"?: [S, P];
@@ -976,15 +983,23 @@ export class Ordering<S extends string = never, P = {}> {
   constructor(
     readonly expr: Node,
     readonly descending: boolean,
-  ) {}
+    readonly nulls?: "first" | "last",
+  ) {
+    if (nulls !== undefined && nulls !== "first" && nulls !== "last") {
+      throw new TypeError(`nulls is "first" or "last", not ${JSON.stringify(nulls)}`);
+    }
+  }
 
+  /** The opposite order, NULLs included. */
   reversed(): Ordering<S, P> {
-    return new Ordering(this.expr, !this.descending);
+    return new Ordering(this.expr, !this.descending, this.nulls === undefined ? undefined : this.nulls === "first" ? "last" : "first");
   }
 
   /** @internal */
   ir(ctx: IRContext): IR {
-    return { expr: this.expr.ir(ctx), desc: this.descending };
+    const ir: IR = { expr: this.expr.ir(ctx), desc: this.descending };
+    if (this.nulls !== undefined) ir["nulls"] = this.nulls;
+    return ir;
   }
 }
 

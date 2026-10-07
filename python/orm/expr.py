@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterable
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, Unpack, overload
+from typing import Literal as _Literal
 
 from .errors import QueryError
 
@@ -29,6 +30,8 @@ E = TypeVar("E")
 M = TypeVar("M", bound="Model")
 
 IR = dict[str, Any]
+# Where NULLs go in an ordering.
+NullsPlace = _Literal["first", "last"]
 
 __all__ = [
     "Expression",
@@ -295,11 +298,13 @@ class Expression(Node, Generic[T]):
 
     # Ordering --------------------------------------------------------------------------------
 
-    def asc(self) -> Ordering:
-        return Ordering(self, desc=False)
+    def asc(self, *, nulls: NullsPlace | None = None) -> Ordering:
+        """Ascending; ``nulls="first"`` / ``"last"`` places NULLs (the database's default otherwise)."""
+        return Ordering(self, desc=False, nulls=nulls)
 
-    def desc(self) -> Ordering:
-        return Ordering(self, desc=True)
+    def desc(self, *, nulls: NullsPlace | None = None) -> Ordering:
+        """Descending; ``nulls="first"`` / ``"last"`` places NULLs (the database's default otherwise)."""
+        return Ordering(self, desc=True, nulls=nulls)
 
 
 def _escape_like(text: str) -> str:
@@ -431,6 +436,11 @@ class ColumnRef(Expression[T]):
                 c = c.outer
             raise ValueError(f"{self!r} belongs to {self._root.__name__}, not to a {root} query; {hint}")
         return {"t": "col", "path": list(self._path), "name": self._field.name}
+
+    def __neg__(self) -> Ordering:
+        """``-Post.created_at`` is ``Post.created_at.desc()``, for ``order_by()``. It is
+        never SQL negation; write ``0 - Post.views`` for that."""
+        return Ordering(self, desc=True)
 
     def __repr__(self) -> str:
         return ".".join((self._root.__name__, *self._path, self._field.name))
@@ -870,20 +880,29 @@ class RelationPath(Generic[M]):
 
 
 class Ordering:
-    __slots__ = ("expr", "desc")
+    __slots__ = ("expr", "desc", "nulls")
 
-    def __init__(self, expr: Expression[Any], desc: bool) -> None:
+    def __init__(self, expr: Expression[Any], desc: bool, nulls: NullsPlace | None = None) -> None:
+        if nulls not in (None, "first", "last"):
+            raise ValueError(f"nulls is 'first' or 'last', not {nulls!r}")
         self.expr = expr
         self.desc = desc
+        self.nulls = nulls
 
     def reversed(self) -> Ordering:
-        return Ordering(self.expr, not self.desc)
+        """The opposite order, NULLs included."""
+        nulls: NullsPlace | None = None if self.nulls is None else "last" if self.nulls == "first" else "first"
+        return Ordering(self.expr, not self.desc, nulls)
 
     def _ir(self, ctx: IRContext) -> IR:
-        return {"expr": self.expr._ir(ctx), "desc": self.desc}
+        ir: IR = {"expr": self.expr._ir(ctx), "desc": self.desc}
+        if self.nulls is not None:
+            ir["nulls"] = self.nulls
+        return ir
 
     def __repr__(self) -> str:
-        return f"{self.expr!r}.{'desc' if self.desc else 'asc'}()"
+        nulls = "" if self.nulls is None else f"nulls={self.nulls!r}"
+        return f"{self.expr!r}.{'desc' if self.desc else 'asc'}({nulls})"
 
 
 # -- conditions ---------------------------------------------------------------------------

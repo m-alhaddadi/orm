@@ -38,6 +38,27 @@ model User {
 }
 ```
 
+Each option also has its own attribute.
+One option comes from one place on a model:
+
+```prisma
+model User {
+  id Int @id @default(autoincrement())
+  name String
+  active Boolean @default(true)
+  created_at DateTime @default(now())
+  bio String @query.selectOut
+  @@query.filter("active == true")
+  @@query.fields(["id", "name"])
+  @@query.related(["profile"])
+  @@query.order("-created_at nulls last", "id")
+  @@query.parent("Base")
+}
+```
+
+`@@query.defaults(filter: ...)` together with `@@query.filter(...)` is an error that names both.
+A second copy of the same attribute is an error too.
+
 Build-select the compiler as a dependency with alias `query_defaults`; its
 manifest selects the `query-defaults` host capability. Disabled artifacts reject
 policy metadata during definition with a rebuild instruction. Ordinary explicit
@@ -68,6 +89,16 @@ current explicit eager loading; subsequent explicit loading adds references.
 Defaults affect reads, count/exists, and queryset update/delete selection, including
 bulk updates. Inserts use declared client/database defaults and caller values;
 filters never provide inserted values.
+
+The default order is one string for each order column: a field, `-` before it for descending, and an optional ` nulls first` or ` nulls last`.
+`@@query.defaults` takes the same strings as a list: `order: ["-created_at", "id"]`.
+Order columns are fields of the model itself, not related columns.
+A child inherits the order, and `@@query.order()` or `order: []` clears it.
+
+The default order applies to model reads that give no `order_by()` / `orderBy()`, which include `first()`, `last()` and the rows of a `Prefetch` query set without its own order.
+An explicit order replaces it, and `without_defaults()` removes it.
+`select(...)` rows, subqueries, `count`, `exists`, `update` and `delete` ignore it.
+`batches()` and `iterate()` keep their primary-key order.
 
 A filtered-out joined target is `None`/`null`, including a physically required
 reference. Its default filter is in the LEFT JOIN condition, so the source

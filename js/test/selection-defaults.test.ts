@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { connect, define, NotLoaded, Registry } from "../src/index.js";
+import { connect, define, loads, NotLoaded, Prefetch, Registry } from "../src/index.js";
 import { native } from "../src/native.js";
 
 const queryDefaults = (JSON.parse(native().nativeArtifact()) as { capabilities?: string[] }).capabilities?.includes("query-defaults") ?? false;
@@ -104,3 +104,83 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     } finally { await db.dropTables(); await db.close(); }
   });
 }
+
+const ordered = `
+datasource db {
+  provider = "sqlite"
+}
+model Topic {
+  id Int @id @default(autoincrement())
+  rank Int?
+  name String
+  notes Note[]
+  @@map("order09_js_topics")
+  @@query.order("-rank nulls last", "id")
+}
+model Note {
+  id Int @id @default(autoincrement())
+  topic_id Int
+  body String
+  topic Topic @relation(fields: [topic_id], references: [id], onDelete: Cascade)
+  @@map("order09_js_notes")
+  @@query.defaults(order: ["-body"])
+}
+`;
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  test(`schema default order: ${dialect}`, async (t) => {
+    if (!queryDefaults) {
+      t.skip("needs a native build with the query-defaults feature");
+      return;
+    }
+    const registry = new Registry();
+    const models = loads(ordered.replace('"sqlite"', dialect === "postgres" ? '"postgresql"' : '"sqlite"'), { registry }) as any;
+    const { Topic, Note } = models;
+    const url = dialect === "sqlite" ? "sqlite://:memory:" : process.env["ORM_TEST_DATABASE_URL"] ?? "postgres://postgres:postgres@localhost/orm_test";
+    const db = await connect(url, { registry, default: false });
+    await db.dropTables(); await db.createTables();
+    const tq = Topic.objects.using(db), nq = Note.objects.using(db);
+    const names = (rows: any[]) => rows.map((r) => r.name);
+    try {
+      for (const [name, rank] of [["a", 1], ["b", null], ["c", 3], ["d", 3]] as const) await tq.insert({ name, rank });
+      assert.deepEqual(names(await tq.all()), ["c", "d", "a", "b"]);
+      assert.equal((await tq.first()).name, "c");
+      assert.equal((await tq.last()).name, "b");
+      assert.deepEqual(names(await tq.orderBy(Topic.name.desc())), ["d", "c", "b", "a"]);
+      assert.deepEqual(names(await tq.orderBy(Topic.rank.asc({ nulls: "first" }), Topic.id)), ["b", "a", "c", "d"]);
+      assert.ok(!tq.withoutDefaults().sql().includes("ORDER BY"));
+      assert.equal((await tq.withoutDefaults().first()).name, "a");
+      assert.equal(await tq.count(), 4);
+      const batches: string[][] = [];
+      for await (const batch of tq.batches(2)) batches.push(names(batch));
+      assert.deepEqual(batches, [["a", "b"], ["c", "d"]]);
+      const page = await tq.paginate({ first: 3 });
+      assert.deepEqual(names(page.items), ["c", "d", "a"]);
+      assert.deepEqual(names((await tq.paginate({ first: 3, after: page.nextCursor })).items), ["b"]);
+      assert.deepEqual(names((await tq.withoutDefaults().paginate({ first: 3 })).items), ["a", "b", "c"]);
+      const c = await tq.get(Topic.name.eq("c"));
+      for (const body of ["x", "z", "y"]) await nq.insert({ topicId: c.pk, body });
+      assert.deepEqual((await nq.all()).map((x: any) => x.body), ["z", "y", "x"]);
+      const loaded = await tq.prefetchRelated(Topic.notes).get(Topic.name.eq("c"));
+      assert.deepEqual((await loaded.notes).map((x: any) => x.body), ["z", "y", "x"]);
+      const own = await tq.prefetchRelated(new Prefetch(Topic.notes, Note.objects.orderBy(Note.body))).get(Topic.name.eq("c"));
+      assert.deepEqual((await own.notes).map((x: any) => x.body), ["x", "y", "z"]);
+      const sliced = await tq.prefetchRelated(new Prefetch(Topic.notes, Note.objects.limit(2))).get(Topic.name.eq("c"));
+      assert.deepEqual((await sliced.notes).map((x: any) => x.body), ["z", "y"]);
+    } finally {
+      await db.dropTables();
+      await db.close();
+    }
+  });
+}
+
+test("schema default order: one source per option", (t) => {
+  if (!queryDefaults) {
+    t.skip("needs a native build with the query-defaults feature");
+    return;
+  }
+  const both = ordered.replace('@@query.defaults(order: ["-body"])', '@@query.defaults(order: ["-body"])\n  @@query.order("id")');
+  assert.throws(() => loads(both, { registry: new Registry() }), /Note: order is set by both @@query\.defaults\(order:\) at .* and @@query\.order at/);
+  assert.throws(() => loads(ordered.replace('"-body"', '"nope"'), { registry: new Registry() }), /order column "nope" is not a field/);
+});
+

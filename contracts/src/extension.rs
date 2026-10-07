@@ -300,6 +300,15 @@ pub struct Argument {
     pub kind: ArgumentKind,
     #[serde(default)]
     pub required: bool,
+    /// The last positional argument only: it takes any number of values of `kind`.
+    #[serde(default, skip_serializing_if = "crate::ir::is_false")]
+    pub variadic: bool,
+}
+impl Attribute {
+    /// The positional argument that describes value `i`.
+    pub fn positional_at(&self, i: usize) -> Option<&Argument> {
+        self.positional.get(i).or_else(|| self.positional.last().filter(|a| a.variadic))
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -424,13 +433,17 @@ pub fn validate_declarations(ir: &SchemaIr, manifests: &[Manifest], language: Op
         for (name, arg) in &a.arguments {
             if arg.required && !d.arguments.contains_key(name) { return Err(fail(d, format!("missing argument {name}"))); }
         }
-        if d.positional.len() > a.positional.len() { return Err(fail(d, "too many positional arguments".into())); }
+        if a.positional.iter().rev().skip(1).any(|arg| arg.variadic) {
+            return Err(fail(d, "only the last positional argument can be variadic".into()));
+        }
+        if d.positional.len() > a.positional.len() && !a.positional.last().is_some_and(|arg| arg.variadic) {
+            return Err(fail(d, "too many positional arguments".into()));
+        }
         for (i, arg) in a.positional.iter().enumerate() {
-            match d.positional.get(i) {
-                None if arg.required => return Err(fail(d, format!("missing positional argument {i}"))),
-                Some(v) if !matches(v, arg) => return Err(fail(d, format!("wrong type for positional argument {i}"))),
-                _ => {}
-            }
+            if d.positional.get(i).is_none() && arg.required { return Err(fail(d, format!("missing positional argument {i}"))); }
+        }
+        for (i, v) in d.positional.iter().enumerate() {
+            if !a.positional_at(i).is_some_and(|arg| matches(v, arg)) { return Err(fail(d, format!("wrong type for positional argument {i}"))); }
         }
     }
     Ok(())
@@ -683,6 +696,17 @@ pub struct QueryDefaults {
     #[serde(default)] pub filter: Option<serde_json::Value>,
     #[serde(default)] pub fields: Option<Vec<String>>,
     #[serde(default)] pub related: Vec<Vec<String>>,
+    /// The order of reads that give no `order_by()`; empty is none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub order: Vec<OrderKey>,
+}
+
+/// One column of a default order.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OrderKey {
+    pub field: String,
+    #[serde(default, skip_serializing_if = "crate::ir::is_false")] pub desc: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub nulls: Option<crate::ir::Nulls>,
 }
 
 #[cfg(test)]
@@ -725,6 +749,24 @@ mod tests {
         assert!(check("tags", serde_json::json!(["a", null])).unwrap_err().contains("wrong type for tags"));
         assert!(check("tags", serde_json::json!([{"k": 1}])).is_err());
         assert!(check("payload", serde_json::json!({"labels": [null]})).is_ok());
+    }
+
+    #[test]
+    fn a_variadic_last_positional_takes_any_number_of_values() {
+        let mut manifest = manifest(&["python"], &["sqlite"]);
+        manifest.attributes[0].positional = serde_json::from_value(serde_json::json!([{"kind": "string", "variadic": true}])).unwrap();
+        let check = |manifest: &Manifest, values: serde_json::Value| {
+            let mut ir = schema(crate::dialect::Dialect::Sqlite);
+            ir.behavior.declarations[0].positional = serde_json::from_value(values).unwrap();
+            validate_declarations(&ir, std::slice::from_ref(manifest), None)
+        };
+        assert!(check(&manifest, serde_json::json!([])).is_ok());
+        assert!(check(&manifest, serde_json::json!(["-a", "b", "c nulls last"])).is_ok());
+        assert!(check(&manifest, serde_json::json!(["a", 1])).unwrap_err().contains("wrong type for positional argument 1"));
+        manifest.attributes[0].positional[0].variadic = false;
+        assert!(check(&manifest, serde_json::json!(["a", "b"])).unwrap_err().contains("too many positional arguments"));
+        manifest.attributes[0].positional = serde_json::from_value(serde_json::json!([{"kind": "string", "variadic": true}, {"kind": "string"}])).unwrap();
+        assert!(check(&manifest, serde_json::json!(["a"])).unwrap_err().contains("only the last positional argument"));
     }
 
     #[test]

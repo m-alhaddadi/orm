@@ -42,6 +42,7 @@ import {
   type Allowed,
   type AllowedOne,
   type CteOptions,
+  type FieldOrder,
   type OuterRefs,
   type ParamsOfAll,
   type Awaitable,
@@ -129,7 +130,7 @@ export class Select<M extends ModelSpec, Row extends object, S extends string, P
     return this.with(this.qs.exclude(...(conditions as unknown as never[])) as never);
   }
 
-  orderBy<const Cs extends readonly (Expression<unknown, AllowedOne<S>, unknown> | Ordering<AllowedOne<S>, unknown>)[]>(
+  orderBy<const Cs extends readonly (Expression<unknown, AllowedOne<S>, unknown> | Ordering<AllowedOne<S>, unknown> | FieldOrder<M>)[]>(
     ...items: Cs
   ): Select<M, Row, S, P & ParamsOfAll<Cs>, X | OuterRefs<ScopesOf<Cs>, S>, C> {
     return this.with(this.qs.orderBy(...(items as unknown as never[])) as never);

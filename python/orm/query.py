@@ -26,7 +26,9 @@ from .expr import (
     as_condition,
     not_,
 )
+from . import pagination
 from .fields import HasMany, ManyToMany
+from .pagination import Page
 from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, prepare_rows, assignments
 
 if TYPE_CHECKING:
@@ -617,7 +619,16 @@ class QuerySet(Generic[M]):
         return await resolve(self._db)._run(ir, params, row_cls, self._db)
 
     def _default_order(self) -> tuple[Ordering, ...]:
-        return self._order or (Ordering(self._model._meta.pk_ref(), desc=False),)
+        """The order of this read: ``order_by()``, else the schema default order, else the pk."""
+        if self._order:
+            return self._order
+        meta = self._model._meta
+        if meta.default_order and not self._without_defaults and self._from is None:
+            return tuple(
+                Ordering(ColumnRef(self._model, (), meta.fields[k["field"]]), k.get("desc", False), k.get("nulls"))
+                for k in meta.default_order
+            )
+        return (Ordering(meta.pk_ref(), desc=False),)
 
     async def _fetch(self) -> list[M]:
         params: list[Any] = []
@@ -642,6 +653,46 @@ class QuerySet(Generic[M]):
     async def __aiter__(self) -> AsyncIterator[M]:
         for obj in await self:
             yield obj
+
+    async def paginate(
+        self, *, first: int | None = None, after: str | None = None, last: int | None = None, before: str | None = None
+    ) -> Page[M]:
+        """A page of rows by keyset: ``paginate(first=20, after=cursor)`` reads on from a
+        cursor, ``paginate(last=20, before=cursor)`` reads back.
+
+        The order is ``order_by()``, else the schema default order, else the primary key;
+        the primary key is added when the order is not unique. Order columns are columns
+        of the model itself, and a nullable one needs ``nulls=``. ``select_related``,
+        ``prefetch_related``, ``only()`` and query defaults apply to each page.
+        """
+        if (first is None) == (last is None):
+            raise TypeError("paginate() takes first= or last=")
+        if (first is not None and before is not None) or (last is not None and after is not None):
+            raise TypeError("paginate() takes first= with after=, or last= with before=")
+        size = first if first is not None else last
+        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+            raise ValueError("a page size is an integer of at least 1")
+        if self._limit is not None or self._offset is not None:
+            raise QueryError("paginate() can't be used on a sliced query set")
+        keys = pagination.keyset(self._model, self._default_order())
+        fp = pagination.fingerprint(self._model, keys)
+        forward = first is not None
+        order = [o if forward else o.reversed() for _, o in keys]
+        helpers = (*self._model_helpers, *(f.name for f, _ in keys if f.name not in self._model_helpers))
+        qs = self._clone(_model_helpers=helpers)
+        cursor = after if forward else before
+        if cursor is not None:
+            qs = qs.filter(pagination.after(order, pagination.decode_cursor(cursor, fp, keys)))
+        rows = await qs.order_by(*order)[: size + 1]._fetch()
+        more = len(rows) > size
+        rows = rows[:size] if forward else rows[:size][::-1]
+        return Page(
+            rows,
+            has_next=more if forward else cursor is not None,
+            has_previous=cursor is not None if forward else more,
+            next_cursor=pagination.encode_cursor(fp, keys, rows[-1]) if rows else None,
+            previous_cursor=pagination.encode_cursor(fp, keys, rows[0]) if rows else None,
+        )
 
     async def first(self) -> M | None:
         """First row by the current ordering (primary key if none), or None."""

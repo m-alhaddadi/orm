@@ -79,6 +79,7 @@ queries, since `User.objects` lives as long as the class. `select()` caches the 
 await User.objects.filter(cond, cond2)        # list[User]; conditions AND-ed
 User.objects.exclude(cond)                    # NOT (...)
 User.objects.order_by(User.name, User.id.desc())
+User.objects.order_by(-User.created_at, User.id)   # -column is column.desc()
 User.objects.all()[10:20]                     # LIMIT 10 OFFSET 10
 async for u in User.objects.filter(...): ...
 
@@ -89,6 +90,11 @@ await qs.in_bulk([1, 2, 3])                   # {1: <User 1>, 3: <User 3>}: by p
 await qs.in_bulk(emails, field=User.email)    # by a unique field; no ids: every row
 qs.sql()                                      # SQL with values inlined, for debugging
 ```
+
+`.asc(nulls="first")` and `.desc(nulls="last")` place NULLs; without `nulls`, the database decides.
+`-column` is a descending `Ordering`, for `order_by()` and a `Prefetch` query set.
+It is never SQL negation: write `0 - Post.views` for that.
+`-` works on a column only, and an ordering in `filter()` or `select()` is a `TypeError`.
 
 Expressions: `== != < <= > >=` (with `== None` meaning `IS NULL`), `.in_()`,
 `.not_in()`, `.is_null()`, `.between()`, `.like()` / `.ilike()` / `.contains()` /
@@ -236,6 +242,28 @@ async for batch in Post.objects.batches(500):      # list[Post] per batch
 Each batch is `WHERE <filters> AND id > <last id> ORDER BY id LIMIT n` (keyset paging, no
 `OFFSET`), so memory stays flat and every batch is an index range scan. `select_related`,
 `prefetch_related` and `lock()` apply per batch; `order_by` and slicing are rejected.
+
+### Cursor pagination
+
+```python
+page = await Post.objects.filter(Post.published).order_by(-Post.created_at).paginate(first=20)
+page.items, page.has_next, page.next_cursor
+page = await qs.paginate(first=20, after=page.next_cursor)       # the next page
+page = await qs.paginate(last=20, before=page.previous_cursor)   # the previous page
+```
+
+`paginate()` reads one page by keyset, like `batches()`, so deep pages stay fast and rows added between pages do not repeat others.
+The order is `order_by()`, else the schema default order, else the primary key.
+The primary key is added as the last order column when no column of the order is unique.
+`select_related`, `prefetch_related`, `only()` and query defaults apply to each page.
+
+* `next_cursor` is the cursor of the last item, and `previous_cursor` that of the first; both are `None` on an empty page.
+* `has_next` / `has_previous` come from one extra row in the direction of reading. In the other direction, they are `True` when the call gave a cursor.
+* Order columns are columns of the model itself: an expression or a related column is a `QueryError`. JSON, array and enum columns are a `QueryError` too.
+* A nullable order column needs `nulls=`: `Post.rank.desc(nulls="last")`.
+* A cursor is opaque base64 of the order values and a fingerprint of the order. A cursor from another order or model is a `QueryError`.
+* A cursor is not signed. A client can change it to start at any position of the same order, so do not use it for access control.
+* There is no total count; call `count()` for it.
 
 ### Prepared queries
 
