@@ -116,11 +116,18 @@ fn manifest_capability_selects_the_host_feature() {
         let selected = toml::Value::String(feature.into());
         for binding in ["python", "node"] {
             let manifest: toml::Value = toml::from_str(&fs::read_to_string(output.join("bindings").join(binding).join("Cargo.toml")).unwrap()).unwrap();
-            assert!(manifest["features"]["default"].as_array().unwrap().contains(&selected), "{feature}: {binding} default features");
+            let defaults = manifest["features"]["default"].as_array().unwrap();
+            assert!(defaults.contains(&selected), "{feature}: {binding} default features");
+            // Extension artifacts keep the binding defaults, reference loading included.
+            assert!(defaults.contains(&toml::Value::String("reference-loading".into())), "{feature}: {binding} default features");
             assert!(manifest["dependencies"]["orm-core"]["features"].as_array().unwrap().contains(&selected), "{feature}: {binding} orm-core features");
         }
         let artifact: serde_json::Value = serde_json::from_slice(&fs::read(output.join("artifact.json")).unwrap()).unwrap();
         assert!(artifact["capabilities"].as_array().unwrap().contains(&serde_json::json!(feature)), "{feature}: {artifact}");
+        // The orm-core and orm-engine tests of the snapshot read these host files.
+        for file in ["examples/blog/schema.prisma", "examples/sqlite/schema.prisma", "docs/prisma-syntax.md", "docs/schema.md", "PLAN.md"] {
+            assert_eq!(fs::read(output.join(file)).unwrap(), fs::read(host.join(file)).unwrap(), "{feature}: {file}");
+        }
     }
     fs::remove_dir_all(root).unwrap();
 }

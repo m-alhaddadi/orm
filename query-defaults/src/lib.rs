@@ -123,6 +123,12 @@ mod tests {
             {"model":"Child","attribute":"query.selectOut","field":"bio","arguments":{},"positional":[],"location":{"file":"test","line":3,"column":1}}
         ]}})).unwrap()
     }
+    /// Declared effect `query-defaults`: the prepared policies only.
+    #[test]
+    fn lowering_changes_only_query_defaults_once() {
+        let effects = orm_contracts::extension::pass_effects(&ir(), lower).unwrap();
+        assert_eq!(effects.into_iter().collect::<Vec<_>>(), ["behavior.query_defaults"]);
+    }
     #[test]
     fn inheritance_replacement_reset_and_select_out() {
         let mut schema = ir(); lower(&mut schema).unwrap();

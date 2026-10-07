@@ -44,3 +44,9 @@ test("the loaded native artifact embeds its build record", async () => {
   assert.match(build.rustc, /^rustc /);
   assert.ok(build.target && build.revision);
 });
+
+test("the loaded native artifact reports no adapters", async () => {
+  const { native, nativeAdapters } = await import(nativeUrl);
+  assert.deepEqual(JSON.parse(native().profileMetadata()).adapters, []);
+  assert.deepEqual(nativeAdapters(), []);
+});

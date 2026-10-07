@@ -51,7 +51,8 @@ def test_selector_loads_exactly_one_profile():
 
 @pytest.mark.parametrize("override", [{"abi": 2}, {"version": "0.2.0"}, {"language": "node"}, {"build": None},
                                       {"build": {**BUILD, "features": "sqlite"}}, {"build": {**BUILD, "revision": None}},
-                                      {"backends": ["postgres", "sqlite"]}, {"capabilities": {"cli": True}}])
+                                      {"backends": ["postgres", "sqlite"]}, {"capabilities": {"cli": True}},
+                                      {"adapters": ["reference-loading"]}])
 def test_incompatible_metadata(override):
     with pytest.raises(ImportError, match="incompatible"):
         profiles.validate(artifact("sqlite", **override), "sqlite")
@@ -85,3 +86,9 @@ def test_installed_artifact_embeds_its_build_record():
     build = metadata["build"]
     assert set(metadata["backends"]) <= set(build["features"])
     assert build["rustc"].startswith("rustc ") and build["target"] and build["revision"]
+
+
+def test_installed_artifact_reports_no_adapters():
+    from orm import _capabilities, _native
+    assert json.loads(_native.profile_metadata())["adapters"] == []
+    assert _capabilities.ADAPTERS == frozenset()

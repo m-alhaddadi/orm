@@ -12,6 +12,14 @@ fn definition() -> Value {
         {"attribute":"composition.model","model":"Employee","field":null,"arguments":{"parent":"Person","parentRef":"person","childRef":"employee"},"positional":[],"location":{"file":"schema","line":1,"column":1}}
     ]}})
 }
+/// Declared effect `composition.storage-ownership`: inherited logical fields, the shared
+/// key columns of the storage snapshot, and the owners and links that resolve them.
+#[test]
+fn lowering_changes_only_storage_ownership_once() {
+    let ir: SchemaIr = serde_json::from_value(definition()).unwrap();
+    let effects = orm_contracts::extension::pass_effects(&ir, orm_model_composition::lower).unwrap();
+    assert_eq!(effects.into_iter().collect::<Vec<_>>(), ["behavior.field_storage", "behavior.owner_links", "behavior.storage", "models"]);
+}
 #[test]
 fn chains_and_siblings_keep_physical_storage_separate() {
     let mut ir: SchemaIr = serde_json::from_value(definition()).unwrap();

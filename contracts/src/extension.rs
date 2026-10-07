@@ -502,6 +502,40 @@ pub struct PhysicalSchema { pub models: Vec<crate::ir::ModelIr> }
 
 /// A later batch (for example a second class `prepare()`) adds the owners of its new
 /// tables; the snapshot of earlier batches stays unchanged.
+/// Test support for pass authors. Captures storage and runs `pass` on a copy of `ir`, as
+/// the generated `prepare` does, and returns the IR sections that the pass changed
+/// (`models`, `enums`, `behavior.<key>`, ...) to compare with its declared effects.
+/// Then marks the batch lowered and fails if a second run changes anything.
+pub fn pass_effects(ir: &SchemaIr, pass: impl Fn(&mut SchemaIr) -> Result<(), String>) -> Result<std::collections::BTreeSet<String>, String> {
+    fn sections(value: &serde_json::Value, prefix: &str, out: &mut BTreeMap<String, serde_json::Value>) {
+        for (key, value) in value.as_object().into_iter().flatten() {
+            if prefix.is_empty() && key == "behavior" { sections(value, "behavior.", out); }
+            else { out.insert(format!("{prefix}{key}"), value.clone()); }
+        }
+    }
+    let snapshot = |ir: &SchemaIr| -> Result<BTreeMap<String, serde_json::Value>, String> {
+        let mut out = BTreeMap::new();
+        sections(&serde_json::to_value(ir).map_err(|e| e.to_string())?, "", &mut out);
+        Ok(out)
+    };
+    let changed = |a: &BTreeMap<String, serde_json::Value>, b: &BTreeMap<String, serde_json::Value>| -> std::collections::BTreeSet<String> {
+        a.keys().chain(b.keys()).filter(|k| a.get(*k) != b.get(*k)).cloned().collect()
+    };
+    let mut lowered: SchemaIr = serde_json::from_value(serde_json::to_value(ir).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    capture_storage(&mut lowered)?;
+    let before = snapshot(&lowered)?;
+    pass(&mut lowered)?;
+    let effects = changed(&before, &snapshot(&lowered)?);
+    for declaration in &mut lowered.behavior.declarations { declaration.lowered = true; }
+    lowered.behavior.lowered_models = lowered.models.iter().map(|m| m.name.clone()).collect();
+    capture_storage(&mut lowered)?;
+    let once = snapshot(&lowered)?;
+    pass(&mut lowered)?;
+    let again = changed(&once, &snapshot(&lowered)?);
+    if !again.is_empty() { return Err(format!("the pass lowered an already lowered batch again; it changed {again:?}")); }
+    Ok(effects)
+}
+
 pub fn capture_storage(ir: &mut SchemaIr) -> Result<(), String> {
     let mut models = physical_models(ir)?;
     match &mut ir.behavior.storage {
@@ -699,6 +733,36 @@ mod tests {
         assert!(serde_json::from_value::<Export>(export.clone()).is_ok());
         export["kind"] = "integer_validator".into();
         assert!(serde_json::from_value::<Export>(export).unwrap_err().to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn requirement_errors_name_the_model_requirement_and_artifact_contents() {
+        let mut ir = SchemaIr::default();
+        ir.behavior.schema_contract = SCHEMA_CONTRACT;
+        ir.behavior.completed_passes = vec!["app.lower".into()];
+        let artifact = Artifact { passes: vec!["other.lower".into()], ..Artifact::default() };
+        let error = check_requirements(&ir, &artifact).unwrap_err();
+        assert!(error.contains("app.lower") && error.contains("other.lower") && error.contains("rebuild"), "{error}");
+        ir.behavior.completed_passes.clear();
+        ir.behavior.specializations = vec![Specialization { model: "User".into(), fingerprint: "f".into(), exports: vec!["app.trim".into()] }];
+        let artifact = Artifact { exports: vec!["app.other".into()], ..Artifact::default() };
+        let error = check_requirements(&ir, &artifact).unwrap_err();
+        assert!(error.starts_with("User requires missing export app.trim") && error.contains("app.other") && error.contains("rebuild"), "{error}");
+        let artifact = Artifact { exports: vec!["app.trim".into()], ..Artifact::default() };
+        let error = check_requirements(&ir, &artifact).unwrap_err();
+        assert!(error.starts_with("User: stale or missing specialization f") && error.contains("rebuild"), "{error}");
+    }
+
+    #[test]
+    fn pass_effects_reports_sections_and_rejects_a_second_lowering() {
+        let ir = schema(crate::dialect::Dialect::Sqlite);
+        let once = |ir: &mut SchemaIr| -> Result<(), String> {
+            if ir.behavior.declarations.iter().any(|d| !d.lowered) { ir.behavior.completed_passes.push("app.lower".into()); }
+            Ok(())
+        };
+        assert_eq!(pass_effects(&ir, once).unwrap().into_iter().collect::<Vec<_>>(), ["behavior.completed_passes"]);
+        let always = |ir: &mut SchemaIr| -> Result<(), String> { ir.behavior.lowered_models.push("again".into()); Ok(()) };
+        assert!(pass_effects(&ir, always).unwrap_err().contains("behavior.lowered_models"));
     }
 
     #[test]

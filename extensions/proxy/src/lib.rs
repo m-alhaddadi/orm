@@ -221,3 +221,23 @@ fn validate_default(field: &FieldIr, value: &serde_json::Value) -> Result<(), St
     };
     if valid { Ok(()) } else { Err(format!("client default does not encode as {:?}", field.ty)) }
 }
+
+#[cfg(test)]
+mod effects {
+    use orm_contracts::{extension::pass_effects, ir::SchemaIr};
+
+    /// Declared effect `orm.proxy.logical-models`: the logical models, their contracts, and
+    /// the storage snapshot, where a proxy shares its parent table instead of its own.
+    #[test]
+    fn lowering_changes_only_logical_proxy_models_once() {
+        let ir: SchemaIr = serde_json::from_value(serde_json::json!({"models":[
+            {"name":"User","table":"users","fields":[{"name":"id","column":"id","type":"int","primary_key":true},{"name":"name","column":"name","type":"string","nullable":true}]},
+            {"name":"Active","table":"active","fields":[]}
+        ],"behavior":{"declarations":[
+            {"attribute":"proxy.of","model":"Active","field":null,"arguments":{},"positional":["User"],"location":{"file":"schema.prisma","line":1,"column":1}},
+            {"attribute":"proxy.nonNull","model":"Active","field":null,"arguments":{},"positional":["name"],"location":{"file":"schema.prisma","line":2,"column":1}},
+            {"attribute":"proxy.default","model":"Active","field":null,"arguments":{},"positional":["name","client"],"location":{"file":"schema.prisma","line":3,"column":1}}
+        ]}})).unwrap();
+        assert_eq!(pass_effects(&ir, super::lower).unwrap().into_iter().collect::<Vec<_>>(), ["behavior.proxy_models", "behavior.storage", "models"]);
+    }
+}

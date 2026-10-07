@@ -260,6 +260,21 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
     #[test]
+    fn generation_checks_plain_schemas_but_defers_extension_schemas() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.test-tmp").join(format!("orm-identity-check-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("schema.prisma");
+        let invalid = "model Tag {\nid Int @id\nkind ContentType\n}\nmodel Note {\nid Int @id\nother Int @id\n}\n";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(crate::dsl::generate_identities(&path, &[], &[]).unwrap_err().contains("exactly one primary key"));
+        assert!(!manifest_path(&path).exists());
+        // Lowering needs the compiled extension, so compilation reports the error later.
+        std::fs::write(&path, invalid.replace("model Note {\n", "model Note {\n@@app.audit\n")).unwrap();
+        crate::dsl::generate_identities(&path, &[], &[]).unwrap();
+        assert!(manifest_path(&path).exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
     fn ordinary_enum_named_content_type_does_not_activate_extension() {
         let source = "enum ContentType {\nPost @value(7)\n@@storage(int)\n}\nmodel Tag {\nid Int @id\nt ContentType\n}";
         crate::dsl::check(crate::dsl::compile(source, None).unwrap()).unwrap();

@@ -86,6 +86,12 @@ mod tests {
     fn schema(ty: &str) -> SchemaIr {
         serde_json::from_value(serde_json::json!({"models":[{"name":"Report","table":"reports","fields":[{"name":"id","column":"id","type":"int","primary_key":true},{"name":"file","column":"file","type":ty}]}],"behavior":{"declarations":[{"attribute":"storage.file","model":"Report","field":"file","arguments":{"storage":"reports"},"positional":[],"location":{"file":"schema.prisma","line":3,"column":9}}]}})).unwrap()
     }
+    /// Declared effects `behavior.file_fields` and `behavior.field_adapters`.
+    #[test]
+    fn lowering_changes_only_its_declared_effects_once() {
+        let effects = orm_contracts::extension::pass_effects(&schema("json"), lower).unwrap();
+        assert_eq!(effects.into_iter().collect::<Vec<_>>(), ["behavior.field_adapters", "behavior.file_fields"]);
+    }
     #[test]
     fn json_metadata_without_provider_configuration() {
         let mut ir = schema("json");

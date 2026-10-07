@@ -121,6 +121,13 @@ mod tests {
             ]}
         })).unwrap()
     }
+    /// Declared effects `behavior.generic_relations`, `behavior.generic_reverse` and
+    /// `storage.generic_checks` (the pair check constraint, logical and physical).
+    #[test]
+    fn preparation_changes_only_its_declared_effects_once() {
+        let effects = orm_contracts::extension::pass_effects(&schema(), prepare).unwrap();
+        assert_eq!(effects.into_iter().collect::<Vec<_>>(), ["behavior.generic_relations", "behavior.generic_reverse", "behavior.storage", "models"]);
+    }
     #[test]
     fn preparation_contributes_pairs_and_reverse_without_foreign_keys() {
         let mut ir = schema();
