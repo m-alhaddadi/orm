@@ -20,8 +20,10 @@ export const RELATED: unique symbol = Symbol("orm.related");
 export const DB: unique symbol = Symbol("orm.db");
 /** Hidden values of a partial instance (identity, relation keys) that adapters read but ordinary property access does not show. */
 export const INTERNAL: unique symbol = Symbol.for("orm.internal");
+// The native artifact is fixed for the process; read its capabilities once.
+const capabilities: readonly string[] = (JSON.parse(native().nativeArtifact()) as { capabilities: string[] }).capabilities;
 // Adapter selection happens once; baseline artifacts never import its runtime module.
-const referenceAdapter = (JSON.parse(native().nativeArtifact()) as { capabilities: string[] }).capabilities.includes("reference-loading")
+const referenceAdapter = capabilities.includes("reference-loading")
   ? await import("./references.js") : undefined;
 
 export type IRField = {
@@ -104,8 +106,7 @@ export class ModelMeta implements Source {
   readonly pk: FieldMeta;
   /** Makes instances: `new meta.Row()`, then the fields are assigned in schema order. */
   readonly Row: new () => Row;
-  /** Makes partial instances: like `Row`, but an absent field throws `NotLoaded`. */
-  readonly PartialRow: new () => Row;
+  private partialRow: (new () => Row) | undefined;
   /** The prototype of paths that reach this model (`User.posts` for `Post`). */
   readonly pathProto: object;
   readonly model: ModelClass<ModelSpec> & Record<string, unknown>;
@@ -162,7 +163,6 @@ export class ModelMeta implements Source {
     this.pk = pks[0]!;
     this.pathProto = this.makePathProto();
     this.Row = this.makeRow();
-    this.PartialRow = this.makePartialRow();
     const model = Object.create(this.pathProto) as Record<PropertyKey, unknown>;
     model[PATH] = { root: this, path: [], names: [], target: ir.name } satisfies PathState;
     const name = ir.name;
@@ -267,6 +267,11 @@ export class ModelMeta implements Source {
     Object.defineProperty(Row, "name", { value: meta.name });
     (proto as { constructor?: unknown }).constructor = Row;
     return Row;
+  }
+
+  /** Makes partial instances: like `Row`, but an absent field throws `NotLoaded`. Built on first use. */
+  get PartialRow(): new () => Row {
+    return (this.partialRow ??= this.makePartialRow());
   }
 
   /** Field accessors live only here, so whole-model rows keep plain assignment. */
@@ -542,10 +547,10 @@ export class Registry {
   }
 
   /** @internal */
-  setIdentities(value: unknown): void { this.identities = structuredClone(value); }
+  setIdentities(value: unknown): void { this.identities = detached(value); }
 
   /** @internal: normalized context is owned by this candidate. */
-  setBehavior(value: unknown): void { this.behavior = structuredClone((value ?? {}) as Record<string, unknown>); }
+  setBehavior(value: unknown): void { this.behavior = detached((value ?? {}) as Record<string, unknown>); }
 
   /** The schema IR of every registered model. */
   ir(): SchemaIR {
@@ -568,8 +573,8 @@ export class Registry {
     for (const [k, v] of this.enums) next.enums.set(k, v);
     for (const [k, v] of this.enumValues) next.enumValues.set(k, v);
     next.dialect = this.dialect;
-    next.behavior = structuredClone(this.behavior);
-    next.identities = structuredClone(this.identities);
+    next.behavior = detached(this.behavior);
+    next.identities = detached(this.identities);
     for (const [k, v] of Object.entries(this.extra)) next.extra[k] = [...v];
     return next;
   }
@@ -583,11 +588,17 @@ export class Registry {
     for (const [k, v] of next.enums) this.enums.set(k, v);
     for (const [k, v] of next.enumValues) this.enumValues.set(k, v);
     this.dialect = next.dialect;
-    this.behavior = structuredClone(next.behavior);
-    this.identities = structuredClone(next.identities);
+    this.behavior = detached(next.behavior);
+    this.identities = detached(next.identities);
     for (const k of Object.keys(this.extra)) delete this.extra[k];
     for (const [k, v] of Object.entries(next.extra)) this.extra[k] = [...v];
     this.nativeSchema = next.nativeSchema;
+  }
+
+  /** @internal: `prepared` is the prepared schema JSON these models were just built from. */
+  prepareFrom(prepared: string): NativeSchema {
+    this.nativeSchema ??= call(() => new (native().Schema)(prepared));
+    return this.nativeSchema;
   }
 
   /** The compiled native schema (cached until models change). */
@@ -595,6 +606,15 @@ export class Registry {
     this.nativeSchema ??= call(() => new (native().Schema)(JSON.stringify(this.ir())));
     return this.nativeSchema;
   }
+}
+
+/** A deep copy; `undefined` and empty plain objects skip `structuredClone`. */
+function detached<T>(value: T): T {
+  if (value === undefined) return value;
+  if (value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.keys(value).length ? structuredClone(value) : ({} as T);
+  }
+  return structuredClone(value);
 }
 
 /** The default registry. */
@@ -608,14 +628,19 @@ export function define(
   schema: string | SchemaIR,
   options: { readonly registry?: Registry; readonly requiredCapabilities?: readonly string[] } = {},
 ): Record<string, ModelClass<ModelSpec> & Record<string, unknown>> {
-  const available = (JSON.parse(native().nativeArtifact()) as { capabilities: string[] }).capabilities;
   for (const capability of options.requiredCapabilities ?? []) {
-    if (!available.includes(capability)) throw new TypeError(`generated models require ${capability}; rebuild/select a compatible native artifact`);
+    if (!capabilities.includes(capability)) throw new TypeError(`generated models require ${capability}; rebuild/select a compatible native artifact`);
   }
-  let ir: SchemaIR = JSON.parse(typeof schema === "string" ? schema : JSON.stringify(schema)) as SchemaIR;
   const destination = options.registry ?? registry;
   const context = [...destination].length ? JSON.stringify(destination.ir()) : undefined;
-  ir = JSON.parse(call(() => native().prepareSchema(JSON.stringify(ir), context))) as SchemaIR;
+  let prepared: string;
+  try {
+    prepared = call(() => native().prepareSchema(typeof schema === "string" ? schema : JSON.stringify(schema), context));
+  } catch (e) {
+    if (typeof schema === "string") JSON.parse(schema); // malformed JSON keeps throwing SyntaxError
+    throw e;
+  }
+  const ir = JSON.parse(prepared) as SchemaIR;
   const reg = destination.candidate();
   reg.addExtra(ir);
   reg.setBehavior(ir.behavior);
@@ -652,7 +677,7 @@ export function define(
     reg.add(meta);
     out[m.name] = meta.model;
   }
-  reg.prepare();
+  reg.prepareFrom(prepared);
   destination.publish(reg);
   return out;
 }

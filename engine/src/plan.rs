@@ -1055,6 +1055,12 @@ impl<'s> Planner<'s> {
         Ok(col(&alias, &column))
     }
 
+    #[cfg(not(feature = "composition"))]
+    fn read_field(&self, _model: usize, alias: &str, field: &FieldIr) -> Result<SExpr> {
+        Ok(read_col(alias, field))
+    }
+
+    #[cfg(feature = "composition")]
     fn read_field(&self, model: usize, alias: &str, field: &FieldIr) -> Result<SExpr> {
         let value = self.stored_field(model, alias, field)?;
         Ok(match &field.read_sql { Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), value), None => value })
@@ -1769,7 +1775,7 @@ impl<'s> Planner<'s> {
         let mut types = vec![];
         let shape = self.instance_shape(self.root, q.model_fields.as_deref(), &q.model_helpers)?;
         let positions = shape_positions(root, shape.as_ref());
-        for &position in &positions {
+        for position in positions.iter() {
             let f = &root.fields()[position];
             #[cfg(feature = "composition")]
             if root.native.computed().contains(&position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
@@ -1800,10 +1806,10 @@ impl<'s> Planner<'s> {
                 attr: path[path.len() - 1].clone(),
                 model,
                 start: types.len(),
-                pk_pos: joined_positions.iter().position(|&f| f == m.pk).expect("identity selected"),
+                pk_pos: joined_positions.iter().position(|f| f == m.pk).expect("identity selected"),
                 shape: joined_shape,
             });
-            for &position in &joined_positions {
+            for position in joined_positions.iter() {
                 let f = &m.fields()[position];
                 #[cfg(feature = "composition")]
                 if m.native.computed().contains(&position) { stmt.expr(SExpr::cust("NULL")); types.push(f.value_type()); continue; }
@@ -1823,13 +1829,13 @@ impl<'s> Planner<'s> {
         let mut prefetch = vec![];
         for node in &q.prefetch {
             let mut plan = plan_prefetch(self.schema, self.target, self.params, self.root, node, q.without_defaults)?;
-            plan.key_pos = positions.iter().position(|&f| f == plan.key_pos).expect("selected relation helper");
+            plan.key_pos = positions.iter().position(|f| f == plan.key_pos).expect("selected relation helper");
             prefetch.push(plan);
         }
         #[cfg(feature = "composition")]
         let computations = {
-            let mut out = crate::behavior::shape_computations(root.native, 0, &positions);
-            for j in &joins { out.extend(crate::behavior::shape_computations(self.model(j.model).native, j.start, &shape_positions(self.model(j.model), j.shape.as_ref()))); }
+            let mut out = crate::behavior::shape_computations(root.native, 0, &positions.to_vec());
+            for j in &joins { out.extend(crate::behavior::shape_computations(self.model(j.model).native, j.start, &shape_positions(self.model(j.model), j.shape.as_ref()).to_vec())); }
             out
         };
         Ok(SelectPlan { stmt, types, output: Output::Instances { model: self.root, shape, joins }, prefetch,
@@ -1952,13 +1958,13 @@ impl<'s> Planner<'s> {
         self.require(self.caps.returning, "update().returning()")?;
         let shape = self.return_shape(q.model_fields.as_deref(), q.without_defaults)?;
         let positions = shape_positions(root, shape.as_ref());
-        stmt.returning(Query::returning().exprs(positions.iter().map(|&pos| {
+        stmt.returning(Query::returning().exprs(positions.iter().map(|pos| {
             let f = &root.fields()[pos];
             #[cfg(feature = "composition")]
             if root.native.computed().contains(&pos) { return SExpr::cust("NULL"); }
             returning_col(f)
         })));
-        Ok((stmt, Some((positions.iter().map(|&pos| root.fields()[pos].value_type()).collect(), shape))))
+        Ok((stmt, Some((positions.iter().map(|pos| root.fields()[pos].value_type()).collect(), shape))))
     }
 
     pub fn delete(&mut self, q: &Delete) -> Result<(DeleteStatement, Option<ReturnColumns>)> {
@@ -1976,13 +1982,13 @@ impl<'s> Planner<'s> {
         self.require(self.caps.returning, "delete().returning()")?;
         let shape = self.return_shape(q.model_fields.as_deref(), q.without_defaults)?;
         let positions = shape_positions(root, shape.as_ref());
-        stmt.returning(Query::returning().exprs(positions.iter().map(|&pos| {
+        stmt.returning(Query::returning().exprs(positions.iter().map(|pos| {
             let f = &root.fields()[pos];
             #[cfg(feature = "composition")]
             if root.native.computed().contains(&pos) { return SExpr::cust("NULL"); }
             returning_col(f)
         })));
-        Ok((stmt, Some((positions.iter().map(|&pos| root.fields()[pos].value_type()).collect(), shape))))
+        Ok((stmt, Some((positions.iter().map(|pos| root.fields()[pos].value_type()).collect(), shape))))
     }
 }
 
@@ -2048,7 +2054,7 @@ fn plan_prefetch(
     let (key_field, key, child_key_pos) = match &rel.through {
         None => {
             let f = cm.field(&rel.to).map_err(query_err)?;
-            (f, col(p.root_alias(), &f.column), match &plan.output { Output::Instances { shape, .. } => shape_positions(cm, shape.as_ref()).iter().position(|&pos| pos == cm.field_pos(&rel.to).expect("validated relation")).ok_or_else(|| Error::query("missing prefetch key"))?, _ => unreachable!() })
+            (f, col(p.root_alias(), &f.column), match &plan.output { Output::Instances { shape, .. } => shape_positions(cm, shape.as_ref()).iter().position(|pos| pos == cm.field_pos(&rel.to).expect("validated relation")).ok_or_else(|| Error::query("missing prefetch key"))?, _ => unreachable!() })
         }
         Some(th) => {
             let jm = schema.model(schema.model_idx(&th.model).map_err(query_err)?);
@@ -2373,8 +2379,24 @@ fn write_expr(e: SExpr, f: &FieldIr) -> SExpr {
     }
 }
 
-fn shape_positions(model: &Model, shape: Option<&orm_core::behavior::ResultShape>) -> Vec<usize> {
-    match shape { Some(shape) => shape.fields.iter().map(|f| f.field.position).collect(), None => (0..model.fields().len()).collect() }
+/// Selected field positions in output order; a whole-model row needs no allocation.
+enum Positions {
+    All(usize),
+    Shaped(Vec<usize>),
+}
+
+impl Positions {
+    fn iter(&self) -> std::iter::Chain<std::ops::Range<usize>, std::iter::Copied<std::slice::Iter<'_, usize>>> {
+        let (all, shaped): (_, &[usize]) = match self { Positions::All(n) => (0..*n, &[]), Positions::Shaped(v) => (0..0, v) };
+        all.chain(shaped.iter().copied())
+    }
+
+    #[cfg(feature = "composition")]
+    fn to_vec(&self) -> Vec<usize> { self.iter().collect() }
+}
+
+fn shape_positions(model: &Model, shape: Option<&orm_core::behavior::ResultShape>) -> Positions {
+    match shape { Some(shape) => Positions::Shaped(shape.fields.iter().map(|f| f.field.position).collect()), None => Positions::All(model.fields().len()) }
 }
 
 pub type Returned = (usize, Vec<ValueType>, Option<orm_core::behavior::ResultShape>);

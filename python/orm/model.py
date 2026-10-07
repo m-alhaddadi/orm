@@ -20,8 +20,14 @@ if TYPE_CHECKING:
 
     from .query import QuerySet
 
+# The native artifact is fixed for the process; read its capabilities once.
+_CAPABILITIES: tuple[str, ...] = tuple(json.loads(_native.native_artifact()).get("capabilities", ()))
+# Only a composition artifact (schema transformations) can change an already prepared schema.
+_REPREPARE: bool = ("schema-transformations" in _CAPABILITIES
+                    or json.loads(_native.profile_metadata())["capabilities"].get("composition") is True)
+
 _reference_adapter: types.ModuleType | None = None
-if "reference-loading" in json.loads(_native.native_artifact()).get("capabilities", ()):
+if "reference-loading" in _CAPABILITIES:
     from . import _references
     _reference_adapter = _references
 
@@ -29,6 +35,13 @@ __all__ = ["Model", "ModelMeta", "Registry", "registry", "define", "load", "load
 
 
 _ABSENT = object()
+
+
+def _detached(value: Any) -> Any:
+    """A deep copy; empty containers and ``None`` skip the generic ``deepcopy`` walk."""
+    if value is None:
+        return None
+    return copy.deepcopy(value) if value else type(value)()
 
 
 def _peek(row: Model, name: str) -> Any:
@@ -149,10 +162,18 @@ class Registry:
 
     def prepare(self) -> _native.Schema:
         """Prepare class declarations after registering a complete dependency batch."""
+        return self._prepare(None)
+
+    def _prepare(self, done: tuple[str, dict[str, Any]] | None) -> _native.Schema:
+        """``done`` is the prepared JSON and IR these classes were just built from."""
         if self._native is not None:
             return self._native
         snapshot = self._candidate()
-        prepared = json.loads(_native.prepare_schema(json.dumps(snapshot.ir())))
+        if done is None:
+            prepared_json = _native.prepare_schema(json.dumps(snapshot.ir()))
+            prepared = json.loads(prepared_json)
+        else:
+            prepared_json, prepared = done
         classes: dict[str, type] = {**snapshot._models, **snapshot._enums}
         associations: list[tuple[type[Model], dict[str, Any], dict[str, Field[Any]], dict[str, Relation[Any, Any]]]] = []
         for ir in prepared["models"]:
@@ -204,7 +225,7 @@ class Registry:
             if name in _RESERVED or hasattr(model, name):
                 raise TypeError(f"{method['model']}.{name}: generated method collides with an existing model member")
             methods_by_model.setdefault(method["model"], {})[name] = getattr(_native, method["native_function"])
-        native = _native.Schema(json.dumps(prepared), classes)
+        native = _native.Schema(prepared_json, classes)
         snapshot._native = native
         snapshot._behavior = prepared.get("behavior", {})
         # Associations are published only after all native validation succeeds.
@@ -242,7 +263,7 @@ class Registry:
             if _reference_adapter is not None:
                 _reference_adapter.install(model)
         self._native = native
-        self._behavior = copy.deepcopy(snapshot._behavior)
+        self._behavior = _detached(snapshot._behavior)
         return native
 
     def _candidate(self) -> Registry:
@@ -251,9 +272,9 @@ class Registry:
         candidate._enums = self._enums.copy()
         candidate._enum_ir = self._enum_ir.copy()
         candidate._dialect = self._dialect
-        candidate._schema_extra = copy.deepcopy(self._schema_extra)
-        candidate._behavior = copy.deepcopy(self._behavior)
-        candidate._identities = copy.deepcopy(self._identities)
+        candidate._schema_extra = _detached(self._schema_extra)
+        candidate._behavior = _detached(self._behavior)
+        candidate._identities = _detached(self._identities)
         return candidate
 
     def native(self) -> _native.Schema:
@@ -325,14 +346,20 @@ def define(
     Returns the model classes and the schema's enum classes, by name. They join
     ``registry`` (the default one unless given); ``module`` sets their ``__module__``.
     """
-    available = json.loads(_native.native_artifact()).get("capabilities", ())
     for capability in required_capabilities:
-        if capability not in available:
+        if capability not in _CAPABILITIES:
             raise TypeError(f"generated models require {capability}; rebuild/select a compatible native artifact")
-    ir: dict[str, Any] = json.loads(schema) if isinstance(schema, str) else json.loads(json.dumps(schema))
     destination = registry if registry is not None else _default_registry()
     context = json.dumps(destination.ir()) if destination._models else None
-    ir = json.loads(_native.prepare_schema(json.dumps(ir), context))
+    if isinstance(schema, str):
+        try:
+            prepared_json = _native.prepare_schema(schema, context)
+        except _native.SchemaError:
+            json.loads(schema)  # malformed JSON keeps raising JSONDecodeError
+            raise
+    else:
+        prepared_json = _native.prepare_schema(json.dumps(schema), context)
+    ir: dict[str, Any] = json.loads(prepared_json)
     reg = destination._candidate()
     dialect = ir.get("dialect", "postgres")
     if reg._dialect is not None and reg._dialect != dialect:
@@ -372,17 +399,17 @@ def define(
         items.extend(x for x in ir.get(key, ()) if x not in items)
         if not items:
             del reg._schema_extra[key]
-    reg._behavior = copy.deepcopy(ir.get("behavior", {}))
-    reg._identities = copy.deepcopy(ir.get("identities"))
-    reg.prepare()
+    reg._behavior = _detached(ir.get("behavior", {}))
+    reg._identities = _detached(ir.get("identities"))
+    reg._prepare(None if _REPREPARE else (prepared_json, ir))
     destination._models = reg._models.copy()
     destination._enums = reg._enums.copy()
     destination._enum_ir = reg._enum_ir.copy()
     destination._dialect = reg._dialect
     destination._schema_extra = {k: v.copy() for k, v in reg._schema_extra.items()}
     destination._native = reg._native
-    destination._behavior = copy.deepcopy(reg._behavior)
-    destination._identities = copy.deepcopy(reg._identities)
+    destination._behavior = _detached(reg._behavior)
+    destination._identities = _detached(reg._identities)
     return out
 
 
