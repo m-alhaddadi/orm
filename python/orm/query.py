@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Unpack, overload
@@ -141,6 +140,29 @@ def _prefetch_ir(model: type[Model], items: Iterable[tuple[tuple[str, ...], Pref
     return out
 
 
+_SUBCLASS_SLOTS: dict[type, tuple[str, ...]] = {}
+
+
+def _copy_subclass_state(source: QuerySet[Any], target: QuerySet[Any]) -> None:
+    """Copy what a QuerySet subclass adds: its own slots and any instance ``__dict__``."""
+    cls = type(source)
+    names = _SUBCLASS_SLOTS.get(cls)
+    if names is None:
+        found: list[str] = []
+        for klass in cls.__mro__[: cls.__mro__.index(QuerySet)]:
+            slots = klass.__dict__.get("__slots__", ())
+            found.extend((slots,) if isinstance(slots, str) else slots)
+        names = _SUBCLASS_SLOTS[cls] = tuple(n for n in found if n not in ("__dict__", "__weakref__"))
+    for name in names:
+        try:
+            setattr(target, name, getattr(source, name))
+        except AttributeError:
+            pass
+    state = getattr(source, "__dict__", None)
+    if state:
+        target.__dict__.update(state)
+
+
 class QuerySet(Generic[M]):
     """A query over one model. Every method returns a new query set; nothing runs until
     the query set is awaited (``await User.objects.filter(...)`` gives a list) or a
@@ -184,8 +206,27 @@ class QuerySet(Generic[M]):
         return self._model
 
     def _clone(self, **changes: Any) -> Self:
-        new = copy.copy(self)
+        # Every builder step clones; explicit slot copies keep that step cheap.
+        cls = type(self)
+        new = cls.__new__(cls)
+        new._model_helpers = self._model_helpers
+        new._without_defaults = self._without_defaults
+        new._without_related = self._without_related
+        new._model_fields = self._model_fields
+        new._model = self._model
+        new._filters = self._filters
+        new._order = self._order
+        new._limit = self._limit
+        new._offset = self._offset
+        new._related = self._related
+        new._prefetch = self._prefetch
+        new._lock = self._lock
+        new._db = self._db
+        new._from = self._from
+        new._joins = self._joins
         new._result = None
+        if cls is not QuerySet:
+            _copy_subclass_state(self, new)
         for k, v in changes.items():
             setattr(new, k, v)
         return new
