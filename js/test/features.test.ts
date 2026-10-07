@@ -94,6 +94,18 @@ test("a scalar subquery in an update", async () => {
   assert.deepEqual(views, { a1: 0, a2: 2, a3: 0, b1: 1 });
 });
 
+test("string functions and concatenation", async () => {
+  await seed();
+  const rows = await Comment.objects.orderBy(Comment.id).select({ body: Comment.body, c: func.concat(Comment.author.name, "!"), p: Comment.author.name.concat("!") }).all();
+  assert.deepEqual(rows, [{ body: "c1", c: "Bob!", p: "Bob!" }, { body: "c2", c: "!", p: null }, { body: "c3", c: "Alice!", p: "Alice!" }]);
+  const row = await Post.objects.filter(Post.title.eq("b1")).select({
+    t: func.trim(func.concat("  ", Post.title, " ")), l: func.ltrim(func.concat("  ", Post.title)), r: func.rtrim(func.concat(Post.title, "  ")),
+    x: func.replace(Post.title, "b", "B"), s: func.substr(Post.title, 2), i: func.strpos(Post.title, "1"),
+  }).first();
+  assert.deepEqual(row, { t: "b1", l: "b1", r: "b1", x: "B1", s: "1", i: 2 });
+  assert.deepEqual((await Post.objects.filter(Post.title.concat("!").eq("a2!")).all()).map((p) => p.title), ["a2"]);
+});
+
 test("outer() errors", () => {
   assert.throws(() => (User.objects.filter(exists(Post.objects.filter(Post.authorId.eq(User.id as never)))) as never as { sql(): string }).sql(), /use outer\(User.id\)/);
   assert.throws(() => (User.objects.filter(User.id.eq(outer(User.id))) as never as { sql(): string }).sql(), /not a column of an enclosing query/);

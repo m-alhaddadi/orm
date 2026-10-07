@@ -214,6 +214,8 @@ await Profile.objects.filter(Profile.links.has("https://a.example"))    # links 
 await Profile.objects.filter(Profile.links.has_any(urls))                # links && ...
 Profile.links.has_all(urls) / Profile.links.contained_by(urls)          # @> / <@
 await Profile.objects.select(func.cardinality(Profile.links))
+await Profile.objects.select(Profile.links[1])                          # links[1]: the first element
+await Profile.objects.select(func.unnest(Profile.links))                # one row per element
 ```
 
 * Decimal parameters accept `Decimal`, `int`, `float` (through its `str`) and decimal
@@ -223,6 +225,9 @@ await Profile.objects.select(func.cardinality(Profile.links))
   members compare equal to their stored values. A value the enum doesn't know (added in
   the database by hand) reads back as the plain value.
 * Arrays are Python lists both ways (tuples are accepted); elements may be `None`.
+* `Profile.links[i]` is SQL's element access: the index is 1-based, as in the SQL
+  text, and an index out of range gives `None`. `func.unnest(...)` returns one row per
+  element, so it is valid only as a `select()` column. SQLite has no array columns.
 
 ### Big tables: batches
 
@@ -323,12 +328,17 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
   Selecting fewer columns is about twice as fast as building instances (1000 rows: 1.2 ms
   vs 2.3 ms here).
 * **Aggregates** are `func.count` / `sum` / `avg` / `min` / `max`; scalar functions are
-  `lower`, `upper`, `length`, `abs`, `coalesce`, `now`. Over the model's own columns an
+  `lower`, `upper`, `length`, `abs`, `coalesce`, `now`, and for strings `concat`, `trim`,
+  `ltrim`, `rtrim`, `replace`, `substr` (1-based start, optional length) and `strpos`
+  (1-based, 0 if absent; `INSTR` on SQLite). Over the model's own columns an
   aggregate summarizes the rows (of each `group_by()` group). Over a relation path it is
   computed **per row in a correlated subquery**: `func.count(User.posts)` is `(SELECT
   COUNT(*) FROM posts WHERE posts.author_id = users.id)`. So two aggregates over different
   relations never multiply each other, unlike Django's JOIN-based `annotate(Count(...),
   Count(...))`, and they work in `filter()` too.
+* **String concatenation** has two forms with different `NULL` rules:
+  `func.concat(a, " ", b)` is `CONCAT(...)` and reads a `NULL` part as an empty string;
+  `a.concat(b)` is `a || b` and is `NULL` when either side is `NULL`.
 * Integer `SUM`s come back as `int` (cast to `bigint`), `AVG` as `float` (as a
   `Decimal` over decimal columns).
 * Columns through to-one relations are `LEFT JOIN`ed; a to-many column outside an
@@ -676,9 +686,10 @@ TLS on, the TLS cost hides the difference)
 
 ## Not done yet
 
-* More SQL functions (one line each in the planner), string concatenation.
-* Drivers for MySQL and SQLite; schema checks against a dialect's capabilities.
-* Caching of compiled plans.
+* A MySQL driver.
+* Caching of compiled plans: a decision, not open work. [`performance.md`](performance.md)
+  keeps it out until profiling shows a benefit; `prepare()` and the driver's statement
+  cache exist.
 * `outer()` through relation paths (`outer(Post.author.name)`), `SEARCH` / `CYCLE`
   clauses for recursive CTEs, filtering on window functions without a CTE.
 * Several shared windows per query, and shared windows with `ORDER BY` / `LIMIT`: needs
@@ -686,4 +697,4 @@ TLS on, the TLS cost hides the difference)
 * Composite keys. (One-to-one, many-to-many, decimal, enum, array, UUID and JSON
   columns are done, see [`schema.md`](schema.md).)
 * `select_related` through a many-to-many relation (it would repeat rows; use
-  `prefetch_related`), and array element access (`links[1]`) or `unnest`.
+  `prefetch_related`).

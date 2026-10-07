@@ -32,6 +32,17 @@ export async function columns() {
   void j;
 }
 
+export async function stringsAndArrays() {
+  const rows = await Profile.objects.select({ first: Profile.links.element(1), link: func.unnest(Profile.links) }).all();
+  same<(typeof rows)[number], { first: string | null; link: string }>();
+  const text = await Post.objects.select({ c: func.concat(Post.title, " ", Post.views), p: Post.title.concat("!"), i: func.strpos(Post.title, "x"), t: func.trim(Post.title) }).all();
+  same<(typeof text)[number], { c: string; p: string; i: number; t: string }>();
+  // @ts-expect-error concatenation takes strings
+  Post.views.concat("!");
+  // @ts-expect-error element access takes an array column
+  Post.title.element(1);
+}
+
 export async function filters() {
   await User.objects.filter(User.email.eq("a"), User.posts.views.gt(3)).all();
   await Post.objects.filter(Post.published).all();

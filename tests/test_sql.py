@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from blog.models import Comment, Post, User
+from blog.models import Comment, Post, Profile, User
 
 from orm import QueryError, and_, excluded, func, or_
 
@@ -342,3 +342,31 @@ def test_cte_reads_each_column_once(tmp_path):
     Doc = orm.loads(source, registry=orm.Registry())["Doc"]
     sql = Doc.objects.from_(Doc.objects.filter(Doc.id > 0).cte("recent")).sql()
     assert sql.count("|| '!'") == 1, sql
+
+
+def test_string_functions_and_concatenation():
+    sql = Post.objects.select(
+        func.concat(Post.title, " by ", Post.views), Post.title.concat("!"), func.trim(Post.title),
+        func.ltrim(Post.title), func.rtrim(Post.title), func.replace(Post.title, "a", "b"),
+        func.substr(Post.title, 2, 3), func.strpos(Post.title, "x"),
+    ).sql()
+    assert sql == (
+        "SELECT CONCAT(\"posts\".\"title\", ' by ', \"posts\".\"views\"), \"posts\".\"title\" || '!', "
+        "TRIM(\"posts\".\"title\"), LTRIM(\"posts\".\"title\"), RTRIM(\"posts\".\"title\"), "
+        "REPLACE(\"posts\".\"title\", 'a', 'b'), SUBSTR(\"posts\".\"title\", 2, 3), "
+        "STRPOS(\"posts\".\"title\", 'x') FROM \"posts\""
+    )
+    assert where(Post.objects.filter(Post.title.concat(Post.body) == "ab")) == "(\"posts\".\"title\" || \"posts\".\"body\") = 'ab'"
+    with pytest.raises(TypeError, match="at least one"):
+        func.concat()
+
+
+def test_array_element_and_unnest():
+    sql = Profile.objects.select(Profile.links[1], func.unnest(Profile.links)).sql()
+    assert sql == "SELECT (\"profiles\".\"links\")[1], UNNEST(\"profiles\".\"links\") FROM \"profiles\""
+    with pytest.raises(QueryError, match="only be a select\\(\\) column"):
+        Profile.objects.filter(func.unnest(Profile.links) == "x").sql()
+    with pytest.raises(QueryError, match="an index needs an array"):
+        Post.objects.select(Post.title[1]).sql()  # type: ignore[index]
+    with pytest.raises(TypeError, match="not iterable"):
+        list(Profile.links)

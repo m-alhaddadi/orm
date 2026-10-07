@@ -303,6 +303,20 @@ export abstract class Expression<T, S extends string = never, P = {}> extends No
     return new Comparison("contained_by", this, new Literal([...values]));
   }
 
+  /** Array columns: the element at SQL's 1-based `index` (`col[1]` is the first), `null`
+   * out of range. PostgreSQL only. */
+  element<E>(this: Expression<readonly E[] | null, S, P>, index: number): Func<E | null, S, P> {
+    return new Func("element", [this, new Int(index)]);
+  }
+
+  // Strings ----------------------------------------------------------------------------------
+
+  /** `this || other`: `null` when either side is `null`. {@link Functions.concat}
+   * reads `null` as an empty string instead. */
+  concat<S2 extends string = never, P2 = {}>(this: Expression<string | null, S, P>, other: Operand<string, S2, P2>): Expression<string, S | S2, P & P2> {
+    return new Arith("concat", this, wrap(other)) as never;
+  }
+
   // Arithmetic -------------------------------------------------------------------------------
 
   add<N extends string>(value: ParamRef<N>): Expression<T, S, P & ParamValues<N, In<NonNullable<T>>>>;
@@ -863,6 +877,58 @@ class Functions {
   /** The number of elements of an array. */
   cardinality<T extends readonly unknown[] | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<number | Extract<T, null>, S, P> {
     return new Func("cardinality", [expr]);
+  }
+
+  /** One row for each element of an array. Only a `select()` column; PostgreSQL only. */
+  unnest<E, S extends string, P>(expr: AnyExpr<readonly E[] | null, S, P>): Func<E, S, P> {
+    return new Func("unnest", [expr]);
+  }
+
+  /** `CONCAT(...)`: the parts as text, a `null` part as an empty string.
+   * `a.concat(b)` (`a || b`) is `null` when either side is `null`. */
+  concat<S extends string = never, P = {}>(...parts: readonly (string | Expression<unknown, S, P>)[]): Func<string, S, P> {
+    if (parts.length === 0) {
+      throw new TypeError("concat() needs at least one part");
+    }
+    return new Func("concat", parts.map((p) => wrap(p)));
+  }
+
+  /** Without leading and trailing spaces. */
+  trim<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
+    return new Func("trim", [expr]);
+  }
+
+  /** Without leading spaces. */
+  ltrim<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
+    return new Func("ltrim", [expr]);
+  }
+
+  /** Without trailing spaces. */
+  rtrim<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
+    return new Func("rtrim", [expr]);
+  }
+
+  /** Every `old` in `expr` replaced by `replacement`. */
+  replace<T extends string | null, S extends string, P, S2 extends string = never, P2 = {}, S3 extends string = never, P3 = {}>(
+    expr: AnyExpr<T, S, P>,
+    old: Operand<string, S2, P2>,
+    replacement: Operand<string, S3, P3>,
+  ): Func<T, S | S2 | S3, P & P2 & P3> {
+    return new Func("replace", [expr, wrap(old), wrap(replacement)]);
+  }
+
+  /** The characters from the 1-based `start`, `length` of them (default: all). */
+  substr<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>, start: number, length?: number): Func<T, S, P> {
+    return new Func("substr", length === undefined ? [expr, new Int(start)] : [expr, new Int(start), new Int(length)]);
+  }
+
+  /** The 1-based position of the first `part` in `expr`, 0 if absent (`STRPOS`; `INSTR`
+   * on SQLite). */
+  strpos<T extends string | null, S extends string, P, S2 extends string = never, P2 = {}>(
+    expr: AnyExpr<T, S, P>,
+    part: Operand<string, S2, P2>,
+  ): Func<number | Extract<T, null>, S | S2, P & P2> {
+    return new Func("strpos", [expr, wrap(part)]);
   }
 
   abs<T extends Num | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {

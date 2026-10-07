@@ -131,6 +131,31 @@ test("SQLite rebuilds after a rename ignore the kept rename hints", async () => 
   }
 });
 
+test("SQLite string functions and concatenation", async () => {
+  const registry = new Registry();
+  const Note = loads(`
+    datasource db { provider = "sqlite" }
+    model Note {
+      id BigInt @id @default(autoincrement())
+      title String
+      tag String?
+    }`, { registry })["Note"] as any;
+  const db = await connect("sqlite://:memory:", { registry, default: false });
+  try {
+    await db.createTables();
+    await Note.objects.using(db).insertMany([{ title: "  a-b  ", tag: "x" }, { title: "c", tag: null }]);
+    const rows = await Note.objects.using(db).orderBy(Note.id).select({
+      c: func.concat(Note.title, Note.tag), p: Note.title.concat(Note.tag), t: func.trim(Note.title), l: func.ltrim(Note.title),
+      r: func.rtrim(Note.title), x: func.replace(Note.title, "-", "+"), s: func.substr(func.trim(Note.title), 2, 1), i: func.strpos(Note.title, "b"),
+    }).all();
+    assert.deepEqual(rows, [
+      { c: "  a-b  x", p: "  a-b  x", t: "a-b", l: "a-b  ", r: "  a-b", x: "  a+b  ", s: "-", i: 5 },
+      { c: "c", p: null, t: "c", l: "c", r: "c", x: "c", s: "", i: 0 },
+    ]);
+    assert.equal(await Note.objects.using(db).filter(Note.title.concat("!").eq("c!")).count(), 1);
+  } finally { await db.close(); }
+});
+
 test("SQLite UUID, date, timestamp and inline trigger conversions", async () => {
   const registry = new Registry();
   const Event = loads(`

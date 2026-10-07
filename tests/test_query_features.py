@@ -112,6 +112,21 @@ async def test_scalar_subquery_in_update(clean):
     assert views == {"a1": 0, "a2": 2, "a3": 0, "b1": 1}
 
 
+async def test_string_functions_and_concatenation(clean):
+    await seed()
+    rows = await Comment.objects.order_by(Comment.id).select(
+        Comment.body, func.concat(Comment.author.name, "!").label("c"), Comment.author.name.concat("!").label("p")
+    )
+    assert [tuple(r) for r in rows] == [("c1", "Bob!", "Bob!"), ("c2", "!", None), ("c3", "Alice!", "Alice!")]
+    row = await Post.objects.filter(Post.title == "b1").select(
+        func.trim(func.concat("  ", Post.title, " ")).label("t"), func.ltrim(func.concat("  ", Post.title)).label("l"),
+        func.rtrim(func.concat(Post.title, "  ")).label("r"), func.replace(Post.title, "b", "B").label("x"),
+        func.substr(Post.title, 2).label("s"), func.strpos(Post.title, "1").label("i"),
+    ).first()
+    assert row is not None and tuple(row) == ("b1", "b1", "b1", "B1", "1", 2)
+    assert [p.title for p in await Post.objects.filter(Post.title.concat("!") == "a2!")] == ["a2"]
+
+
 async def test_outer_errors(clean):
     with pytest.raises(ValueError, match=r"use outer\(User.id\)"):
         User.objects.filter(exists(Post.objects.filter(Post.author_id == User.id))).sql()

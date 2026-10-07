@@ -518,6 +518,8 @@ pub enum ArithOp {
     Sub,
     Mul,
     Div,
+    /// `l || r`: string concatenation; NULL when either side is NULL.
+    Concat,
 }
 
 #[derive(Deserialize, Debug, Clone)]

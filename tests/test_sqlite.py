@@ -136,6 +136,28 @@ async def test_kept_rename_hints_do_not_redirect_later_rebuilds(tmp_path):
         await db.close()
 
 
+async def test_string_functions_and_concatenation():
+    from orm import func
+    registry, m = models('datasource db { provider = "sqlite" }\nmodel Note {\n  id BigInt @id @default(autoincrement())\n  title String\n  tag String?\n}')
+    Note = m["Note"]
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    try:
+        await db.create_tables()
+        await Note.objects.using(db).insert_many([{"title": "  a-b  ", "tag": "x"}, {"title": "c", "tag": None}])
+        rows = await Note.objects.using(db).order_by(Note.id).select(
+            func.concat(Note.title, Note.tag).label("c"), Note.title.concat(Note.tag).label("p"), func.trim(Note.title).label("t"),
+            func.ltrim(Note.title).label("l"), func.rtrim(Note.title).label("r"), func.replace(Note.title, "-", "+").label("x"),
+            func.substr(func.trim(Note.title), 2, 1).label("s"), func.strpos(Note.title, "b").label("i"),
+        )
+        assert [tuple(r) for r in rows] == [
+            ("  a-b  x", "  a-b  x", "a-b", "a-b  ", "  a-b", "  a+b  ", "-", 5),
+            ("c", None, "c", "c", "c", "c", "", 0),
+        ]
+        assert await Note.objects.using(db).filter(Note.title.concat("!") == "c!").count() == 1
+    finally:
+        await db.close()
+
+
 async def test_file_database_and_target_mismatch(tmp_path):
     reg, _ = models()
     url = f"sqlite://{tmp_path / 'database.db'}"

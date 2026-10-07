@@ -99,6 +99,11 @@ test("array columns", async () => {
   assert.deepEqual(b.links, ["one", null]);
   assert.deepEqual(await Profile.objects.select({ n: func.cardinality(Profile.links) }).orderBy(Profile.id).scalars(), [2, 2]);
   await assert.rejects(b.update({ links: "one" as never }), /expected an array/);
+  const rows = await Profile.objects.select({ first: Profile.links.element(1), third: Profile.links.element(3) }).orderBy(Profile.id).all();
+  assert.deepEqual(rows, [{ first: "https://a.example", third: null }, { first: "one", third: null }]);
+  assert.equal(await Profile.objects.filter(Profile.links.element(2).eq("https://b.example")).count(), 1);
+  const all = await Profile.objects.select({ link: func.unnest(Profile.links) }).scalars();
+  assert.deepEqual([...all].sort((x, y) => String(x).localeCompare(String(y))), ["https://a.example", "https://b.example", null, "one"]);
 });
 
 // -- one-to-one -----------------------------------------------------------------------------------

@@ -207,7 +207,12 @@ fn fold(items: Vec<SExpr>, and: bool) -> SExpr {
 }
 
 const AGGREGATES: [&str; 5] = ["count", "sum", "avg", "min", "max"];
-const SCALAR_FUNCS: [&str; 7] = ["lower", "upper", "length", "abs", "coalesce", "now", "cardinality"];
+const SCALAR_FUNCS: [&str; 16] = [
+    "lower", "upper", "length", "abs", "coalesce", "now", "cardinality", "concat", "trim", "ltrim", "rtrim", "replace",
+    "substr", "strpos", "element", "unnest",
+];
+/// Functions whose arguments are strings: their parameters bind as text.
+const TEXT_FUNCS: [&str; 7] = ["concat", "trim", "ltrim", "rtrim", "replace", "substr", "strpos"];
 /// Functions that only exist with `OVER (...)`.
 const WINDOW_FUNCS: [&str; 11] = [
     "row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead", "first_value",
@@ -406,6 +411,8 @@ pub struct Planner<'s> {
     allow_excluded: bool,
     /// Window functions are only valid in the select list and `ORDER BY`.
     allow_window: bool,
+    /// `unnest()` returns a set of rows: only valid in the select list.
+    allow_unnest: bool,
     target: Target,
     caps: Capabilities,
     #[cfg(feature = "query-defaults")]
@@ -440,6 +447,7 @@ impl<'s> Planner<'s> {
             next_alias,
             allow_excluded: false,
             allow_window: false,
+            allow_unnest: false,
             target,
             caps: target.caps,
             #[cfg(feature = "query-defaults")] policy_bypass: false,
@@ -1121,7 +1129,10 @@ impl<'s> Planner<'s> {
             Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
             Expr::Arith { op, l, r } => {
                 let inner = self.hint_of(l).or(self.hint_of(r));
-                let hint = Hint { ty: inner.ty.or(hint.ty), field: None };
+                let hint = match op {
+                    ArithOp::Concat => Hint { ty: Some(ValueType::scalar(ColType::Text)), field: None },
+                    _ => Hint { ty: inner.ty.or(hint.ty), field: None },
+                };
                 let l = self.value(l, hint)?;
                 let r = self.value(r, hint)?;
                 match op {
@@ -1129,6 +1140,7 @@ impl<'s> Planner<'s> {
                     ArithOp::Sub => l.sub(r),
                     ArithOp::Mul => l.mul(r),
                     ArithOp::Div => l.div(r),
+                    ArithOp::Concat => template(self.target.dialect, "$1 || $2", vec![l, r]),
                 }
             }
             cond => self.cond(cond)?,
@@ -1153,6 +1165,7 @@ impl<'s> Planner<'s> {
             Expr::Text { .. } => scalar(ColType::Text),
             Expr::Subquery { select } => self.child(select)?.expr_type(Self::one_column(select, "as_scalar()")?)?,
             Expr::Window { func, .. } => self.expr_type(func)?,
+            Expr::Arith { op: ArithOp::Concat, .. } => scalar(ColType::Text),
             Expr::Arith { l, r, .. } => match self.expr_type(l) {
                 Ok(t) => t,
                 Err(_) => self.expr_type(r)?,
@@ -1170,8 +1183,15 @@ impl<'s> Planner<'s> {
                         ColType::Decimal => scalar(ColType::Decimal),
                         _ => scalar(ColType::Float),
                     },
-                    "length" | "ntile" | "cardinality" => scalar(ColType::Int),
-                    "lower" | "upper" => scalar(ColType::Text),
+                    "length" | "ntile" | "cardinality" | "strpos" => scalar(ColType::Int),
+                    "lower" | "upper" | "concat" | "trim" | "ltrim" | "rtrim" | "replace" | "substr" => scalar(ColType::Text),
+                    "element" | "unnest" if self.target.dialect == Dialect::Sqlite => {
+                        return Err(Error::query("sqlite does not support array element access or unnest()"))
+                    }
+                    "element" | "unnest" => match first()? {
+                        t if t.array => t.element(),
+                        _ => return Err(Error::query(format!("{} needs an array", if name == "element" { "an index" } else { "unnest()" }))),
+                    },
                     "now" => scalar(ColType::DateTime),
                     // SUM of integers is cast to bigint (see `func`).
                     "sum" => match first()? {
@@ -1320,8 +1340,14 @@ impl<'s> Planner<'s> {
         if self.target.dialect == Dialect::Sqlite && name == "cardinality" {
             return Err(Error::query("sqlite does not support cardinality()"));
         }
+        if self.target.dialect == Dialect::Sqlite && matches!(name, "element" | "unnest") {
+            return Err(Error::query("sqlite does not support array element access or unnest()"));
+        }
+        if name == "unnest" && !self.allow_unnest {
+            return Err(Error::query("unnest() returns several rows: it can only be a select() column"));
+        }
         let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
-        let hint = Hint { ty: hint.ty, field: None };
+        let hint = Hint { ty: if TEXT_FUNCS.contains(&name) { Some(ValueType::scalar(ColType::Text)) } else { hint.ty }, field: None };
         let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>()?;
         let d = if distinct { "DISTINCT " } else { "" };
         let n = planned.len();
@@ -1361,6 +1387,19 @@ impl<'s> Planner<'s> {
             "length" => one("LENGTH($1)", planned)?,
             "cardinality" => one("CARDINALITY($1)", planned)?,
             "abs" => one("ABS($1)", planned)?,
+            "concat" if !planned.is_empty() => call("CONCAT", planned)?,
+            "trim" => one("TRIM($1)", planned)?,
+            "ltrim" => one("LTRIM($1)", planned)?,
+            "rtrim" => one("RTRIM($1)", planned)?,
+            "replace" if n == 3 => call("REPLACE", planned)?,
+            "substr" if (2..=3).contains(&n) => call("SUBSTR", planned)?,
+            "strpos" if n == 2 => call(if dialect == Dialect::Sqlite { "INSTR" } else { "STRPOS" }, planned)?,
+            // The index is an `Int`, written into the SQL text.
+            "element" => match args.get(1) {
+                Some(Expr::Int { value }) if n == 2 => one(&format!("($1)[{value}]"), planned.into_iter().take(1).collect())?,
+                _ => return Err(Error::query("wrong arguments for an array index")),
+            },
+            "unnest" => one("UNNEST($1)", planned)?,
             "now" if planned.is_empty() => SExpr::cust("CURRENT_TIMESTAMP"),
             "coalesce" if !planned.is_empty() => call("COALESCE", planned)?,
             "row_number" | "rank" | "dense_rank" | "percent_rank" | "cume_dist" if planned.is_empty() => {
@@ -1451,6 +1490,7 @@ impl<'s> Planner<'s> {
                     windowed |= has_window(expr);
                     types.push(self.expr_type(expr)?);
                     self.allow_window = true;
+                    self.allow_unnest = true;
                     #[cfg(feature = "composition")]
                     let computed = match expr {
                         Expr::Col { path, name } => {
@@ -1469,6 +1509,7 @@ impl<'s> Planner<'s> {
                     #[cfg(not(feature = "composition"))]
                     let e = self.value(expr, Hint::default());
                     self.allow_window = false;
+                    self.allow_unnest = false;
                     let mut e = e?;
                     let read_sql = match expr {
                         Expr::Col { path, name } => {

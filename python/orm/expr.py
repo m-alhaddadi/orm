@@ -253,6 +253,25 @@ class Expression(Node, Generic[T]):
         """Array columns: every element is one of ``values`` (``col <@ values``)."""
         return Comparison("contained_by", self, Literal(list(values)))
 
+    @overload
+    def __getitem__(self: Expression[list[E]], index: int) -> Func[E | None]: ...
+    @overload
+    def __getitem__(self: Expression[list[E] | None], index: int) -> Func[E | None]: ...
+    def __getitem__(self: Expression[Any], index: int) -> Func[Any]:
+        """Array columns: the element at SQL's 1-based ``index`` (``col[1]`` is the first),
+        ``None`` out of range. PostgreSQL only."""
+        return Func("element", (self, _Int(index)))
+
+    # ``__getitem__`` alone would make every expression iterable.
+    __iter__ = None
+
+    # Strings -------------------------------------------------------------------------------
+
+    def concat(self: Expression[str] | Expression[str | None], other: str | Expression[str] | Expression[str | None]) -> Expression[str]:
+        """``self || other``: ``NULL`` when either side is ``NULL``. :func:`func.concat`
+        reads ``NULL`` as an empty string instead."""
+        return Arith("concat", self, _wrap(other))
+
     # Arithmetic ----------------------------------------------------------------------------
 
     def __add__(self, other: T | Expression[T]) -> Expression[T]:
@@ -749,9 +768,49 @@ class _Functions:
     def length(self, expr: Expression[str] | Expression[str | None]) -> Func[int]:
         return Func("length", (expr,))
 
+    def concat(self, *parts: str | Expression[Any]) -> Func[str]:
+        """``CONCAT(...)``: the parts as text, a ``NULL`` part as an empty string.
+        ``a.concat(b)`` (``a || b``) is ``NULL`` when either side is ``NULL``."""
+        if not parts:
+            raise TypeError("concat() needs at least one part")
+        return Func("concat", parts)
+
+    def trim(self, expr: Expression[str] | Expression[str | None]) -> Func[str]:
+        """Without leading and trailing spaces."""
+        return Func("trim", (expr,))
+
+    def ltrim(self, expr: Expression[str] | Expression[str | None]) -> Func[str]:
+        """Without leading spaces."""
+        return Func("ltrim", (expr,))
+
+    def rtrim(self, expr: Expression[str] | Expression[str | None]) -> Func[str]:
+        """Without trailing spaces."""
+        return Func("rtrim", (expr,))
+
+    def replace(self, expr: Expression[str] | Expression[str | None], old: str | Expression[str], new: str | Expression[str]) -> Func[str]:
+        """Every ``old`` in ``expr`` replaced by ``new``."""
+        return Func("replace", (expr, old, new))
+
+    def substr(self, expr: Expression[str] | Expression[str | None], start: int, length: int | None = None) -> Func[str]:
+        """The characters from the 1-based ``start``, ``length`` of them (default: all)."""
+        return Func("substr", (expr, _Int(start)) if length is None else (expr, _Int(start), _Int(length)))
+
+    def strpos(self, expr: Expression[str] | Expression[str | None], part: str | Expression[str]) -> Func[int]:
+        """The 1-based position of the first ``part`` in ``expr``, 0 if absent
+        (``STRPOS``; ``INSTR`` on SQLite)."""
+        return Func("strpos", (expr, part))
+
     def cardinality(self, expr: Expression[list[Any]] | Expression[list[Any] | None]) -> Func[int]:
         """The number of elements of an array."""
         return Func("cardinality", (expr,))
+
+    @overload
+    def unnest(self, expr: Expression[list[E]]) -> Func[E]: ...
+    @overload
+    def unnest(self, expr: Expression[list[E] | None]) -> Func[E]: ...
+    def unnest(self, expr: Expression[Any]) -> Func[Any]:
+        """One row for each element of an array. Only a ``select()`` column; PostgreSQL only."""
+        return Func("unnest", (expr,))
 
     def abs(self, expr: Expression[T]) -> Func[T]:
         return Func("abs", (expr,))
@@ -942,7 +1001,7 @@ class Arith(Expression[Any]):
         return {"t": "arith", "op": self.op, "l": self.left._ir(ctx), "r": self.right._ir(ctx)}
 
     def __repr__(self) -> str:
-        sym = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[self.op]
+        sym = {"add": "+", "sub": "-", "mul": "*", "div": "/", "concat": "||"}[self.op]
         return f"({self.left!r} {sym} {self.right!r})"
 
 
