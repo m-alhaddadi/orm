@@ -48,16 +48,12 @@ The selected `orm-generic` compiler crate declares these namespaced attributes:
 ```prisma
 model Tag {
   id           Int @id
-  content_type ContentType?
-  object_id    Int?
-
-  @@generic.relation("target", type: "content_type", key: "object_id", targets: ["Post", "Photo"])
-  @@index([content_type, object_id])
+  target Generic @generic.relation(type: "content_type", key: "object_id", targets: ["Post", "Photo"], index=True)
 }
 
 model Post {
   id Int @id
-  @@generic.reverse("tags", source: "Tag", relation: "target")
+  tags Tag[] @generic.reverse(source: "Tag", relation: "target")
 }
 ```
 

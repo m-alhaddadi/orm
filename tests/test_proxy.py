@@ -58,3 +58,56 @@ async def test_proxy_warning_rows_defaults_writes_and_relation_targets(dialect, 
     finally:
         await db.drop_tables()
         await db.close()
+
+
+DEFAULTS_SOURCE = """
+model Member {
+  id     Int     @id
+  name   String
+  status String
+  bio    String?
+  @@map("proxy_defaults_members")
+}
+model ActiveMember {
+  @@proxy.of(Member)
+  @@proxy.default("status", "active")
+  @@query.defaults(filter: "status == \\"active\\"", fields: ["id", "name"])
+}
+"""
+
+
+@pytest.mark.skipif("query-defaults" not in json.loads(_native.native_artifact())["capabilities"], reason="requires proxy and query-defaults in one artifact")
+@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+async def test_proxy_with_query_defaults_is_a_filtered_view(dialect):
+    source = DEFAULTS_SOURCE if dialect == "postgres" else 'datasource db { provider = "sqlite" }\n' + DEFAULTS_SOURCE
+    registry = orm.Registry()
+    models = orm.loads(source, registry=registry)
+    Member, Active = models["Member"], models["ActiveMember"]
+    url = "sqlite://:memory:" if dialect == "sqlite" else os.environ.get("ORM_TEST_DATABASE_URL", "postgres://postgres:postgres@localhost/orm_test")
+    db = await orm.connect(url, registry=registry, default=False)
+    await db.create_tables()
+    try:
+        await Member.objects.using(db).insert_many([
+            {"id": 1, "name": "ann", "status": "active", "bio": "a"},
+            {"id": 2, "name": "bob", "status": "old", "bio": "b"},
+        ])
+        # the proxy policy filters and narrows; the parent model is unchanged
+        rows = await Active.objects.using(db).order_by(Active.id)
+        assert [type(r) for r in rows] == [Active] and rows[0].to_dict() == {"id": 1, "name": "ann"}
+        with pytest.raises(orm.NotLoaded):
+            rows[0].bio
+        assert await Active.objects.using(db).count() == 1
+        assert await Member.objects.using(db).count() == 2
+        assert (await Member.objects.using(db).get(Member.id == 2)).bio == "b"
+        assert await Active.objects.using(db).without_defaults().count() == 2
+        # an insert through the proxy uses its client default and is in its view
+        await Active.objects.using(db).insert(id=3, name="cat")
+        assert [r.name for r in await Active.objects.using(db).order_by(Active.id)] == ["ann", "cat"]
+        # query set writes select through the policy filter
+        assert await Active.objects.using(db).update(bio="x") == 2
+        assert (await Member.objects.using(db).get(Member.id == 2)).bio == "b"
+        assert await Active.objects.using(db).delete() == 2
+        assert [m.id for m in await Member.objects.using(db)] == [2]
+    finally:
+        await db.drop_tables()
+        await db.close()

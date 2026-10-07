@@ -330,3 +330,59 @@ async def test_cross_dialect_snapshots_are_rejected(tmp_path):
             await Migrator(db, Migrations(directory, sqlite)).upgrade()
     finally:
         await db.close()
+
+
+FOLLOW = """
+datasource db {
+  provider = "sqlite"
+}
+
+model Person {
+  id        BigInt   @id @default(autoincrement())
+  name      String
+  following Person[] @relation(through: Follow, through_fields: [follower, followee])
+  followers Person[] @relation(through: Follow, through_fields: [followee, follower])
+}
+
+model Follow {
+  id          BigInt @id @default(autoincrement())
+  follower_id BigInt
+  followee_id BigInt
+  follower    Person @relation("follower", fields: [follower_id], references: [id])
+  followee    Person @relation("followee", fields: [followee_id], references: [id])
+
+  @@unique([follower_id, followee_id])
+}
+"""
+
+
+async def test_self_many_to_many_has_both_sides():
+    registry, m = models(FOLLOW)
+    Person, Follow = m["Person"], m["Follow"]
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    await db.create_tables()
+    try:
+        people = Person.objects.using(db)
+        ann, bob, cat = await people.insert_many([{"name": "ann"}, {"name": "bob"}, {"name": "cat"}])
+        await ann.following.using(db).add(bob, cat)
+        await bob.following.using(db).add(cat)
+        assert await Follow.objects.using(db).count() == 3
+        # each side reads the join rows in its own direction
+        assert [p.name for p in await ann.following.using(db).order_by(Person.id)] == ["bob", "cat"]
+        assert [p.name for p in await cat.followers.using(db).order_by(Person.id)] == ["ann", "bob"]
+        assert await ann.followers.using(db).count() == 0
+        # a link removed from one side is gone from the other
+        await cat.followers.using(db).remove(ann)
+        assert [p.name for p in await ann.following.using(db)] == ["bob"]
+        assert [p.name for p in await people.filter(Person.followers.name == "bob")] == ["cat"]
+        rows = await people.select(Person.name, orm.func.count(Person.followers)).order_by(Person.id)
+        assert [tuple(r) for r in rows] == [("ann", 0), ("bob", 1), ("cat", 1)]
+        loaded = await people.prefetch_related(Person.following, Person.followers).order_by(Person.id)
+        assert [([f.name for f in p.following.cached], [f.name for f in p.followers.cached]) for p in loaded] == [
+            (["bob"], []),
+            (["cat"], ["ann"]),
+            ([], ["bob"]),
+        ]
+    finally:
+        await db.drop_tables()
+        await db.close()

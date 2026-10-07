@@ -22,6 +22,13 @@ model ActiveUser {
   @@proxy.default("name", "client default")
   @@proxy.default("status", "active")
 }
+model ActiveUser {
+  name String @default("name", "client default")
+  status [ACTIVE] @default(ACTIVE)
+
+  @@proxy.of(User)
+}
+
 ```
 
 A proxy inherits its source fields and relations, also through proxy chains.
