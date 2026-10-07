@@ -14,8 +14,8 @@ model Report {
  @@map("proxy_file_reports")
 }
 model Draft {
+ file Json? @client_default("\"not a file reference\"")
  @@proxy.of(Report)
- @@proxy.default("file", "not a file reference")
 }
 "#;
 
