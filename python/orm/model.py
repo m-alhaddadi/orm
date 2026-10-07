@@ -79,6 +79,8 @@ class ModelMeta:
         self.field_names: tuple[str, ...] = tuple(self.fields)
         self.input_fields: dict[str, Field[Any]] = self.fields
         self.default_filter: dict[str, Any] | None = None
+        # The schema default order: `{"field", "desc"?, "nulls"?}` per column.
+        self.default_order: list[dict[str, Any]] = []
 
     def pk_ref(self) -> ColumnRef[Any]:
         return ColumnRef(self.model, (), self.pk)
@@ -247,7 +249,9 @@ class Registry:
             meta.table = ir["table"]
             meta.pk = next(field for field in fields.values() if field.primary_key)
             meta.schema_ir = ir
-            meta.default_filter = next((d.get("filter") for d in prepared.get("behavior", {}).get("query_defaults", ()) if d["model"] == meta.name), None)
+            policy: dict[str, Any] = next((d for d in prepared.get("behavior", {}).get("query_defaults", ()) if d["model"] == meta.name), {})
+            meta.default_filter = policy.get("filter")
+            meta.default_order = policy.get("order", [])
             meta.field_names = tuple(fields)
             pk_ir = next(f for f in ir["fields"] if f.get("primary_key"))
             meta.attach_fields = (

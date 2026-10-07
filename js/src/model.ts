@@ -96,6 +96,8 @@ export class ModelMeta implements Source {
   declare attachInputFields?: readonly FieldMeta[];
   /** The schema default filter IR, if any; set once by `define()`. */
   defaultFilter: unknown;
+  /** The schema default order, one key per column; set once by `define()`. */
+  defaultOrder: readonly { field: string; desc?: boolean; nulls?: "first" | "last" }[] = [];
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
   readonly fieldList: FieldMeta[] = [];
@@ -668,7 +670,9 @@ export function define(
     }
     const defaults = ((ir.behavior as { proxy_models?: { model: string; defaults: Record<string, unknown> }[] } | undefined)?.proxy_models ?? []).find((p) => p.model === m.name)?.defaults;
     const meta = new ModelMeta(m, reg, defaults === undefined ? [] : Object.keys(defaults));
-    meta.defaultFilter = ((ir.behavior as { query_defaults?: { model: string; filter?: unknown }[] } | undefined)?.query_defaults ?? []).find((d) => d.model === m.name)?.filter;
+    const policy = ((ir.behavior as { query_defaults?: { model: string; filter?: unknown; order?: ModelMeta["defaultOrder"] }[] } | undefined)?.query_defaults ?? []).find((d) => d.model === m.name);
+    meta.defaultFilter = policy?.filter;
+    meta.defaultOrder = policy?.order ?? [];
     const computed = new Set(((ir.behavior as { result_fields?: { model: string; field: string }[] } | undefined)?.result_fields ?? []).filter((f) => f.model === m.name).map((f) => f.field));
     if (computed.size) {
       meta.inputFieldList = meta.fieldList.filter((f) => !computed.has(f.ir));

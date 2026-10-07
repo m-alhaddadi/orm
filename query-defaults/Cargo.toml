@@ -25,9 +25,42 @@ kind = "list"
 kind = "list"
 [package.metadata.orm-extension.attributes.arguments.parent]
 kind = "string"
+[package.metadata.orm-extension.attributes.arguments.order]
+kind = "list"
 [[package.metadata.orm-extension.attributes]]
 name = "query.selectOut"
 target = "field"
+# One attribute per `query.defaults` option; each sets that option only.
+[[package.metadata.orm-extension.attributes]]
+name = "query.filter"
+target = "model"
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "string"
+required = true
+[[package.metadata.orm-extension.attributes]]
+name = "query.fields"
+target = "model"
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "list"
+required = true
+[[package.metadata.orm-extension.attributes]]
+name = "query.related"
+target = "model"
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "list"
+required = true
+[[package.metadata.orm-extension.attributes]]
+name = "query.order"
+target = "model"
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "string"
+variadic = true
+[[package.metadata.orm-extension.attributes]]
+name = "query.parent"
+target = "model"
+[[package.metadata.orm-extension.attributes.positional]]
+kind = "string"
+required = true
 [[package.metadata.orm-extension.passes]]
 id = "query.defaults.lower"
 phase = "behavior"

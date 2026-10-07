@@ -91,6 +91,7 @@ await qs.in_bulk(emails, field=User.email)    # by a unique field; no ids: every
 qs.sql()                                      # SQL with values inlined, for debugging
 ```
 
+`.asc(nulls="first")` and `.desc(nulls="last")` place NULLs; without `nulls`, the database decides.
 `-column` is a descending `Ordering`, for `order_by()` and a `Prefetch` query set.
 It is never SQL negation: write `0 - Post.views` for that.
 `-` works on a column only, and an ordering in `filter()` or `select()` is a `TypeError`.

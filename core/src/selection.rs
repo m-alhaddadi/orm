@@ -1,11 +1,13 @@
 //! Schema defaults are resolved once, before publishing a schema.
-use crate::{behavior::QueryDefaults, ir::Expr, schema::Model};
+use crate::{behavior::QueryDefaults, ir::{Expr, Order}, schema::Model};
 
 #[derive(Default)]
 pub struct PreparedDefaults {
     pub filter: Option<Expr>,
     pub fields: Option<Vec<String>>,
     pub related: Vec<Vec<String>>,
+    /// The order of instance reads without `order_by()`.
+    pub order: Vec<Order>,
 }
 
 pub fn prepare(models: &mut [Model], defaults: &[QueryDefaults]) -> Result<(), String> {
@@ -19,6 +21,7 @@ pub fn prepare(models: &mut [Model], defaults: &[QueryDefaults]) -> Result<(), S
         }
         let filter = d.filter.clone().map(serde_json::from_value::<Expr>).transpose().map_err(|e| format!("{} default filter: {e}", d.model))?;
         if let Some(filter) = &filter { validate_filter(model, filter)?; }
+        for key in &d.order { model.field(&key.field)?; }
         filters.push(filter);
         for path in &d.related {
             let mut current = model;
@@ -44,7 +47,8 @@ pub fn prepare(models: &mut [Model], defaults: &[QueryDefaults]) -> Result<(), S
     for d in defaults { visit(models, defaults, &d.model, &mut vec![])?; }
     for (d, filter) in defaults.iter().zip(filters) {
         let model = models.iter_mut().find(|m| m.ir.name == d.model).expect("validated model");
-        model.query_defaults = PreparedDefaults { filter, fields: d.fields.clone(), related: d.related.clone() };
+        let order = d.order.iter().map(|k| Order { expr: Expr::Col { path: vec![], name: k.field.clone() }, desc: k.desc, nulls: k.nulls }).collect();
+        model.query_defaults = PreparedDefaults { filter, fields: d.fields.clone(), related: d.related.clone(), order };
     }
     Ok(())
 }

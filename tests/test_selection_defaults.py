@@ -142,3 +142,76 @@ async def test_selection_defaults(dialect):
     finally:
         await db.drop_tables()
         await db.close()
+
+
+ORDERED = """
+datasource db {
+  provider = "sqlite"
+}
+model Topic {
+  id Int @id @default(autoincrement())
+  rank Int?
+  name String
+  notes Note[]
+  @@map("order09_topics")
+  @@query.order("-rank nulls last", "id")
+}
+model Note {
+  id Int @id @default(autoincrement())
+  topic_id Int
+  body String
+  topic Topic @relation(fields: [topic_id], references: [id], onDelete: Cascade)
+  @@map("order09_notes")
+  @@query.defaults(order: ["-body"])
+}
+"""
+
+
+@pytest.mark.skipif(not QUERY_DEFAULTS, reason="needs a native build with the query-defaults feature")
+@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+async def test_default_order(dialect):
+    registry = orm.Registry()
+    models = orm.loads(ORDERED.replace('"sqlite"', '"postgresql"' if dialect == "postgres" else '"sqlite"'), registry=registry)
+    Topic, Note = models["Topic"], models["Note"]
+    url = "sqlite://:memory:" if dialect == "sqlite" else os.environ.get("ORM_TEST_DATABASE_URL", "postgres://postgres:postgres@localhost/orm_test")
+    db = await orm.connect(url, registry=registry, default=False)
+    await db.drop_tables()
+    await db.create_tables()
+    t, n = Topic.objects.using(db), Note.objects.using(db)
+
+    def names(rows):
+        return [r.name for r in rows]
+
+    try:
+        for name, rank in [("a", 1), ("b", None), ("c", 3), ("d", 3)]:
+            await t.insert(name=name, rank=rank)
+        assert names(await t.all()) == ["c", "d", "a", "b"]
+        assert (await t.first()).name == "c" and (await t.last()).name == "b"
+        assert names(await t.order_by(Topic.name.desc())) == ["d", "c", "b", "a"]
+        assert names(await t.order_by(Topic.rank.asc(nulls="first"), Topic.id)) == ["b", "a", "c", "d"]
+        assert "ORDER BY" not in t.without_defaults().sql() and "ORDER BY" not in t.filter(Topic.id > 0).without_defaults().sql()
+        assert (await t.without_defaults().first()).name == "a"
+        assert await t.count() == 4 and await t.exists()
+        assert [names(b) async for b in t.batches(2)] == [["a", "b"], ["c", "d"]]
+        c = await t.get(Topic.name == "c")
+        for body in ["x", "z", "y"]:
+            await n.insert(topic_id=c.pk, body=body)
+        assert [x.body for x in await n.all()] == ["z", "y", "x"]
+        loaded = await t.prefetch_related(Topic.notes).get(Topic.name == "c")
+        assert [x.body for x in await loaded.notes] == ["z", "y", "x"]
+        own = await t.prefetch_related(orm.Prefetch(Topic.notes, Note.objects.order_by(Note.body))).get(Topic.name == "c")
+        assert [x.body for x in await own.notes] == ["x", "y", "z"]
+        sliced = await t.prefetch_related(orm.Prefetch(Topic.notes, Note.objects.all()[:2])).get(Topic.name == "c")
+        assert [x.body for x in await sliced.notes] == ["z", "y"]
+    finally:
+        await db.drop_tables()
+        await db.close()
+
+
+@pytest.mark.skipif(not QUERY_DEFAULTS, reason="needs a native build with the query-defaults feature")
+def test_default_order_options_have_one_source():
+    both = ORDERED.replace('@@query.defaults(order: ["-body"])', '@@query.defaults(order: ["-body"])\n  @@query.order("id")')
+    with pytest.raises(Exception, match=r"Note: order is set by both @@query\.defaults\(order:\) at .* and @@query\.order at"):
+        orm.loads(both, registry=orm.Registry())
+    with pytest.raises(Exception, match=r"order column \"nope\" is not a field"):
+        orm.loads(ORDERED.replace('"-body"', '"nope"'), registry=orm.Registry())

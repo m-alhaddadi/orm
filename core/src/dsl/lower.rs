@@ -1285,7 +1285,7 @@ pub(super) fn behavior_declarations(items: &mut [Item], file: &str, manifests: &
                 lowered: false,
                 attribute: a.name, model: model.to_owned(), field: field.map(str::to_owned), arguments,
                 positional: a.args.positional.iter().enumerate()
-                    .map(|(i, (pos, v))| declaration_value(*pos, v, declared.and_then(|d| d.positional.get(i)).map(|arg| arg.kind)))
+                    .map(|(i, (pos, v))| declaration_value(*pos, v, declared.and_then(|d| d.positional_at(i)).map(|arg| arg.kind)))
                     .collect::<Result<_>>()?,
                 location: crate::behavior::SourceLocation { file: file.to_owned(), line: a.pos.line, column: a.pos.col },
             });

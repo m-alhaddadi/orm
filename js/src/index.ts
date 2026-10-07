@@ -39,7 +39,7 @@ export {
   param,
   window,
 } from "./expr.js";
-export type { Many, Compat, Operand } from "./expr.js";
+export type { Many, Compat, Operand, OrderOptions } from "./expr.js";
 export { ModelMeta, Registry, define, load, loads, registry } from "./model.js";
 export type { Instance, ModelClass, Row, SchemaIR } from "./model.js";
 export { ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet } from "./query.js";

@@ -20,13 +20,13 @@ use sea_query::extension::postgres::PgExpr;
 use sea_query::{
     self,
     Alias, IntoIden, DeleteStatement, Expr as SExpr, ExprTrait, InsertStatement,
-    JoinType, LikeExpr, LockBehavior, LockType, Order as SOrder, Query, SelectStatement, UpdateStatement,
+    JoinType, LikeExpr, LockBehavior, LockType, NullOrdering, Order as SOrder, OrderedStatement, Query, SelectStatement, UpdateStatement,
 };
 
 use crate::error::{query_err, Error, Result};
 use crate::params::Params;
 use orm_core::ir::{
-    ArithOp, Assignment, CmpOp, ColType, Count, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Operation, Order, ParamRef,
+    ArithOp, Assignment, CmpOp, ColType, Count, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Nulls, Operation, Order, ParamRef,
     Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType,
 };
 use orm_core::dialect::{Capabilities, Dialect, Target};
@@ -624,7 +624,7 @@ impl<'s> Planner<'s> {
         for o in &w.order_by {
             self.join_paths(&o.expr, "a window")?;
             let e = self.value(&o.expr, Hint::default())?;
-            spec.order_by_expr(e, if o.desc { SOrder::Desc } else { SOrder::Asc });
+            order_by(&mut spec, e, o);
         }
         if let Some(f) = &w.frame {
             let bound = |b: Option<i64>, start: bool| -> Result<sea_query::Frame> {
@@ -1281,7 +1281,7 @@ impl<'s> Planner<'s> {
             let mut slots = vec![];
             for o in order_by {
                 exprs.push(self.value(&o.expr, Hint::default())?);
-                slots.push(format!("${}{}", exprs.len(), if o.desc { " DESC" } else { "" }));
+                slots.push(format!("${}{}", exprs.len(), order_sql(o)));
             }
             clauses.push(format!("ORDER BY {}", slots.join(", ")));
         }
@@ -1662,7 +1662,7 @@ impl<'s> Planner<'s> {
             self.allow_window = true;
             let e = self.value(&o.expr, Hint::default());
             self.allow_window = false;
-            stmt.order_by_expr(e?, if o.desc { SOrder::Desc } else { SOrder::Asc });
+            order_by(stmt, e?, o);
         }
         if let Some(n) = q.limit {
             stmt.limit(count(self.params, n)?);
@@ -1992,8 +1992,44 @@ impl<'s> Planner<'s> {
     }
 }
 
+/// `ORDER BY <e> [DESC] [NULLS FIRST|LAST]`.
+fn order_by<S: OrderedStatement>(stmt: &mut S, e: SExpr, o: &Order) {
+    let direction = if o.desc { SOrder::Desc } else { SOrder::Asc };
+    match o.nulls {
+        None => stmt.order_by_expr(e, direction),
+        Some(Nulls::First) => stmt.order_by_expr_with_nulls(e, direction, NullOrdering::First),
+        Some(Nulls::Last) => stmt.order_by_expr_with_nulls(e, direction, NullOrdering::Last),
+    };
+}
+
+/// The direction and nulls position of `o` in an SQL template.
+fn order_sql(o: &Order) -> &'static str {
+    match (o.desc, o.nulls) {
+        (false, None) => "",
+        (true, None) => " DESC",
+        (false, Some(Nulls::First)) => " NULLS FIRST",
+        (false, Some(Nulls::Last)) => " NULLS LAST",
+        (true, Some(Nulls::First)) => " DESC NULLS FIRST",
+        (true, Some(Nulls::Last)) => " DESC NULLS LAST",
+    }
+}
+
+/// The schema default order of a model read that gives no `order_by()`.
+#[cfg(feature = "query-defaults")]
+fn with_default_order(schema: &Schema, q: &Select) -> Result<Option<Select>> {
+    if !q.order.is_empty() || q.without_defaults || q.columns.is_some() || q.from.is_some() {
+        return Ok(None);
+    }
+    let order = &schema.model(schema.model_idx(&q.model).map_err(query_err)?).query_defaults.order;
+    Ok((!order.is_empty()).then(|| Select { order: order.clone(), ..q.clone() }))
+}
+
 /// A top-level SELECT with its `WITH` clause.
 pub fn plan_select(schema: &Schema, target: Target, q: &Select, params: &dyn Params) -> Result<SelectPlan> {
+    #[cfg(feature = "query-defaults")]
+    let defaulted = with_default_order(schema, q)?;
+    #[cfg(feature = "query-defaults")]
+    let q = defaulted.as_ref().unwrap_or(q);
     let virt = derive_ctes(schema, target, &q.with, params)?;
     let mut p = Planner::new(schema, &virt, target, &q.model, q.from.as_deref(), params, vec![], 0)?;
     let mut plan = p.build_select(q)?;
@@ -2029,7 +2065,11 @@ fn plan_prefetch(
     let many = rel.kind == RelKind::Many;
     let mut q = node.query.clone();
     q.without_defaults |= without_defaults;
-    let pk_order = Order { expr: Expr::Col { path: vec![], name: cm.pk_field().name.clone() }, desc: false };
+    let pk_order = Order { expr: Expr::Col { path: vec![], name: cm.pk_field().name.clone() }, desc: false, nulls: None };
+    #[cfg(feature = "query-defaults")]
+    if q.order.is_empty() && !q.without_defaults {
+        q.order = cm.query_defaults.order.clone();
+    }
     let sliced = q.limit.is_some() || q.offset.is_some();
     let slice = match sliced {
         false => None,
@@ -2080,7 +2120,7 @@ fn plan_prefetch(
             let e = p.value(&o.expr, Hint::default());
             p.allow_window = false;
             exprs.push(e?);
-            slots.push(format!("${}{}", exprs.len(), if o.desc { " DESC" } else { "" }));
+            slots.push(format!("${}{}", exprs.len(), order_sql(o)));
         }
         let e = template(target.dialect, format!("ROW_NUMBER() OVER (PARTITION BY $1 ORDER BY {})", slots.join(", ")), exprs);
         for (s, on) in &p.joins[joined..] {

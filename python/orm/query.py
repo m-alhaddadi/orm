@@ -617,7 +617,16 @@ class QuerySet(Generic[M]):
         return await resolve(self._db)._run(ir, params, row_cls, self._db)
 
     def _default_order(self) -> tuple[Ordering, ...]:
-        return self._order or (Ordering(self._model._meta.pk_ref(), desc=False),)
+        """The order of this read: ``order_by()``, else the schema default order, else the pk."""
+        if self._order:
+            return self._order
+        meta = self._model._meta
+        if meta.default_order and not self._without_defaults and self._from is None:
+            return tuple(
+                Ordering(ColumnRef(self._model, (), meta.fields[k["field"]]), k.get("desc", False), k.get("nulls"))
+                for k in meta.default_order
+            )
+        return (Ordering(meta.pk_ref(), desc=False),)
 
     async def _fetch(self) -> list[M]:
         params: list[Any] = []

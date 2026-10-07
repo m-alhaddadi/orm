@@ -113,7 +113,7 @@ The builders are `filter(...)`, `exclude(...)`, `orderBy(...)`, `limit(n)`, `off
 Comparisons are methods: `.eq .ne .lt .lte .gt .gte .between .in .notIn .isNull
 .isNotNull`. String columns also have `.contains .icontains .startsWith .endsWith .like
 .ilike`, and arrays have `.has .hasAll .hasAny .containedBy`. Arithmetic is `.add .sub
-.mul .div`, and orderings are `.asc() / .desc()`. `orderBy` also takes field names, with
+.mul .div`, and orderings are `.asc() / .desc()`. `.asc({ nulls: "first" })` and `.desc({ nulls: "last" })` place NULLs. `orderBy` also takes field names, with
 `-` for descending: `orderBy("-createdAt", "id")`. A name that is not a field of the
 model is a type error and a `TypeError`. Conditions combine with `and()`,
 `or()`, `not()`, or the methods of the same names. A boolean column is a condition by

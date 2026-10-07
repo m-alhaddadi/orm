@@ -267,3 +267,12 @@ test("orderBy takes field names, with - for descending", () => {
   assert.ok(Post.objects.select({ t: Post.title }).orderBy("-views").sql().endsWith('ORDER BY "posts"."views" DESC'));
   assert.throws(() => Post.objects.orderBy("-nope" as never), /Post has no field "nope"/);
 });
+
+test("orderings place NULLs first or last", () => {
+  assert.ok(Comment.objects.orderBy(Comment.authorId.desc({ nulls: "last" })).sql().endsWith('ORDER BY "comments"."author_id" DESC NULLS LAST'));
+  assert.ok(Comment.objects.orderBy(Comment.authorId.asc({ nulls: "first" }), Comment.id).sql().endsWith('ORDER BY "comments"."author_id" ASC NULLS FIRST, "comments"."id" ASC'));
+  const reversed = Comment.authorId.asc({ nulls: "first" }).reversed();
+  assert.equal(reversed.descending, true);
+  assert.equal(reversed.nulls, "last");
+  assert.throws(() => Comment.authorId.desc({ nulls: "middle" as never }), /nulls is "first" or "last"/);
+});

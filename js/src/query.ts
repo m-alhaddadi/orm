@@ -881,8 +881,14 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     yield* await this.fromCache();
   }
 
+  /** The order of this read: `orderBy()`, else the schema default order, else the pk. */
   private defaultOrder(): readonly Ordering<string, unknown>[] {
-    return this.state.order.length ? this.state.order : [this.meta.column(this.meta.pk).asc()];
+    if (this.state.order.length) return this.state.order;
+    const keys = this.meta.defaultOrder;
+    if (keys.length && !this.state.withoutDefaults && !this.state.from) {
+      return keys.map((k) => new Ordering(this.meta.column(this.meta.fieldByIr.get(k.field)!), k.desc ?? false, k.nulls));
+    }
+    return [this.meta.column(this.meta.pk).asc()];
   }
 
   /** The first row by the current ordering (the primary key if none), or `null`. */

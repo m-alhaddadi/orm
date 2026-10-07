@@ -354,3 +354,11 @@ def test_minus_column_is_a_descending_order():
         Post.objects.select(-Post.views)  # type: ignore[call-overload]
     with pytest.raises(TypeError):
         -(Post.views + 1)  # type: ignore[operator]
+
+
+def test_nulls_first_and_last():
+    assert Comment.objects.order_by(Comment.author_id.desc(nulls="last")).sql().endswith('ORDER BY "comments"."author_id" DESC NULLS LAST')
+    assert Comment.objects.order_by(Comment.author_id.asc(nulls="first"), Comment.id).sql().endswith('ORDER BY "comments"."author_id" ASC NULLS FIRST, "comments"."id" ASC')
+    assert repr(Comment.author_id.asc(nulls="first").reversed()) == "Comment.author_id.desc(nulls='last')"
+    with pytest.raises(ValueError, match="nulls is 'first' or 'last'"):
+        Comment.author_id.desc(nulls="middle")  # type: ignore[arg-type]
