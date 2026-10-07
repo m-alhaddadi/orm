@@ -67,8 +67,8 @@ A manifest capability in `HOST_FEATURE_CAPABILITIES` (`file-storage`, `query-def
 Do not add those features by hand; select the extension crate.
 `scripts/feature-check.sh` builds one artifact per such extension, and one with all of them, and runs every suite on each.
 
-Binding backend and generator defaults are preserved when composition is added.
-For explicit host selection, use `binding_features`, for example `{"python": ["sqlite"], "node": ["postgres"]}`.
+Binding backend and generator defaults (including `reference-loading`) are preserved when composition is added, so an extension artifact is never minimal.
+For a minimal artifact, select the host features explicitly with `binding_features`, for example `{"python": ["sqlite"], "node": ["postgres"]}`.
 Each supplied entry replaces that binding's defaults with the listed features plus required static composition;
 an omitted entry preserves its original defaults.
 Unknown features, `default`, and entries for unselected bindings fail before the native build.
@@ -141,17 +141,8 @@ A field owner must be the local owner or an ancestor.
 Inherited scalar reads, projections and filters use ordinary SQL through those prepared owners.
 Inherited relation links, `outer()` and `distinct(on=...)` on inherited columns need an expanded host primitive.
 
-The Rust host API `orm_engine::ownership::prepare_write` consumes a typed `WriteContract<WriteValue<sea_query::Value>>` with one `OwnerWrite` per owner, ordered parent to child.
-`WriteValue::Returned` copies a previously returned primary key;
-explicit owner links prevent ambiguous key propagation.
-Values are typed native inputs and native validators run before execution.
-Ancestor inserts may supply their shared primary key explicitly even when the logical child exposes only its local identity.
-Every written owner must belong to the declared ancestor chain.
-`run_write` executes the prepared insert sequence in its own transaction or savepoint and rolls back that scope on failure.
-It supports a complete logical return shape.
-It requires an explicit physical schema and currently supports single composed inserts.
-The `model-composition` package does not use it:
-`orm_engine::composed` plans its creates, attaches, filtered updates and deletes, and each runs in one transaction or savepoint.
+Writes across owner tables belong to `orm_engine::composed`, the executor of the `model-composition` package.
+It plans creates, attaches, filtered updates and deletes, and each runs in one transaction or savepoint.
 `update_many` on a composed model is rejected.
 Ordinary model writes reject inherited storage instead of writing nonexistent columns.
 Full filters, selection defaults, proxy warnings, loaders and the composition-facing language APIs belong to plans 03–06;

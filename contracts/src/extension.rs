@@ -363,22 +363,6 @@ pub struct ResolvedField {
     pub logical_type: ValueType,
     pub physical_type: ValueType,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Supplied<T> { Omitted, Null, Value(T) }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WriteMode { Insert, Update, BulkInsert, BulkUpdate, Expression, Upsert }
-#[derive(Clone, Debug)]
-pub enum WriteValue<T> {
-    Value(T),
-    /// Copy a column returned by an earlier owner statement, inside one transaction.
-    Returned { step: usize, column: StorageId },
-}
-#[derive(Debug)]
-pub struct OwnerWrite<'a, T> {
-    pub owner: OwnerId,
-    pub fields: &'a [StorageId],
-    pub values: &'a [Supplied<T>],
-}
 #[derive(Debug)]
 pub struct ResultField {
     pub field: FieldId,
@@ -393,14 +377,6 @@ pub struct QueryContract<'a> {
     pub expression: &'a crate::ir::Expr,
     pub owner: OwnerId,
     pub shape: &'a ResultShape,
-}
-#[derive(Debug)]
-pub struct WriteContract<'a, T> {
-    pub model: ModelId,
-    pub mode: WriteMode,
-    pub owners: &'a [OwnerWrite<'a, T>],
-    pub validation_dependencies: &'a [FieldId],
-    pub returning: Option<&'a ResultShape>,
 }
 
 pub fn validate_declarations(ir: &SchemaIr, manifests: &[Manifest], language: Option<&str>) -> Result<(), String> {
