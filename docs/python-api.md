@@ -596,6 +596,29 @@ async with db.transaction():
   signed big-endian).
 * No optimistic locking (version columns) on purpose.
 
+### Finding N+1 queries: `orm.debug`
+
+The ORM never loads a relation by itself, so an N+1 comes from explicit code: a `load_x()` call or a query in a loop.
+`orm.debug.n_plus_one` finds it:
+
+```python
+with orm.debug.n_plus_one(threshold=5, fail=True):
+    for c in customers:
+        await c.load_person()
+# orm.debug.NPlusOne: 20 queries with one shape `SELECT ... FROM "person" WHERE "person"."id" = $1 ...`
+#   at app/views.py:42; use select_related(Customer.person)
+```
+
+* The scope counts its queries by statement shape: the query without its values.
+  Tasks started in the scope count too.
+* When the block ends, a shape that ran more than `threshold` times (default 5) raises `orm.debug.NPlusOne` with `fail=True`, or gives an `orm.debug.NPlusOneWarning`.
+  The exception and the `with ... as report` value carry the report: each shape, its SQL, its count, the call site of its first query and the fix.
+* The fix is `select_related(...)` for a repeated `load_x()`, and `prefetch_related(...)` for a repeated to-many query (`await post.comments`).
+* The call site and the SQL text are captured only inside the scope.
+  Outside it, each query pays one `ContextVar` read (about 15 ns, measured).
+* In a test suite, add `pytest_plugins = ["orm.testing"]` to `conftest.py`.
+  The `n_plus_one` fixture counts the whole test and fails it at teardown; set `n_plus_one.threshold` to change the threshold.
+
 ### Hooks for packages: `orm.hooks`
 
 A package that changes writes and reads from outside the ORM (for example

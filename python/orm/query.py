@@ -28,6 +28,7 @@ from .expr import (
 )
 from .fields import HasMany, ManyToMany
 from .protection import allowed_writes
+from . import debug
 from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, prepare_rows, assignments
 
 if TYPE_CHECKING:
@@ -817,6 +818,8 @@ class Prepared(Generic[M]):
         if qs._lock is not None:
             qs._check_lock()
         db = resolve(qs._db)
+        if debug._scope.get() is not None:
+            debug.record("run:" + c.json, lambda: str(qs._native().statement(c.json, params)))
         return db._engine.run(c.json, params, db._tx(), None, qs._db, allowed_writes())
 
     def __call__(self, **values: Any) -> Awaitable[list[M]]:
@@ -895,6 +898,9 @@ class RelatedSet(QuerySet[M]):
         rows = self._instance.__dict__.get(self._relation.name)
         if rows is not None and self._is_pristine() and not self._prefetch and not self._related:
             return list(rows)
+        if debug._scope.get() is not None and self._is_pristine():
+            with debug.relation_load(self._relation.model.__name__, self._relation.name, "prefetch_related"):
+                return await super()._fetch()
         return await super()._fetch()
 
     def insert(self, **values: Any) -> InsertOne[M]:

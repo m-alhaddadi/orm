@@ -152,6 +152,14 @@ impl PySchema {
         Ok(exec::sql(target, &plan))
     }
 
+    /// SQL for an operation with its parameter placeholders: the statement shape.
+    fn statement(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<String> {
+        let op = parse_op(op_json).map_err(engine_err)?;
+        let target = Target::new(self.inner.dialect);
+        let plan = Planner::plan(&self.inner, target, &op, &PyParams(&params)).map_err(engine_err)?;
+        Ok(exec::statement(target, &plan))
+    }
+
     /// The SQL of `update_many` (one statement per batch), parameters inlined. For
     /// debugging and tests; `disable` switches capabilities off as in `connect`.
     #[pyo3(signature = (model, fields, rows, filters_json = "[]", params = vec![], batch_size = None, disable = vec![]))]

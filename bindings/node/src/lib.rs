@@ -333,6 +333,16 @@ impl JsSchema {
         Ok(exec::sql(target, &plan))
     }
 
+    /// SQL for an operation with its parameter placeholders: the statement shape.
+    #[napi]
+    pub fn statement(&self, env: &Env, op_json: String, params_: Unknown<'_>) -> napi::Result<String> {
+        let op = parse_op(&op_json).map_err(engine_err)?;
+        let target = Target::new(self.inner.dialect);
+        let p = params(env, params_)?;
+        let plan = Planner::plan(&self.inner, target, &op, &p).map_err(engine_err)?;
+        Ok(exec::statement(target, &plan))
+    }
+
     /// The SQL of `update_many` (one statement per batch), parameters inlined.
     #[napi]
     #[allow(clippy::too_many_arguments)]

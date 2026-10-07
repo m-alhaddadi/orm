@@ -261,6 +261,31 @@ See `docs/schema.md`, "Protected writes".
 
 Both throw `TransactionRequired` when called outside a transaction.
 
+### Finding N+1 queries: `debug`
+
+The ORM never loads a relation by itself, so an N+1 comes from explicit code: a `loadX()` call or a query in a loop.
+`debug.nPlusOne` finds it:
+
+```ts
+import { debug } from "orm";
+
+await debug.nPlusOne(async () => {
+  for (const c of customers) await c.loadPerson();
+}, { threshold: 5, fail: true });
+// NPlusOne: 20 queries with one shape `SELECT ... FROM "person" WHERE "person"."id" = $1 ...`
+//   at src/views.ts:42; use selectRelated(Customer.person)
+```
+
+* The scope counts the queries of `fn` by statement shape: the query without its values.
+  Work that `fn` starts counts too.
+* When `fn` resolves, a shape that ran more than `threshold` times (default 5) throws `debug.NPlusOne` with `fail: true`, or emits an `NPlusOneWarning` process warning.
+  `error.report` has each shape, its SQL, its count, the call site of its first query and the fix.
+* The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated to-many query (`post.comments.all()`).
+* The call site and the SQL text are captured only inside the scope.
+  Outside it, each query pays one `AsyncLocalStorage` read (about 2 ns, measured).
+* In tests, `await debug.expectNoNPlusOne(fn, { threshold })` throws `NPlusOne` when `fn` sends an N+1.
+  Without source maps (`node --enable-source-maps`), the call site is a line of the compiled JavaScript.
+
 ### Hooks for packages
 
 A package that changes writes and reads from outside the ORM (for example

@@ -90,6 +90,20 @@ pub fn sql(target: Target, plan: &Plan) -> String {
     }
 }
 
+/// SQL of a plan with its parameter placeholders: the statement shape, for debugging.
+pub fn statement(target: Target, plan: &Plan) -> String {
+    let d = target.dialect;
+    match plan {
+        Plan::Select(p) => db::build(d, &p.stmt).0,
+        Plan::Count(s) | Plan::Exists(s) => db::build(d, s).0,
+        Plan::Update(s, _) => db::build(d, s).0,
+        Plan::Delete(s, _) => db::build(d, s).0,
+        Plan::Insert(s, _) => db::build(d, s).0,
+        #[cfg(feature = "model-composition")]
+        Plan::ComposedInsert(_) | Plan::ComposedMutation(_) => sql(target, plan),
+    }
+}
+
 /// An UPDATE / DELETE: the row count, or the rows when it has `RETURNING`.
 async fn count_or_rows(
     conn: &dyn Executor,

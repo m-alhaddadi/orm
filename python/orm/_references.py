@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from . import debug
 from .errors import IntegrityError, NotLoaded
 from .fields import BelongsTo, HasOne
 
@@ -148,6 +149,10 @@ async def load_reference(owner: Any, name: str, *, reload: bool = False, filtere
         if key_value(owner, source) == key:
             data[name] = value
             data.setdefault("_reference_keys", {})[name] = key
+    if debug._scope.get() is not None:
+        # The loader runs `fetch` in its own task, so the call site is captured here.
+        with debug.relation_load(owner._meta.name, name, "select_related"):
+            return await coalesced_load(owner, name, context, fetch, publish)
     return await coalesced_load(owner, name, context, fetch, publish)
 
 
