@@ -69,9 +69,12 @@ may select verified capabilities and extensions. A marker package cannot add cod
 to an already compiled engine. Refer to [build-time extensions](build-time-extensions.md)
 for extension manifests and build environment requirements.
 
-Build a custom Python artifact using the `custom` template. Record the exact Cargo
-features, Cargo.lock revision, Rust toolchain, target triple, Python version and
-extension manifest/compiler configuration with the artifact. This template has no
+Build a custom Python artifact using the `custom` template. Every artifact embeds
+its build record in `profile_metadata()["build"]`: the exact Cargo features, the
+`rustc -V` toolchain, target triple, Cargo profile and git revision (`git rev-parse
+HEAD` of the host source, or `ORM_BUILD_REVISION` when set; `unknown` outside git).
+Keep the Python version and the extension build configuration (`build-input.json`
+of `orm-extension-build`) with the artifact; the record does not hold them. This template has no
 backend by default; at least one backend must be explicitly selected. The
 features on the command line replace the `features` list of the template pyproject.
 
@@ -105,7 +108,9 @@ build; exact metadata validation rejects broadened named artifacts.
 ## Immutable adapter contract
 
 Native `profile_metadata()` / `profileMetadata()` returns JSON ABI 1 with `version`,
-`language`, `profile`, `backends`, boolean `capabilities`, and selected `adapters`.
+`language`, `profile`, `backends`, boolean `capabilities`, selected `adapters`, and
+the `build` record (`features`, `rustc`, `target`, `profile`, `revision`). The loaders
+reject an artifact without a well-formed build record.
 This metadata is separate from schema/extension manifests. An adapter name must
 have a true capability with the same canonical name. Python
 `orm._capabilities.ADAPTERS` is a frozen set initialized at module import;

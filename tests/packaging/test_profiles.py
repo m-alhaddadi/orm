@@ -12,9 +12,12 @@ profiles = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(profiles)
 
 
+BUILD = {"features": ["sqlite"], "rustc": "rustc 1.0.0", "target": "t", "profile": "release", "revision": "r"}
+
+
 def artifact(name, **overrides):
     metadata = {"abi": 1, "version": "0.1.0", "language": "python", "profile": name,
-                "backends": list(profiles.PROFILES[name]), "adapters": [],
+                "backends": list(profiles.PROFILES[name]), "adapters": [], "build": BUILD,
                 "capabilities": {"cli": name == "tooling", "generate-python": name == "tooling",
                                  "generate-typescript": name == "tooling", "composition": False}}
     metadata.update(overrides)
@@ -46,7 +49,8 @@ def test_selector_loads_exactly_one_profile():
         load.assert_called_once_with("orm_native_combined._native")
 
 
-@pytest.mark.parametrize("override", [{"abi": 2}, {"version": "0.2.0"}, {"language": "node"},
+@pytest.mark.parametrize("override", [{"abi": 2}, {"version": "0.2.0"}, {"language": "node"}, {"build": None},
+                                      {"build": {**BUILD, "features": "sqlite"}}, {"build": {**BUILD, "revision": None}},
                                       {"backends": ["postgres", "sqlite"]}, {"capabilities": {"cli": True}}])
 def test_incompatible_metadata(override):
     with pytest.raises(ImportError, match="incompatible"):
@@ -56,7 +60,7 @@ def test_incompatible_metadata(override):
 def test_custom_profile_validates_actual_capabilities():
     module = artifact("sqlite", profile="custom", capabilities={"cli": False, "reference-loading": True}, adapters=["reference-loading"])
     profiles.validate(module, "custom")
-    module.profile_metadata = lambda: json.dumps({"abi": 1, "version": "0.1.0", "language": "python", "profile": "custom",
+    module.profile_metadata = lambda: json.dumps({"abi": 1, "version": "0.1.0", "language": "python", "profile": "custom", "build": BUILD,
         "backends": ["sqlite"], "capabilities": {"reference-loading": False}, "adapters": ["reference-loading"]})
     with pytest.raises(ImportError, match="incompatible custom"):
         profiles.validate(module, "custom")
@@ -72,3 +76,12 @@ def test_malformed_custom_metadata_has_compatibility_diagnostic(metadata):
     module.profile_metadata = lambda: json.dumps(metadata)
     with pytest.raises(ImportError, match="incompatible"):
         profiles.validate(module, "custom")
+
+
+def test_installed_artifact_embeds_its_build_record():
+    import orm  # noqa: F401  (selects and validates the installed profile)
+    from orm import _native
+    metadata = json.loads(_native.profile_metadata())
+    build = metadata["build"]
+    assert set(metadata["backends"]) <= set(build["features"])
+    assert build["rustc"].startswith("rustc ") and build["target"] and build["revision"]

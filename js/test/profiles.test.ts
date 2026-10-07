@@ -11,7 +11,8 @@ test("native profiles reject invalid selections and compatibility before use", (
   mkdirSync(artifacts, { recursive: true });
   const directory = mkdtempSync(join(artifacts, "orm-profile-"));
   const path = join(directory, "mock.cjs");
-  const metadata = { abi: 1, version: "0.1.0", language: "node", profile: "sqlite", backends: ["sqlite"], adapters: [],
+  const build = { features: ["sqlite"], rustc: "rustc 1.0.0", target: "t", profile: "release", revision: "r" };
+  const metadata = { abi: 1, version: "0.1.0", language: "node", profile: "sqlite", backends: ["sqlite"], adapters: [], build,
     capabilities: { cli: false, "generate-python": false, "generate-typescript": false, composition: false } };
   const run = (profile: string) => execFileSync(process.execPath,
     ["--input-type=module", "-e", `const { native } = await import(${JSON.stringify(nativeUrl)}); native();`],
@@ -25,11 +26,21 @@ test("native profiles reject invalid selections and compatibility before use", (
     assert.throws(() => run("postgres"), /incompatible orm native profile/);
     writeFileSync(path, `module.exports={profileMetadata(){return ${JSON.stringify(JSON.stringify({ ...metadata, abi: 2 }))}}};`);
     assert.throws(() => run("sqlite"), /incompatible orm native artifact/);
-    for (const invalid of [null, [], { ...metadata, capabilities: [] },
+    for (const invalid of [null, [], { ...metadata, capabilities: [] }, { ...metadata, build: undefined },
+      { ...metadata, build: { ...build, features: "sqlite" } }, { ...metadata, build: { ...build, revision: null } },
       { ...metadata, adapters: ["reference-loading", "reference-loading"],
         capabilities: { "reference-loading": true } }]) {
       writeFileSync(path, `module.exports={profileMetadata(){return ${JSON.stringify(JSON.stringify(invalid))}}};`);
       assert.throws(() => run("sqlite"), /incompatible orm native artifact/);
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("the loaded native artifact embeds its build record", async () => {
+  const { native } = await import(nativeUrl);
+  const metadata = JSON.parse(native().profileMetadata());
+  const build = metadata.build;
+  for (const backend of metadata.backends) assert.ok(build.features.includes(backend), backend);
+  assert.match(build.rustc, /^rustc /);
+  assert.ok(build.target && build.revision);
 });

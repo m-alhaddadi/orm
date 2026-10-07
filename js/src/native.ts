@@ -138,13 +138,22 @@ const profiles: Record<string, readonly string[]> = {
   postgres: ["postgres"], sqlite: ["sqlite"], combined: ["postgres", "sqlite"], tooling: ["postgres", "sqlite"],
 };
 
+/** The artifact's embedded Cargo features, rustc, target, profile and git revision. */
+function buildRecord(build: unknown): boolean {
+  if (typeof build !== "object" || build === null || Array.isArray(build)) return false;
+  const record = build as Record<string, unknown>;
+  return Array.isArray(record["features"]) && record["features"].every(f => typeof f === "string") &&
+    ["rustc", "target", "profile", "revision"].every(key => typeof record[key] === "string");
+}
+
 function validate(addon: Addon, profile?: string): void {
   if (typeof addon.profileMetadata !== "function") throw new Error("incompatible orm native artifact; rebuild for metadata ABI 1");
   const meta = JSON.parse(addon.profileMetadata()) as {
     abi: number; version: string; language: string; profile: string; backends: string[];
-    capabilities: Record<string, boolean>; adapters: string[];
+    capabilities: Record<string, boolean>; adapters: string[]; build: Record<string, unknown>;
   };
   if (typeof meta !== "object" || meta === null || Array.isArray(meta) || meta.abi !== 1 || meta.version !== "0.1.0" || meta.language !== "node" ||
+      !buildRecord(meta.build) ||
       !Array.isArray(meta.backends) || meta.backends.length === 0 ||
       new Set(meta.backends).size !== meta.backends.length || meta.backends.some(b => !["postgres", "sqlite"].includes(b)) ||
       typeof meta.capabilities !== "object" || meta.capabilities === null ||

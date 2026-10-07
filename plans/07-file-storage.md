@@ -22,6 +22,15 @@ proceed independently; the ORM extension depends on plans 1 and 2.
 | Optional ORM extension | Field codecs, generated field operations, upload-on-write and SQL transaction coordination |
 | Application | Configuration, authorization, HTTP handling, retention and cleanup policy |
 
+**Exception for this release.** The field codec, the definition and write checks and
+the generated file operations live in host code behind the Cargo feature
+`file-storage` (`core/src/file_storage.rs`, `engine/src/file_storage.rs`, the codegen
+imports of `orm_file_storage` and `@orm/file-storage`). The extension manifest
+selects the feature through its `file-storage` capability, and a build without it
+compiles none of this code. Before a second field codec ships, move the codec and the
+generated operations behind a generic plan-01 field-adapter contract, so that the
+host names no codec.
+
 The extension depends on the storage library's public interface. The storage
 library has no dependency on ORM models, schemas, migrations, or transactions.
 Providers can ship as optional packages in the storage project. Adding a provider

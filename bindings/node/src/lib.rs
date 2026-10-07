@@ -790,6 +790,7 @@ pub fn profile_metadata() -> napi::Result<String> {
         "abi": 1, "version": env!("CARGO_PKG_VERSION"), "language": "node", "profile": profile,
         "backends": orm_engine::compiled_backends(),
         "adapters": [],
+        "build": serde_json::from_str::<serde_json::Value>(env!("ORM_BUILD_RECORD")).map_err(|e| schema_err(e.to_string()))?,
         "capabilities": { "cli": cfg!(feature = "cli"),
             "generate-python": cfg!(feature = "generate-python"),
             "generate-typescript": cfg!(feature = "generate-typescript"),

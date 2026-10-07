@@ -1,4 +1,4 @@
-fn main() { napi_build::setup(); build_record(); }
+fn main() { build_record(); }
 
 /// Embed the exact build configuration as `ORM_BUILD_RECORD` JSON for `profile_metadata()`.
 fn build_record() {

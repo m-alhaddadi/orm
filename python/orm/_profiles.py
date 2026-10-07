@@ -16,10 +16,21 @@ PROFILES = {
 }
 
 
+def _build_record(build: object) -> bool:
+    """The artifact's embedded Cargo features, rustc, target, profile and git revision."""
+    if not isinstance(build, dict):
+        return False
+    features = build.get("features")
+    return (isinstance(features, list) and all(isinstance(f, str) for f in features)
+            and all(isinstance(build.get(key), str) for key in ("rustc", "target", "profile", "revision")))
+
+
 def validate(module: ModuleType, profile: str) -> None:
     metadata = json.loads(module.profile_metadata())
     if not isinstance(metadata, dict):
         raise ImportError("incompatible orm native artifact; expected profile metadata object")
+    if not _build_record(metadata.get("build")):
+        raise ImportError("incompatible orm native artifact; rebuild it to embed its build record")
     if profile == "custom":
         backends = metadata.get("backends")
         capabilities = metadata.get("capabilities")
