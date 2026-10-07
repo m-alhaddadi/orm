@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { connect, func, IntegrityError, loads, Migrations, Migrator, Prefetch, QueryError, Registry, SchemaError } from "../src/index.js";
+import { connect, func, IntegrityError, loads, Migrations, Migrator, outer, Prefetch, QueryError, Registry, SchemaError } from "../src/index.js";
 import { Author, Book, Status, sqliteRegistry } from "./sqlite/models.js";
 
 test("SQLite CRUD, relations, enums, JSON, bulk defaults and CASE updates", async () => {
@@ -129,6 +129,18 @@ test("SQLite rebuilds after a rename ignore the kept rename hints", async () => 
     await db.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("SQLite outer() through a relation path", async () => {
+  const db = await connect("sqlite://:memory:", { registry: sqliteRegistry, default: false });
+  try {
+    await db.createTables();
+    const alice = await Author.objects.using(db).insert({ email: "a@example.com", name: "Alice" });
+    const bob = await Author.objects.using(db).insert({ email: "b@example.com", name: "Bob" });
+    await Book.objects.using(db).insertMany([{ authorId: alice.id, title: "one" }, { authorId: bob.id, title: "two" }]);
+    const name = Author.objects.filter(Author.email.eq(outer(Book.author.email))).select({ n: Author.name }).asScalar();
+    assert.deepEqual(await Book.objects.using(db).orderBy(Book.id).select({ title: Book.title, name }).all(), [{ title: "one", name: "Alice" }, { title: "two", name: "Bob" }]);
+  } finally { await db.close(); }
 });
 
 test("SQLite string functions and concatenation", async () => {

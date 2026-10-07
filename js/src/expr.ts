@@ -538,8 +538,8 @@ export function excluded<T, S extends string>(column: Column<T, S>): Excluded<T,
 export class Outer<T, S extends string> extends Expression<T, OuterOf<S>, {}> {
   constructor(readonly column: Column<T, S>) {
     super();
-    if (!(column instanceof Column) || column.path.length) {
-      throw new TypeError(`outer() takes a column of a model (no relation path), got ${String(column)}`);
+    if (!(column instanceof Column)) {
+      throw new TypeError(`outer() takes a column of a model, got ${String(column)}`);
     }
   }
 
@@ -547,7 +547,7 @@ export class Outer<T, S extends string> extends Expression<T, OuterOf<S>, {}> {
     let depth = 1;
     for (let c = ctx.outer; c; c = c.outer, depth++) {
       if (c.root === this.column.root) {
-        return { t: "outer", depth, name: this.column.field.ir };
+        return { t: "outer", depth, path: [...this.column.path], name: this.column.field.ir };
       }
     }
     throw new QueryError(`outer(${this.column.label}) is not a column of an enclosing query`);
@@ -561,9 +561,10 @@ export class Outer<T, S extends string> extends Expression<T, OuterOf<S>, {}> {
  * await User.objects.filter(exists(Post.objects.filter(Post.authorId.eq(outer(User.id))))).all();
  * ```
  *
- * It refers to the nearest enclosing query over the column's model.
+ * It refers to the nearest enclosing query over the column's model. A path of to-one
+ * relations reads a related row: `outer(Post.author.name)`.
  */
-export function outer<T, S extends string>(column: Column<T, S>): Outer<T, S> {
+export function outer<T, S extends string>(column: Column<T, S> & (string extends S ? unknown : Many extends S ? never : unknown)): Outer<T, S> {
   return new Outer(column);
 }
 

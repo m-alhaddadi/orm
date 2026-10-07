@@ -373,6 +373,9 @@ await Post.objects.update(views=Comment.objects.filter(Comment.post_id == outer(
 * `outer(Model.col)` refers to the nearest enclosing query over `Model` (a subquery
   of a subquery can reach two levels up). Using `User.id` directly inside a `Post`
   subquery raises a `ValueError` that suggests `outer(User.id)`.
+* `outer(Post.author.name)` reads a related row of the enclosing query's row through
+  to-one relations, in a correlated scalar subquery. A to-many hop has several rows, so
+  it is a `QueryError`.
 * A scalar subquery returning more than one row is a database error, as in SQL:
   slice it (`[:1]`) or aggregate. No row gives `NULL` (`None`).
 * `in_()` subqueries take `outer()` too. A subquery over the same table as its outer
@@ -690,8 +693,8 @@ TLS on, the TLS cost hides the difference)
 * Caching of compiled plans: a decision, not open work. [`performance.md`](performance.md)
   keeps it out until profiling shows a benefit; `prepare()` and the driver's statement
   cache exist.
-* `outer()` through relation paths (`outer(Post.author.name)`), `SEARCH` / `CYCLE`
-  clauses for recursive CTEs, filtering on window functions without a CTE.
+* `SEARCH` / `CYCLE` clauses for recursive CTEs, filtering on window functions without
+  a CTE.
 * Several shared windows per query, and shared windows with `ORDER BY` / `LIMIT`: needs
   a fix in sea-query (or our own SELECT writer); see Window functions.
 * Composite keys. (One-to-one, many-to-many, decimal, enum, array, UUID and JSON

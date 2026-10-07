@@ -168,6 +168,10 @@ export async function subqueries() {
   // two levels down: the nearest User query
   const commented = Comment.objects.filter(Comment.authorId.eq(outer(User.id))).select({ p: Comment.postId });
   await User.objects.filter(exists(Post.objects.filter(Post.id.in(commented)))).all();
+  const authorName = Post.objects.filter(Post.author.name.eq(outer(Comment.post.author.name))).select({ t: Post.title }).limit(1).asScalar();
+  await Comment.objects.select({ t: authorName }).all();
+  // @ts-expect-error outer() through a to-many relation
+  outer(User.posts.views);
   // @ts-expect-error an outer() reference with no enclosing query
   await User.objects.filter(User.id.eq(outer(User.id))).all();
   // a Post query reading a User reference runs only inside a User query

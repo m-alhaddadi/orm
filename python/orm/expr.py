@@ -681,15 +681,15 @@ class Outer(Expression[T]):
     __slots__ = ("_column",)
 
     def __init__(self, column: ColumnRef[T]) -> None:
-        if not isinstance(column, ColumnRef) or column._path:
-            raise TypeError(f"outer() takes a column of a model (no relation path), got {column!r}")
+        if not isinstance(column, ColumnRef):
+            raise TypeError(f"outer() takes a column of a model, got {column!r}")
         self._column = column
 
     def _ir(self, ctx: IRContext) -> IR:
         depth, c = 1, ctx.outer
         while c is not None:
             if c.root is self._column._root:
-                return {"t": "outer", "depth": depth, "name": self._column._field.name}
+                return {"t": "outer", "depth": depth, "path": list(self._column._path), "name": self._column._field.name}
             depth, c = depth + 1, c.outer
         raise ValueError(f"{self!r} is not a column of an enclosing query")
 
@@ -873,7 +873,8 @@ def outer(column: ColumnRef[T]) -> Outer[T]:
 
         await User.objects.filter(exists(Post.objects.filter(Post.author_id == outer(User.id))))
 
-    It refers to the nearest enclosing query over the column's model.
+    It refers to the nearest enclosing query over the column's model. A path of to-one
+    relations reads a related row: ``outer(Post.author.name)``.
     """
     return Outer(column)
 

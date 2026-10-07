@@ -58,6 +58,17 @@ async def test_crud_relations_defaults_and_upserts(sqlite):
     assert registry.ir()["dialect"] == "sqlite"
 
 
+async def test_outer_through_a_relation_path(sqlite):
+    db, m, _ = sqlite
+    Author, Book = m["Author"], m["Book"]
+    alice = await Author.objects.using(db).insert(email="a@example.com", name="Alice")
+    bob = await Author.objects.using(db).insert(email="b@example.com", name="Bob")
+    await Book.objects.using(db).insert_many([{"author_id": alice.id, "title": "one"}, {"author_id": bob.id, "title": "two"}])
+    name = Author.objects.filter(Author.email == orm.outer(Book.author.email)).select(Author.name).as_scalar()
+    rows = await Book.objects.using(db).order_by(Book.id).select(Book.title, name.label("name"))
+    assert [tuple(r) for r in rows] == [("one", "Alice"), ("two", "Bob")]
+
+
 async def test_transactions_concurrency_and_abandonment(sqlite):
     db, m, _ = sqlite
     Author = m["Author"]

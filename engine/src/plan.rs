@@ -1002,18 +1002,43 @@ impl<'s> Planner<'s> {
         }
     }
 
-    fn outer_field(&self, depth: usize, name: &str) -> Result<(&str, &'s FieldIr)> {
+    /// The enclosing query's alias and the field reached from its root through `path`.
+    fn outer_field(&self, depth: usize, path: &[String], name: &str) -> Result<(&str, &'s FieldIr)> {
         if depth == 0 || depth > self.outer.len() {
             return Err(Error::query(format!("outer() column {name:?} has no enclosing query at that depth")));
         }
-        let (alias, model) = &self.outer[self.outer.len() - depth];
+        let (alias, root) = &self.outer[self.outer.len() - depth];
+        let mut model = *root;
+        for hop in path {
+            let (rel, target) = self.model(model).relation(hop).map_err(query_err)?;
+            // A to-many hop has several rows, so the value would not be one value.
+            if rel.kind != RelKind::One {
+                return Err(Error::query(format!("outer() through {hop:?} needs a to-one relation, not a to-many one")));
+            }
+            model = target;
+        }
         #[cfg(feature = "composition")]
-        self.reject_computed(self.model(*model), name)?;
+        self.reject_computed(self.model(model), name)?;
         #[cfg(feature = "composition")]
-        if self.model(*model).resolved_fields[self.model(*model).field_pos(name).map_err(query_err)?].storage.owner != self.model(*model).owner {
+        if self.model(model).resolved_fields[self.model(model).field_pos(name).map_err(query_err)?].storage.owner != self.model(model).owner {
             return Err(Error::query("outer() on inherited storage requires an explicit owner projection"));
         }
-        Ok((alias, self.model(*model).field(name).map_err(query_err)?))
+        Ok((alias, self.model(model).field(name).map_err(query_err)?))
+    }
+
+    /// `(SELECT o2.<column> FROM <hop 1> o1 [JOIN <hop 2> o2 ON ...] WHERE o1.to = <outer>.from)`:
+    /// a field of a row related to an enclosing query's row through to-one relations.
+    fn outer_path(&mut self, depth: usize, path: &[String], field: &FieldIr) -> Result<SExpr> {
+        let (alias, root) = self.outer[self.outer.len() - depth].clone();
+        let mut sub = Query::select();
+        let mut at = (alias, root);
+        for (k, hop) in path.iter().enumerate() {
+            let (rel, target) = self.model(at.1).relation(hop).map_err(query_err)?;
+            let next = self.add_hop(&mut sub, k == 0, (&at.0, at.1), rel, target, "o")?;
+            at = (next, target);
+        }
+        sub.expr(col(&at.0, &field.column));
+        Ok(SExpr::SubQuery(None, Box::new(sub.into())))
     }
 
     #[cfg(feature = "composition")]
@@ -1034,8 +1059,8 @@ impl<'s> Planner<'s> {
                 let field = self.model(self.root).field(name).ok();
                 Hint { ty: field.map(|f| f.value_type()), field }
             }
-            Expr::Outer { depth, name } => {
-                let field = self.outer_field(*depth, name).ok().map(|(_, f)| f);
+            Expr::Outer { depth, path, name } => {
+                let field = self.outer_field(*depth, path, name).ok().map(|(_, f)| f);
                 Hint { ty: field.map(|f| f.value_type()), field }
             }
             Expr::CteCol { cte, name } => {
@@ -1110,9 +1135,9 @@ impl<'s> Planner<'s> {
                 let f = self.model(self.root).field(name).map_err(query_err)?;
                 col("excluded", &f.column)
             }
-            Expr::Outer { depth, name } => {
-                let (alias, f) = self.outer_field(*depth, name)?;
-                col(alias, &f.column)
+            Expr::Outer { depth, path, name } => {
+                let (alias, f) = self.outer_field(*depth, path, name)?;
+                if path.is_empty() { col(alias, &f.column) } else { self.outer_path(*depth, path, f)? }
             }
             Expr::CteCol { cte, name } => {
                 let (alias, f) = self.cte_col(cte, name)?;
@@ -1157,7 +1182,7 @@ impl<'s> Planner<'s> {
                 let m = self.walk(self.root, path)?;
                 self.model(m).field(name).map_err(query_err)?.value_type()
             }
-            Expr::Outer { depth, name } => self.outer_field(*depth, name)?.1.value_type(),
+            Expr::Outer { depth, path, name } => self.outer_field(*depth, path, name)?.1.value_type(),
             Expr::CteCol { cte, name } => {
                 self.model(self.model_idx(cte)?).field(name).map_err(query_err)?.value_type()
             }

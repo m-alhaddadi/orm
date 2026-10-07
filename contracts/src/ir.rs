@@ -559,8 +559,14 @@ pub enum Expr {
     /// Bound schema-policy string literal.
     Text { value: String },
     /// A field of an enclosing query's root model (or CTE), `depth` queries up:
-    /// `outer(User.id)` in a subquery of a `User` query.
-    Outer { depth: usize, name: String },
+    /// `outer(User.id)` in a subquery of a `User` query. A `path` of to-one relations
+    /// reaches a related row's field: `outer(Post.author.name)`.
+    Outer {
+        depth: usize,
+        #[serde(default)]
+        path: Vec<String>,
+        name: String,
+    },
     /// A column of a CTE (`cte.c.<name>`), in a query reading that CTE, or in the
     /// recursive part of the CTE itself.
     CteCol { cte: String, name: String },

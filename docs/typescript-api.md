@@ -185,7 +185,8 @@ Other `Select` methods:
 * `qs.select({ t: Post.title }).limit(1).asScalar()` for a scalar value.
 * `col.in(select)` for a one-column select.
 * `outer(User.id)` refers to the nearest enclosing `User` query. It can sit two or more
-  levels down.
+  levels down. `outer(Post.author.name)` reads a related row through to-one relations;
+  a to-many hop is a type error and a `QueryError`.
 
 A query set that holds an `outer()` reference can't run on its own. Trying to is a type
 error, and also a `QueryError` at runtime.
