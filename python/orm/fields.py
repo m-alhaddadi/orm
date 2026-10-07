@@ -53,8 +53,6 @@ class Field(Generic[T]):
     name: str
     column: str
     model: type[Model]
-    # A proxy client default, which native insert preparation supplies.
-    client_default: bool = False
 
     def __init__(
         self,
@@ -68,6 +66,7 @@ class Field(Generic[T]):
         default: T | Callable[[], T] = MISSING,
         default_now: bool = False,
         server_default: bool = False,
+        client_default: Any = None,
     ) -> None:
         self.primary_key = primary_key
         self.auto_increment = auto_increment
@@ -79,6 +78,8 @@ class Field(Generic[T]):
         self.default_now = default_now
         # The database computes a default (an SQL expression in the schema).
         self.server_default = server_default
+        # The schema's ``@client_default`` IR, which native insert preparation fills.
+        self.client_default = client_default
 
     def __set_name__(self, owner: type[Model], name: str) -> None:
         self.name = name
@@ -109,7 +110,7 @@ class Field(Generic[T]):
     @property
     def has_insert_default(self) -> bool:
         """True if native insert preparation or the database fills an omitted value."""
-        return self.client_default or self.has_server_value
+        return self.client_default is not None or self.has_server_value
 
     def ir(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "column": self.column, "type": self.type_name}
@@ -118,6 +119,8 @@ class Field(Generic[T]):
                 out[flag] = True
         if self.default is not MISSING and not callable(self.default):
             out["default"] = self.default
+        if self.client_default is not None:
+            out["client_default"] = self.client_default
         return out
 
     def __repr__(self) -> str:

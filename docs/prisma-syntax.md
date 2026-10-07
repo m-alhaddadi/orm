@@ -92,6 +92,7 @@ Fields are `name Type @attr...` with no colon. `Type?` is nullable, as before.
 | `@default(now)` | `@default(now())` | native |
 | `@default(sql("gen_random_uuid()"))` | `@default(dbgenerated("gen_random_uuid()"))` | native |
 | `@default({"a": 1})` | `@default("{\"a\": 1}")` on a `Json` field | native |
+| client-made `uuid` | `@client_default(uuid())`, `@client_default(uuid7())` | ours |
 | `@column("db_name")` | `@map("db_name")` | native |
 | `@check("views >= 0")` | `@check("views >= 0")` | ours |
 | `@comment("...")` | `@comment("...")` | ours |
@@ -321,6 +322,11 @@ Where the mapping above leaves something open:
   `ORM_DATABASE_URL`). `generator` blocks are read and ignored, so a file can also
   drive Prisma Client.
 * Comments are `//` only, as in Prisma.
+* Prisma Client makes `uuid()` and `cuid()`, not the database. So an imported
+  `@default(uuid())` (also `uuid(4)`) becomes `@client_default(uuid())`, and
+  `@default(uuid(7))` becomes `@client_default(uuid7())`: no DDL default, and the ORM
+  fills the value on insert. `cuid()`, `nanoid()` and `ulid()` fail with a hint to
+  use `uuid()` or `uuid7()`.
 
 ## Migrations
 

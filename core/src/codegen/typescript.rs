@@ -247,7 +247,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
             if m.native.computed().contains(&position) { continue; }
             #[cfg(not(feature = "composition"))]
             let _ = position;
-            let optional = f.nullable || has_server_value(f) || super::has_client_default(ir, &m.ir.name, &f.name);
+            let optional = f.nullable || has_server_value(f) || f.client_default.is_some();
             match belongs_to(m, &f.name) {
                 Some(r) if !optional => one_of.push((f, r)),
                 Some(r) => {

@@ -306,7 +306,7 @@ mod integration_tests {
         let mut view = serde_json::to_value(&ir.models[0]).unwrap(); view["name"] = "PublicPost".into();
         ir.models.push(serde_json::from_value(view).unwrap());
         ir.behavior.proxy_models.push(orm_contracts::extension::ProxyModel {
-            model: "PublicPost".into(), parent: "Post".into(), storage_owner: "Post".into(), fields: vec![], defaults: Default::default(),
+            model: "PublicPost".into(), parent: "Post".into(), storage_owner: "Post".into(), fields: vec![], ..Default::default()
         });
         validate(&ir).unwrap();
         ir.behavior.proxy_models.clear();

@@ -27,6 +27,7 @@ pub mod ownership;
 #[cfg(feature = "file-storage")]
 pub mod file_storage;
 pub mod identity;
+pub mod client_default;
 
 #[cfg(any(feature = "generic-relations", test))]
 pub mod generic;

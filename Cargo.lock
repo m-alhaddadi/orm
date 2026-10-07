@@ -807,12 +807,15 @@ dependencies = [
 name = "orm-core"
 version = "0.1.0"
 dependencies = [
+ "bigdecimal",
+ "chrono",
  "orm-contracts",
  "orm-proxy-runtime",
  "serde",
  "serde_json",
  "storage-reference",
  "toml",
+ "uuid",
 ]
 
 [[package]]
@@ -897,12 +900,9 @@ dependencies = [
 name = "orm-proxy-runtime"
 version = "0.1.0"
 dependencies = [
- "bigdecimal",
- "chrono",
  "orm-contracts",
  "serde",
  "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -1649,6 +1649,7 @@ version = "1.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
 ]

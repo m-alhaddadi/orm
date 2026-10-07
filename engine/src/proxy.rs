@@ -1,7 +1,6 @@
 //! Concrete optional proxy behavior, inside existing planning/materialization.
-use crate::{db::{Cell, DbResult, RowSet}, error::{Error, Result}, params::{array_type, null_of}};
-use orm_core::{behavior::ResultShape, ir::ValueType, proxy::{Category, ClientDefault, EnumScalar, PreparedField, PreparedProxy, Warning, Warnings}};
-use sea_query::Value;
+use crate::db::{Cell, DbResult, RowSet};
+use orm_core::{behavior::ResultShape, ir::ValueType, proxy::{Category, EnumScalar, PreparedField, PreparedProxy, Warning, Warnings}};
 
 /// Check public instance columns only. An absent LEFT JOIN object is not a loaded
 /// null field and produces no warning. Row order/count/values remain untouched.
@@ -79,39 +78,4 @@ pub fn emit(warnings: &[Warning]) {
         // Both bindings use the same native sink; stderr is capturable by hosts.
         if let Ok(record) = serde_json::to_string(warning) { eprintln!("{record}"); }
     }
-}
-
-fn value(default: &ClientDefault) -> Value {
-    match default {
-        ClientDefault::Null(ty) => null_of(Some(*ty)),
-        ClientDefault::Int(v) => Value::Int(Some(*v)),
-        ClientDefault::BigInt(v) => Value::BigInt(Some(*v)),
-        ClientDefault::Float(v) => Value::Double(Some(*v)),
-        ClientDefault::Bool(v) => Value::Bool(Some(*v)),
-        ClientDefault::Text(v) => Value::String(Some(v.clone())),
-        ClientDefault::DateTime(v) => Value::ChronoDateTimeWithTimeZone(Some(*v)),
-        ClientDefault::Date(v) => Value::ChronoDate(Some(*v)),
-        ClientDefault::Uuid(v) => Value::Uuid(Some(*v)),
-        ClientDefault::Decimal(v) => Value::BigDecimal(Some(Box::new(v.clone()))),
-        ClientDefault::Json(v) => Value::Json(Some(Box::new(v.clone()))),
-        ClientDefault::Array(ty, values) => Value::Array(array_type(*ty), Some(Box::new(values.iter().map(value).collect()))),
-    }
-}
-
-/// Explicit SQL NULL is Some(typed null); None is an omitted value. Schema
-/// defaults fill omission before native transforms/validation or SQL planning.
-pub fn insert_defaults<'a>(proxy: &PreparedProxy, model: &orm_core::schema::Model, fields: &'a [String],
-    mut rows: Vec<Vec<Option<Value>>>) -> Result<(std::borrow::Cow<'a, [String]>, Vec<Vec<Option<Value>>>)> {
-    if proxy.defaults.is_empty() { return Ok((std::borrow::Cow::Borrowed(fields), rows)); }
-    let mut fields = fields.to_vec();
-    if rows.iter().any(|r| r.len() != fields.len()) { return Err(Error::query("insert row length does not match fields")); }
-    for (position, default) in &proxy.defaults {
-        let name = &model.fields()[*position].name;
-        let slot = match fields.iter().position(|f| f == name) {
-            Some(slot) => slot,
-            None => { let slot = fields.len(); fields.push(name.clone()); for row in &mut rows { row.push(None); } slot }
-        };
-        for row in &mut rows { if row[slot].is_none() { row[slot] = Some(value(default)); } }
-    }
-    Ok((std::borrow::Cow::Owned(fields), rows))
 }

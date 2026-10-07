@@ -9,6 +9,8 @@ pub type Result<T> = std::result::Result<T, String>;
 pub struct Model {
     pub ir: ModelIr,
     pub pk: usize,
+    /// Prepared `@client_default`s by field position.
+    pub client_defaults: Vec<(usize, crate::client_default::ClientDefault)>,
     #[cfg(feature = "file-storage")]
     pub file_fields: Vec<crate::file_storage::PreparedFileField>,
     #[cfg(feature = "query-defaults")]
@@ -47,7 +49,7 @@ impl Model {
         };
         Ok(Model {
             #[cfg(feature = "file-storage")] file_fields: vec![],
-            ir, pk: 0, field_index, relation_index: HashMap::new(),
+            ir, pk: 0, field_index, relation_index: HashMap::new(), client_defaults: vec![],
             #[cfg(feature = "query-defaults")] query_defaults: Default::default(),
             #[cfg(feature = "composition")] native: crate::behavior::NativeModel::None,
             #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
@@ -198,9 +200,13 @@ impl Schema {
                 }
                 relation_index.insert(r.name.clone(), (i, target));
             }
+            if let Some(f) = m.fields.iter().find(|f| f.enum_subset.is_some()) {
+                return Err(format!("{}.{}: an enum subset is only allowed on a field of a proxy model", m.name, f.name));
+            }
+            let client_defaults = crate::client_default::prepare(&m.name, &m.fields, &enums)?;
             models.push(Model {
                 #[cfg(feature = "file-storage")] file_fields: file_fields.next().expect("prepared file model"),
-                ir: m, pk, field_index, relation_index,
+                ir: m, pk, field_index, relation_index, client_defaults,
                 #[cfg(feature = "query-defaults")] query_defaults: Default::default(),
                 #[cfg(feature = "composition")] native: native.next().expect("prepared model"),
                 #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),

@@ -14,6 +14,9 @@ orm-proxy-runtime = { path = "../extensions/proxy-runtime", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+chrono = "0.4"
+uuid = "1"
+bigdecimal = "0.4"
 storage-reference = { path = "../storage/reference", optional = true }
 
 [features]

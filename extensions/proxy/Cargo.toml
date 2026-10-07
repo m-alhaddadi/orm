@@ -37,29 +37,9 @@ kind = "value"
 required = true
 
 [[package.metadata.orm-extension.attributes]]
-name = "proxy.nonNull"
+name = "proxy.fields"
 target = "model"
-[[package.metadata.orm-extension.attributes.positional]]
-kind = "string"
-required = true
-
-[[package.metadata.orm-extension.attributes]]
-name = "proxy.subset"
-target = "model"
-[[package.metadata.orm-extension.attributes.positional]]
-kind = "string"
-required = true
-# `value`: members are bare enum names, `[ACTIVE]`; the pass checks a list of names.
-[[package.metadata.orm-extension.attributes.positional]]
-kind = "value"
-required = true
-
-[[package.metadata.orm-extension.attributes]]
-name = "proxy.default"
-target = "model"
-[[package.metadata.orm-extension.attributes.positional]]
-kind = "string"
-required = true
-[[package.metadata.orm-extension.attributes.positional]]
-kind = "value"
-required = true
+[package.metadata.orm-extension.attributes.arguments.include]
+kind = "list"
+[package.metadata.orm-extension.attributes.arguments.exclude]
+kind = "list"

@@ -501,8 +501,9 @@ await post.refresh()
 ```
 
 * `insert` validates eagerly. Unknown fields, expressions as values and missing
-  required fields raise before any SQL runs. Fields left out get the column's database
-  default (`DEFAULT` in the VALUES list), and `RETURNING` reads them back.
+  required fields raise before any SQL runs. Fields left out get their
+  `@client_default`, else the column's database default (`DEFAULT` in the VALUES
+  list), and `RETURNING` reads them back.
 * `do_update()` with no columns overwrites the fields you passed except the conflict
   columns, so `created_at` isn't reset to `now()`. Pass columns to choose them.
 * `do_update(*columns, **values)`: `columns` take the proposed values, `values` are
@@ -629,8 +630,10 @@ Rust took these from ~2.3 / ~4.3 ms, below the Phase 0 prototype's 2.5 / 4.7 ms
 4. **Explicit both sides of a relation** in the generated code (`BelongsTo` +
    `HasMany`) rather than Django's implicit `related_name`. The schema names both.
 5. **Explicit writes, read-only instances** (your call: no `save()`). Defaults live in
-   the database (DDL `DEFAULT`) and come back via `RETURNING`. Callable defaults
-   declared in Python are evaluated at insert time.
+   the database (DDL `DEFAULT`) and come back via `RETURNING`. A schema
+   `@client_default` fills an omitted insert value natively. Callable defaults
+   declared in Python fill an omitted value at the same step, before native
+   transforms and validators; an explicit value, also `None`, wins over both.
 6. **Instance equality** is by model class and primary key (Django).
 7. **One default database** set by `connect()`, `.using(db)` to override, like Django's
    `using()`.

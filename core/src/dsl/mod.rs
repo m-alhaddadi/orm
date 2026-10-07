@@ -209,7 +209,8 @@ fn compile_project_mode(source: &str, origin: Option<&Path>, update: Option<Iden
         Some(pos) => loader.located(syntax::Error { pos: *pos, msg }),
         None => msg,
     };
-    let mut ir = lower::Lowering { load: &load, deferred_identity: &deferred_identity }.lower(items).map_err(|e| loader.located(e))?;
+    let proxies: std::collections::HashSet<String> = declarations.iter().filter(|d| d.attribute == "proxy.of").map(|d| d.model.clone()).collect();
+    let mut ir = lower::Lowering { load: &load, deferred_identity: &deferred_identity, proxies: &proxies }.lower(items).map_err(|e| loader.located(e))?;
     ir.identities = identities;
     if !declarations.is_empty() {
         ir.behavior.schema_contract = crate::behavior::SCHEMA_CONTRACT;

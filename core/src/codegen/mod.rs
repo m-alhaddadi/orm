@@ -62,9 +62,14 @@ mod reference_tests {
         assert!(python::generate(&ir, &schema, "schema.prisma").err().unwrap().contains("collides"));
         assert!(typescript::generate(&ir, &schema, "schema.prisma", "orm").err().unwrap().contains("collides"));
     }
-}
 
-/// A proxy client default lets an insert omit the field.
-fn has_client_default(ir: &crate::ir::SchemaIr, model: &str, field: &str) -> bool {
-    ir.behavior.proxy_models.iter().any(|p| p.model == model && p.defaults.contains_key(field))
+    #[test]
+    fn client_defaults_make_insert_fields_optional() {
+        let ir = crate::dsl::compile("model A {\n id String @id @client_default(uuid())\n name String\n}", None).unwrap();
+        let schema = crate::schema::Schema::from_ir(serde_json::from_value(serde_json::to_value(&ir).unwrap()).unwrap()).unwrap();
+        let py = python::generate(&ir, &schema, "schema.prisma").unwrap().stub;
+        assert!(py.contains("    id: NotRequired[str]\n    name: str\n"), "{py}");
+        let ts = typescript::generate(&ir, &schema, "schema.prisma", "orm").unwrap();
+        assert!(ts.contains("  id?: In<string>;\n  name: In<string>;\n"), "{ts}");
+    }
 }

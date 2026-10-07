@@ -260,7 +260,18 @@ fn errors_point_at_the_problem() {
         ("model A {\n  id BigInt @id\n  e Unsupported(\"vector\")\n}".into(), "needs argument \"dims\""),
         ("model A {\n  id BigInt @id\n  e Unsupported(\"nope(1)\")\n}".into(), "unknown type nope"),
         ("model A {\n  id BigInt @id\n  e String @db.Nope\n}".into(), "unknown native type @db.Nope"),
-        ("model A {\n  id BigInt @id @default(uuid())\n}".into(), "not uuid"),
+        ("model A {\n  id BigInt @id @default(foo())\n}".into(), "not foo"),
+        ("enum E {\n  a\n  b\n}\nmodel A {\n  id BigInt @id\n  e E(a)\n}".into(), "A.e: an enum subset E(...) is only allowed on a field of a proxy model"),
+        ("model A {\n  id String @id @default(cuid())\n}".into(), "A.id: cuid() is not supported; use @client_default(uuid())"),
+        ("model A {\n  id String @id @default(uuid(5))\n}".into(), "uuid() takes no argument, 4 or 7"),
+        ("model A {\n  id BigInt @id @client_default(autoincrement())\n}".into(), "A.id: only the database can make autoincrement(); use @default"),
+        ("model A {\n  id String @id @client_default(dbgenerated(\"x\"))\n}".into(), "only the database can make dbgenerated()"),
+        ("model A {\n  id String @id @client_default(cuid())\n}".into(), "@client_default takes a literal, uuid(), uuid7() or now(), not cuid()"),
+        ("model A {\n  id String @id @client_default(uuid(7))\n}".into(), "uuid() takes no arguments"),
+        ("model A {\n  id BigInt @id @client_default(uuid())\n}".into(), "A.id: @client_default uuid does not fit a bigint field"),
+        ("model A {\n  id BigInt @id\n  at String @client_default(now())\n}".into(), "A.at: @client_default now does not fit"),
+        ("model A {\n  id BigInt @id\n  n Int @client_default(\"x\")\n}".into(), "A.n: @client_default requires int32"),
+        ("enum E {\n  a\n}\nmodel A {\n  id BigInt @id\n  e E @client_default(b)\n}".into(), "A.e: E has no value b"),
         ("model A {\n  id BigInt @id\n  j Json @default(\"{oops\")\n}".into(), "JSON text"),
         (format!("{b}\n{b}"), "declared twice"),
         ("datasource db {\n  provider = \"mysql\"\n}".into(), "provider must be \"postgresql\""),
@@ -531,16 +542,16 @@ fn imported_models_use_main_extension_definitions() {
 fn behavioral_arguments_preserve_names_null_and_nested_json() {
     let mut items = syntax::parse(r#"model View {
       @@proxy.of(User)
-      @@proxy.subset("state", [ACTIVE, OLD])
-      @@proxy.default("payload", {enabled: true, labels: ["null", null, 3]})
+      @@view.members("state", [ACTIVE, OLD])
+      @@view.payload("payload", {enabled: true, labels: ["null", null, 3]})
     }"#).unwrap();
     let declarations = super::lower::behavior_declarations(&mut items, "views.prisma", &[]).unwrap();
     assert_eq!(declarations[0].positional, vec![serde_json::json!("User")]);
     assert_eq!(declarations[1].positional[1], serde_json::json!(["ACTIVE", "OLD"]));
     assert_eq!(declarations[2].positional[1], serde_json::json!({"enabled":true,"labels":["null",null,3]}));
     assert_eq!(declarations[2].location.file, "views.prisma");
-    assert!(syntax::parse(r#"model V { @@proxy.default("x", {key:1,key:2}) }"#).is_err());
-    let mut items = syntax::parse(r#"model V { @@proxy.default("x", now()) }"#).unwrap();
+    assert!(syntax::parse(r#"model V { @@view.payload("x", {key:1,key:2}) }"#).is_err());
+    let mut items = syntax::parse(r#"model V { @@view.payload("x", now()) }"#).unwrap();
     assert!(super::lower::behavior_declarations(&mut items, "v.prisma", &[]).is_err());
 }
 
@@ -566,4 +577,47 @@ fn behavioral_literal_forms_need_an_argument_of_kind_value() {
     }
     // An attribute no compiled manifest declares keeps the literal forms; validation names the missing extension.
     assert!(lower(r#"model V { @@other.mark(Name, null, {k: 1}) }"#).is_ok());
+}
+
+#[test]
+fn client_defaults_stay_out_of_the_database_schema() {
+    let src = "enum Status {\n  ACTIVE @map(\"active\")\n  OLD @map(\"old\")\n}\nmodel A {\n  id String @id @client_default(uuid7()) @db.Uuid\n  token String @client_default(uuid())\n  \
+               status Status @default(OLD) @client_default(ACTIVE)\n  tags Status[] @client_default([ACTIVE, OLD])\n  \
+               at DateTime @client_default(now())\n  day DateTime @db.Date @client_default(now())\n  \
+               meta Json @client_default(\"{\\\"a\\\": [1]}\")\n  n Int @client_default(3)\n  ok Boolean @client_default(true)\n  \
+               prisma String @default(uuid())\n  prisma7 String @default(uuid(7))\n}";
+    let ir = ok(src);
+    let defaults: Vec<_> = ir.models[0].fields.iter().map(|f| serde_json::to_value(&f.client_default).unwrap()).collect();
+    assert_eq!(defaults, [json!({"call": "uuid7"}), json!({"call": "uuid"}), json!({"value": "active"}), json!({"value": ["active", "old"]}),
+        json!({"call": "now"}), json!({"call": "now"}), json!({"value": {"a": [1]}}), json!({"value": 3}), json!({"value": true}),
+        json!({"call": "uuid"}), json!({"call": "uuid7"})]);
+    assert_eq!(ir.models[0].fields[2].default, Some(json!("old")));
+    assert!(ir.models[0].fields[9].default.is_none() && ir.models[0].fields[9].default_sql.is_none());
+    let (_, with) = check(ir).unwrap();
+    // Drop each client default attribute, up to its matching parenthesis.
+    let mut plain = src.replace(" @default(uuid(7))", "").replace(" @default(uuid())", "");
+    while let Some(start) = plain.find(" @client_default(") {
+        let mut depth = 0;
+        let end = plain[start..].char_indices().find_map(|(i, c)| {
+            depth += match c { '(' => 1, ')' => -1, _ => 0 };
+            (c == ')' && depth == 0).then_some(start + i + 1)
+        }).unwrap();
+        plain.replace_range(start..end, "");
+    }
+    let (_, without) = check(ok(&plain)).unwrap();
+    assert_eq!(crate::migrate::create_all(&with).unwrap(), crate::migrate::create_all(&without).unwrap());
+    assert!(crate::migrate::plan(&with, &crate::migrate::snapshot(&without).unwrap()).unwrap().up.is_empty());
+    assert_eq!(with.models[0].client_defaults.len(), 11);
+}
+
+#[test]
+fn enum_subsets_lower_only_on_proxy_fields() {
+    let lowered = |field: &str| compile(&format!("enum E {{\n  a\n  b\n}}\nmodel M {{\n  id Int @id\n  e E\n}}\nmodel V {{\n  {field}\n  @@proxy.of(M)\n}}"), None);
+    for (field, message) in [("e E(c)", "V.e: E has no value c"), ("e E(a, a)", "V.e: a is listed twice"), ("e E(\"a\")", "V.e: an enum subset lists member names")] {
+        let error = lowered(field).unwrap_err();
+        assert!(error.contains(message), "{error}");
+    }
+    let mut ir = ok("enum E {\n  a\n  b\n}\nmodel M {\n  id Int @id\n  e E\n}");
+    ir.models[0].fields[1].enum_subset = Some(vec!["a".into()]);
+    assert!(check(ir).err().unwrap().contains("M.e: an enum subset is only allowed on a field of a proxy model"));
 }

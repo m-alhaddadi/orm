@@ -213,7 +213,9 @@ type error. `from()` accepts only a CTE that has the model's columns.
 Writes run when they are called and return a `Promise`:
 
 * `insert(row, { onConflict, doNothing | doUpdate | set })` gives the stored row (or
-  `null` with `doNothing`). `insertMany(rows, ...)` is the bulk version.
+  `null` with `doNothing`). `insertMany(rows, ...)` is the bulk version. A field left
+  out gets its `@client_default` (filled natively, as in Python), else the database
+  default; an explicit value, also `null`, wins.
 * `qs.update({...}, { returning })` gives a count, or the rows when `returning` is set.
 * `qs.delete()`.
 * `updateMany(rows, { batchSize, returning })` does a bulk update by primary key with
