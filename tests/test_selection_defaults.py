@@ -193,6 +193,10 @@ async def test_default_order(dialect):
         assert (await t.without_defaults().first()).name == "a"
         assert await t.count() == 4 and await t.exists()
         assert [names(b) async for b in t.batches(2)] == [["a", "b"], ["c", "d"]]
+        page = await t.paginate(first=3)
+        assert names(page.items) == ["c", "d", "a"]
+        assert names((await t.paginate(first=3, after=page.next_cursor)).items) == ["b"]
+        assert names((await t.without_defaults().paginate(first=3)).items) == ["a", "b", "c"]
         c = await t.get(Topic.name == "c")
         for body in ["x", "z", "y"]:
             await n.insert(topic_id=c.pk, body=body)

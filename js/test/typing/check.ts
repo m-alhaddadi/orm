@@ -4,7 +4,7 @@
  * two types are identical. Never run.
  */
 
-import { Decimal, Prefetch, exists, func, outer, param, window, type JsonValue } from "../../src/index.js";
+import { Decimal, Prefetch, exists, func, outer, param, window, type JsonValue, type Page } from "../../src/index.js";
 import { Comment, Post, Priority, Profile, Role, Tag, User } from "../blog/models.js";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -60,6 +60,9 @@ export async function filters() {
   User.objects.orderBy(User.posts.views);
   Post.objects.orderBy("-createdAt", "id", Post.title.desc());
   Post.objects.select({ t: Post.title }).orderBy("-views");
+  same<Awaited<ReturnType<typeof Post.objects.paginate>>, Page<Post>>();
+  // @ts-expect-error a forward page reads after a cursor, not before one
+  Post.objects.paginate({ first: 20, before: "x" });
   // @ts-expect-error orderBy takes the model's own field names
   Post.objects.orderBy("-nope");
   // @ts-expect-error field names are the TypeScript names, not the column names

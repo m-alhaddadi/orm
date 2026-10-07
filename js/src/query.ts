@@ -39,6 +39,7 @@ import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
 import { DB, fieldValue, RELATED, registerQueries, type Instance, type ModelClass, type ModelMeta } from "./model.js";
 import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
 import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
+import { after, decodeCursor, encodeCursor, fingerprint, keyset, type Page, type PageOptions } from "./pagination.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
 import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./select.js";
 
@@ -889,6 +890,46 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       return keys.map((k) => new Ordering(this.meta.column(this.meta.fieldByIr.get(k.field)!), k.desc ?? false, k.nulls));
     }
     return [this.meta.column(this.meta.pk).asc()];
+  }
+
+  /**
+   * A page of rows by keyset: `paginate({ first: 20, after })` reads on from a cursor,
+   * `paginate({ last: 20, before })` reads back.
+   *
+   * The order is `orderBy()`, else the schema default order, else the primary key; the
+   * primary key is added when the order is not unique. Order columns are columns of the
+   * model itself, and a nullable one needs `{ nulls }`. `selectRelated`,
+   * `prefetchRelated`, `only()` and query defaults apply to each page.
+   */
+  async paginate(options: PageOptions, ...check: Runnable<P, X>): Promise<Page<R>> {
+    void check;
+    const forward = options.first !== undefined;
+    if (forward === (options.last !== undefined)) throw new TypeError("paginate() takes first or last");
+    if ((forward && options.before !== undefined) || (!forward && options.after !== undefined)) {
+      throw new TypeError("paginate() takes first with after, or last with before");
+    }
+    const size = forward ? options.first : options.last;
+    if (!Number.isInteger(size) || size! < 1) throw new RangeError("a page size is an integer of at least 1");
+    if (this.state.limit !== undefined || this.state.offset !== undefined) {
+      throw new QueryError("paginate() can't be used on a sliced query set");
+    }
+    const keys = keyset(this.meta, this.defaultOrder());
+    const fp = fingerprint(this.meta, keys);
+    const order = keys.map(([, o]) => (forward ? o : o.reversed()));
+    const helpers = [...(this.state.modelHelpers ?? [])];
+    for (const [f] of keys) if (!helpers.includes(f.ir)) helpers.push(f.ir);
+    const cursor = (forward ? options.after : options.before) ?? null;
+    const filters = cursor === null ? this.state.filters : [...this.state.filters, after(order, decodeCursor(cursor, fp, keys))];
+    const fetched = (await this.clone({ modelHelpers: helpers, filters, order, limit: size! + 1, offset: undefined }).fetch()) as R[];
+    const more = fetched.length > size!;
+    const items = forward ? fetched.slice(0, size!) : fetched.slice(0, size!).reverse();
+    return {
+      items,
+      hasNext: forward ? more : cursor !== null,
+      hasPrevious: forward ? cursor !== null : more,
+      nextCursor: items.length ? encodeCursor(fp, keys, items[items.length - 1] as object) : null,
+      previousCursor: items.length ? encodeCursor(fp, keys, items[0] as object) : null,
+    };
   }
 
   /** The first row by the current ordering (the primary key if none), or `null`. */

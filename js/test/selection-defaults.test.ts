@@ -154,6 +154,10 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       const batches: string[][] = [];
       for await (const batch of tq.batches(2)) batches.push(names(batch));
       assert.deepEqual(batches, [["a", "b"], ["c", "d"]]);
+      const page = await tq.paginate({ first: 3 });
+      assert.deepEqual(names(page.items), ["c", "d", "a"]);
+      assert.deepEqual(names((await tq.paginate({ first: 3, after: page.nextCursor })).items), ["b"]);
+      assert.deepEqual(names((await tq.withoutDefaults().paginate({ first: 3 })).items), ["a", "b", "c"]);
       const c = await tq.get(Topic.name.eq("c"));
       for (const body of ["x", "z", "y"]) await nq.insert({ topicId: c.pk, body });
       assert.deepEqual((await nq.all()).map((x: any) => x.body), ["z", "y", "x"]);

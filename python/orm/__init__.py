@@ -23,6 +23,7 @@ from .errors import (
     SchemaError,
     TransactionRequired,
 )
+from .pagination import Page
 from .expr import (
     ColumnRef,
     Condition,
@@ -83,6 +84,7 @@ __all__ = [
     "RelationPath",
     "Condition",
     "Ordering",
+    "Page",
     "and_",
     "or_",
     "not_",

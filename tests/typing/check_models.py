@@ -13,6 +13,7 @@ from orm import (
     Condition,
     ManyRelatedSet,
     Ordering,
+    Page,
     Prefetch,
     Prepared,
     RelatedSet,
@@ -58,6 +59,9 @@ async def check() -> None:
     async for p in Post.objects.order_by(Post.created_at.desc())[:10]:
         assert_type(p, Post)
     assert_type(-Post.created_at, Ordering)
+    page = await Post.objects.order_by(-Post.created_at).paginate(first=20)
+    assert_type(page, Page[Post])
+    assert_type(page.next_cursor, str | None)
     Post.objects.order_by(-Post.created_at, Post.id)
     Post.objects.filter(-Post.published)  # E: an ordering is no condition
     -(Post.views + 1)  # E: only a column has a descending short form
