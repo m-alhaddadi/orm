@@ -520,14 +520,16 @@ pub fn validate_requirements(ir: &SchemaIr, manifests: &[Manifest], language: Op
 #[serde(deny_unknown_fields)]
 pub struct PhysicalSchema { pub models: Vec<crate::ir::ModelIr> }
 
+/// A later batch (for example a second class `prepare()`) adds the owners of its new
+/// tables; the snapshot of earlier batches stays unchanged.
 pub fn capture_storage(ir: &mut SchemaIr) -> Result<(), String> {
-    if ir.behavior.storage.is_none() {
-        let models = serde_json::from_value(serde_json::to_value(&ir.models).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        ir.behavior.storage = Some(PhysicalSchema { models });
-        if let Some(storage) = &mut ir.behavior.storage {
-            for model in &mut storage.models {
-                model.fields.retain(|f| !ir.behavior.result_fields.iter().any(|r| r.model == model.name && r.field == f.name));
-            }
+    let mut models = physical_models(ir)?;
+    match &mut ir.behavior.storage {
+        None => ir.behavior.storage = Some(PhysicalSchema { models }),
+        Some(storage) => {
+            models.retain(|m| !ir.behavior.lowered_models.contains(&m.name)
+                && !storage.models.iter().any(|s| s.name == m.name || s.table == m.table));
+            storage.models.extend(models);
         }
     }
     Ok(())
@@ -701,5 +703,21 @@ mod tests {
         assert!(serde_json::from_value::<Export>(export.clone()).is_ok());
         export["kind"] = "integer_validator".into();
         assert!(serde_json::from_value::<Export>(export).unwrap_err().to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn a_later_batch_adds_the_owners_of_its_new_tables() {
+        let model = |name: &str, table: &str| -> crate::ir::ModelIr {
+            serde_json::from_value(serde_json::json!({"name": name, "table": table, "fields": [{"name": "id", "column": "id", "type": "int", "primary_key": true}]})).unwrap()
+        };
+        let mut ir = SchemaIr { models: vec![model("User", "user")], ..SchemaIr::default() };
+        capture_storage(&mut ir).unwrap();
+        ir.behavior.lowered_models = vec!["User".into()];
+        ir.models[0].table = "renamed".into();
+        ir.models.push(model("Other", "other"));
+        ir.models.push(model("ActiveUser", "user"));
+        capture_storage(&mut ir).unwrap();
+        let owners: Vec<_> = ir.behavior.storage.unwrap().models.into_iter().map(|m| (m.name, m.table)).collect();
+        assert_eq!(owners, [("User".to_string(), "user".to_string()), ("Other".into(), "other".into())]);
     }
 }
