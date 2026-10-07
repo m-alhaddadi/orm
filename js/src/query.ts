@@ -57,6 +57,9 @@ export type Allowed<S extends string> = S | Many | OuterOf<string> | NearestOf<s
 /** Expressions allowed where rows must not repeat (ordering, `select()`, grouping). */
 export type AllowedOne<S extends string> = S | OuterOf<string> | NearestOf<string>;
 
+/** A field name in `orderBy`: `"createdAt"` ascending, `"-createdAt"` descending. */
+export type FieldOrder<M extends ModelSpec> = (keyof M["data"] & string) | `-${keyof M["data"] & string}`;
+
 type ItemScope<I> = I extends Expression<unknown, infer S, unknown> ? S : I extends Ordering<infer S, unknown> ? S : never;
 type ItemParams<I> = I extends Expression<unknown, string, infer P> ? P : I extends Ordering<string, infer P> ? P : {};
 export type ScopesOf<C extends readonly unknown[]> = ItemScope<C[number]>;
@@ -479,12 +482,18 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return this.clone({ filters: [...this.state.filters, not(and(...conditions))] }) as never;
   }
 
-  /** Replace the ordering: `orderBy(Post.createdAt.desc(), Post.id)`. Columns through
-   * to-one relations are joined. */
-  orderBy<const C extends readonly (Expression<unknown, AllowedOne<S>, unknown> | Ordering<AllowedOne<S>, unknown>)[]>(
+  /** Replace the ordering: `orderBy(Post.createdAt.desc(), Post.id)`, or by field name
+   * with `-` for descending: `orderBy("-createdAt", "id")`. Columns through to-one
+   * relations are joined. */
+  orderBy<const C extends readonly (Expression<unknown, AllowedOne<S>, unknown> | Ordering<AllowedOne<S>, unknown> | FieldOrder<M>)[]>(
     ...items: C
   ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
-    return this.clone({ order: orderings(items) }) as never;
+    const named = items.map((i) => {
+      if (typeof i !== "string") return i;
+      const column = this.meta.column(this.meta.field(i.startsWith("-") ? i.slice(1) : i));
+      return i.startsWith("-") ? column.desc() : column.asc();
+    });
+    return this.clone({ order: orderings(named) }) as never;
   }
 
   /** At most `n` rows; `n` may be a `param()` in a prepared query. */

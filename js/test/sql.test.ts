@@ -261,3 +261,9 @@ test("a many-to-many filter is one EXISTS through the join table", () => {
 test("has-one joins on the other side", () => {
   assert.ok(User.objects.selectRelated(User.profile).sql().includes('LEFT JOIN "profiles" AS "j1" ON "j1"."user_id" = "users"."id"'));
 });
+
+test("orderBy takes field names, with - for descending", () => {
+  assert.equal(Post.objects.orderBy("-createdAt", "id").sql(), Post.objects.orderBy(Post.createdAt.desc(), Post.id.asc()).sql());
+  assert.ok(Post.objects.select({ t: Post.title }).orderBy("-views").sql().endsWith('ORDER BY "posts"."views" DESC'));
+  assert.throws(() => Post.objects.orderBy("-nope" as never), /Post has no field "nope"/);
+});

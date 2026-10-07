@@ -567,3 +567,27 @@ fn behavioral_literal_forms_need_an_argument_of_kind_value() {
     // An attribute no compiled manifest declares keeps the literal forms; validation names the missing extension.
     assert!(lower(r#"model V { @@other.mark(Name, null, {k: 1}) }"#).is_ok());
 }
+
+#[test]
+fn minus_field_is_a_descending_index_key() {
+    let model = |keys: &str| format!("model Post {{\n  id BigInt @id\n  author_id BigInt\n  created_at DateTime?\n  {keys}\n}}\n");
+    let short = ok(&model("@@index([author_id, -created_at(nulls: last)])"));
+    let long = ok(&model("@@index([author_id, created_at(sort: Desc, nulls: last)])"));
+    assert_eq!(serde_json::to_value(&short).unwrap(), serde_json::to_value(&long).unwrap());
+    let (_, short) = check(short).unwrap();
+    let (_, long) = check(long).unwrap();
+    let (short, long) = (crate::migrate::snapshot(&short).unwrap(), crate::migrate::snapshot(&long).unwrap());
+    assert_eq!(serde_json::to_value(&short).unwrap(), serde_json::to_value(&long).unwrap());
+    assert!(short.tables[0].indexes[0].keys[1].desc);
+    let unique = ok(&model("@@index([-created_at], unique: true)"));
+    assert!(unique.models[0].indexes[0].columns[0].desc);
+    for (keys, message) in [
+        ("@@index([-created_at(sort: Asc)])", "give `-` or sort:, not both"),
+        ("@@index([-sql(\"lower(x)\")])", "an expression key takes sort: Desc"),
+        ("@@index([-\"created_at\"])", "`-` goes before a field name"),
+        ("@@unique([author_id, -created_at])", "use @@index([...], unique: true)"),
+        ("@@map(-posts)", "takes one string"),
+    ] {
+        assert!(fails(&model(keys)).contains(message), "{keys}: {}", fails(&model(keys)));
+    }
+}

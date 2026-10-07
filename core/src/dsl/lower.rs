@@ -144,6 +144,7 @@ fn json_of(pos: Pos, v: &Value) -> Result<serde_json::Value> {
         Value::Num(n) => serde_json::from_str(n).map_err(|e| super::syntax::Error { pos, msg: e.to_string() })?,
         Value::List(items) => serde_json::Value::Array(items.iter().map(|(p, v)| json_of(*p, v)).collect::<Result<_>>()?),
         Value::Object(_) | Value::Path(..) => return err(pos, "expected a literal"),
+        Value::Desc(_) => return err(pos, "`-field` (descending) only goes in an index key list"),
     })
 }
 
@@ -983,8 +984,8 @@ fn many_to_many(
     })
 }
 
-/// `[field, field(sort: Desc, ops: raw("x")), sql("expr", ...)]` -> index keys (and
-/// the exclusion operator of each, when `with_op`).
+/// `[field, -field, field(sort: Desc, ops: raw("x")), sql("expr", ...)]` -> index keys
+/// (and the exclusion operator of each, when `with_op`).
 fn keys(pos: Pos, v: Option<&Value>, what: &str, with_op: bool) -> Result<Vec<(IndexColumnIr, Option<String>)>> {
     let Some(Value::List(items)) = v else {
         return err(pos, format!("{what}: the first argument is a list of keys, e.g. [author_id, created_at(sort: Desc)]"));
@@ -994,7 +995,14 @@ fn keys(pos: Pos, v: Option<&Value>, what: &str, with_op: bool) -> Result<Vec<(I
     }
     let mut out = vec![];
     for (p, item) in items {
+        let (minus, item) = match item {
+            Value::Desc(inner) => (true, inner.as_ref()),
+            item => (false, item),
+        };
         let (field, expr, args) = match item {
+            Value::Path(path, _) if minus && path.len() == 1 && path[0] == "sql" => {
+                return err(*p, format!("{what}: an expression key takes sort: Desc, not `-`"));
+            }
             Value::Path(path, args) if path.len() == 1 && path[0] == "sql" => {
                 let Some(args) = args else { return err(*p, "sql(\"...\") needs an expression") };
                 let Some((_, Value::Str(e))) = args.positional.first() else {
@@ -1012,7 +1020,9 @@ fn keys(pos: Pos, v: Option<&Value>, what: &str, with_op: bool) -> Result<Vec<(I
         }
         let mut n = Named::new(format!("{what} key"), &args);
         let desc = match n.name("sort")?.as_deref() {
-            None | Some("Asc") => false,
+            None => minus,
+            Some(_) if minus => return err(*p, format!("{what}: give `-` or sort:, not both")),
+            Some("Asc") => false,
             Some("Desc") => true,
             Some(o) => return err(*p, format!("sort must be Asc or Desc, not {o}")),
         };
@@ -1092,7 +1102,14 @@ fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
         "unique" => {
             extra_positional(1)?;
             let fields = match first {
-                Some(Value::List(items)) => items.iter().map(|(p, v)| name_of(*p, v, &what)).collect::<Result<Vec<_>>>()?,
+                Some(Value::List(items)) => items
+                    .iter()
+                    .map(|(p, v)| match v {
+                        // a UNIQUE constraint has no key order; a unique index has
+                        Value::Desc(_) => err(*p, format!("{what}: a unique constraint has no order; use @@index([...], unique: true) for a descending key")),
+                        v => name_of(*p, v, &what),
+                    })
+                    .collect::<Result<Vec<_>>>()?,
                 _ => return err(b.pos, format!("{what}: takes a list of fields, e.g. @@unique([author_id, slug])")),
             };
             let mut n = Named::new(what.clone(), &b.args);

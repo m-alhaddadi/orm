@@ -342,3 +342,15 @@ def test_cte_reads_each_column_once(tmp_path):
     Doc = orm.loads(source, registry=orm.Registry())["Doc"]
     sql = Doc.objects.from_(Doc.objects.filter(Doc.id > 0).cte("recent")).sql()
     assert sql.count("|| '!'") == 1, sql
+
+
+def test_minus_column_is_a_descending_order():
+    assert Post.objects.order_by(-Post.created_at, Post.id).sql() == Post.objects.order_by(Post.created_at.desc(), Post.id).sql()
+    assert Comment.objects.order_by(-Comment.post.title).sql().endswith('ORDER BY "j1"."title" DESC')
+    assert repr(-Post.views) == "Post.views.desc()"
+    with pytest.raises(TypeError, match="expected a condition"):
+        Post.objects.filter(-Post.published)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="select\\(\\) takes columns and expressions"):
+        Post.objects.select(-Post.views)  # type: ignore[call-overload]
+    with pytest.raises(TypeError):
+        -(Post.views + 1)  # type: ignore[operator]

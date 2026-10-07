@@ -43,7 +43,7 @@ export type { Many, Compat, Operand } from "./expr.js";
 export { ModelMeta, Registry, define, load, loads, registry } from "./model.js";
 export type { Instance, ModelClass, Row, SchemaIR } from "./model.js";
 export { ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet } from "./query.js";
-export type { DoNothing, DoUpdate, LoadOf, LockOptions, PreparedInsert, PreparedUpdate, Simplify } from "./query.js";
+export type { DoNothing, DoUpdate, FieldOrder, LoadOf, LockOptions, PreparedInsert, PreparedUpdate, Simplify } from "./query.js";
 export { Select } from "./select.js";
 export { Cte, CteColumn } from "./cte.js";
 export type { CteSelf } from "./cte.js";

@@ -58,6 +58,12 @@ export async function filters() {
   Post.objects.filter(Post.views);
   // @ts-expect-error ordering through a to-many relation would repeat rows
   User.objects.orderBy(User.posts.views);
+  Post.objects.orderBy("-createdAt", "id", Post.title.desc());
+  Post.objects.select({ t: Post.title }).orderBy("-views");
+  // @ts-expect-error orderBy takes the model's own field names
+  Post.objects.orderBy("-nope");
+  // @ts-expect-error field names are the TypeScript names, not the column names
+  Post.objects.orderBy("created_at");
   // @ts-expect-error a CTE column in a query that doesn't read the CTE
   Post.objects.filter(Post.objects.select({ n: func.count() }).cte("t").c.n.gt(1));
   // @ts-expect-error nowait and skipLocked exclude each other

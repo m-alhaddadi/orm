@@ -432,6 +432,11 @@ class ColumnRef(Expression[T]):
             raise ValueError(f"{self!r} belongs to {self._root.__name__}, not to a {root} query; {hint}")
         return {"t": "col", "path": list(self._path), "name": self._field.name}
 
+    def __neg__(self) -> Ordering:
+        """``-Post.created_at`` is ``Post.created_at.desc()``, for ``order_by()``. It is
+        never SQL negation; write ``0 - Post.views`` for that."""
+        return Ordering(self, desc=True)
+
     def __repr__(self) -> str:
         return ".".join((self._root.__name__, *self._path, self._field.name))
 

@@ -79,6 +79,7 @@ queries, since `User.objects` lives as long as the class. `select()` caches the 
 await User.objects.filter(cond, cond2)        # list[User]; conditions AND-ed
 User.objects.exclude(cond)                    # NOT (...)
 User.objects.order_by(User.name, User.id.desc())
+User.objects.order_by(-User.created_at, User.id)   # -column is column.desc()
 User.objects.all()[10:20]                     # LIMIT 10 OFFSET 10
 async for u in User.objects.filter(...): ...
 
@@ -89,6 +90,10 @@ await qs.in_bulk([1, 2, 3])                   # {1: <User 1>, 3: <User 3>}: by p
 await qs.in_bulk(emails, field=User.email)    # by a unique field; no ids: every row
 qs.sql()                                      # SQL with values inlined, for debugging
 ```
+
+`-column` is a descending `Ordering`, for `order_by()` and a `Prefetch` query set.
+It is never SQL negation: write `0 - Post.views` for that.
+`-` works on a column only, and an ordering in `filter()` or `select()` is a `TypeError`.
 
 Expressions: `== != < <= > >=` (with `== None` meaning `IS NULL`), `.in_()`,
 `.not_in()`, `.is_null()`, `.between()`, `.like()` / `.ilike()` / `.contains()` /
