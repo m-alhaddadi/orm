@@ -1,12 +1,8 @@
-import importlib.util
+"""A build without query-defaults rejects compiled policies and keeps the registry."""
 import json
-from pathlib import Path
-import sys
-spec = importlib.util.spec_from_file_location("orm._native", Path(sys.argv[1]).resolve())
-module = importlib.util.module_from_spec(spec)
-sys.modules["orm._native"] = module
-spec.loader.exec_module(module)
+
 import orm
+from orm import _native as module
 assert "query-defaults" not in json.loads(module.native_artifact())["capabilities"]
 registry = orm.Registry()
 plain = {"models": [{"name": "Plain", "table": "plain", "fields": [{"name": "id", "column": "id", "type": "int", "primary_key": True}]}]}

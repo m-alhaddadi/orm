@@ -155,26 +155,14 @@ claim. The TypeScript suite verifies real SDK signing and controlled multipart
 commands. Python memory tests stream 64 MiB and cap traced peak allocations at
 2 MiB local / 16 MiB multipart (caller-generated chunks; transport discards parts).
 
-The root `CLAUDE.md` checks build without `file-storage` and do not run these packages.
-Run them too when you change `storage/` or the file-storage host code:
+The default `CLAUDE.md` checks build without `file-storage` and do not run these packages.
+The feature check runs all of them (see `CLAUDE.md`, "Feature artifacts"):
 
 ```bash
-cargo test -q -p orm-core -p orm-engine --features file-storage
-cargo test -q --manifest-path storage/reference/Cargo.toml
-cargo test -q --manifest-path storage/orm-extension/Cargo.toml
-uv pip install -e storage/python -e storage/integration/python
-python -m pytest -q storage/python/tests storage/integration/python/tests
-(cd storage/typescript && npm install && npm test)
-(cd storage/integration/typescript && npm install && npm test)
-# End-to-end, against a file-storage build; set FILE_STORAGE_DATABASE_URL for Postgres.
-(cd packaging/python/custom && maturin develop --features postgres,sqlite,file-storage)
-ORM_PROFILE=custom python storage/integration/tests/native_python.py
-cargo build -p orm-node --features file-storage && cp target/debug/liborm_node.dylib js/orm.node
-(cd js && npm run build) && node --test storage/integration/tests/native_node.mjs
+ORM_TEST_DATABASE_URL=postgres://... scripts/feature-check.sh file-storage
 ```
 
-The Python line builds a `custom` profile artifact (see `docs/optional-packaging.md`).
-A named profile such as `tooling` does not accept extra features:
-`maturin develop --features` replaces the `profile-tooling` feature of its pyproject.
-Before the root checks, run `uv pip uninstall orm-native-custom`,
-and rebuild the default bindings (`maturin develop` in `packaging/python/tooling`, `npm run build:native`).
+It runs the Rust tests of `storage/reference` and `storage/orm-extension`,
+the Python and TypeScript storage packages,
+and the end-to-end scripts `storage/integration/tests/native_python.py` and `native_node.mjs`
+on SQLite and PostgreSQL against an artifact that selects `orm-extension/` (the `file-storage` feature comes from its manifest).
