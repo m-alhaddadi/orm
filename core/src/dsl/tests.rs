@@ -261,6 +261,7 @@ fn errors_point_at_the_problem() {
         ("model A {\n  id BigInt @id\n  e Unsupported(\"nope(1)\")\n}".into(), "unknown type nope"),
         ("model A {\n  id BigInt @id\n  e String @db.Nope\n}".into(), "unknown native type @db.Nope"),
         ("model A {\n  id BigInt @id @default(foo())\n}".into(), "not foo"),
+        ("enum E {\n  a\n  b\n}\nmodel A {\n  id BigInt @id\n  e E(a)\n}".into(), "A.e: an enum subset E(...) is only allowed on a field of a proxy model"),
         ("model A {\n  id String @id @default(cuid())\n}".into(), "A.id: cuid() is not supported; use @client_default(uuid())"),
         ("model A {\n  id String @id @default(uuid(5))\n}".into(), "uuid() takes no argument, 4 or 7"),
         ("model A {\n  id BigInt @id @client_default(autoincrement())\n}".into(), "A.id: only the database can make autoincrement(); use @default"),
@@ -541,16 +542,16 @@ fn imported_models_use_main_extension_definitions() {
 fn behavioral_arguments_preserve_names_null_and_nested_json() {
     let mut items = syntax::parse(r#"model View {
       @@proxy.of(User)
-      @@proxy.subset("state", [ACTIVE, OLD])
-      @@proxy.default("payload", {enabled: true, labels: ["null", null, 3]})
+      @@view.members("state", [ACTIVE, OLD])
+      @@view.payload("payload", {enabled: true, labels: ["null", null, 3]})
     }"#).unwrap();
     let declarations = super::lower::behavior_declarations(&mut items, "views.prisma", &[]).unwrap();
     assert_eq!(declarations[0].positional, vec![serde_json::json!("User")]);
     assert_eq!(declarations[1].positional[1], serde_json::json!(["ACTIVE", "OLD"]));
     assert_eq!(declarations[2].positional[1], serde_json::json!({"enabled":true,"labels":["null",null,3]}));
     assert_eq!(declarations[2].location.file, "views.prisma");
-    assert!(syntax::parse(r#"model V { @@proxy.default("x", {key:1,key:2}) }"#).is_err());
-    let mut items = syntax::parse(r#"model V { @@proxy.default("x", now()) }"#).unwrap();
+    assert!(syntax::parse(r#"model V { @@view.payload("x", {key:1,key:2}) }"#).is_err());
+    let mut items = syntax::parse(r#"model V { @@view.payload("x", now()) }"#).unwrap();
     assert!(super::lower::behavior_declarations(&mut items, "v.prisma", &[]).is_err());
 }
 
@@ -607,4 +608,16 @@ fn client_defaults_stay_out_of_the_database_schema() {
     assert_eq!(crate::migrate::create_all(&with).unwrap(), crate::migrate::create_all(&without).unwrap());
     assert!(crate::migrate::plan(&with, &crate::migrate::snapshot(&without).unwrap()).unwrap().up.is_empty());
     assert_eq!(with.models[0].client_defaults.len(), 11);
+}
+
+#[test]
+fn enum_subsets_lower_only_on_proxy_fields() {
+    let lowered = |field: &str| compile(&format!("enum E {{\n  a\n  b\n}}\nmodel M {{\n  id Int @id\n  e E\n}}\nmodel V {{\n  {field}\n  @@proxy.of(M)\n}}"), None);
+    for (field, message) in [("e E(c)", "V.e: E has no value c"), ("e E(a, a)", "V.e: a is listed twice"), ("e E(\"a\")", "V.e: an enum subset lists member names")] {
+        let error = lowered(field).unwrap_err();
+        assert!(error.contains(message), "{error}");
+    }
+    let mut ir = ok("enum E {\n  a\n  b\n}\nmodel M {\n  id Int @id\n  e E\n}");
+    ir.models[0].fields[1].enum_subset = Some(vec!["a".into()]);
+    assert!(check(ir).err().unwrap().contains("M.e: an enum subset is only allowed on a field of a proxy model"));
 }

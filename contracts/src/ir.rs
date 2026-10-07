@@ -184,6 +184,9 @@ pub struct FieldIr {
     /// ORM insert default (`@client_default`); never in the DDL or a migration snapshot.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub client_default: Option<ClientDefaultIr>,
+    /// Enum members a proxy field expects (`Status(ACTIVE)`); the proxy pass consumes it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub enum_subset: Option<Vec<String>>,
     /// SQL type overriding the one derived from `type` (`citext`, `vector(3)`). `type`
     /// then only says how values convert to and from the frontend language.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -253,6 +256,7 @@ impl FieldIr {
             default_now: false,
             default_sql: None,
             client_default: None,
+            enum_subset: None,
             db_type: None,
             read_sql: None,
             write_sql: None,

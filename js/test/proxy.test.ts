@@ -37,3 +37,57 @@ for (const dialect of ["sqlite", "postgres"]) {
     } finally { await db.dropTables(); await db.close(); }
   });
 }
+
+const fieldsSource = `
+model Member {
+  id     Int     @id
+  name   String
+  status String  @default("new")
+  legacy String?
+  @@map("proxy_fields_node_members")
+}
+model Current {
+  name String @client_default("anon")
+  @@proxy.of(Member)
+  @@proxy.fields(exclude: ["legacy", "status"])
+}
+model Named {
+  @@proxy.of(Current)
+  @@proxy.fields(include: ["id", "name"])
+}
+`;
+for (const dialect of ["sqlite", "postgres"]) {
+  test(`omitted proxy fields are not part of the model (${dialect})`, { skip: !enabled }, async () => {
+    const registry = new Registry();
+    const models = loads((dialect === "sqlite" ? 'datasource db { provider = "sqlite" }\n' : "") + fieldsSource, { registry });
+    const Member = models.Member!, Current = models.Current!, Named = models.Named!;
+    assert.deepEqual([...Current._meta.fields.keys()], ["id", "name"]);
+    assert.deepEqual([...Named._meta.fields.keys()], ["id", "name"]);
+    assert.equal((Current as Record<string, unknown>).legacy, undefined);
+    assert.notEqual((Member as Record<string, unknown>).legacy, undefined);
+    const url = dialect === "sqlite" ? "sqlite://:memory:" : process.env.ORM_TEST_DATABASE_URL ?? "postgres://postgres:postgres@localhost/orm_test";
+    const db = await connect(url, { registry, default: false });
+    await db.createTables();
+    try {
+      await Member.objects.using(db).insert({ id: 1, name: "ann", status: "old", legacy: "x" });
+      const rows = await Current.objects.using(db).all() as object[];
+      assert.deepEqual(Object.keys(rows[0]!), ["id", "name"]);
+      await assert.rejects(Current.objects.using(db).insert({ id: 2, legacy: "y" } as never), /Current has no field "legacy"/);
+      const created = await Current.objects.using(db).insert({ id: 2 }) as { name: string };
+      assert.equal(created.name, "anon");
+      const stored = await Member.objects.using(db).filter((Member as unknown as { id: { eq(v: number): never } }).id.eq(2)).get() as { status: string; legacy: null };
+      assert.equal(stored.status, "new"); assert.equal(stored.legacy, null);
+    } finally { await db.dropTables(); await db.close(); }
+  });
+}
+
+test("proxy field rules fail at definition", { skip: !enabled }, () => {
+  const cases: [string, RegExp][] = [
+    ['@@proxy.fields(exclude: ["name"])', /Current\.name: a NOT NULL field without a database default cannot be omitted/],
+    ['@@proxy.fields(include: ["id"], exclude: ["legacy"])', /include and exclude together/],
+    ['@@proxy.nonNull("legacy")', /proxy\.nonNull/],
+  ];
+  for (const [attribute, message] of cases) {
+    assert.throws(() => loads(fieldsSource.replace('@@proxy.fields(exclude: ["legacy", "status"])', attribute), { registry: new Registry() }), message);
+  }
+});

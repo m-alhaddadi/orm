@@ -11,24 +11,18 @@ enum Status {
   @@storage(text)
 }
 model User {
-  id Int @id
-  name String?
-  status Status @default(OLD)
+  id          Int     @id
+  name        String?
+  status      Status  @default(OLD)
+  legacy_note String?
 }
 model ActiveUser {
-  @@proxy.of(User)
-  @@proxy.nonNull("name")
-  @@proxy.subset("status", [ACTIVE])
-  @@proxy.default("name", "client default")
-  @@proxy.default("status", "active")
-}
-model ActiveUser {
-  name String @default("name", "client default")
-  status [ACTIVE] @default(ACTIVE)
+  name   String         @client_default("client default")
+  status Status(ACTIVE) @client_default(ACTIVE)
 
   @@proxy.of(User)
+  @@proxy.fields(exclude: ["legacy_note"])
 }
-
 ```
 
 A proxy inherits its source fields and relations, also through proxy chains.
@@ -39,21 +33,42 @@ still return the proxy model. Cycles, unknown sources, stored-field additions,
 encoding changes, key changes and physical object overrides fail during definition.
 A proxy cannot override a relation; inherited relations keep their targets.
 
-`proxy.nonNull` changes the intended view of a nullable field. `proxy.subset` lists
-parent enum member names. It keeps the full parent runtime enum, so a query can
-still return a value outside the subset as its ordinary parent enum member.
-Repeated compatible field declarations may broaden logical nullability; they never
-relax the physical database constraints. Namespaced declarations do not repeat
-storage definitions.
+**Inherited fields.** `@@proxy.fields(include: [...])` or
+`@@proxy.fields(exclude: [...])` selects the source fields and relations by name.
+With no `@@proxy.fields`, the proxy inherits all of them. `include` and `exclude`
+together is an error. With `include`, a relation that is not in the list is omitted.
+An omitted field is not part of the proxy model: not in its class, its types, its
+reads or its writes. An insert through the proxy leaves the column to its database
+default. This is different from `@query.selectOut` and `@@query.defaults(fields:)`,
+which only change the default selection and keep the field.
 
-`proxy.default` replaces a client insert default. A default can be a literal
-string, number, boolean, null, array or JSON object that the physical field encoding
-accepts. An enum default uses the stored parent enum value (the example uses
-`"active"`); a subset declaration uses member names (`ACTIVE`). Definition parses
-each default once. A child proxy inherits the defaults of its source, and a child
-default for the same field replaces the inherited one. Defaults fill omitted insert
-values before native write transforms and validators. An explicit value, also SQL
-NULL, wins over a default.
+Definition fails with the field name when an omission breaks a rule:
+
+* The primary key cannot be omitted.
+* A `NOT NULL` field without a database `@default` cannot be omitted, because an
+  insert through the proxy then fails. A `@client_default` on the source field does
+  not count: the proxy insert does not contain the field.
+* A field that a relation of the proxy uses as its key cannot be omitted, unless the
+  relation is omitted too. A field that a relation of another model references on
+  the proxy cannot be omitted.
+* A child proxy selects from the fields of its source proxy, not from the root model.
+
+**Redeclared fields** change only the logical view. A redeclared field must be in
+the inherited set, and it must equal the source field in everything except
+nullability, the enum subset and `@client_default`. It can leave out `@default`;
+it keeps the database default, because a proxy cannot change it.
+
+* Nullability: `name String` declares a non-null view of a nullable field. Broader
+  nullability never relaxes the physical database constraint.
+* Enum subset: `Status(ACTIVE, OLD)` lists parent enum member names. Only a proxy
+  field takes this type argument. It keeps the full parent runtime enum, so a query
+  can still return a value outside the subset as its ordinary parent enum member.
+* Client default: `@client_default(...)` (see [the schema](schema.md#client-defaults))
+  replaces the inherited client default. A child proxy inherits the client defaults
+  of its source, and a child redeclaration replaces the inherited one. An enum
+  default uses member names (`ACTIVE`). Defaults fill omitted insert values before
+  native write transforms and validators. An explicit value, also SQL NULL, wins.
+
 The physical server default remains available to writes through the parent and
 other database clients. Filters never synthesize inserted values.
 

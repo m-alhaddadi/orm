@@ -2,7 +2,7 @@
 //! The compiler preserves parent enum identities and server defaults. Neither
 //! narrowing nor client defaults change physical storage or imply predicates.
 use std::collections::{BTreeMap, BTreeSet};
-use orm_contracts::{extension::{capture_storage, ProxyField, ProxyModel}, ir::{ClientDefaultIr, FieldIr, ModelIr, SchemaIr}};
+use orm_contracts::{extension::{capture_storage, ProxyField, ProxyModel, ProxySelection}, ir::{ClientDefaultIr, FieldIr, ModelIr, SchemaIr}};
 
 /// Namespaced declarations contribute logical metadata only. Required argument
 /// kinds/targets are checked by the composition manifest before this pass runs.
@@ -11,60 +11,29 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
     let mut specs = BTreeMap::new();
     for d in declarations.iter().filter(|d| d.attribute == "proxy.of") {
         let parent = d.positional.first().and_then(|v| v.as_str()).ok_or("proxy.of requires a source model name")?;
-        let spec = ProxyModel { model: d.model.clone(), parent: parent.into(), storage_owner: String::new(), fields: vec![] };
+        let spec = ProxyModel { model: d.model.clone(), parent: parent.into(), ..Default::default() };
         if specs.insert(d.model.clone(), spec).is_some() { return Err(format!("{}: duplicate proxy source", d.model)); }
     }
-    let mut defaults: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new();
-    let mut overrides = BTreeSet::new();
     for d in declarations.iter().filter(|d| d.attribute != "proxy.of") {
         let error = |message: &str| format!("{}:{}:{}: @@{}: {message}", d.location.file, d.location.line, d.location.column, d.attribute);
-        let spec = specs.get_mut(&d.model).ok_or_else(|| error("override requires @@proxy.of on the same model"))?;
-        let field = d.positional.first().and_then(|v| v.as_str()).ok_or_else(|| error("requires an inherited field name"))?;
-        if !overrides.insert((&d.model, field, &d.attribute)) { return Err(error("duplicate proxy override")); }
-        if d.attribute == "proxy.default" {
-            let value = d.positional.get(1).ok_or_else(|| error("requires a literal client default"))?;
-            if defaults.entry(d.model.clone()).or_default().insert(field.into(), value.clone()).is_some() { return Err(error("duplicate client default")); }
-            continue;
-        }
-        let pos = spec.fields.iter().position(|f| f.field == field);
-        let contract = match pos {
-            Some(pos) => &mut spec.fields[pos],
-            None => {
-                // Inherit nullability from the nearest declared or normalized
-                // source field, even when that source is another pending proxy.
-                let mut parent = spec.parent.as_str();
-                let mut visited = BTreeSet::new();
-                let nullable = loop {
-                    if !visited.insert(parent) { return Err(error("cyclic proxy source chain")); }
-                    if declarations.iter().any(|p| p.model == parent && p.attribute == "proxy.nonNull" && p.positional.first().and_then(|v| v.as_str()) == Some(field)) { break false; }
-                    if let Some(f) = ir.models.iter().find(|m| m.name == parent).and_then(|m| m.fields.iter().find(|f| f.name == field)) { break f.nullable; }
-                    parent = declarations.iter().find(|p| p.model == parent && p.attribute == "proxy.of")
-                        .and_then(|p| p.positional.first()).and_then(|v| v.as_str()).ok_or_else(|| error("unknown inherited field"))?;
-                };
-                spec.fields.push(ProxyField { field: field.into(), non_null: !nullable, subset: None });
-                spec.fields.last_mut().expect("added contract")
-            }
-        };
-        match d.attribute.as_str() {
-            "proxy.nonNull" => contract.non_null = true,
-            "proxy.subset" => {
-                if contract.subset.is_some() { return Err(error("duplicate enum subset")); }
-                contract.subset = Some(d.positional.get(1).and_then(|v| v.as_array()).ok_or_else(|| error("requires enum member list"))?
-                    .iter().map(|v| v.as_str().map(str::to_owned).ok_or_else(|| error("subset members must be names"))).collect::<Result<_, _>>()?);
-            }
-            _ => return Err(error("unknown proxy declaration")),
-        }
+        let spec = specs.get_mut(&d.model).ok_or_else(|| error("requires @@proxy.of on the same model"))?;
+        if d.attribute != "proxy.fields" { return Err(error("unknown proxy declaration")); }
+        if spec.selection.is_some() { return Err(error("duplicate @@proxy.fields")); }
+        let names = |key: &str| d.arguments.get(key).map(|v| v.as_array().into_iter().flatten()
+            .map(|n| n.as_str().map(str::to_owned).ok_or_else(|| error("lists field names"))).collect::<Result<Vec<_>, _>>()).transpose();
+        spec.selection = Some(match (names("include")?, names("exclude")?) {
+            (Some(_), Some(_)) => return Err(error("include and exclude together; use one")),
+            (Some(include), None) => ProxySelection::Include(include),
+            (None, Some(exclude)) => ProxySelection::Exclude(exclude),
+            (None, None) => return Err(error("requires include: or exclude:")),
+        });
     }
-    lower_batch(ir, &specs.into_values().collect::<Vec<_>>(), &defaults)
+    lower_specs(ir, &specs.into_values().collect::<Vec<_>>())
 }
 
 /// Resolve a complete declaration batch. Existing normalized parents can be
 /// referenced; only declarations in this batch are transformed.
 pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String> {
-    lower_batch(ir, specs, &BTreeMap::new())
-}
-
-fn lower_batch(ir: &mut SchemaIr, specs: &[ProxyModel], defaults: &BTreeMap<String, BTreeMap<String, serde_json::Value>>) -> Result<(), String> {
     let mut by_model = BTreeMap::new();
     for spec in specs {
         if by_model.insert(spec.model.as_str(), spec).is_some()
@@ -105,51 +74,75 @@ fn lower_batch(ir: &mut SchemaIr, specs: &[ProxyModel], defaults: &BTreeMap<Stri
             || !placeholder.triggers.is_empty() || placeholder.renamed_from.is_some() {
             return Err(format!("{}: proxies cannot declare physical objects", spec.model));
         }
-        // Repeated field declarations cannot quietly become physical overrides.
+        let inherited = ir.behavior.proxy_models.iter().find(|p| p.model == spec.parent);
+        let storage_owner = inherited.map(|p| p.storage_owner.clone()).unwrap_or_else(|| source.name.clone());
+        let physical = ir.behavior.storage.as_ref().expect("captured storage").models.iter().find(|m| m.name == storage_owner)
+            .ok_or_else(|| format!("{}: unknown storage owner {storage_owner}", spec.model))?;
+        let stored = |f: &FieldIr| physical.fields.iter().find(|p| p.column == f.column);
+        // A child selects from its source view, so a field its source omits is unknown here.
+        let names: Vec<&str> = source.fields.iter().map(|f| f.name.as_str()).chain(source.relations.iter().map(|r| r.name.as_str())).collect();
+        let listed = match &spec.selection { Some(ProxySelection::Include(l) | ProxySelection::Exclude(l)) => l.as_slice(), None => &[] };
+        let mut seen = BTreeSet::new();
+        for name in listed {
+            if !names.contains(&name.as_str()) {
+                return Err(format!("{}: @@proxy.fields names {name}, which is not a field or relation of {}", spec.model, spec.parent));
+            }
+            if !seen.insert(name) { return Err(format!("{}: @@proxy.fields names {name} twice", spec.model)); }
+        }
+        let omitted: BTreeSet<String> = match &spec.selection {
+            Some(ProxySelection::Include(list)) => names.iter().filter(|n| !list.iter().any(|l| l == *n)).map(|n| n.to_string()).collect(),
+            Some(ProxySelection::Exclude(list)) => list.iter().cloned().collect(),
+            None => BTreeSet::new(),
+        };
+        for f in source.fields.iter().filter(|f| omitted.contains(&f.name)) {
+            if f.primary_key { return Err(format!("{}.{}: the primary key cannot be omitted", spec.model, f.name)); }
+            if stored(f).is_some_and(|p| !p.nullable && p.default.is_none() && !p.default_now && p.default_sql.is_none() && !p.auto_increment) {
+                return Err(format!("{}.{}: a NOT NULL field without a database default cannot be omitted, because an insert through the proxy would fail", spec.model, f.name));
+            }
+        }
+        if let Some(r) = source.relations.iter().find(|r| !omitted.contains(&r.name) && omitted.contains(&r.from)) {
+            return Err(format!("{}.{}: relation {} uses it as its key; omit the relation too", spec.model, r.from, r.name));
+        }
+        for other in &ir.models {
+            if let Some(r) = other.relations.iter().find(|r| r.target == spec.model && omitted.contains(&r.to)) {
+                return Err(format!("{}.{}: relation {}.{} references it", spec.model, r.to, other.name, r.name));
+            }
+        }
+        model.fields.retain(|f| !omitted.contains(&f.name));
+        model.relations.retain(|r| !omitted.contains(&r.name));
+        let mut prepared = ProxyModel { model: spec.model.clone(), parent: spec.parent.clone(), storage_owner,
+            fields: inherited.map(|p| p.fields.clone()).unwrap_or_default(),
+            selection: spec.selection.clone(), omitted: omitted.iter().cloned().collect() };
+        prepared.fields.retain(|c| !omitted.contains(&c.field));
+        // Redeclared fields change only the logical view: nullability, enum subset and client default.
         for declared in &placeholder.fields {
+            if omitted.contains(&declared.name) {
+                return Err(format!("{}.{}: a redeclared field must be in the inherited set", spec.model, declared.name));
+            }
             let inherited = source.fields.iter().find(|f| f.name == declared.name)
                 .ok_or_else(|| format!("{}.{}: a proxy cannot add a stored field", spec.model, declared.name))?;
-            let mut comparable = declared.clone();
-            if declared.primary_key && declared.nullable != inherited.nullable {
+            if declared.primary_key && (declared.nullable != inherited.nullable || declared.enum_subset.is_some()) {
                 return Err(format!("{}.{}: proxy cannot change primary key shape", spec.model, declared.name));
             }
+            let mut comparable = declared.clone();
             comparable.nullable = inherited.nullable;
             comparable.comment = inherited.comment.clone();
             comparable.hints = inherited.hints.clone();
             comparable.client_default = inherited.client_default.clone();
+            comparable.enum_subset = inherited.enum_subset.clone();
+            // Leaving out `@default` keeps the database default; writing it must repeat it.
+            if declared.default.is_none() && !declared.default_now && declared.default_sql.is_none() {
+                comparable.default = inherited.default.clone();
+                comparable.default_now = inherited.default_now;
+                comparable.default_sql = inherited.default_sql.clone();
+            }
             if serde_json::to_value(&comparable).map_err(|e| e.to_string())? != serde_json::to_value(inherited).map_err(|e| e.to_string())? {
-                return Err(format!("{}.{}: proxy override changes physical type, encoding, identity or constraint; use a logical proxy declaration", spec.model, declared.name));
+                return Err(format!("{}.{}: proxy override changes physical type, encoding, identity or constraint; redeclare only nullability, an enum subset or @client_default", spec.model, declared.name));
             }
-            let field = model.fields.iter_mut().find(|f| f.name == declared.name).expect("inherited field");
-            field.nullable = declared.nullable;
-            if declared.client_default.is_some() { field.client_default = declared.client_default.clone(); }
-        }
-        model.name = spec.model.clone();
-        model.comment = placeholder.comment.clone();
-        model.indexes.clear(); model.constraints.clear(); model.triggers.clear(); model.renamed_from = None;
-        // Relations retain logical targets; the physical schema resolves FKs to
-        // owners below, avoiding references to nonexistent proxy tables.
-        for rel in &mut model.relations { rel.foreign_key = false; }
-        let inherited = ir.behavior.proxy_models.iter().find(|p| p.model == spec.parent);
-        let mut prepared = ProxyModel { model: spec.model.clone(), parent: spec.parent.clone(),
-            storage_owner: inherited.map(|p| p.storage_owner.clone()).unwrap_or_else(|| source.name.clone()),
-            fields: inherited.map(|p| p.fields.clone()).unwrap_or_default() };
-        for declared in &placeholder.fields {
-            if let Some(contract) = prepared.fields.iter_mut().find(|p| p.field == declared.name) {
-                contract.non_null = !declared.nullable;
-            } else if !declared.nullable && source.fields.iter().any(|f| f.name == declared.name && f.nullable) {
-                prepared.fields.push(ProxyField { field: declared.name.clone(), non_null: true, subset: None });
-            }
-        }
-        let mut seen = BTreeSet::new();
-        for contract in &spec.fields {
-            if !seen.insert(&contract.field) { return Err(format!("{}.{}: duplicate proxy shape", spec.model, contract.field)); }
-            let f = model.fields.iter_mut().find(|f| f.name == contract.field)
-                .ok_or_else(|| format!("{}.{}: unknown proxy field", spec.model, contract.field))?;
-            if f.primary_key && (contract.subset.is_some() || (contract.non_null && f.nullable)) {
-                return Err(format!("{}.{}: proxy cannot change primary key shape", spec.model, f.name));
-            }
-            if let Some(members) = &contract.subset {
+            let f = model.fields.iter_mut().find(|f| f.name == declared.name).expect("inherited field");
+            f.nullable = declared.nullable;
+            if declared.client_default.is_some() { f.client_default = declared.client_default.clone(); }
+            if let Some(members) = &declared.enum_subset {
                 let e = f.enum_name.as_ref().and_then(|n| ir.enums.iter().find(|e| e.name == *n))
                     .ok_or_else(|| format!("{}.{}: subset requires a parent enum", spec.model, f.name))?;
                 if members.is_empty() || members.iter().collect::<BTreeSet<_>>().len() != members.len()
@@ -163,15 +156,13 @@ fn lower_batch(ir: &mut SchemaIr, specs: &[ProxyModel], defaults: &BTreeMap<Stri
                 f.hints.insert("python".into(), format!("Literal[{}]", python.join(", ")));
                 f.hints.insert("typescript".into(), typescript.join(" | "));
             }
-            f.nullable &= !contract.non_null;
-            let subset = contract.subset.clone().or_else(|| prepared.fields.iter().find(|p| p.field == f.name).and_then(|p| p.subset.clone()));
-            prepared.fields.retain(|p| p.field != contract.field);
-            prepared.fields.push(ProxyField { field: f.name.clone(), non_null: !f.nullable, subset });
-        }
-        for (field, value) in defaults.get(&spec.model).into_iter().flatten() {
-            let f = model.fields.iter_mut().find(|f| f.name == *field)
-                .ok_or_else(|| format!("{}.{}: unknown client-default field", spec.model, field))?;
-            f.client_default = Some(ClientDefaultIr::Value(value.clone()));
+            let subset = declared.enum_subset.clone()
+                .or_else(|| prepared.fields.iter().find(|c| c.field == f.name).and_then(|c| c.subset.clone()));
+            let non_null = !f.nullable && stored(f).is_none_or(|p| p.nullable);
+            prepared.fields.retain(|c| c.field != declared.name);
+            if non_null || subset.is_some() {
+                prepared.fields.push(ProxyField { field: declared.name.clone(), non_null, subset });
+            }
         }
         for f in &model.fields {
             let Some(ClientDefaultIr::Value(value)) = &f.client_default else { continue };
@@ -184,6 +175,12 @@ fn lower_batch(ir: &mut SchemaIr, specs: &[ProxyModel], defaults: &BTreeMap<Stri
                 }
             }
         }
+        model.name = spec.model.clone();
+        model.comment = placeholder.comment.clone();
+        model.indexes.clear(); model.constraints.clear(); model.triggers.clear(); model.renamed_from = None;
+        // Relations retain logical targets; the physical schema resolves FKs to
+        // owners below, avoiding references to nonexistent proxy tables.
+        for rel in &mut model.relations { rel.foreign_key = false; }
         let pos = ir.models.iter().position(|m| m.name == spec.model).expect("checked proxy");
         ir.models[pos] = model;
         ir.behavior.storage.as_mut().expect("captured storage").models.retain(|m| m.name != spec.model);

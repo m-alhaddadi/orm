@@ -173,7 +173,7 @@ pub fn validate_field_adapters(ir: &SchemaIr) -> Result<(), String> {
 
 /// Intended shape only. Physical encoding, enum representation and constraints
 /// remain on the storage owner. These contracts never imply SQL predicates.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyModel {
     pub model: String,
@@ -184,6 +184,19 @@ pub struct ProxyModel {
     pub storage_owner: String,
     #[serde(default)]
     pub fields: Vec<ProxyField>,
+    /// `@@proxy.fields(include:|exclude:)`: which source fields and relations the view keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ProxySelection>,
+    /// Source fields and relations that are not part of the view, filled by lowering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub omitted: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxySelection {
+    Include(Vec<String>),
+    Exclude(Vec<String>),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

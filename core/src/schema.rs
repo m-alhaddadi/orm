@@ -200,6 +200,9 @@ impl Schema {
                 }
                 relation_index.insert(r.name.clone(), (i, target));
             }
+            if let Some(f) = m.fields.iter().find(|f| f.enum_subset.is_some()) {
+                return Err(format!("{}.{}: an enum subset is only allowed on a field of a proxy model", m.name, f.name));
+            }
             let client_defaults = crate::client_default::prepare(&m.name, &m.fields, &enums)?;
             models.push(Model {
                 #[cfg(feature = "file-storage")] file_fields: file_fields.next().expect("prepared file model"),

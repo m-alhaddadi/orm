@@ -16,11 +16,9 @@ model User {
  @@map("proxy_05_users")
 }
 model Active {
+ name String @client_default("client")
+ status Status(ACTIVE) @client_default(ACTIVE)
  @@proxy.of(User)
- @@proxy.nonNull("name")
- @@proxy.subset("status", [ACTIVE])
- @@proxy.default("name", "client")
- @@proxy.default("status", "active")
 }
 "#;
 

@@ -1,6 +1,7 @@
 """Run with the isolated native artifact containing the selected proxy compiler."""
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -69,8 +70,8 @@ model Member {
   @@map("proxy_defaults_members")
 }
 model ActiveMember {
+  status String @client_default("active")
   @@proxy.of(Member)
-  @@proxy.default("status", "active")
   @@query.defaults(filter: "status == \\"active\\"", fields: ["id", "name"])
 }
 """
@@ -111,3 +112,63 @@ async def test_proxy_with_query_defaults_is_a_filtered_view(dialect):
     finally:
         await db.drop_tables()
         await db.close()
+
+
+FIELDS_SOURCE = """
+model Member {
+  id     Int     @id
+  name   String
+  status String  @default("new")
+  legacy String?
+  @@map("proxy_fields_members")
+}
+model Current {
+  name String @client_default("anon")
+  @@proxy.of(Member)
+  @@proxy.fields(exclude: ["legacy", "status"])
+}
+model Named {
+  @@proxy.of(Current)
+  @@proxy.fields(include: ["id", "name"])
+}
+"""
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+async def test_omitted_proxy_fields_are_not_part_of_the_model(dialect):
+    source = FIELDS_SOURCE if dialect == "postgres" else 'datasource db { provider = "sqlite" }\n' + FIELDS_SOURCE
+    registry = orm.Registry()
+    models = orm.loads(source, registry=registry)
+    Member, Current, Named = models["Member"], models["Current"], models["Named"]
+    assert list(Current._meta.fields) == ["id", "name"] and list(Named._meta.fields) == ["id", "name"]
+    assert not hasattr(Current, "legacy") and hasattr(Member, "legacy")
+    url = "sqlite://:memory:" if dialect == "sqlite" else os.environ.get("ORM_TEST_DATABASE_URL", "postgres://postgres:postgres@localhost/orm_test")
+    db = await orm.connect(url, registry=registry, default=False)
+    await db.create_tables()
+    try:
+        await Member.objects.using(db).insert(id=1, name="ann", status="old", legacy="x")
+        row = (await Current.objects.using(db))[0]
+        assert row.to_dict() == {"id": 1, "name": "ann"}
+        with pytest.raises(TypeError, match="Current has no field 'legacy'"):
+            await Current.objects.using(db).insert(id=2, legacy="y")
+        created = await Current.objects.using(db).insert(id=2)
+        assert created.name == "anon"
+        stored = await Member.objects.using(db).get(Member.id == 2)
+        assert stored.status == "new" and stored.legacy is None
+    finally:
+        await db.drop_tables()
+        await db.close()
+
+
+def test_proxy_field_rules_fail_at_definition():
+    cases = [
+        ('@@proxy.fields(exclude: ["name"])', "Current.name: a NOT NULL field without a database default cannot be omitted"),
+        ('@@proxy.fields(include: ["id"], exclude: ["legacy"])', "include and exclude together"),
+        ('@@proxy.nonNull("legacy")', "proxy.nonNull"),
+    ]
+    for attribute, message in cases:
+        source = FIELDS_SOURCE.replace('@@proxy.fields(exclude: ["legacy", "status"])', attribute)
+        with pytest.raises(orm.SchemaError, match=re.escape(message)):
+            orm.loads(source, registry=orm.Registry())
+    with pytest.raises(orm.SchemaError, match=re.escape("an enum subset Status(...) is only allowed on a field of a proxy model")):
+        orm.loads("enum Status {\n  A\n  @@storage(text)\n}\nmodel M {\n  id Int @id\n  s Status(A)\n}", registry=orm.Registry())

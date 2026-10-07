@@ -258,17 +258,20 @@ pub struct Lowering<'l> {
     /// Model declarations selected for compiler contributions may derive identity.
     /// Final identity validation runs after the selected passes.
     pub deferred_identity: &'l HashSet<String>,
+    /// Proxy models (`@@proxy.of`): only their redeclared fields take an enum subset.
+    pub proxies: &'l HashSet<String>,
 }
 
-struct Ctx {
+struct Ctx<'l> {
     types: HashMap<String, (String, TypeDef)>,
     enums: HashMap<String, EnumIr>,
+    proxies: &'l HashSet<String>,
 }
 
 impl Lowering<'_> {
     pub fn lower(&self, items: Vec<Item>) -> Result<SchemaIr> {
         let mut ir = SchemaIr::default();
-        let mut ctx = Ctx { types: HashMap::new(), enums: HashMap::new() };
+        let mut ctx = Ctx { types: HashMap::new(), enums: HashMap::new(), proxies: self.proxies };
         for def in ExtensionDef::builtin() {
             for (name, t) in &def.types {
                 ctx.types.insert(name.clone(), (def.name.clone(), t.clone()));
@@ -495,7 +498,7 @@ fn function(pos: Pos, name: &str, props: &Props) -> Result<FunctionIr> {
     Ok(f)
 }
 
-fn model_fields(m: &ModelDecl, models: &HashMap<&str, &ModelDecl>, ctx: &Ctx) -> Result<ModelIr> {
+fn model_fields(m: &ModelDecl, models: &HashMap<&str, &ModelDecl>, ctx: &Ctx<'_>) -> Result<ModelIr> {
     let mut ir = ModelIr {
         name: m.name.clone(),
         table: m.name.to_lowercase(),
@@ -535,7 +538,7 @@ fn model_fields(m: &ModelDecl, models: &HashMap<&str, &ModelDecl>, ctx: &Ctx) ->
     Ok(ir)
 }
 
-fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
+fn field(m: &ModelDecl, member: &Member, ctx: &Ctx<'_>) -> Result<FieldIr> {
     let TypeRef { pos, name, args, list, optional } = &member.ty;
     let what = format!("{}.{}", m.name, member.name);
     let mut f = FieldIr {
@@ -555,6 +558,7 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
         default_now: false,
         default_sql: None,
         client_default: None,
+        enum_subset: None,
         db_type: None,
         read_sql: None,
         write_sql: None,
@@ -580,8 +584,29 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
     let decimal = name == "Decimal";
     let enum_ir = ctx.enums.get(name.as_str());
     if let Some(e) = enum_ir {
-        if !args.positional.is_empty() || !args.named.is_empty() {
-            return err(args.pos, format!("{what}: {name} takes no arguments"));
+        if !args.named.is_empty() {
+            return err(args.pos, format!("{what}: {name} takes no named arguments"));
+        }
+        // `Status(ACTIVE, OLD)`: the members a proxy view expects.
+        if !args.positional.is_empty() {
+            if !ctx.proxies.contains(&m.name) {
+                return err(args.pos, format!("{what}: an enum subset {name}(...) is only allowed on a field of a proxy model"));
+            }
+            let mut members: Vec<String> = vec![];
+            for (p, v) in &args.positional {
+                let n = match v {
+                    Value::Path(path, None) if path.len() == 1 => path[0].clone(),
+                    _ => return err(*p, format!("{what}: an enum subset lists member names")),
+                };
+                if !e.values.iter().any(|x| x.name == n) {
+                    return err(*p, format!("{what}: {} has no value {n}", e.name));
+                }
+                if members.contains(&n) {
+                    return err(*p, format!("{what}: {n} is listed twice"));
+                }
+                members.push(n);
+            }
+            f.enum_subset = Some(members);
         }
         f.enum_name = Some(e.name.clone());
         match e.storage {
