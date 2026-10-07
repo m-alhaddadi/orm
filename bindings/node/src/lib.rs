@@ -36,7 +36,7 @@ use orm_core::ir::{self, ValueType};
 use orm_core::{migrate, schema};
 use orm_engine::db::{self, DbError, Driver, ErrorKind, Executor, RowSet};
 use orm_engine::exec::{self, Conflict, Fetched, Outcome};
-use orm_engine::plan::{Output, Planner};
+use orm_engine::plan::{self, Output, Planner};
 use orm_engine::migrate as engine_migrate;
 use orm_engine::{parse_op, Error};
 
@@ -293,21 +293,25 @@ pub struct JsSchema {
     inner: Arc<schema::Schema>,
 }
 
-// A separate impl block: `#[napi]` registers every method of a block, ignoring `cfg` on items.
-#[cfg(feature = "file-storage")]
 #[napi]
 impl JsSchema {
-    /// Selected upload preflight: ordinary conversion/planning without SQL or I/O.
+    /// Converts and plans a single-row insert without SQL or I/O (`prepareInsert`).
     #[napi]
-    pub fn validate_file_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>) -> napi::Result<()> {
+    pub fn validate_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>) -> napi::Result<()> {
         let values = convert_rows(env, &self.inner, &model, &fields, rows, true)?;
         exec::plan_insert(&self.inner, Target::new(self.inner.dialect), &model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
         Ok(())
     }
-}
 
-#[napi]
-impl JsSchema {
+    /// Plans an update without SQL or I/O; true when its filters pin one row by a
+    /// non-null primary key or unique field (`prepareUpdate`).
+    #[napi]
+    pub fn unique_row_update(&self, env: &Env, op_json: String, params_: Unknown<'_>) -> napi::Result<bool> {
+        let op = parse_op(&op_json).map_err(engine_err)?;
+        let p = params(env, params_)?;
+        plan::unique_row_update(&self.inner, Target::new(self.inner.dialect), &op, &p).map_err(engine_err)
+    }
+
     #[napi(constructor)]
     pub fn new(schema_json: String) -> napi::Result<Self> {
         let mut ir: ir::SchemaIr =

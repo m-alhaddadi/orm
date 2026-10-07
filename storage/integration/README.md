@@ -2,7 +2,10 @@
 
 `python/` and `typescript/` contain separately packaged selected binding helpers.
 They depend on the independent storage package. They do not import ORM internals,
-provider SDKs, or install a runtime native callback registry.
+provider SDKs, or install a runtime native callback registry. They use only the
+public ORM hooks: Python `orm.hooks` (`prepare_insert`, `prepare_update`,
+`decode_field`) and TypeScript `QuerySet.prepareInsert`, `QuerySet.prepareUpdate`
+and `ModelMeta.addRowDecoder`. The engine proves a unique-row update.
 
 `install_model` / `installModel` decode loaded file fields to `Reference` and route
 `Upload` writes through `PreparedFileWrite`. Annotated file fields need a native

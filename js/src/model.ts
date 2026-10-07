@@ -112,6 +112,7 @@ export class ModelMeta implements Source {
   readonly model: ModelClass<ModelSpec> & Record<string, unknown>;
   /** @internal */
   objects!: QuerySet<ModelSpec>;
+  private decodeRow: ((row: Row) => void) | undefined;
 
   constructor(
     readonly ir: IRModel,
@@ -305,10 +306,21 @@ export class ModelMeta implements Source {
     } else {
       for (let i = 0; i < fields.length; i++) o[fields[i]!.name] = values[start + i];
     }
+    if (this.decodeRow !== undefined) this.decodeRow(o);
     if (db !== undefined) {
       o[DB] = db;
     }
     return o;
+  }
+
+  /**
+   * Runs `decode` on each instance of this model that a query or write returns, after
+   * its loaded fields are set. A partial instance has only its loaded fields as own
+   * properties. For a package that reads stored values as its own type.
+   */
+  addRowDecoder(decode: (row: Row) => void): void {
+    const previous = this.decodeRow;
+    this.decodeRow = previous === undefined ? decode : (row) => { previous(row); decode(row); };
   }
 
   toString(): string {

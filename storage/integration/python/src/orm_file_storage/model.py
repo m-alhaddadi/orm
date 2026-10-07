@@ -23,33 +23,11 @@ class ModelAdapter:
         return prepare_decoder(self.fields, public)
 
 
-class _FileAttribute:
-    """Reads a loaded file field as a Reference, without I/O; the column stays the class-side value."""
-    __slots__ = ("column", "field")
-
-    def __init__(self, column: Any, field: FileField) -> None:
-        self.column = column
-        self.field = field
-
-    def __get__(self, obj: Any, owner: type[Any]) -> Any:
-        if obj is None:
-            return self.column.__get__(None, owner)
-        try:
-            value = obj.__dict__[self.field.name]
-        except KeyError:
-            return self.column.__get__(obj, owner)
-        return self.field.decode(value)
-
-    # A data descriptor, so that it reads before the native row values in the instance __dict__.
-    def __set__(self, obj: Any, value: Any) -> None:
-        raise AttributeError(f"{type(obj).__name__}.{self.field.name} is read-only")
-
-
 def install_model(model: type[Any], fields: Mapping[str, FileField], registry: Registry | None = None) -> ModelAdapter:
     """Called once at definition after selected artifact validation, before publish.
 
-    The host installs adapter.decoder(public slots) in its prepared materializer
-    and adapter.prepare_write in the selected statement implementation.
+    It uses the public ``orm.hooks``: ``decode_field`` for loaded file fields, and
+    ``prepare_insert`` and ``prepare_update`` in the file statements.
     """
     adapter = ModelAdapter(fields, registry)
     methods: dict[str, Any] = {}
@@ -75,8 +53,10 @@ def install_model(model: type[Any], fields: Mapping[str, FileField], registry: R
     for name, method in methods.items():
         setattr(model, name, method)
     if hasattr(model, "_meta"):
+        from orm.hooks import decode_field
         for name, field in fields.items():
-            setattr(model, name, _FileAttribute(vars(model)[name], field))
+            # A loaded file field reads as a Reference, without I/O.
+            decode_field(model, name, field.decode)
         from .orm import install_queries
         install_queries(model, adapter)
     return adapter

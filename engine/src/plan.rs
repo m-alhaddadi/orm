@@ -2401,3 +2401,35 @@ fn shape_positions(model: &Model, shape: Option<&orm_core::behavior::ResultShape
 
 pub type Returned = (usize, Vec<ValueType>, Option<orm_core::behavior::ResultShape>);
 pub type ReturnColumns = (Vec<ValueType>, Option<orm_core::behavior::ResultShape>);
+
+/// Plans `op`, an update, without running it, and tells whether its filters pin one
+/// row: an `and`-reachable `field == param` on the primary key or a unique field, with
+/// a non-null parameter. Packages that must change exactly one row check this first.
+pub fn unique_row_update(schema: &Schema, target: Target, op: &Operation, params: &dyn Params) -> Result<bool> {
+    let Operation::Update(update) = op else { return Err(Error::query("unique_row_update takes an update")) };
+    Planner::plan(schema, target, op, params)?;
+    let model = schema.model(schema.model_idx(&update.model).map_err(query_err)?);
+    fn proves(e: &Expr, model: &orm_core::schema::Model, params: &dyn Params) -> Result<bool> {
+        match e {
+            Expr::And { items } => {
+                for item in items { if proves(item, model, params)? { return Ok(true); } }
+                Ok(false)
+            }
+            Expr::Cmp { op: CmpOp::Eq, l, r } => {
+                for (column, parameter) in [(l, r), (r, l)] {
+                    let (Expr::Col { path, name }, Expr::Param { i }) = (column.as_ref(), parameter.as_ref()) else { continue };
+                    let Ok(field) = model.field(name) else { continue };
+                    if !path.is_empty() || !(field.primary_key || field.unique) || *i >= params.len() { continue; }
+                    let value = params.value(*i, Some(field.value_type()))?;
+                    if value != value.as_null() { return Ok(true); }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+    for filter in &update.filters {
+        if proves(filter, model, params)? { return Ok(true); }
+    }
+    Ok(false)
+}

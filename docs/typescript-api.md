@@ -243,6 +243,19 @@ A transaction that is never finished is rolled back when it is garbage-collected
 
 Both throw `TransactionRequired` when called outside a transaction.
 
+### Hooks for packages
+
+A package that changes writes and reads from outside the ORM (for example
+`@orm/file-storage`) uses these public methods, not internal names:
+
+* `qs.prepareInsert(values)` checks one insert as `insert()` does (required fields,
+  conversion, native planning) without SQL or I/O. `prepared.execute(values?)` inserts it.
+* `qs.prepareUpdate(values)` checks `qs.update(values)` the same way. `prepared.unique`
+  is true when the engine proves that the filters pin one row by a non-null primary
+  key or unique field. `prepared.execute(values?, { returning })` runs it.
+* `Model._meta.addRowDecoder(decode)` runs `decode(row)` on each instance that a query
+  or write returns. A partial instance has only its loaded fields as own properties.
+
 ## Errors
 
 Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,

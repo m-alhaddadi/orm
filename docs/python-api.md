@@ -576,6 +576,21 @@ async with db.transaction():
   signed big-endian).
 * No optimistic locking (version columns) on purpose.
 
+### Hooks for packages: `orm.hooks`
+
+A package that changes writes and reads from outside the ORM (for example
+`orm-file-storage`) uses these public hooks, not private names:
+
+* `prepare_insert(qs, values)` checks one insert as `insert()` does (required fields,
+  conversion, native planning) without SQL or I/O. `await prepared.execute(values)`
+  inserts it, by default with the checked values.
+* `prepare_update(qs, values)` checks `qs.update(**values)` the same way.
+  `prepared.unique` is true when the engine proves that the filters pin one row by a
+  non-null primary key or unique field. `await prepared.execute(values, returning=False)`
+  runs it.
+* `decode_field(Model, name, decode)` reads the loaded value of a field as
+  `decode(value)`. The instance keeps the stored value for writes and filters.
+
 ## The FFI boundary
 
 ```

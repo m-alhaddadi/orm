@@ -35,7 +35,7 @@ use crate::errors::{db_err, engine_err, query_err, schema_err};
 use orm_core::dialect::Target;
 use orm_engine::db::{self, Driver, Executor};
 use orm_engine::exec::{self, Conflict, Outcome};
-use orm_engine::plan::Planner;
+use orm_engine::plan::{self, Planner};
 use orm_engine::migrate as engine_migrate;
 use orm_engine::parse_op;
 
@@ -129,12 +129,18 @@ impl PySchema {
         Ok(PySchema { inner: Arc::new(inner), classes: Arc::new(classes) })
     }
 
-    /// Selected upload preflight: ordinary conversion/planning without SQL or I/O.
-    #[cfg(feature = "file-storage")]
-    fn validate_file_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>) -> PyResult<()> {
+    /// Converts and plans a single-row insert without SQL or I/O (`orm.hooks.prepare_insert`).
+    fn validate_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>) -> PyResult<()> {
         let values = convert_rows(&self.inner, model, &fields, rows, true)?;
         exec::plan_insert(&self.inner, Target::new(self.inner.dialect), model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
         Ok(())
+    }
+
+    /// Plans an update without SQL or I/O; true when its filters pin one row by a
+    /// non-null primary key or unique field (`orm.hooks.prepare_update`).
+    fn unique_row_update(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<bool> {
+        let op = parse_op(op_json).map_err(engine_err)?;
+        plan::unique_row_update(&self.inner, Target::new(self.inner.dialect), &op, &PyParams(&params)).map_err(engine_err)
     }
 
     /// SQL for an operation with parameters inlined. For debugging and tests only.

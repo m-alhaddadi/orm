@@ -1,7 +1,7 @@
 /** Selected model setup, shared by generated and runtime-defined hosts. */
 import { Registry } from "@orm/storage";
 import { FileField, FileFieldError, PreparedFileWrite } from "./index.js";
-import { installQueries } from "./orm.js";
+import { installQueries, type HostModel } from "./orm.js";
 import { prepareDecoder } from "./decoder.js";
 
 export class ModelAdapter {
@@ -19,7 +19,7 @@ export class ModelAdapter {
   }
 }
 
-export function installModel(prototype: object, fields: ReadonlyMap<string, FileField>, registry?: Registry, host?: unknown): ModelAdapter {
+export function installModel(prototype: object, fields: ReadonlyMap<string, FileField>, registry?: Registry, host?: HostModel): ModelAdapter {
   const adapter = new ModelAdapter(fields, registry);
   const methods = new Map<string, (this: Record<string, unknown>, options?: { expiresIn?: number }) => unknown>();
   for (const [name, field] of fields) {
@@ -41,13 +41,11 @@ export function installModel(prototype: object, fields: ReadonlyMap<string, File
   return adapter;
 }
 
-// Loaded file fields read as a Reference: the prepared decoder runs once per materialized row, without I/O.
-function installInstances(meta: any, adapter: ModelAdapter): void {
-  const decode = adapter.decoder(meta.fieldList.map((field: { name: string }, position: number) => [field.name, position] as const));
-  const instance = meta.instance.bind(meta);
-  meta.instance = (values: unknown[], start: number, db: unknown) => {
-    const row = instance(values, start, db);
-    decode(values, start, row);
-    return row;
-  };
+// Loaded file fields read as a Reference: the host runs the decoder once per materialized row, without I/O.
+function installInstances(meta: HostModel, adapter: ModelAdapter): void {
+  const fields = [...adapter.fields];
+  meta.addRowDecoder(row => {
+    // A partial row has only its loaded fields as own properties.
+    for (const [name, field] of fields) if (Object.hasOwn(row, name)) row[name] = field.decode(row[name]);
+  });
 }

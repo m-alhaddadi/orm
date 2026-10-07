@@ -173,6 +173,20 @@ export interface ConflictOptions<M extends ModelSpec> {
 }
 
 /** `ON CONFLICT DO NOTHING`: keep the existing row. */
+/** A checked single-row insert (`QuerySet.prepareInsert`). */
+export interface PreparedInsert<M extends ModelSpec> {
+  /** Inserts `values` (by default the checked values) and gives the new instance. */
+  execute(values?: M["insert"]): Promise<M["row"]>;
+}
+
+/** A checked update (`QuerySet.prepareUpdate`). */
+export interface PreparedUpdate<M extends ModelSpec> {
+  /** The filters pin one row by a non-null primary key or unique field. */
+  readonly unique: boolean;
+  /** Updates to `values` (by default the checked values); `returning` gives the rows. */
+  execute(values?: M["update"], options?: { readonly returning?: boolean }): Promise<number | M["row"][]>;
+}
+
 export interface DoNothing<M extends ModelSpec> extends ConflictOptions<M> {
   readonly doNothing: true;
 }
@@ -948,12 +962,29 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   update(values: M["update"], options: { readonly returning: true }): Promise<M["row"][]>;
   update(values: M["update"], options?: { readonly returning?: boolean }): Promise<number | M["row"][]>;
   async update(values: M["update"], options: { readonly returning?: boolean } = {}): Promise<number | M["row"][]> {
+    return this.updateValues(values, options.returning ?? false);
+  }
+
+  private async updateValues(values: M["update"], returning: boolean): Promise<number | M["row"][]> {
     const params: unknown[] = [];
     const ir = this.mutationIr("update", params, values);
     if (!(ir["set"] as unknown[]).length) {
-      return options.returning ? [] : 0;
+      return returning ? [] : 0;
     }
-    return this.write(ir, params, options.returning ?? false);
+    return this.write(ir, params, returning);
+  }
+
+  /**
+   * Checks `update(values)` as `update()` does, without SQL or I/O, for a package that
+   * must check a write before its own I/O. `unique`: the filters pin one row by a
+   * non-null primary key or unique field. `execute()` runs the update.
+   */
+  prepareUpdate(values: M["update"]): PreparedUpdate<M> {
+    this.db();
+    const params: unknown[] = [];
+    const ir = this.mutationIr("update", params, values);
+    const unique = call(() => this.meta.registry.native().uniqueRowUpdate(JSON.stringify(ir), params));
+    return { unique, execute: (data = values, options = {}) => this.updateValues(data, options.returning ?? false) };
   }
 
   /**
@@ -1036,6 +1067,17 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    * skipped by `doNothing` are left out). */
   insertMany(rows: readonly M["insert"][], options?: InsertOptions<M>): Promise<M["row"][]> {
     return this.insertRows(rows, options);
+  }
+
+  /**
+   * Checks one `insert(values)` as `insert()` does, without SQL or I/O, for a package
+   * that must check a write before its own I/O. `execute()` inserts the row.
+   */
+  prepareInsert(values: M["insert"]): PreparedInsert<M> {
+    this.db();
+    const prepared = prepareRows(this.meta, [values]);
+    call(() => this.meta.registry.native().validateInsert(this.meta.name, prepared.fields, prepared.rows));
+    return { execute: async (data = values) => (await this.insertRows([data], undefined))[0]! };
   }
 
   /** @internal */
