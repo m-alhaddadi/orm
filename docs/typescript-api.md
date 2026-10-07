@@ -113,8 +113,8 @@ The builders are `filter(...)`, `exclude(...)`, `orderBy(...)`, `limit(n)`, `off
 
 Comparisons are methods: `.eq .ne .lt .lte .gt .gte .between .in .notIn .isNull
 .isNotNull`. String columns also have `.contains .icontains .startsWith .endsWith .like
-.ilike`, and arrays have `.has .hasAll .hasAny .containedBy`. Arithmetic is `.add .sub
-.mul .div`, and orderings are `.asc() / .desc()`. `.asc({ nulls: "first" })` and `.desc({ nulls: "last" })` place NULLs. `orderBy` also takes field names, with
+.ilike .concat`, and arrays have `.has .hasAll .hasAny .containedBy .element`. Arithmetic
+is `.add .sub .mul .div`, and orderings are `.asc() / .desc()`. `.asc({ nulls: "first" })` and `.desc({ nulls: "last" })` place NULLs. `orderBy` also takes field names, with
 `-` for descending: `orderBy("-createdAt", "id")`. A name that is not a field of the
 model is a type error and a `TypeError`. Conditions combine with `and()`,
 `or()`, `not()`, or the methods of the same names. A boolean column is a condition by
@@ -179,7 +179,11 @@ await q.all({ author: 1n, n: 10 }); // { author: bigint | number; n: number }
 ## Columns and aggregates: `select()`
 
 `select({ alias: expr | Model })` gives object rows typed per key. `func` has `count sum
-avg min max coalesce lower upper length abs now cardinality` plus the window functions.
+avg min max coalesce lower upper length abs now cardinality unnest concat trim ltrim rtrim
+replace substr strpos` plus the window functions. `func.concat(a, " ", b)` reads a `null`
+part as an empty string; `a.concat(b)` (`a || b`) is `null` when either side is `null`.
+`Profile.links.element(1)` is SQL's 1-based element access (`null` out of range), and
+`func.unnest(...)` is valid only as a `select()` column; SQLite has no array columns.
 The result types follow the SQL: `count` is a `bigint`, `sum(Int)` is `number | null`,
 `sum(Decimal)` is `Decimal | null`, and `avg` is `number | null`. A column read through a
 nullable relation becomes nullable.
@@ -197,7 +201,8 @@ Other `Select` methods:
 * `qs.select({ t: Post.title }).limit(1).asScalar()` for a scalar value.
 * `col.in(select)` for a one-column select.
 * `outer(User.id)` refers to the nearest enclosing `User` query. It can sit two or more
-  levels down.
+  levels down. `outer(Post.author.name)` reads a related row through to-one relations;
+  a to-many hop is a type error and a `QueryError`.
 
 A query set that holds an `outer()` reference can't run on its own. Trying to is a type
 error, and also a `QueryError` at runtime.

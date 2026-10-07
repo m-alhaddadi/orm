@@ -58,6 +58,17 @@ async def test_crud_relations_defaults_and_upserts(sqlite):
     assert registry.ir()["dialect"] == "sqlite"
 
 
+async def test_outer_through_a_relation_path(sqlite):
+    db, m, _ = sqlite
+    Author, Book = m["Author"], m["Book"]
+    alice = await Author.objects.using(db).insert(email="a@example.com", name="Alice")
+    bob = await Author.objects.using(db).insert(email="b@example.com", name="Bob")
+    await Book.objects.using(db).insert_many([{"author_id": alice.id, "title": "one"}, {"author_id": bob.id, "title": "two"}])
+    name = Author.objects.filter(Author.email == orm.outer(Book.author.email)).select(Author.name).as_scalar()
+    rows = await Book.objects.using(db).order_by(Book.id).select(Book.title, name.label("name"))
+    assert [tuple(r) for r in rows] == [("one", "Alice"), ("two", "Bob")]
+
+
 async def test_transactions_concurrency_and_abandonment(sqlite):
     db, m, _ = sqlite
     Author = m["Author"]
@@ -107,6 +118,53 @@ async def test_migrations_rebuild_preserve_rows_and_sequences(tmp_path):
         await runner.downgrade()
         assert (await db._fetch_text("SELECT title FROM book"))[0][0] == "kept"
         assert all(s.applied for s in (await runner.status())[:1])
+    finally:
+        await db.close()
+
+
+async def test_kept_rename_hints_do_not_redirect_later_rebuilds(tmp_path):
+    from orm.migrations import Migrations, Migrator
+    renamed = SOURCE.replace("  books      Book[]", '  books      Book[]\n  @@map("writer")\n  @@renamed_from("author")').replace("  title     String", '  name      String @renamed_from("title")').replace("@@index([title]", "@@index([name]")
+    regs = [models(source)[0] for source in (SOURCE, renamed, renamed.replace("  pages     Int", "  added     Int @default(42)\n  pages     Int"))]
+    directory = str(tmp_path / "migrations")
+    for reg, name in zip(regs, ("initial", "rename", "later")):
+        Migrations(directory, reg).make(name)
+    db = await orm.connect("sqlite://:memory:", registry=regs[0], default=False)
+    runner = Migrator(db, Migrations(directory, regs[0]))
+    try:
+        await runner.upgrade("1")
+        await db.execute("INSERT INTO author (id, email, name) VALUES (100, 'gone', 'gone'); DELETE FROM author; INSERT INTO author (email, name) VALUES ('kept', 'kept')")
+        await db.execute("INSERT INTO book (author_id, title) VALUES (101, 'kept')")
+        await runner.upgrade("2")
+        await runner.upgrade()
+        assert await db._fetch_text("SELECT w.email, b.name, b.added FROM writer w JOIN book b ON b.author_id = w.id") == [("kept", "kept", "42")]
+        assert await db._fetch_text("PRAGMA foreign_key_check") == []
+        await db.execute("INSERT INTO writer (email, name) VALUES ('next', 'next')")
+        assert (await db._fetch_text("SELECT max(id) FROM writer"))[0][0] == "102"
+        await runner.downgrade()
+        assert await db._fetch_text("SELECT w.email, b.name FROM writer w JOIN book b ON b.author_id = w.id") == [("kept", "kept")]
+    finally:
+        await db.close()
+
+
+async def test_string_functions_and_concatenation():
+    from orm import func
+    registry, m = models('datasource db { provider = "sqlite" }\nmodel Note {\n  id BigInt @id @default(autoincrement())\n  title String\n  tag String?\n}')
+    Note = m["Note"]
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    try:
+        await db.create_tables()
+        await Note.objects.using(db).insert_many([{"title": "  a-b  ", "tag": "x"}, {"title": "c", "tag": None}])
+        rows = await Note.objects.using(db).order_by(Note.id).select(
+            func.concat(Note.title, Note.tag).label("c"), Note.title.concat(Note.tag).label("p"), func.trim(Note.title).label("t"),
+            func.ltrim(Note.title).label("l"), func.rtrim(Note.title).label("r"), func.replace(Note.title, "-", "+").label("x"),
+            func.substr(func.trim(Note.title), 2, 1).label("s"), func.strpos(Note.title, "b").label("i"),
+        )
+        assert [tuple(r) for r in rows] == [
+            ("  a-b  x", "  a-b  x", "a-b", "a-b  ", "  a-b", "  a+b  ", "-", 5),
+            ("c", None, "c", "c", "c", "c", "", 0),
+        ]
+        assert await Note.objects.using(db).filter(Note.title.concat("!") == "c!").count() == 1
     finally:
         await db.close()
 

@@ -32,6 +32,17 @@ export async function columns() {
   void j;
 }
 
+export async function stringsAndArrays() {
+  const rows = await Profile.objects.select({ first: Profile.links.element(1), link: func.unnest(Profile.links) }).all();
+  same<(typeof rows)[number], { first: string | null; link: string }>();
+  const text = await Post.objects.select({ c: func.concat(Post.title, " ", Post.views), p: Post.title.concat("!"), i: func.strpos(Post.title, "x"), t: func.trim(Post.title) }).all();
+  same<(typeof text)[number], { c: string; p: string; i: number; t: string }>();
+  // @ts-expect-error concatenation takes strings
+  Post.views.concat("!");
+  // @ts-expect-error element access takes an array column
+  Post.title.element(1);
+}
+
 export async function filters() {
   await User.objects.filter(User.email.eq("a"), User.posts.views.gt(3)).all();
   await Post.objects.filter(Post.published).all();
@@ -166,6 +177,10 @@ export async function subqueries() {
   // two levels down: the nearest User query
   const commented = Comment.objects.filter(Comment.authorId.eq(outer(User.id))).select({ p: Comment.postId });
   await User.objects.filter(exists(Post.objects.filter(Post.id.in(commented)))).all();
+  const authorName = Post.objects.filter(Post.author.name.eq(outer(Comment.post.author.name))).select({ t: Post.title }).limit(1).asScalar();
+  await Comment.objects.select({ t: authorName }).all();
+  // @ts-expect-error outer() through a to-many relation
+  outer(User.posts.views);
   // @ts-expect-error an outer() reference with no enclosing query
   await User.objects.filter(User.id.eq(outer(User.id))).all();
   // a Post query reading a User reference runs only inside a User query

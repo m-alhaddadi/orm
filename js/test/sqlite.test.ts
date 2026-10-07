@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { connect, func, IntegrityError, loads, Migrations, Migrator, Prefetch, QueryError, Registry, SchemaError } from "../src/index.js";
+import { connect, func, IntegrityError, loads, Migrations, Migrator, outer, Prefetch, QueryError, Registry, SchemaError } from "../src/index.js";
 import { Author, Book, Status, sqliteRegistry } from "./sqlite/models.js";
 
 test("SQLite CRUD, relations, enums, JSON, bulk defaults and CASE updates", async () => {
@@ -95,6 +95,77 @@ test("SQLite migrations, target checks and file persistence", async () => {
     await db.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("SQLite rebuilds after a rename ignore the kept rename hints", async () => {
+  const root = [join(import.meta.dirname, "..", ".."), join(import.meta.dirname, "..", "..", "..")].find((d) => {
+    try { readFileSync(join(d, "examples/sqlite/schema.prisma")); return true; } catch { return false; }
+  })!;
+  const source = readFileSync(join(root, "examples/sqlite/schema.prisma"), "utf8");
+  const renamed = source.replace("  books      Book[]", "  books      Book[]\n  @@map(\"writer\")\n  @@renamed_from(\"author\")")
+    .replace("  title     String", "  name      String @renamed_from(\"title\")").replace("@@index([title]", "@@index([name]");
+  const regs = [source, renamed, renamed.replace("  pages     Int", "  added     Int @default(42)\n  pages     Int")].map((text) => {
+    const reg = new Registry();
+    loads(text, { registry: reg });
+    return reg;
+  });
+  const dir = mkdtempSync(join(tmpdir(), "orm-sqlite-"));
+  ["initial", "rename", "later"].forEach((name, i) => new Migrations(dir, regs[i]!).make(name));
+  const db = await connect("sqlite://:memory:", { registry: regs[0]!, default: false });
+  try {
+    const runner = new Migrator(db, new Migrations(dir, regs[0]!));
+    await runner.upgrade("1");
+    await db.execute("INSERT INTO author (id, email, name) VALUES (100, 'gone', 'gone'); DELETE FROM author; INSERT INTO author (email, name) VALUES ('kept', 'kept')");
+    await db.execute("INSERT INTO book (author_id, title) VALUES (101, 'kept')");
+    await runner.upgrade("2");
+    await runner.upgrade();
+    assert.deepEqual(await db.fetchText("SELECT w.email, b.name, b.added FROM writer w JOIN book b ON b.author_id = w.id"), [["kept", "kept", "42"]]);
+    assert.deepEqual(await db.fetchText("PRAGMA foreign_key_check"), []);
+    await db.execute("INSERT INTO writer (email, name) VALUES ('next', 'next')");
+    assert.equal((await db.fetchText("SELECT max(id) FROM writer"))[0]![0], "102");
+    await runner.downgrade();
+    assert.deepEqual(await db.fetchText("SELECT w.email, b.name FROM writer w JOIN book b ON b.author_id = w.id"), [["kept", "kept"]]);
+  } finally {
+    await db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("SQLite outer() through a relation path", async () => {
+  const db = await connect("sqlite://:memory:", { registry: sqliteRegistry, default: false });
+  try {
+    await db.createTables();
+    const alice = await Author.objects.using(db).insert({ email: "a@example.com", name: "Alice" });
+    const bob = await Author.objects.using(db).insert({ email: "b@example.com", name: "Bob" });
+    await Book.objects.using(db).insertMany([{ authorId: alice.id, title: "one" }, { authorId: bob.id, title: "two" }]);
+    const name = Author.objects.filter(Author.email.eq(outer(Book.author.email))).select({ n: Author.name }).asScalar();
+    assert.deepEqual(await Book.objects.using(db).orderBy(Book.id).select({ title: Book.title, name }).all(), [{ title: "one", name: "Alice" }, { title: "two", name: "Bob" }]);
+  } finally { await db.close(); }
+});
+
+test("SQLite string functions and concatenation", async () => {
+  const registry = new Registry();
+  const Note = loads(`
+    datasource db { provider = "sqlite" }
+    model Note {
+      id BigInt @id @default(autoincrement())
+      title String
+      tag String?
+    }`, { registry })["Note"] as any;
+  const db = await connect("sqlite://:memory:", { registry, default: false });
+  try {
+    await db.createTables();
+    await Note.objects.using(db).insertMany([{ title: "  a-b  ", tag: "x" }, { title: "c", tag: null }]);
+    const rows = await Note.objects.using(db).orderBy(Note.id).select({
+      c: func.concat(Note.title, Note.tag), p: Note.title.concat(Note.tag), t: func.trim(Note.title), l: func.ltrim(Note.title),
+      r: func.rtrim(Note.title), x: func.replace(Note.title, "-", "+"), s: func.substr(func.trim(Note.title), 2, 1), i: func.strpos(Note.title, "b"),
+    }).all();
+    assert.deepEqual(rows, [
+      { c: "  a-b  x", p: "  a-b  x", t: "a-b", l: "a-b  ", r: "  a-b", x: "  a+b  ", s: "-", i: 5 },
+      { c: "c", p: null, t: "c", l: "c", r: "c", x: "c", s: "", i: 0 },
+    ]);
+    assert.equal(await Note.objects.using(db).filter(Note.title.concat("!").eq("c!")).count(), 1);
+  } finally { await db.close(); }
 });
 
 test("SQLite UUID, date, timestamp and inline trigger conversions", async () => {

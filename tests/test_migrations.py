@@ -145,6 +145,14 @@ def test_table_rename_renames_generated_constraint_names(tmp_path):
     ]
 
 
+def test_kept_rename_hints_do_nothing_after_the_rename(tmp_path):
+    renamed = V1.replace('@@map("authors")', '@@map("writers")\n  @@renamed_from("authors")').replace("  title     String @db.VarChar(200)", '  name      String @renamed_from("title") @db.VarChar(200)')
+    Migrations(tmp_path, models(V1)).make()
+    Migrations(tmp_path, models(renamed)).make()
+    later = Migrations(tmp_path, models(renamed.replace("  pages     Int", "  added     Int    @default(42)\n  pages     Int"))).plan()
+    assert [s.sql for s in later.up] == ['ALTER TABLE "books" ADD COLUMN "added" integer DEFAULT 42 NOT NULL']
+
+
 def test_migrations_from_a_schema_file(tmp_path):
     (tmp_path / "schema.prisma").write_text(V1)
     m = Migrations(tmp_path / "migrations", tmp_path / "schema.prisma").make()

@@ -207,7 +207,12 @@ fn fold(items: Vec<SExpr>, and: bool) -> SExpr {
 }
 
 const AGGREGATES: [&str; 5] = ["count", "sum", "avg", "min", "max"];
-const SCALAR_FUNCS: [&str; 7] = ["lower", "upper", "length", "abs", "coalesce", "now", "cardinality"];
+const SCALAR_FUNCS: [&str; 16] = [
+    "lower", "upper", "length", "abs", "coalesce", "now", "cardinality", "concat", "trim", "ltrim", "rtrim", "replace",
+    "substr", "strpos", "element", "unnest",
+];
+/// Functions whose arguments are strings: their parameters bind as text.
+const TEXT_FUNCS: [&str; 7] = ["concat", "trim", "ltrim", "rtrim", "replace", "substr", "strpos"];
 /// Functions that only exist with `OVER (...)`.
 const WINDOW_FUNCS: [&str; 11] = [
     "row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead", "first_value",
@@ -406,6 +411,8 @@ pub struct Planner<'s> {
     allow_excluded: bool,
     /// Window functions are only valid in the select list and `ORDER BY`.
     allow_window: bool,
+    /// `unnest()` returns a set of rows: only valid in the select list.
+    allow_unnest: bool,
     target: Target,
     caps: Capabilities,
     #[cfg(feature = "query-defaults")]
@@ -440,6 +447,7 @@ impl<'s> Planner<'s> {
             next_alias,
             allow_excluded: false,
             allow_window: false,
+            allow_unnest: false,
             target,
             caps: target.caps,
             #[cfg(feature = "query-defaults")] policy_bypass: false,
@@ -994,18 +1002,43 @@ impl<'s> Planner<'s> {
         }
     }
 
-    fn outer_field(&self, depth: usize, name: &str) -> Result<(&str, &'s FieldIr)> {
+    /// The enclosing query's alias and the field reached from its root through `path`.
+    fn outer_field(&self, depth: usize, path: &[String], name: &str) -> Result<(&str, &'s FieldIr)> {
         if depth == 0 || depth > self.outer.len() {
             return Err(Error::query(format!("outer() column {name:?} has no enclosing query at that depth")));
         }
-        let (alias, model) = &self.outer[self.outer.len() - depth];
+        let (alias, root) = &self.outer[self.outer.len() - depth];
+        let mut model = *root;
+        for hop in path {
+            let (rel, target) = self.model(model).relation(hop).map_err(query_err)?;
+            // A to-many hop has several rows, so the value would not be one value.
+            if rel.kind != RelKind::One {
+                return Err(Error::query(format!("outer() through {hop:?} needs a to-one relation, not a to-many one")));
+            }
+            model = target;
+        }
         #[cfg(feature = "composition")]
-        self.reject_computed(self.model(*model), name)?;
+        self.reject_computed(self.model(model), name)?;
         #[cfg(feature = "composition")]
-        if self.model(*model).resolved_fields[self.model(*model).field_pos(name).map_err(query_err)?].storage.owner != self.model(*model).owner {
+        if self.model(model).resolved_fields[self.model(model).field_pos(name).map_err(query_err)?].storage.owner != self.model(model).owner {
             return Err(Error::query("outer() on inherited storage requires an explicit owner projection"));
         }
-        Ok((alias, self.model(*model).field(name).map_err(query_err)?))
+        Ok((alias, self.model(model).field(name).map_err(query_err)?))
+    }
+
+    /// `(SELECT o2.<column> FROM <hop 1> o1 [JOIN <hop 2> o2 ON ...] WHERE o1.to = <outer>.from)`:
+    /// a field of a row related to an enclosing query's row through to-one relations.
+    fn outer_path(&mut self, depth: usize, path: &[String], field: &FieldIr) -> Result<SExpr> {
+        let (alias, root) = self.outer[self.outer.len() - depth].clone();
+        let mut sub = Query::select();
+        let mut at = (alias, root);
+        for (k, hop) in path.iter().enumerate() {
+            let (rel, target) = self.model(at.1).relation(hop).map_err(query_err)?;
+            let next = self.add_hop(&mut sub, k == 0, (&at.0, at.1), rel, target, "o")?;
+            at = (next, target);
+        }
+        sub.expr(col(&at.0, &field.column));
+        Ok(SExpr::SubQuery(None, Box::new(sub.into())))
     }
 
     #[cfg(feature = "composition")]
@@ -1026,8 +1059,8 @@ impl<'s> Planner<'s> {
                 let field = self.model(self.root).field(name).ok();
                 Hint { ty: field.map(|f| f.value_type()), field }
             }
-            Expr::Outer { depth, name } => {
-                let field = self.outer_field(*depth, name).ok().map(|(_, f)| f);
+            Expr::Outer { depth, path, name } => {
+                let field = self.outer_field(*depth, path, name).ok().map(|(_, f)| f);
                 Hint { ty: field.map(|f| f.value_type()), field }
             }
             Expr::CteCol { cte, name } => {
@@ -1102,9 +1135,9 @@ impl<'s> Planner<'s> {
                 let f = self.model(self.root).field(name).map_err(query_err)?;
                 col("excluded", &f.column)
             }
-            Expr::Outer { depth, name } => {
-                let (alias, f) = self.outer_field(*depth, name)?;
-                col(alias, &f.column)
+            Expr::Outer { depth, path, name } => {
+                let (alias, f) = self.outer_field(*depth, path, name)?;
+                if path.is_empty() { col(alias, &f.column) } else { self.outer_path(*depth, path, f)? }
             }
             Expr::CteCol { cte, name } => {
                 let (alias, f) = self.cte_col(cte, name)?;
@@ -1121,7 +1154,10 @@ impl<'s> Planner<'s> {
             Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
             Expr::Arith { op, l, r } => {
                 let inner = self.hint_of(l).or(self.hint_of(r));
-                let hint = Hint { ty: inner.ty.or(hint.ty), field: None };
+                let hint = match op {
+                    ArithOp::Concat => Hint { ty: Some(ValueType::scalar(ColType::Text)), field: None },
+                    _ => Hint { ty: inner.ty.or(hint.ty), field: None },
+                };
                 let l = self.value(l, hint)?;
                 let r = self.value(r, hint)?;
                 match op {
@@ -1129,6 +1165,7 @@ impl<'s> Planner<'s> {
                     ArithOp::Sub => l.sub(r),
                     ArithOp::Mul => l.mul(r),
                     ArithOp::Div => l.div(r),
+                    ArithOp::Concat => template(self.target.dialect, "$1 || $2", vec![l, r]),
                 }
             }
             cond => self.cond(cond)?,
@@ -1145,7 +1182,7 @@ impl<'s> Planner<'s> {
                 let m = self.walk(self.root, path)?;
                 self.model(m).field(name).map_err(query_err)?.value_type()
             }
-            Expr::Outer { depth, name } => self.outer_field(*depth, name)?.1.value_type(),
+            Expr::Outer { depth, path, name } => self.outer_field(*depth, path, name)?.1.value_type(),
             Expr::CteCol { cte, name } => {
                 self.model(self.model_idx(cte)?).field(name).map_err(query_err)?.value_type()
             }
@@ -1153,6 +1190,7 @@ impl<'s> Planner<'s> {
             Expr::Text { .. } => scalar(ColType::Text),
             Expr::Subquery { select } => self.child(select)?.expr_type(Self::one_column(select, "as_scalar()")?)?,
             Expr::Window { func, .. } => self.expr_type(func)?,
+            Expr::Arith { op: ArithOp::Concat, .. } => scalar(ColType::Text),
             Expr::Arith { l, r, .. } => match self.expr_type(l) {
                 Ok(t) => t,
                 Err(_) => self.expr_type(r)?,
@@ -1170,8 +1208,15 @@ impl<'s> Planner<'s> {
                         ColType::Decimal => scalar(ColType::Decimal),
                         _ => scalar(ColType::Float),
                     },
-                    "length" | "ntile" | "cardinality" => scalar(ColType::Int),
-                    "lower" | "upper" => scalar(ColType::Text),
+                    "length" | "ntile" | "cardinality" | "strpos" => scalar(ColType::Int),
+                    "lower" | "upper" | "concat" | "trim" | "ltrim" | "rtrim" | "replace" | "substr" => scalar(ColType::Text),
+                    "element" | "unnest" if self.target.dialect == Dialect::Sqlite => {
+                        return Err(Error::query("sqlite does not support array element access or unnest()"))
+                    }
+                    "element" | "unnest" => match first()? {
+                        t if t.array => t.element(),
+                        _ => return Err(Error::query(format!("{} needs an array", if name == "element" { "an index" } else { "unnest()" }))),
+                    },
                     "now" => scalar(ColType::DateTime),
                     // SUM of integers is cast to bigint (see `func`).
                     "sum" => match first()? {
@@ -1320,8 +1365,14 @@ impl<'s> Planner<'s> {
         if self.target.dialect == Dialect::Sqlite && name == "cardinality" {
             return Err(Error::query("sqlite does not support cardinality()"));
         }
+        if self.target.dialect == Dialect::Sqlite && matches!(name, "element" | "unnest") {
+            return Err(Error::query("sqlite does not support array element access or unnest()"));
+        }
+        if name == "unnest" && !self.allow_unnest {
+            return Err(Error::query("unnest() returns several rows: it can only be a select() column"));
+        }
         let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
-        let hint = Hint { ty: hint.ty, field: None };
+        let hint = Hint { ty: if TEXT_FUNCS.contains(&name) { Some(ValueType::scalar(ColType::Text)) } else { hint.ty }, field: None };
         let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>()?;
         let d = if distinct { "DISTINCT " } else { "" };
         let n = planned.len();
@@ -1361,6 +1412,19 @@ impl<'s> Planner<'s> {
             "length" => one("LENGTH($1)", planned)?,
             "cardinality" => one("CARDINALITY($1)", planned)?,
             "abs" => one("ABS($1)", planned)?,
+            "concat" if !planned.is_empty() => call("CONCAT", planned)?,
+            "trim" => one("TRIM($1)", planned)?,
+            "ltrim" => one("LTRIM($1)", planned)?,
+            "rtrim" => one("RTRIM($1)", planned)?,
+            "replace" if n == 3 => call("REPLACE", planned)?,
+            "substr" if (2..=3).contains(&n) => call("SUBSTR", planned)?,
+            "strpos" if n == 2 => call(if dialect == Dialect::Sqlite { "INSTR" } else { "STRPOS" }, planned)?,
+            // The index is an `Int`, written into the SQL text.
+            "element" => match args.get(1) {
+                Some(Expr::Int { value }) if n == 2 => one(&format!("($1)[{value}]"), planned.into_iter().take(1).collect())?,
+                _ => return Err(Error::query("wrong arguments for an array index")),
+            },
+            "unnest" => one("UNNEST($1)", planned)?,
             "now" if planned.is_empty() => SExpr::cust("CURRENT_TIMESTAMP"),
             "coalesce" if !planned.is_empty() => call("COALESCE", planned)?,
             "row_number" | "rank" | "dense_rank" | "percent_rank" | "cume_dist" if planned.is_empty() => {
@@ -1451,6 +1515,7 @@ impl<'s> Planner<'s> {
                     windowed |= has_window(expr);
                     types.push(self.expr_type(expr)?);
                     self.allow_window = true;
+                    self.allow_unnest = true;
                     #[cfg(feature = "composition")]
                     let computed = match expr {
                         Expr::Col { path, name } => {
@@ -1469,6 +1534,7 @@ impl<'s> Planner<'s> {
                     #[cfg(not(feature = "composition"))]
                     let e = self.value(expr, Hint::default());
                     self.allow_window = false;
+                    self.allow_unnest = false;
                     let mut e = e?;
                     let read_sql = match expr {
                         Expr::Col { path, name } => {

@@ -112,13 +112,42 @@ async def test_scalar_subquery_in_update(clean):
     assert views == {"a1": 0, "a2": 2, "a3": 0, "b1": 1}
 
 
+async def test_string_functions_and_concatenation(clean):
+    await seed()
+    rows = await Comment.objects.order_by(Comment.id).select(
+        Comment.body, func.concat(Comment.author.name, "!").label("c"), Comment.author.name.concat("!").label("p")
+    )
+    assert [tuple(r) for r in rows] == [("c1", "Bob!", "Bob!"), ("c2", "!", None), ("c3", "Alice!", "Alice!")]
+    row = await Post.objects.filter(Post.title == "b1").select(
+        func.trim(func.concat("  ", Post.title, " ")).label("t"), func.ltrim(func.concat("  ", Post.title)).label("l"),
+        func.rtrim(func.concat(Post.title, "  ")).label("r"), func.replace(Post.title, "b", "B").label("x"),
+        func.substr(Post.title, 2).label("s"), func.strpos(Post.title, "1").label("i"),
+    ).first()
+    assert row is not None and tuple(row) == ("b1", "b1", "b1", "B1", "1", 2)
+    assert [p.title for p in await Post.objects.filter(Post.title.concat("!") == "a2!")] == ["a2"]
+
+
+async def test_outer_through_relation_paths(clean):
+    await seed()
+    others = (
+        Comment.objects.filter(Comment.post_id == outer(Post.id), Comment.author.name != outer(Post.author.name))
+        .select(func.count())
+        .as_scalar()
+    )
+    rows = await Post.objects.order_by(Post.title).select(Post.title, others.label("n"))
+    assert [tuple(r) for r in rows] == [("a1", 0), ("a2", 1), ("a3", 0), ("b1", 1)]
+    email = User.objects.filter(User.name == outer(Comment.post.author.name)).select(User.email).as_scalar()
+    rows = await Comment.objects.order_by(Comment.id).select(Comment.body, email.label("email"))
+    assert [tuple(r) for r in rows] == [("c1", "alice@example.com"), ("c2", "alice@example.com"), ("c3", "bob@example.com")]
+
+
 async def test_outer_errors(clean):
     with pytest.raises(ValueError, match=r"use outer\(User.id\)"):
         User.objects.filter(exists(Post.objects.filter(Post.author_id == User.id))).sql()
     with pytest.raises(ValueError, match="not a column of an enclosing query"):
         User.objects.filter(User.id == outer(User.id)).sql()
-    with pytest.raises(TypeError, match="relation path"):
-        outer(User.posts.views)
+    with pytest.raises(QueryError, match="needs a to-one relation"):
+        User.objects.filter(exists(Post.objects.filter(Post.views == outer(User.posts.views)))).sql()
     with pytest.raises(QueryError, match="one column"):
         Post.objects.select(Post.id, Post.title).as_scalar()
 

@@ -105,6 +105,10 @@ async def test_array_columns(clean):
     assert n == [2, 2]
     with pytest.raises(TypeError, match="expected a list"):
         await b.update(links="one")
+    rows = await Profile.objects.select(Profile.links[1].label("first"), Profile.links[3].label("third")).order_by(Profile.id)
+    assert [tuple(r) for r in rows] == [("https://a.example", None), ("one", None)]
+    assert await Profile.objects.filter(Profile.links[2] == "https://b.example").count() == 1
+    assert sorted(await Profile.objects.select(func.unnest(Profile.links)).scalars(), key=repr) == ["https://a.example", "https://b.example", "one", None]
 
 
 # -- one-to-one ---------------------------------------------------------------------------

@@ -94,10 +94,32 @@ test("a scalar subquery in an update", async () => {
   assert.deepEqual(views, { a1: 0, a2: 2, a3: 0, b1: 1 });
 });
 
+test("string functions and concatenation", async () => {
+  await seed();
+  const rows = await Comment.objects.orderBy(Comment.id).select({ body: Comment.body, c: func.concat(Comment.author.name, "!"), p: Comment.author.name.concat("!") }).all();
+  assert.deepEqual(rows, [{ body: "c1", c: "Bob!", p: "Bob!" }, { body: "c2", c: "!", p: null }, { body: "c3", c: "Alice!", p: "Alice!" }]);
+  const row = await Post.objects.filter(Post.title.eq("b1")).select({
+    t: func.trim(func.concat("  ", Post.title, " ")), l: func.ltrim(func.concat("  ", Post.title)), r: func.rtrim(func.concat(Post.title, "  ")),
+    x: func.replace(Post.title, "b", "B"), s: func.substr(Post.title, 2), i: func.strpos(Post.title, "1"),
+  }).first();
+  assert.deepEqual(row, { t: "b1", l: "b1", r: "b1", x: "B1", s: "1", i: 2 });
+  assert.deepEqual((await Post.objects.filter(Post.title.concat("!").eq("a2!")).all()).map((p) => p.title), ["a2"]);
+});
+
+test("outer() through relation paths", async () => {
+  await seed();
+  const others = Comment.objects.filter(Comment.postId.eq(outer(Post.id)), Comment.author.name.ne(outer(Post.author.name))).select({ n: func.count() }).asScalar();
+  const rows = await Post.objects.orderBy(Post.title).select({ title: Post.title, n: others }).all();
+  assert.deepEqual(rows, [{ title: "a1", n: 0n }, { title: "a2", n: 1n }, { title: "a3", n: 0n }, { title: "b1", n: 1n }]);
+  const email = User.objects.filter(User.name.eq(outer(Comment.post.author.name))).select({ e: User.email }).asScalar();
+  const bodies = await Comment.objects.orderBy(Comment.id).select({ body: Comment.body, email }).all();
+  assert.deepEqual(bodies, [{ body: "c1", email: "alice@example.com" }, { body: "c2", email: "alice@example.com" }, { body: "c3", email: "bob@example.com" }]);
+});
+
 test("outer() errors", () => {
   assert.throws(() => (User.objects.filter(exists(Post.objects.filter(Post.authorId.eq(User.id as never)))) as never as { sql(): string }).sql(), /use outer\(User.id\)/);
   assert.throws(() => (User.objects.filter(User.id.eq(outer(User.id))) as never as { sql(): string }).sql(), /not a column of an enclosing query/);
-  assert.throws(() => outer(User.posts.views), /relation path/);
+  assert.throws(() => (User.objects.filter(exists(Post.objects.filter(Post.views.eq(outer(User.posts.views as never) as never)))) as never as { sql(): string }).sql(), /needs a to-one relation/);
   assert.throws(() => (Post.objects.select({ id: Post.id, t: Post.title }) as never as { asScalar(): unknown }).asScalar(), /one column/);
 });
 

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { Func, QueryError, and, exists, excluded, func, or, outer } from "../src/index.js";
-import { Comment, Post, Tag, User } from "./blog/models.js";
+import { Comment, Post, Profile, Tag, User } from "./blog/models.js";
 
 const Y = new Date("2026-10-01T00:00:00Z");
 const USER_COLS = 'SELECT "users"."id", "users"."email", "users"."name", "users"."created_at" FROM "users"';
@@ -275,4 +275,27 @@ test("orderings place NULLs first or last", () => {
   assert.equal(reversed.descending, true);
   assert.equal(reversed.nulls, "last");
   assert.throws(() => Comment.authorId.desc({ nulls: "middle" as never }), /nulls is "first" or "last"/);
+});
+
+test("string functions and concatenation SQL", () => {
+  const sql = Post.objects.select({
+    c: func.concat(Post.title, " by ", Post.views), p: Post.title.concat("!"), t: func.trim(Post.title), l: func.ltrim(Post.title),
+    r: func.rtrim(Post.title), x: func.replace(Post.title, "a", "b"), s: func.substr(Post.title, 2, 3), i: func.strpos(Post.title, "x"),
+  }).sql();
+  assert.equal(
+    sql,
+    'SELECT CONCAT("posts"."title", \' by \', "posts"."views"), "posts"."title" || \'!\', TRIM("posts"."title"), LTRIM("posts"."title"), ' +
+      'RTRIM("posts"."title"), REPLACE("posts"."title", \'a\', \'b\'), SUBSTR("posts"."title", 2, 3), STRPOS("posts"."title", \'x\') FROM "posts"',
+  );
+  assert.equal(where(Post.objects.filter(Post.title.concat(Post.body).eq("ab"))), '("posts"."title" || "posts"."body") = \'ab\'');
+  assert.throws(() => func.concat(), /at least one/);
+});
+
+test("array element and unnest SQL", () => {
+  assert.equal(
+    Profile.objects.select({ first: Profile.links.element(1), link: func.unnest(Profile.links) }).sql(),
+    'SELECT ("profiles"."links")[1], UNNEST("profiles"."links") FROM "profiles"',
+  );
+  assert.throws(() => Profile.objects.filter(func.unnest(Profile.links).eq("x")).sql(), /only be a select\(\) column/);
+  assert.throws(() => Post.objects.select({ x: Post.title.element.call(Post.title as never, 1) }).sql(), /an index needs an array/);
 });

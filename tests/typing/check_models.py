@@ -9,6 +9,7 @@ from blog.models import Comment, Post, PostInsert, PostQuerySet, Priority, Profi
 
 from orm import (
     ColumnRef,
+    Expression,
     Func,
     Condition,
     ManyRelatedSet,
@@ -143,6 +144,12 @@ async def check() -> None:
     assert_type(await Profile.objects.select(func.sum(Profile.balance)).scalar(), Decimal | None)
     assert_type(await Profile.objects.select(func.avg(Profile.balance)).scalar(), Decimal | None)
     assert_type(func.cardinality(Profile.links), Func[int])
+    assert_type(Profile.links[1], Func[str | None])
+    assert_type(func.unnest(Profile.links), Func[str])
+    assert_type(func.concat(Post.title, " ", Post.views), Func[str])
+    assert_type(Post.title.concat("!"), Expression[str])
+    assert_type(func.strpos(Post.title, "x"), Func[int])
+    Post.views.concat("!")  # E: concatenation takes strings
     assert_type(alice.profile, Profile | None)
     assert_type(post.tags, ManyRelatedSet[Tag])
     assert_type(await post.tags, list[Tag])

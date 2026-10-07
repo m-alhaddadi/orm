@@ -575,7 +575,11 @@ From Python: `Migrations("migrations", "schema.prisma")` (or a `Registry`) has
 The generator diffs the schema against the **snapshot stored with the last migration**,
 not a live database, so it works offline and gives the same files everywhere.
 
-* **Tables and columns** are matched by name or `@renamed_from`. New tables are created
+* **Tables and columns** are matched by name first, then by `@renamed_from` /
+  `@@renamed_from`. A hint applies only when the current name is not in the snapshot
+  and the hinted name is, on Postgres and on SQLite. The snapshot stores only the new
+  name, so the hint is safe to remove after the migration is generated; a kept hint
+  does nothing in later migrations. New tables are created
   in foreign-key order with their keys and constraints inline; a foreign-key cycle is
   closed with `ALTER TABLE ... ADD CONSTRAINT`. Changed columns are altered in place
   (`TYPE ... USING`, `SET / DROP NOT NULL`, `SET / DROP DEFAULT`, identity).

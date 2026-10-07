@@ -303,6 +303,20 @@ export abstract class Expression<T, S extends string = never, P = {}> extends No
     return new Comparison("contained_by", this, new Literal([...values]));
   }
 
+  /** Array columns: the element at SQL's 1-based `index` (`col[1]` is the first), `null`
+   * out of range. PostgreSQL only. */
+  element<E>(this: Expression<readonly E[] | null, S, P>, index: number): Func<E | null, S, P> {
+    return new Func("element", [this, new Int(index)]);
+  }
+
+  // Strings ----------------------------------------------------------------------------------
+
+  /** `this || other`: `null` when either side is `null`. {@link Functions.concat}
+   * reads `null` as an empty string instead. */
+  concat<S2 extends string = never, P2 = {}>(this: Expression<string | null, S, P>, other: Operand<string, S2, P2>): Expression<string, S | S2, P & P2> {
+    return new Arith("concat", this, wrap(other)) as never;
+  }
+
   // Arithmetic -------------------------------------------------------------------------------
 
   add<N extends string>(value: ParamRef<N>): Expression<T, S, P & ParamValues<N, In<NonNullable<T>>>>;
@@ -526,8 +540,8 @@ export function excluded<T, S extends string>(column: Column<T, S>): Excluded<T,
 export class Outer<T, S extends string> extends Expression<T, OuterOf<S>, {}> {
   constructor(readonly column: Column<T, S>) {
     super();
-    if (!(column instanceof Column) || column.path.length) {
-      throw new TypeError(`outer() takes a column of a model (no relation path), got ${String(column)}`);
+    if (!(column instanceof Column)) {
+      throw new TypeError(`outer() takes a column of a model, got ${String(column)}`);
     }
   }
 
@@ -535,7 +549,7 @@ export class Outer<T, S extends string> extends Expression<T, OuterOf<S>, {}> {
     let depth = 1;
     for (let c = ctx.outer; c; c = c.outer, depth++) {
       if (c.root === this.column.root) {
-        return { t: "outer", depth, name: this.column.field.ir };
+        return { t: "outer", depth, path: [...this.column.path], name: this.column.field.ir };
       }
     }
     throw new QueryError(`outer(${this.column.label}) is not a column of an enclosing query`);
@@ -549,9 +563,10 @@ export class Outer<T, S extends string> extends Expression<T, OuterOf<S>, {}> {
  * await User.objects.filter(exists(Post.objects.filter(Post.authorId.eq(outer(User.id))))).all();
  * ```
  *
- * It refers to the nearest enclosing query over the column's model.
+ * It refers to the nearest enclosing query over the column's model. A path of to-one
+ * relations reads a related row: `outer(Post.author.name)`.
  */
-export function outer<T, S extends string>(column: Column<T, S>): Outer<T, S> {
+export function outer<T, S extends string>(column: Column<T, S> & (string extends S ? unknown : Many extends S ? never : unknown)): Outer<T, S> {
   return new Outer(column);
 }
 
@@ -865,6 +880,58 @@ class Functions {
   /** The number of elements of an array. */
   cardinality<T extends readonly unknown[] | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<number | Extract<T, null>, S, P> {
     return new Func("cardinality", [expr]);
+  }
+
+  /** One row for each element of an array. Only a `select()` column; PostgreSQL only. */
+  unnest<E, S extends string, P>(expr: AnyExpr<readonly E[] | null, S, P>): Func<E, S, P> {
+    return new Func("unnest", [expr]);
+  }
+
+  /** `CONCAT(...)`: the parts as text, a `null` part as an empty string.
+   * `a.concat(b)` (`a || b`) is `null` when either side is `null`. */
+  concat<S extends string = never, P = {}>(...parts: readonly (string | Expression<unknown, S, P>)[]): Func<string, S, P> {
+    if (parts.length === 0) {
+      throw new TypeError("concat() needs at least one part");
+    }
+    return new Func("concat", parts.map((p) => wrap(p)));
+  }
+
+  /** Without leading and trailing spaces. */
+  trim<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
+    return new Func("trim", [expr]);
+  }
+
+  /** Without leading spaces. */
+  ltrim<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
+    return new Func("ltrim", [expr]);
+  }
+
+  /** Without trailing spaces. */
+  rtrim<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
+    return new Func("rtrim", [expr]);
+  }
+
+  /** Every `old` in `expr` replaced by `replacement`. */
+  replace<T extends string | null, S extends string, P, S2 extends string = never, P2 = {}, S3 extends string = never, P3 = {}>(
+    expr: AnyExpr<T, S, P>,
+    old: Operand<string, S2, P2>,
+    replacement: Operand<string, S3, P3>,
+  ): Func<T, S | S2 | S3, P & P2 & P3> {
+    return new Func("replace", [expr, wrap(old), wrap(replacement)]);
+  }
+
+  /** The characters from the 1-based `start`, `length` of them (default: all). */
+  substr<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>, start: number, length?: number): Func<T, S, P> {
+    return new Func("substr", length === undefined ? [expr, new Int(start)] : [expr, new Int(start), new Int(length)]);
+  }
+
+  /** The 1-based position of the first `part` in `expr`, 0 if absent (`STRPOS`; `INSTR`
+   * on SQLite). */
+  strpos<T extends string | null, S extends string, P, S2 extends string = never, P2 = {}>(
+    expr: AnyExpr<T, S, P>,
+    part: Operand<string, S2, P2>,
+  ): Func<number | Extract<T, null>, S | S2, P & P2> {
+    return new Func("strpos", [expr, wrap(part)]);
   }
 
   abs<T extends Num | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
