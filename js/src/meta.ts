@@ -82,7 +82,7 @@ export interface FieldMeta {
   readonly unique: boolean;
   /** Native preparation or the database fills an omitted insert value. */
   readonly hasInsertDefault: boolean;
-  /** Physical database default; proxy client defaults do not change it. */
+  /** Physical database default; client defaults do not change it. */
   readonly hasServerValue: boolean;
 }
 

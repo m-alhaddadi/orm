@@ -184,9 +184,6 @@ pub struct ProxyModel {
     pub storage_owner: String,
     #[serde(default)]
     pub fields: Vec<ProxyField>,
-    /// Literal client defaults; a JSON null is an explicit supplied null.
-    #[serde(default)]
-    pub defaults: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

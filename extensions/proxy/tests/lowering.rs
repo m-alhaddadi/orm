@@ -1,4 +1,4 @@
-use orm_contracts::{extension::{ProxyField, ProxyModel}, ir::SchemaIr};
+use orm_contracts::{extension::{ProxyField, ProxyModel}, ir::{ClientDefaultIr, SchemaIr}};
 use orm_proxy::lower_specs;
 use serde_json::json;
 
@@ -21,7 +21,15 @@ fn schema() -> SchemaIr {
     })).unwrap()
 }
 fn spec(model: &str, parent: &str) -> ProxyModel {
-    ProxyModel { model: model.into(), parent: parent.into(), storage_owner: String::new(), fields: vec![], defaults: Default::default() }
+    ProxyModel { model: model.into(), parent: parent.into(), storage_owner: String::new(), fields: vec![] }
+}
+/// Redeclare a `User` field on a proxy with a client default.
+fn client_default(ir: &mut SchemaIr, proxy: &str, field: &str, value: serde_json::Value) {
+    let mut declared = ir.models[0].fields.iter().find(|f| f.name == field).cloned().unwrap_or_else(|| {
+        orm_contracts::ir::FieldIr::plain(field, orm_contracts::ir::ColType::Text)
+    });
+    declared.client_default = Some(ClientDefaultIr::Value(value));
+    ir.models.iter_mut().find(|m| m.name == proxy).unwrap().fields.push(declared);
 }
 
 #[test]
@@ -29,7 +37,7 @@ fn chains_preserve_physical_constraints_enum_representation_and_relation_identit
     let mut ir = schema();
     let mut active = spec("Active", "User");
     active.fields.push(ProxyField { field: "status".into(), non_null: true, subset: Some(vec!["ACTIVE".into()]) });
-    active.defaults.insert("status".into(), json!("active"));
+    client_default(&mut ir, "Active", "status", json!("active"));
     let mut named = spec("Named", "Active");
     named.fields.push(ProxyField { field: "name".into(), non_null: true, subset: None });
     lower_specs(&mut ir, &[named, active]).unwrap();
@@ -38,7 +46,8 @@ fn chains_preserve_physical_constraints_enum_representation_and_relation_identit
     assert_eq!(ir.enums.len(), 1);
     assert_eq!(ir.models[2].fields[2].default, Some(json!("old")));
     assert!(!ir.models[2].fields[1].nullable);
-    assert_eq!(ir.behavior.proxy_models[1].defaults["status"], json!("active"));
+    assert_eq!(ir.models[1].fields[2].client_default, Some(ClientDefaultIr::Value(json!("active"))));
+    assert_eq!(ir.models[2].fields[2].client_default, Some(ClientDefaultIr::Value(json!("active"))));
     // Generated TypeScript enums are const objects, so a member type needs `typeof`.
     assert_eq!(ir.models[1].fields[2].hints["typescript"], "typeof Status.ACTIVE");
     assert_eq!(ir.models[1].fields[2].hints["python"], "Literal[Status.ACTIVE]");
@@ -62,7 +71,7 @@ fn proxy_only_edits_have_identical_postgres_and_sqlite_migrations() {
         let mut b = schema();
         b.dialect = a.dialect;
         let mut active = spec("Active", "User");
-        active.defaults.insert("name".into(), json!("new default"));
+        client_default(&mut b, "Active", "name", json!("new default"));
         active.fields.push(ProxyField { field: "name".into(), non_null: true, subset: None });
         lower_specs(&mut b, &[active, spec("Named", "Active")]).unwrap();
         let physical = |ir: SchemaIr| {
@@ -91,8 +100,9 @@ fn invalid_chains_overrides_defaults_and_subsets_fail_at_preparation() {
         assert!(lower_specs(&mut schema(), &[p]).is_err());
     }
     for (field, value) in [("missing", json!("x")), ("id", json!("wrong")), ("status", json!("missing"))] {
-        let mut p = spec("Active", "User"); p.defaults.insert(field.into(), value);
-        assert!(lower_specs(&mut schema(), &[p]).is_err());
+        let mut ir = schema();
+        client_default(&mut ir, "Active", field, value);
+        assert!(lower_specs(&mut ir, &[spec("Active", "User")]).is_err());
     }
     let mut ir = schema();
     ir.models[1].fields = ir.models[0].fields.clone();
@@ -103,15 +113,17 @@ fn invalid_chains_overrides_defaults_and_subsets_fail_at_preparation() {
 #[test]
 fn explicit_defaults_replace_inherited_and_shape_violations_remain_allowed() {
     let mut ir = schema();
-    let mut active = spec("Active", "User"); active.defaults.insert("name".into(), json!("parent"));
+    client_default(&mut ir, "Active", "name", json!("parent"));
+    client_default(&mut ir, "Named", "name", json!(null));
     let mut named = spec("Named", "Active");
     named.fields.push(ProxyField { field: "name".into(), non_null: true, subset: None });
-    named.defaults.insert("name".into(), json!(null));
-    lower_specs(&mut ir, &[named, active]).unwrap();
-    assert_eq!(ir.behavior.proxy_models[1].defaults["name"], json!(null));
+    lower_specs(&mut ir, &[named, spec("Active", "User")]).unwrap();
+    assert_eq!(ir.models[1].fields[1].client_default, Some(ClientDefaultIr::Value(json!("parent"))));
+    assert_eq!(ir.models[2].fields[1].client_default, Some(ClientDefaultIr::Value(json!(null))));
     let serialized = serde_json::to_value(&ir).unwrap();
     let roundtrip: SchemaIr = serde_json::from_value(serialized).unwrap();
-    assert_eq!(roundtrip.behavior.proxy_models[1].defaults["name"], json!(null));
+    assert_eq!(roundtrip.models[2].fields[1].client_default, Some(ClientDefaultIr::Value(json!(null))));
+    assert!(roundtrip.behavior.storage.unwrap().models[0].fields[1].client_default.is_none());
 }
 #[test]
 fn logical_nullable_broadening_preserves_physical_not_null() {

@@ -13,7 +13,6 @@ from . import _native
 from .errors import DoesNotExist, MultipleObjectsReturned, NotLoaded
 from .expr import ColumnRef
 from .fields import BY_TYPE, Array, BelongsTo, Enum, Field, HasMany, HasOne, ManyToMany, Relation, String
-from .proxy import prepare_defaults
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -243,7 +242,6 @@ class Registry:
                     setattr(model, name, relation)
             meta.relations = relations
             meta.fields = fields
-            prepare_defaults(fields, snapshot._behavior, meta.name)
             meta.table = ir["table"]
             meta.pk = next(field for field in fields.values() if field.primary_key)
             meta.schema_ir = ir
@@ -305,6 +303,8 @@ def _field(ir: dict[str, Any]) -> Field[Any]:
     }
     if "default" in ir:
         kwargs["default"] = ir["default"]
+    if "client_default" in ir:
+        kwargs["client_default"] = ir["client_default"]
     if ir.get("array"):
         return Array(ir["type"], enum=ir.get("enum"), **kwargs)
     if "enum" in ir:
@@ -388,7 +388,6 @@ def define(
                 if method["name"] in ns or method["name"] in _RESERVED:
                     raise TypeError(f"{m['name']}.{method['name']}: model method collision")
         cls._meta.schema_ir = m
-        prepare_defaults(cls._meta.fields, ir.get("behavior", {}), m["name"])
         cls._meta.pk = cls._meta.fields[cls._meta.pk.name]
         computed = {f["field"] for f in ir.get("behavior", {}).get("result_fields", ()) if f["model"] == m["name"]}
         if computed:

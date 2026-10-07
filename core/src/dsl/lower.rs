@@ -6,7 +6,7 @@ use super::syntax::{err, Args, Attr, EnumDecl, Item, Member, ModelDecl, Pos, Pro
 use crate::behavior::ArgumentKind;
 use crate::ext::{ExtensionDef, TypeDef};
 use crate::ir::{
-    ColType, ConstraintIr, Deferrable, EnumIr, EnumStorage, EnumValueIr, ExcludeElementIr, ExtensionIr, FieldIr,
+    ClientCall, ClientDefaultIr, ColType, ConstraintIr, Deferrable, EnumIr, EnumStorage, EnumValueIr, ExcludeElementIr, ExtensionIr, FieldIr,
     ForEach, FunctionIr, IndexColumnIr, IndexIr, ModelIr, Nulls, OnDelete, RelKind, RelationIr, SchemaIr,
     ThroughIr, TriggerEvent, TriggerIr, TriggerTiming,
 };
@@ -137,6 +137,29 @@ fn sql_text(pos: Pos, v: &Value) -> Result<String> {
     }
 }
 
+/// A client default literal in its stored form: enum values for member names, JSON
+/// text parsed for a Json field.
+fn literal(pos: Pos, v: &Value, f: &FieldIr, enum_ir: Option<&EnumIr>, what: &str) -> Result<serde_json::Value> {
+    let member = |pos: Pos, v: &Value| -> Result<serde_json::Value> {
+        let e = enum_ir.expect("enum field");
+        let n = name_of(pos, v, what)?;
+        match e.values.iter().find(|x| x.name == n) {
+            Some(x) => Ok(x.value.clone()),
+            None => err(pos, format!("{what}: {} has no value {n}", e.name)),
+        }
+    };
+    match v {
+        Value::Path(p, None) if p.len() == 1 && enum_ir.is_some() => member(pos, v),
+        Value::List(items) if f.array && enum_ir.is_some() => {
+            Ok(serde_json::Value::Array(items.iter().map(|(p, v)| member(*p, v)).collect::<Result<_>>()?))
+        }
+        Value::Str(s) if f.ty == ColType::Json && !f.array => serde_json::from_str(s)
+            .map_err(|e| super::syntax::Error { pos, msg: format!("{what}: @client_default on a Json field is JSON text: {e}") }),
+        Value::Path(p, _) => err(pos, format!("{what}: @client_default takes a literal, uuid(), uuid7() or now(), not {}", p.join("."))),
+        v => json_of(pos, v),
+    }
+}
+
 fn json_of(pos: Pos, v: &Value) -> Result<serde_json::Value> {
     Ok(match v {
         Value::Str(s) => serde_json::Value::String(s.clone()),
@@ -227,7 +250,7 @@ fn native_type(name: &str, ty: ColType) -> Option<(&'static str, bool)> {
     Some((sql, same))
 }
 
-const FIELD_ATTRS: &str = "@id, @unique, @default, @map, @db.*, @check, @comment, @renamed_from";
+const FIELD_ATTRS: &str = "@id, @unique, @default, @client_default, @map, @db.*, @check, @comment, @renamed_from";
 
 pub struct Lowering<'l> {
     /// Reads an imported file (path as written in the schema).
@@ -531,6 +554,7 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
         default: None,
         default_now: false,
         default_sql: None,
+        client_default: None,
         db_type: None,
         read_sql: None,
         write_sql: None,
@@ -679,6 +703,19 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
                     Value::Path(p, Some(args)) if p.len() == 1 && p[0] == "now" && args.positional.is_empty() && args.named.is_empty() => {
                         f.default_now = true
                     }
+                    // Prisma makes `uuid()` in its client, so an imported schema keeps it there.
+                    Value::Path(p, Some(args)) if p.len() == 1 && p[0] == "uuid" && args.named.is_empty() => {
+                        let call = match args.positional.as_slice() {
+                            [] => ClientCall::Uuid,
+                            [(_, Value::Num(n))] if n == "4" => ClientCall::Uuid,
+                            [(_, Value::Num(n))] if n == "7" => ClientCall::Uuid7,
+                            _ => return err(a.pos, format!("{what}: uuid() takes no argument, 4 or 7")),
+                        };
+                        f.client_default = Some(ClientDefaultIr::Call(call));
+                    }
+                    Value::Path(p, Some(_)) if p.len() == 1 && (p[0] == "cuid" || p[0] == "nanoid" || p[0] == "ulid") => {
+                        return err(a.pos, format!("{what}: {}() is not supported; use @client_default(uuid()) or @client_default(uuid7())", p[0]))
+                    }
                     // an enum value: `@default(draft)`
                     Value::Path(p, None) if p.len() == 1 && enum_ir.is_some() => {
                         let e = enum_ir.unwrap();
@@ -723,6 +760,27 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx) -> Result<FieldIr> {
                         },
                     },
                 }
+            }
+            "client_default" => {
+                let v = one(a, &what)?;
+                f.client_default = Some(match v {
+                    Value::Path(p, Some(args)) if p.len() == 1 => {
+                        let call = match p[0].as_str() {
+                            "uuid" => ClientCall::Uuid,
+                            "uuid7" => ClientCall::Uuid7,
+                            "now" => ClientCall::Now,
+                            "autoincrement" | "dbgenerated" => {
+                                return err(a.pos, format!("{what}: only the database can make {}(); use @default", p[0]))
+                            }
+                            other => return err(a.pos, format!("{what}: @client_default takes a literal, uuid(), uuid7() or now(), not {other}()")),
+                        };
+                        if !args.positional.is_empty() || !args.named.is_empty() {
+                            return err(a.pos, format!("{what}: {}() takes no arguments", p[0]));
+                        }
+                        ClientDefaultIr::Call(call)
+                    }
+                    v => ClientDefaultIr::Value(literal(a.pos, v, &f, enum_ir, &what)?),
+                });
             }
             "relation" => return err(a.pos, format!("{what}: @relation goes on a field whose type is a model")),
             other => return err(a.pos, format!("{what}: unknown attribute @{other}; use {FIELD_ATTRS}")),

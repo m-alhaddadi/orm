@@ -2,7 +2,7 @@
 //! The compiler preserves parent enum identities and server defaults. Neither
 //! narrowing nor client defaults change physical storage or imply predicates.
 use std::collections::{BTreeMap, BTreeSet};
-use orm_contracts::{extension::{capture_storage, ProxyField, ProxyModel}, ir::{FieldIr, ModelIr, SchemaIr}};
+use orm_contracts::{extension::{capture_storage, ProxyField, ProxyModel}, ir::{ClientDefaultIr, FieldIr, ModelIr, SchemaIr}};
 
 /// Namespaced declarations contribute logical metadata only. Required argument
 /// kinds/targets are checked by the composition manifest before this pass runs.
@@ -11,9 +11,10 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
     let mut specs = BTreeMap::new();
     for d in declarations.iter().filter(|d| d.attribute == "proxy.of") {
         let parent = d.positional.first().and_then(|v| v.as_str()).ok_or("proxy.of requires a source model name")?;
-        let spec = ProxyModel { model: d.model.clone(), parent: parent.into(), storage_owner: String::new(), fields: vec![], defaults: BTreeMap::new() };
+        let spec = ProxyModel { model: d.model.clone(), parent: parent.into(), storage_owner: String::new(), fields: vec![] };
         if specs.insert(d.model.clone(), spec).is_some() { return Err(format!("{}: duplicate proxy source", d.model)); }
     }
+    let mut defaults: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new();
     let mut overrides = BTreeSet::new();
     for d in declarations.iter().filter(|d| d.attribute != "proxy.of") {
         let error = |message: &str| format!("{}:{}:{}: @@{}: {message}", d.location.file, d.location.line, d.location.column, d.attribute);
@@ -22,7 +23,7 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         if !overrides.insert((&d.model, field, &d.attribute)) { return Err(error("duplicate proxy override")); }
         if d.attribute == "proxy.default" {
             let value = d.positional.get(1).ok_or_else(|| error("requires a literal client default"))?;
-            if spec.defaults.insert(field.into(), value.clone()).is_some() { return Err(error("duplicate client default")); }
+            if defaults.entry(d.model.clone()).or_default().insert(field.into(), value.clone()).is_some() { return Err(error("duplicate client default")); }
             continue;
         }
         let pos = spec.fields.iter().position(|f| f.field == field);
@@ -54,12 +55,16 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
             _ => return Err(error("unknown proxy declaration")),
         }
     }
-    lower_specs(ir, &specs.into_values().collect::<Vec<_>>())
+    lower_batch(ir, &specs.into_values().collect::<Vec<_>>(), &defaults)
 }
 
 /// Resolve a complete declaration batch. Existing normalized parents can be
 /// referenced; only declarations in this batch are transformed.
 pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String> {
+    lower_batch(ir, specs, &BTreeMap::new())
+}
+
+fn lower_batch(ir: &mut SchemaIr, specs: &[ProxyModel], defaults: &BTreeMap<String, BTreeMap<String, serde_json::Value>>) -> Result<(), String> {
     let mut by_model = BTreeMap::new();
     for spec in specs {
         if by_model.insert(spec.model.as_str(), spec).is_some()
@@ -111,10 +116,13 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
             comparable.nullable = inherited.nullable;
             comparable.comment = inherited.comment.clone();
             comparable.hints = inherited.hints.clone();
+            comparable.client_default = inherited.client_default.clone();
             if serde_json::to_value(&comparable).map_err(|e| e.to_string())? != serde_json::to_value(inherited).map_err(|e| e.to_string())? {
                 return Err(format!("{}.{}: proxy override changes physical type, encoding, identity or constraint; use a logical proxy declaration", spec.model, declared.name));
             }
-            model.fields.iter_mut().find(|f| f.name == declared.name).expect("inherited field").nullable = declared.nullable;
+            let field = model.fields.iter_mut().find(|f| f.name == declared.name).expect("inherited field");
+            field.nullable = declared.nullable;
+            if declared.client_default.is_some() { field.client_default = declared.client_default.clone(); }
         }
         model.name = spec.model.clone();
         model.comment = placeholder.comment.clone();
@@ -125,8 +133,7 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
         let inherited = ir.behavior.proxy_models.iter().find(|p| p.model == spec.parent);
         let mut prepared = ProxyModel { model: spec.model.clone(), parent: spec.parent.clone(),
             storage_owner: inherited.map(|p| p.storage_owner.clone()).unwrap_or_else(|| source.name.clone()),
-            fields: inherited.map(|p| p.fields.clone()).unwrap_or_default(),
-            defaults: inherited.map(|p| p.defaults.clone()).unwrap_or_default() };
+            fields: inherited.map(|p| p.fields.clone()).unwrap_or_default() };
         for declared in &placeholder.fields {
             if let Some(contract) = prepared.fields.iter_mut().find(|p| p.field == declared.name) {
                 contract.non_null = !declared.nullable;
@@ -161,18 +168,21 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
             prepared.fields.retain(|p| p.field != contract.field);
             prepared.fields.push(ProxyField { field: f.name.clone(), non_null: !f.nullable, subset });
         }
-        for (field, value) in &spec.defaults {
-            let f = model.fields.iter().find(|f| f.name == *field)
+        for (field, value) in defaults.get(&spec.model).into_iter().flatten() {
+            let f = model.fields.iter_mut().find(|f| f.name == *field)
                 .ok_or_else(|| format!("{}.{}: unknown client-default field", spec.model, field))?;
-            validate_default(f, value).map_err(|e| format!("{}.{}: {e}", spec.model, field))?;
+            f.client_default = Some(ClientDefaultIr::Value(value.clone()));
+        }
+        for f in &model.fields {
+            let Some(ClientDefaultIr::Value(value)) = &f.client_default else { continue };
+            validate_default(f, value).map_err(|e| format!("{}.{}: {e}", spec.model, f.name))?;
             if let Some(name) = &f.enum_name {
                 let e = ir.enums.iter().find(|e| e.name == *name).ok_or("unknown enum")?;
                 let values: Vec<&serde_json::Value> = if f.array { value.as_array().map(|a| a.iter().collect()).unwrap_or_default() } else { vec![value] };
                 if values.iter().any(|v| !v.is_null() && !e.values.iter().any(|m| m.value == **v)) {
-                    return Err(format!("{}.{}: client default must use physical parent enum values", spec.model, field));
+                    return Err(format!("{}.{}: client default must use physical parent enum values", spec.model, f.name));
                 }
             }
-            prepared.defaults.insert(field.clone(), value.clone());
         }
         let pos = ir.models.iter().position(|m| m.name == spec.model).expect("checked proxy");
         ir.models[pos] = model;

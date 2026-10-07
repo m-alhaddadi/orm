@@ -321,11 +321,38 @@ value, and says so in a warning.
 | `@default("{\"a\": 1}")` on `Json` | JSON default, written as JSON text |
 | `@default(now())` | `now()` |
 | `@default(dbgenerated("gen_random_uuid()"))` | any SQL default |
+| `@client_default(...)` | ORM insert default (below); not in the DDL |
 | `@map("db_name")` | column name, if different from the field name |
 | `@db.*` | the SQL type (above) |
 | `@check("views >= 0")` | column check constraint |
 | `@comment("...")` | column comment |
 | `@renamed_from("old")` | previous column name: the migration renames it instead of dropping |
+
+### Client defaults
+
+`@default(...)` is the database default.
+It goes into the DDL and the migrations, and it applies to every writer.
+`@client_default(...)` is the ORM default.
+It fills an omitted insert value before native transforms and validators, in Python and TypeScript.
+It is not in the DDL or in a migration snapshot.
+
+```
+id      String   @id @client_default(uuid7()) @db.Uuid
+token   String   @client_default(uuid())
+status  Status   @default(OLD) @client_default(ACTIVE)
+created DateTime @default(now())
+```
+
+* `@client_default` takes a literal, `uuid()`, `uuid7()` or `now()`.
+  A literal has the form of a `@default` literal: an enum member name, a list, or JSON text on a `Json` field.
+* `uuid()` and `uuid7()` fit a `String` field, also with `@db.Uuid`.
+  `now()` fits a `DateTime` field, also with `@db.Date` (the UTC date).
+* `autoincrement()` and `dbgenerated(...)` fail, because only the database can make them.
+* A field can have both defaults.
+  The client default fills ORM inserts, and the database default covers other writers.
+* An explicit value, also `NULL`, wins over both.
+* `insert`, bulk insert and upsert make a new `uuid()`, `uuid7()` or `now()` value for each row.
+* A field with either default is optional in the generated insert types.
 
 ### Relations
 

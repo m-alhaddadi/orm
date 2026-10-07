@@ -9,6 +9,3 @@ description = "Optional prepared same-table proxy value contracts"
 orm-contracts = { path = "../../contracts" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = "0.4"
-uuid = "1"
-bigdecimal = "0.4"

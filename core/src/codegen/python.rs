@@ -268,13 +268,13 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
             match belongs(&f.name) {
                 Some(r) => {
                     let target = if f.nullable { format!("{} | None", r.target) } else { r.target.clone() };
-                    if !f.nullable && !has_server_value(f) && !super::has_client_default(ir, &m.ir.name, &f.name) {
+                    if !f.nullable && !has_server_value(f) && f.client_default.is_none() {
                         writeln!(body, "    # One of {} / {} is required (checked at runtime).", f.name, r.name).unwrap();
                     }
                     writeln!(body, "    {}: NotRequired[{t}]", f.name).unwrap();
                     writeln!(body, "    {}: NotRequired[{target}]", r.name).unwrap();
                 }
-                None if f.nullable || has_server_value(f) || super::has_client_default(ir, &m.ir.name, &f.name) => writeln!(body, "    {}: NotRequired[{t}]", f.name).unwrap(),
+                None if f.nullable || has_server_value(f) || f.client_default.is_some() => writeln!(body, "    {}: NotRequired[{t}]", f.name).unwrap(),
                 None => writeln!(body, "    {}: {t}", f.name).unwrap(),
             }
         }

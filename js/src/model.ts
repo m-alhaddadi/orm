@@ -40,6 +40,8 @@ export type IRField = {
   default?: unknown;
   default_now?: boolean;
   default_sql?: string;
+  /** The ORM insert default (`@client_default`); native insert preparation fills it. */
+  client_default?: unknown;
   [key: string]: unknown;
 };
 
@@ -117,7 +119,6 @@ export class ModelMeta implements Source {
   constructor(
     readonly ir: IRModel,
     readonly registry: Registry,
-    clientDefaults: readonly string[] = [],
   ) {
     for (const f of ir.fields) {
       const physicalDefault = !!(f.auto_increment || f.default !== undefined || f.default_now || f.default_sql || f.hints?.["composition.key-default"] === "true");
@@ -130,7 +131,7 @@ export class ModelMeta implements Source {
         enumName: f.enum,
         primaryKey: f.primary_key ?? false,
         unique: f.unique ?? false,
-        hasInsertDefault: physicalDefault || clientDefaults.includes(f.name),
+        hasInsertDefault: physicalDefault || f.client_default !== undefined,
         hasServerValue: physicalDefault,
       };
       checkName(ir.name, fm.name, this.fields);
@@ -666,8 +667,7 @@ export function define(
       if (JSON.stringify(m) !== JSON.stringify(destination.get(m.name).ir)) throw new TypeError(`extension changed existing model ${m.name}; define dependent schemas together in a new registry`);
       continue;
     }
-    const defaults = ((ir.behavior as { proxy_models?: { model: string; defaults: Record<string, unknown> }[] } | undefined)?.proxy_models ?? []).find((p) => p.model === m.name)?.defaults;
-    const meta = new ModelMeta(m, reg, defaults === undefined ? [] : Object.keys(defaults));
+    const meta = new ModelMeta(m, reg);
     meta.defaultFilter = ((ir.behavior as { query_defaults?: { model: string; filter?: unknown }[] } | undefined)?.query_defaults ?? []).find((d) => d.model === m.name)?.filter;
     const computed = new Set(((ir.behavior as { result_fields?: { model: string; field: string }[] } | undefined)?.result_fields ?? []).filter((f) => f.model === m.name).map((f) => f.field));
     if (computed.size) {
