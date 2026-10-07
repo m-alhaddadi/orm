@@ -40,6 +40,8 @@ import { DB, fieldValue, RELATED, registerQueries, type Instance, type ModelClas
 import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
 import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
 import { after, decodeCursor, encodeCursor, fingerprint, keyset, type Page, type PageOptions } from "./pagination.js";
+import { allowedWrites } from "./protection.js";
+import { active as debugging, record, relationLoad } from "./debug.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
 import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./select.js";
 
@@ -1091,8 +1093,9 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       throw new QueryError("updateMany() filters can't read CTEs");
     }
     const db = this.db();
+    if (debugging()) record(`updateMany:${this.meta.name}:${prepared.fields}:${JSON.stringify(ir["filters"])}`, () => `UPDATE ${this.meta.name} SET ${prepared.fields.join(", ")} ... (updateMany)`);
     const res = await db_wait(db, (tx) =>
-      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx, this.state.withoutDefaults),
+      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx, this.state.withoutDefaults, allowedWrites()),
     );
     return returning ? (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][]) : (res as number);
   }
@@ -1115,7 +1118,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   async attach(parentId: In<M["pk"]>, values: M extends { readonly attach: infer A extends object } ? A : never): Promise<M["row"]> {
     const prepared = prepareAttach(this.meta, values);
     const db = this.db();
-    const res = await db_wait(db, (tx) => db.engine.attach(this.meta.name, parentId, prepared.fields, prepared.rows, tx));
+    const res = await db_wait(db, (tx) => db.engine.attach(this.meta.name, parentId, prepared.fields, prepared.rows, tx, allowedWrites()));
     return (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][])[0]!;
   }
 
@@ -1175,8 +1178,9 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       return [];
     }
     const db = this.db();
+    if (debugging()) record(`insert:${this.meta.name}:${prepared.fields}:${conflict}`, () => `INSERT INTO ${this.meta.name} (${prepared.fields.join(", ")}) ...`);
     const res = await db_wait(db, (tx) =>
-      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx),
+      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowedWrites()),
     );
     return new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][];
   }
@@ -1377,6 +1381,10 @@ export class RelatedSet<M extends ModelSpec, L extends string = never> extends Q
     const rows = loadedRows(this.instance, this.relation);
     if (rows !== undefined && this.pristine()) {
       return [...rows] as M["row"][];
+    }
+    if (debugging() && this.pristine()) {
+      const owner = (this.instance.constructor as unknown as { meta: { name: string } }).meta.name;
+      return relationLoad(owner, this.relation.name, "prefetchRelated", () => super.fetch());
     }
     return super.fetch();
   }

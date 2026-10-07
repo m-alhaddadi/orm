@@ -65,6 +65,11 @@ export class MigrationError extends ORMError {
   override name = "MigrationError";
 }
 
+/** An ORM write to a `@@protected_write` model outside `allowWrites(...)`. */
+export class WriteProtected extends ORMError {
+  override name = "WriteProtected";
+}
+
 const KINDS: Record<string, new (message: string) => Error> = {
   MigrationError,
   DatabaseError,
@@ -73,6 +78,7 @@ const KINDS: Record<string, new (message: string) => Error> = {
   QueryError,
   SchemaError,
   TypeError,
+  WriteProtected,
 };
 
 /** The error class for an error the native engine threw (`[orm:<Kind>] message`). */

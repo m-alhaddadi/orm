@@ -645,3 +645,45 @@ fn minus_field_is_a_descending_index_key() {
         assert!(fails(&model(keys)).contains(message), "{keys}: {}", fails(&model(keys)));
     }
 }
+
+#[test]
+fn the_generic_pass_owns_generic_and_reverse_fields() {
+    let manifest: crate::behavior::Manifest = serde_json::from_value(serde_json::json!({
+        "id": "orm.generic", "version": "1", "host_contract": 1, "schema_contract": 1, "languages": [], "databases": [],
+        "attributes": [{"name": "generic.relation", "target": "field", "arguments": {"targets": {"kind": "list", "required": true}}},
+                       {"name": "generic.reverse", "target": "field"}]
+    })).unwrap();
+    let source = r#"model Tag {
+      id     Int      @id
+      target Generic? @generic.relation(targets: ["Post"])
+      note   String
+    }
+    model Post {
+      id   Int   @id
+      tags Tag[] @generic.reverse
+    }"#;
+    let mut items = syntax::parse(source).unwrap();
+    let declarations = super::lower::behavior_declarations(&mut items, "t.prisma", std::slice::from_ref(&manifest)).unwrap();
+    assert_eq!(declarations[0].field_type.as_deref(), Some("Generic?"));
+    assert_eq!(declarations[1].field_type.as_deref(), Some("Tag[]"));
+    let members = |items: &[syntax::Item], i: usize| match &items[i] { syntax::Item::Model(m) => m.members.iter().map(|f| (f.name.clone(), f.ty.name.clone(), f.ty.optional)).collect::<Vec<_>>(), _ => unreachable!() };
+    assert_eq!(members(&items, 0)[1], ("target".to_string(), "Int".to_string(), true));
+    assert_eq!(members(&items, 1).len(), 1);
+    // Without a compiled generic.relation, Generic stays an unknown type.
+    let mut items = syntax::parse(source).unwrap();
+    super::lower::behavior_declarations(&mut items, "t.prisma", &[]).unwrap();
+    assert_eq!(members(&items, 0)[1].1, "Generic");
+    let error = compile("model Tag {\n id Int @id\n target Generic?\n}", None).unwrap_err();
+    assert!(error.contains("unknown type Generic; a Generic field needs @generic.relation"), "{error}");
+}
+
+#[test]
+fn protected_write_is_a_model_flag_without_ddl() {
+    let source = "model Post {\n id Int @id\n @@protected_write\n}";
+    let ir = compile(source, None).unwrap();
+    assert!(ir.models[0].protected_write);
+    let snapshot = |source: &str| crate::migrate::snapshot(&check(compile(source, None).unwrap()).unwrap().1).unwrap();
+    assert_eq!(snapshot(source), snapshot(&source.replace(" @@protected_write\n", "")));
+    let error = compile(&source.replace("@@protected_write", "@@protected_write(true)"), None).unwrap_err();
+    assert!(error.contains("@@protected_write takes no arguments"), "{error}");
+}

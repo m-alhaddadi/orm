@@ -43,17 +43,45 @@ enables generic relation behavior by itself.
 
 ## Generic relation compiler contribution
 
-The selected `orm-generic` compiler crate declares these namespaced attributes:
+The selected `orm-generic` compiler crate declares these namespaced attributes.
+The field form declares a generic relation as one field of the reserved type `Generic`:
 
 ```prisma
 model Tag {
-  id           Int @id
-  target Generic @generic.relation(type: "content_type", key: "object_id", targets: ["Post", "Photo"], index=True)
+  id     Int      @id
+  target Generic? @generic.relation(targets: ["Post", "Photo"])
 }
 
 model Post {
-  id Int @id
-  tags Tag[] @generic.reverse(source: "Tag", relation: "target")
+  id   Int   @id
+  tags Tag[] @generic.reverse
+}
+```
+
+`target` creates two fields at its position: `target_type ContentType?` and `target_id`.
+`target_id` has the type of the targets' shared primary key; targets with different key types fail.
+`?` sets the nullability of both fields.
+The pass also adds `@@index([target_type, target_id])`; `index: false` disables it.
+`type:` and `key:` name existing fields instead of created ones,
+so a schema in the explicit form moves to the field form with no migration.
+A created name that collides with a member fails; name an existing field with `type:` or `key:` then.
+`Generic` is only a type on a field with `@generic.relation`; elsewhere it is an unknown type.
+
+`tags Tag[] @generic.reverse` is the reverse side: the field name is the relation name, and `Tag[]` is the source.
+It is no ordinary relation, because no foreign key exists.
+`relation: "target"` names the source relation; it is necessary only when the source has more than one generic relation with this model in its targets.
+A reverse field fails when the source has no generic relation with this model in its targets.
+
+The explicit form stays available, because it allows `@map`, `@db.*` and comments on the pair fields:
+
+```prisma
+model Tag {
+  id           Int          @id
+  content_type ContentType?
+  object_id    Int?
+
+  @@generic.relation("target", type: "content_type", key: "object_id", targets: ["Post", "Photo"])
+  @@index([content_type, object_id])
 }
 ```
 

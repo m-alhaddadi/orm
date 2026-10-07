@@ -38,7 +38,7 @@ use orm_engine::db::{self, DbError, Driver, ErrorKind, Executor, RowSet};
 use orm_engine::exec::{self, Conflict, Fetched, Outcome};
 use orm_engine::plan::{self, Output, Planner};
 use orm_engine::migrate as engine_migrate;
-use orm_engine::{parse_op, Error};
+use orm_engine::{parse_op, protect, Error};
 
 // -- errors ---------------------------------------------------------------------------------
 
@@ -61,6 +61,7 @@ fn engine_err(e: Error) -> napi::Error {
         Error::Migration(m) => tagged("MigrationError", m),
         Error::Db(e) => tagged(db_kind(&e), e),
         Error::Value(m) => tagged("TypeError", m),
+        Error::WriteProtected(m) => tagged("WriteProtected", format!("{m} is write-protected (@@protected_write); write it inside allowWrites([{m}], ...)")),
         Error::Binding(e) => tagged("TypeError", e),
     }
 }
@@ -332,6 +333,16 @@ impl JsSchema {
         Ok(exec::sql(target, &plan))
     }
 
+    /// SQL for an operation with its parameter placeholders: the statement shape.
+    #[napi]
+    pub fn statement(&self, env: &Env, op_json: String, params_: Unknown<'_>) -> napi::Result<String> {
+        let op = parse_op(&op_json).map_err(engine_err)?;
+        let target = Target::new(self.inner.dialect);
+        let p = params(env, params_)?;
+        let plan = Planner::plan(&self.inner, target, &op, &p).map_err(engine_err)?;
+        Ok(exec::statement(target, &plan))
+    }
+
     /// The SQL of `update_many` (one statement per batch), parameters inlined.
     #[napi]
     #[allow(clippy::too_many_arguments)]
@@ -456,8 +467,12 @@ impl Engine {
         op_json: String,
         params_: Unknown<'_>,
         tx: Option<&Transaction>,
+        allowed: Option<Vec<String>>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
         let op = parse_op(&op_json).map_err(engine_err)?;
+        if let ir::Operation::Update(ir::Update { model, .. }) | ir::Operation::Delete(ir::Delete { model, .. }) = &op {
+            protect::ensure_writable(&self.schema, model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
+        }
         let target = self.target;
         let plan = Planner::plan(&self.schema, target, &op, &params(env, params_)?).map_err(engine_err)?;
         let conn = self.conn(tx);
@@ -488,7 +503,9 @@ impl Engine {
         set: Option<String>,
         params_: Unknown<'_>,
         tx: Option<&Transaction>,
+        allowed: Option<Vec<String>>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
+        protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
             Some(json) => serde_json::from_str(&json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
             None => vec![],
@@ -528,7 +545,9 @@ impl Engine {
         batch_size: Option<u32>,
         tx: Option<&Transaction>,
         without_defaults: Option<bool>,
+        allowed: Option<Vec<String>>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
+        protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
         let (_, um) = update_many_plan(
             env, &self.schema, self.target, &model, &fields, rows, &filters_json, params_, returning, batch_size,
             without_defaults.unwrap_or(false),
@@ -696,7 +715,8 @@ pub fn connect<'env>(
 impl Engine {
     /// Attach local values to an existing shared-key parent.
     #[napi(ts_return_type = "Promise<unknown>")]
-    pub fn attach<'env>(&self, env: &'env Env, model: String, parent_id: Unknown<'_>, fields: Vec<String>, rows: Unknown<'_>, tx: Option<&Transaction>) -> napi::Result<PromiseRaw<'env, Raw>> {
+    pub fn attach<'env>(&self, env: &'env Env, model: String, parent_id: Unknown<'_>, fields: Vec<String>, rows: Unknown<'_>, tx: Option<&Transaction>, allowed: Option<Vec<String>>) -> napi::Result<PromiseRaw<'env, Raw>> {
+        protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
         let model_idx = self.schema.model_idx(&model).map_err(schema_err)?;
         let identity = conv(env)?.value(parent_id.raw(), Some(self.schema.model(model_idx).pk_field().value_type())).map_err(engine_err)?;
         let values = convert_rows(env, &self.schema, &model, &fields, rows, true)?;

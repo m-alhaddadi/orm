@@ -581,6 +581,26 @@ async with db.transaction():          # commit on success, rollback on exception
 The current transaction lives in a `ContextVar`, so queries inside the block use it
 without passing it around. Tasks started inside the block inherit it.
 
+### Protected writes
+
+`@@protected_write` is an application-level check in the ORM. It does not protect the database.
+Raw SQL (`db.execute`), migrations, other ORM processes without this schema, and other database clients can still write.
+For database-level protection, use `@@trigger` or database grants.
+
+```python
+with orm.allow_writes(Post):               # a sync `with`: it does no I/O
+    await post.update(title="new")
+
+await Post.objects.filter(...).update(title="x")   # raises orm.WriteProtected
+```
+
+Every ORM write to a `@@protected_write` model fails outside `orm.allow_writes(...)` with `orm.WriteProtected`:
+`insert`, `insert_many`, upserts, `update`, `update_many`, `delete`, instance writes and composed writes.
+The check is on the table that the SQL writes, so `post.tags.add()` needs `allow_writes(PostTag)` when `PostTag` is protected.
+The scope is a `ContextVar`, like the transaction: tasks started inside it get it.
+A nested scope adds its models to the outer ones. `allow_writes` starts no transaction.
+See `docs/schema.md`, "Protected writes".
+
 ### Locks
 
 ```python
@@ -604,6 +624,29 @@ async with db.transaction():
   64-bit integers; a `str` key is hashed to one in Python (first 8 bytes of BLAKE2b,
   signed big-endian).
 * No optimistic locking (version columns) on purpose.
+
+### Finding N+1 queries: `orm.debug`
+
+The ORM never loads a relation by itself, so an N+1 comes from explicit code: a `load_x()` call or a query in a loop.
+`orm.debug.n_plus_one` finds it:
+
+```python
+with orm.debug.n_plus_one(threshold=5, fail=True):
+    for c in customers:
+        await c.load_person()
+# orm.debug.NPlusOne: 20 queries with one shape `SELECT ... FROM "person" WHERE "person"."id" = $1 ...`
+#   at app/views.py:42; use select_related(Customer.person)
+```
+
+* The scope counts its queries by statement shape: the query without its values.
+  Tasks started in the scope count too.
+* When the block ends, a shape that ran more than `threshold` times (default 5) raises `orm.debug.NPlusOne` with `fail=True`, or gives an `orm.debug.NPlusOneWarning`.
+  The exception and the `with ... as report` value carry the report: each shape, its SQL, its count, the call site of its first query and the fix.
+* The fix is `select_related(...)` for a repeated `load_x()`, and `prefetch_related(...)` for a repeated to-many query (`await post.comments`).
+* The call site and the SQL text are captured only inside the scope.
+  Outside it, each query pays one `ContextVar` read (about 15 ns, measured).
+* In a test suite, add `pytest_plugins = ["orm.testing"]` to `conftest.py`.
+  The `n_plus_one` fixture counts the whole test and fails it at teardown; set `n_plus_one.threshold` to change the threshold.
 
 ### Hooks for packages: `orm.hooks`
 

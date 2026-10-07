@@ -132,3 +132,58 @@ async def test_generic_relation_schema_follows_the_artifact_capability(tmp_path)
         assert tag.content_type is models["ContentType"].Post and tag.object_id == 7
     finally:
         await db.close()
+
+
+GENERIC_HEADER = 'datasource db {\nprovider = "sqlite"\n}\nmodel Post {\nid Int @id\ntags Tag[] @generic.reverse\n@@map("generic_field_posts")\n}\nmodel Photo {\nid Int @id\n@@map("generic_field_photos")\n}\n'
+
+
+async def test_generic_field_form_creates_the_pair_and_the_reverse(tmp_path, capfd):
+    from orm import _native
+
+    schema = tmp_path / "schema.prisma"
+    schema.write_text(GENERIC_HEADER + 'model Tag {\nid Int @id\ntarget Generic? @generic.relation(targets: ["Post", "Photo"])\nnote String\n@@map("generic_field_tags")\n}')
+    if "generic-relations" not in json.loads(_native.native_artifact())["capabilities"]:
+        assert cli(["--schema", str(schema), "identities"]) != 0
+        assert "unknown type Generic; a Generic field needs @generic.relation" in capfd.readouterr().err
+        return
+    generate(schema)
+    registry = orm.Registry()
+    models = orm.load(schema, registry=registry)
+    tag = next(m for m in registry.ir()["models"] if m["name"] == "Tag")
+    assert [(f["name"], f.get("nullable", False), f.get("enum")) for f in tag["fields"]] == [
+        ("id", False, None), ("target_type", True, "ContentType"), ("target_id", True, None), ("note", False, None)]
+    assert tag["indexes"] == [{"columns": [{"field": "target_type"}, {"field": "target_id"}]}]
+    behavior = registry.ir()["behavior"]
+    assert behavior["generic_relations"] == [{"model": "Tag", "name": "target", "type_field": "target_type", "key_field": "target_id", "targets": ["Photo", "Post"]}]
+    assert behavior["generic_reverse"] == [{"model": "Post", "name": "tags", "source": "Tag", "relation": "target"}]
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    try:
+        await db.create_tables()
+        await models["Tag"].objects.using(db).insert(id=1, target_type=models["ContentType"].Post, target_id=7, note="n")
+        tag = await models["Tag"].objects.using(db).get()
+        assert tag.target_type is models["ContentType"].Post and tag.target_id == 7
+    finally:
+        await db.close()
+
+
+def test_moving_to_the_generic_field_form_needs_no_migration(tmp_path):
+    from orm import _native
+    from orm.migrations import Migrations
+
+    if "generic-relations" not in json.loads(_native.native_artifact())["capabilities"]:
+        pytest.skip("needs an artifact with generic-relations")
+    schema = tmp_path / "schema.prisma"
+    explicit = ('model Tag {\nid Int @id\ntarget_type ContentType?\ntarget_id Int?\nkind ContentType\nobject_id Int\n'
+                '@@generic.relation("target", type: "target_type", key: "target_id", targets: ["Post", "Photo"])\n'
+                '@@generic.relation("owner", type: "kind", key: "object_id", targets: ["Post"])\n'
+                '@@index([target_type, target_id])\n@@map("generic_field_tags")\n}')
+    field = ('model Tag {\nid Int @id\ntarget Generic? @generic.relation(targets: ["Post", "Photo"])\nkind ContentType\nobject_id Int\n'
+             'owner Generic @generic.relation(type: "kind", key: "object_id", targets: ["Post"], index: false)\n@@map("generic_field_tags")\n}')
+    directory = str(tmp_path / "migrations")
+    for i, model in enumerate([explicit, field]):
+        schema.write_text(GENERIC_HEADER.replace("tags Tag[] @generic.reverse", 'tags Tag[] @generic.reverse(relation: "target")') + model)
+        generate(schema)
+        registry = orm.Registry()
+        orm.load(schema, registry=registry)
+        made = Migrations(directory, registry).make("initial")
+        assert (made is None) == (i == 1)

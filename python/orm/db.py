@@ -8,8 +8,9 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from . import _native
+from . import _native, debug
 from .errors import NotConnected, QueryError, TransactionRequired
+from .protection import allowed_writes
 from .model import Registry, registry
 
 __all__ = ["Database", "connect", "get_database"]
@@ -24,9 +25,10 @@ _current_tx: ContextVar[tuple[Database, _native.Transaction] | None] = ContextVa
 class Database:
     """A connection pool. Created by :func:`connect`."""
 
-    def __init__(self, engine: _native.Engine, url: str) -> None:
+    def __init__(self, engine: _native.Engine, url: str, registry: Registry = registry) -> None:
         self._engine = engine
         self.url = url
+        self._registry = registry
 
     def _tx(self) -> _native.Transaction | None:
         cur = _current_tx.get()
@@ -36,7 +38,10 @@ class Database:
         self, ir: dict[str, Any], params: list[Any], row_cls: type | None = None, db: Database | None = None
     ) -> Any:
         """Runs a query; instances it builds get ``db`` to write back to (``using()``)."""
-        return await self._engine.run(json.dumps(ir), params, self._tx(), row_cls, db)
+        op = json.dumps(ir)
+        if debug._scope.get() is not None:
+            debug.record("run:" + op, lambda: self._registry.native().statement(op, params))
+        return await self._engine.run(op, params, self._tx(), row_cls, db, allowed_writes())
 
     async def _insert(
         self,
@@ -49,7 +54,9 @@ class Database:
         db: Database | None = None,
     ) -> list[Any]:
         set_json, params = (json.dumps(set_[0]), set_[1]) if set_ is not None else (None, [])
-        return await self._engine.insert(model, fields, rows, conflict, update, set_json, params, self._tx(), db)
+        if debug._scope.get() is not None:
+            debug.record(f"insert:{model}:{fields}:{conflict}", lambda: f"INSERT INTO {model} ({', '.join(fields)}) ...")
+        return await self._engine.insert(model, fields, rows, conflict, update, set_json, params, self._tx(), db, allowed_writes())
 
     async def _update_many(
         self,
@@ -63,8 +70,11 @@ class Database:
         db: Database | None = None,
         without_defaults: bool = False,
     ) -> Any:
+        if debug._scope.get() is not None:
+            debug.record(f"update_many:{model}:{fields}:{json.dumps(filters)}", lambda: f"UPDATE {model} SET {', '.join(fields)} ... (update_many)")
         return await self._engine.update_many(
-            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx(), db, without_defaults
+            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx(), db, without_defaults,
+            allowed_writes(),
         )
 
     @asynccontextmanager
@@ -162,7 +172,7 @@ async def connect(
     """
     global _default
     engine = await _native.connect(url, registry.prepare(), max_connections, list(_disable))
-    db = Database(engine, url)
+    db = Database(engine, url, registry)
     if default:
         _default = db
     return db

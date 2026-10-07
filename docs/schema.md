@@ -436,6 +436,40 @@ schema.prisma:44:14: relation Comment.author: author_id is not nullable, so the 
 schema.prisma:34:3: model Post: an attribute must be on one line (put a long trigger body in a `function` block)
 ```
 
+### Protected writes (`@@protected_write`)
+
+`@@protected_write` is an application-level check in the ORM. It does not protect the database.
+Raw SQL (`db.execute`), migrations, other ORM processes without this schema, and other database clients can still write.
+For database-level protection, use `@@trigger` or database grants.
+
+```prisma
+model Post {
+  id    Int    @id
+  title String
+  @@protected_write
+}
+```
+
+* All ORM writes to a protected model fail outside an `allow_writes` scope (`allowWrites` in TypeScript) with `WriteProtected`:
+  inserts, bulk inserts, updates, `update_many`, deletes, upserts, instance writes and composed writes.
+* The check is on the table that the SQL writes.
+  `post.tags.add()` writes `PostTag` rows, so `PostTag` must be protected for it to fail.
+  A proxy writes the table of its root, so the protection of the root applies to the proxy.
+  A composed write also writes the tables of its storage ancestors.
+* A scope allows the tables of the models it names. Scopes nest: an inner scope adds its models to the outer ones.
+* Reads are not changed.
+* `@@protected_write` creates no trigger, no grant and no DDL. Migrations ignore it.
+
+A database-level option is a trigger that rejects writes (PostgreSQL):
+
+```prisma
+model Post {
+  id    Int    @id
+  title String
+  @@trigger(read_only, before: [insert, update, delete], body: "BEGIN RAISE EXCEPTION 'posts are written only by the publishing service'; END;")
+}
+```
+
 ### Names
 
 Generated names follow what Postgres itself would choose: `posts_pkey`,

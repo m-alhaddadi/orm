@@ -6,6 +6,8 @@ import { NotConnected, QueryError, TransactionRequired } from "./errors.js";
 import type { IR } from "./expr.js";
 import { registry as defaultRegistry, type Registry } from "./model.js";
 import { call, native, wait, type NativeEngine, type NativeTransaction } from "./native.js";
+import { allowedWrites } from "./protection.js";
+import { active as debugging, record } from "./debug.js";
 
 let defaultDb: Database | undefined;
 
@@ -36,13 +38,13 @@ export class Database {
 
   /** @internal */
   run(ir: IR, params: unknown[]): Promise<unknown> {
-    const json = JSON.stringify(ir);
-    return wait(() => this.engine.run(json, params, this.tx()));
+    return this.runJson(JSON.stringify(ir), params);
   }
 
   /** @internal */
   runJson(json: string, params: unknown[]): Promise<unknown> {
-    return wait(() => this.engine.run(json, params, this.tx()));
+    if (debugging()) record(`run:${json}`, () => this.registry.native().statement(json, params));
+    return wait(() => this.engine.run(json, params, this.tx(), allowedWrites()));
   }
 
   /**

@@ -251,6 +251,24 @@ when it throws. The current transaction follows the async call chain through
 `AsyncLocalStorage`, so queries inside it need no handle. Nested calls are savepoints.
 A transaction that is never finished is rolled back when it is garbage-collected.
 
+### Protected writes
+
+`@@protected_write` is an application-level check in the ORM. It does not protect the database.
+Raw SQL (`db.execute`), migrations, other ORM processes without this schema, and other database clients can still write.
+For database-level protection, use `@@trigger` or database grants.
+
+```ts
+await allowWrites([Post], async () => { await post.update({ title: "new" }); });
+await Post.objects.filter(...).update({ title: "x" });   // throws WriteProtected
+```
+
+Every ORM write to a `@@protected_write` model fails outside `allowWrites(models, fn)` with `WriteProtected`:
+`insert`, `insertMany`, upserts, `update`, `updateMany`, `delete`, instance writes and composed writes.
+The check is on the table that the SQL writes, so `post.tags.add()` needs `allowWrites([PostTag], ...)` when `PostTag` is protected.
+The scope follows the async call chain through `AsyncLocalStorage`, like the transaction: work started inside `fn` gets it.
+A nested call adds its models to the outer ones. `allowWrites` starts no transaction and gives what `fn` gives.
+See `docs/schema.md`, "Protected writes".
+
 ### Locks
 
 * `qs.lock({ exclusive, nowait, skipLocked })` adds `FOR UPDATE` / `FOR SHARE` on the
@@ -260,6 +278,31 @@ A transaction that is never finished is rolled back when it is garbage-collected
   the same name.
 
 Both throw `TransactionRequired` when called outside a transaction.
+
+### Finding N+1 queries: `debug`
+
+The ORM never loads a relation by itself, so an N+1 comes from explicit code: a `loadX()` call or a query in a loop.
+`debug.nPlusOne` finds it:
+
+```ts
+import { debug } from "orm";
+
+await debug.nPlusOne(async () => {
+  for (const c of customers) await c.loadPerson();
+}, { threshold: 5, fail: true });
+// NPlusOne: 20 queries with one shape `SELECT ... FROM "person" WHERE "person"."id" = $1 ...`
+//   at src/views.ts:42; use selectRelated(Customer.person)
+```
+
+* The scope counts the queries of `fn` by statement shape: the query without its values.
+  Work that `fn` starts counts too.
+* When `fn` resolves, a shape that ran more than `threshold` times (default 5) throws `debug.NPlusOne` with `fail: true`, or emits an `NPlusOneWarning` process warning.
+  `error.report` has each shape, its SQL, its count, the call site of its first query and the fix.
+* The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated to-many query (`post.comments.all()`).
+* The call site and the SQL text are captured only inside the scope.
+  Outside it, each query pays one `AsyncLocalStorage` read (about 2 ns, measured).
+* In tests, `await debug.expectNoNPlusOne(fn, { threshold })` throws `NPlusOne` when `fn` sends an N+1.
+  Without source maps (`node --enable-source-maps`), the call site is a line of the compiled JavaScript.
 
 ### Hooks for packages
 
@@ -278,8 +321,8 @@ A package that changes writes and reads from outside the ORM (for example
 
 Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,
 `IntegrityError`, `LockNotAvailable`, `QueryError`, `SchemaError`, `NotConnected`,
-`NotLoaded`, `TransactionRequired`, `DoesNotExist`, `MultipleObjectsReturned` and
-`MigrationError`. Values of the wrong type throw a `TypeError` before any SQL runs.
+`NotLoaded`, `TransactionRequired`, `DoesNotExist`, `MultipleObjectsReturned`,
+`MigrationError` and `WriteProtected`. Values of the wrong type throw a `TypeError` before any SQL runs.
 
 ## Migrations and the CLI
 

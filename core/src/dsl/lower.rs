@@ -510,6 +510,7 @@ fn model_fields(m: &ModelDecl, models: &HashMap<&str, &ModelDecl>, ctx: &Ctx<'_>
         triggers: vec![],
         renamed_from: None,
         comment: None,
+        protected_write: false,
     };
     // model-level attributes that aren't schema objects; the rest come after relations
     for a in &m.blocks {
@@ -523,6 +524,8 @@ fn model_fields(m: &ModelDecl, models: &HashMap<&str, &ModelDecl>, ctx: &Ctx<'_>
             "map" => ir.table = text(a)?,
             "comment" => ir.comment = Some(text(a)?),
             "renamed_from" => ir.renamed_from = Some(text(a)?),
+            "protected_write" if a.args.positional.is_empty() && a.args.named.is_empty() => ir.protected_write = true,
+            "protected_write" => return err(a.pos, format!("{}: @@protected_write takes no arguments", m.name)),
             _ => {}
         }
     }
@@ -647,6 +650,8 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx<'_>) -> Result<FieldIr> {
         if decimal {
             f.db_type = Some("numeric".into());
         }
+    } else if name == "Generic" {
+        return err(*pos, format!("{what}: unknown type Generic; a Generic field needs @generic.relation(...) from the orm.generic extension"));
     } else {
         return err(
             *pos,
@@ -1146,7 +1151,7 @@ fn model_block(m: &mut ModelIr, b: &Attr) -> Result<()> {
         }
     };
     match b.name.as_str() {
-        "map" | "comment" | "renamed_from" => {}
+        "map" | "comment" | "renamed_from" | "protected_write" => {}
         "index" => {
             extra_positional(1)?;
             let columns: Vec<IndexColumnIr> = keys(b.pos, first, &what, false)?.into_iter().map(|(k, _)| k).collect();
@@ -1349,14 +1354,14 @@ fn declaration_value(pos: Pos, value: &Value, kind: Option<ArgumentKind>) -> Res
 /// Database type attributes keep their existing interpretation.
 pub(super) fn behavior_declarations(items: &mut [Item], file: &str, manifests: &[crate::behavior::Manifest]) -> Result<Vec<crate::behavior::Declaration>> {
     let mut out = vec![];
-    let mut collect = |attrs: &mut Vec<Attr>, model: &str, field: Option<&str>| -> Result<()> {
+    let mut collect = |attrs: &mut Vec<Attr>, model: &str, field: Option<(&str, String)>| -> Result<()> {
         let mut ordinary = vec![];
         for a in attrs.drain(..) {
             if !a.name.contains('.') || a.name.starts_with("db.") {
                 ordinary.push(a);
                 continue;
             }
-            let declared = manifests.iter().flat_map(|m| &m.attributes).find(|d| d.name == a.name);
+            let declared = declared(manifests, &a.name, field.is_some());
             let mut arguments = BTreeMap::new();
             for (name, pos, value) in &a.args.named {
                 let kind = declared.and_then(|d| d.arguments.get(name)).map(|arg| arg.kind);
@@ -1366,7 +1371,9 @@ pub(super) fn behavior_declarations(items: &mut [Item], file: &str, manifests: &
             }
             out.push(crate::behavior::Declaration {
                 lowered: false,
-                attribute: a.name, model: model.to_owned(), field: field.map(str::to_owned), arguments,
+                attribute: a.name, model: model.to_owned(),
+                field: field.as_ref().map(|(name, _)| (*name).to_owned()), field_type: field.as_ref().map(|(_, ty)| ty.clone()),
+                arguments,
                 positional: a.args.positional.iter().enumerate()
                     .map(|(i, (pos, v))| declaration_value(*pos, v, declared.and_then(|d| d.positional_at(i)).map(|arg| arg.kind)))
                     .collect::<Result<_>>()?,
@@ -1379,8 +1386,27 @@ pub(super) fn behavior_declarations(items: &mut [Item], file: &str, manifests: &
     for item in items {
         if let Item::Model(m) = item {
             collect(&mut m.blocks, &m.name, None)?;
-            for member in &mut m.members { collect(&mut member.attrs, &m.name, Some(&member.name))?; }
+            let mut members = vec![];
+            for mut member in m.members.drain(..) {
+                let ty = format!("{}{}{}", member.ty.name, if member.ty.list { "[]" } else { "" }, if member.ty.optional { "?" } else { "" });
+                let has = |name: &str| member.attrs.iter().any(|a| a.name == name);
+                // The generic pass owns these members: a reverse field is no relation, and a
+                // `Generic` field becomes its type and key fields at this position.
+                let reverse = has("generic.reverse");
+                let generic = member.ty.name == "Generic" && has("generic.relation") && declared(manifests, "generic.relation", true).is_some();
+                collect(&mut member.attrs, &m.name, Some((&member.name, ty)))?;
+                if reverse { continue; }
+                if generic { member.ty.name = "Int".into(); }
+                members.push(member);
+            }
+            m.members = members;
         }
     }
     Ok(out)
+}
+
+/// The manifest entry of attribute `name` on a field (`@name`) or a model (`@@name`).
+fn declared<'m>(manifests: &'m [crate::behavior::Manifest], name: &str, field: bool) -> Option<&'m crate::behavior::Attribute> {
+    let named = || manifests.iter().flat_map(|m| &m.attributes).filter(|d| d.name == name);
+    named().find(|d| (d.target == crate::behavior::AttributeTarget::Field) == field).or_else(|| named().next())
 }

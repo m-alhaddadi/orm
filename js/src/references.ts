@@ -1,4 +1,5 @@
 /** Build-selected reference loading adapter. Baseline profiles do not load this module. */
+import { active as debugging, relationLoad } from "./debug.js";
 import { IntegrityError, NotLoaded } from "./errors.js";
 import type { Database } from "./db.js";
 import type { ModelMeta, Row } from "./model.js";
@@ -59,12 +60,14 @@ async function loadReference(owner: Row, meta: ModelMeta, r: RelationMeta, reloa
     }
     return value;
   };
-  return coalescedLoad(owner, r.name, [key, db, tx], fetch, (value) => {
+  const load = () => coalescedLoad(owner, r.name, [key, db, tx], fetch, (value) => {
     if (keyValue(owner, from.name, host.INTERNAL) === key) {
       host.related(owner)[r.name] = value;
       state.keys.set(r.name, key);
     }
   });
+  // The loader may share one running fetch, so the call site is captured here.
+  return debugging() ? relationLoad(meta.name, r.name, "selectRelated", load) : load();
 }
 
 /** Internal seam: caller supplies resolved dependency keys plus database/transaction context. */

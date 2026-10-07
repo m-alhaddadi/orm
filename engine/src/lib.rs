@@ -13,6 +13,7 @@ pub mod exec;
 pub mod migrate;
 pub mod params;
 pub mod plan;
+pub mod protect;
 
 pub use error::{Error, Result};
 pub use params::{NoParams, Params};

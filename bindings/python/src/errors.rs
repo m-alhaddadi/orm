@@ -26,6 +26,13 @@ create_exception!(
     "The migrations directory and the database's migration history disagree."
 );
 
+create_exception!(
+    _native,
+    WriteProtected,
+    PyException,
+    "An ORM write to a `@@protected_write` model outside `orm.allow_writes(...)`."
+);
+
 pub fn db_err(e: DbError) -> PyErr {
     match e.kind {
         ErrorKind::Integrity => IntegrityError::new_err(e.message),
@@ -51,6 +58,7 @@ pub fn engine_err(e: Error) -> PyErr {
         Error::Migration(m) => MigrationError::new_err(m),
         Error::Db(e) => db_err(e),
         Error::Value(m) => PyTypeError::new_err(m),
+        Error::WriteProtected(m) => WriteProtected::new_err(format!("{m} is write-protected (@@protected_write); write it inside orm.allow_writes({m})")),
         Error::Binding(e) => match e.downcast::<PyErr>() {
             Ok(e) => *e,
             Err(e) => PyTypeError::new_err(e.to_string()),
