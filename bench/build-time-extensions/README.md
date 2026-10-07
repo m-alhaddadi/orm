@@ -73,6 +73,14 @@ inconclusive. None has a lower bound establishing a cost of 1% or more.
 These results predate the complete implementation and must not be used as
 final performance evidence. Fresh disabled and enabled controls are pending.
 
+The enabled gate ran on 2026-10-08 after the Q61 fixes (`results/jury-4/gate/`):
+`controls.py`, then `run.py --native-profile` and `report.py --native-profile --check`,
+3 processes per runtime and backend, handwritten control against the extension build.
+It has **not passed** (measured): no warm case has a lower bound at or above 1%,
+4 of 44 have an upper bound below 1%, and 40 are inconclusive.
+Five other build sessions shared the machine (load average 11 to 23), so the
+intervals are wide; the gate stays unmet until a quiet-machine run passes.
+
 The first matrix is retained in `results/initial/`. A focused old-versus-old
 control produced about a 42% apparent construction gain when results were
 discarded. Retaining results removed that artifact. The refined matrix uses

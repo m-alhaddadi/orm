@@ -1,0 +1,66 @@
+{
+  "control": "independently handwritten native execution using the same Rust functions and host planning/result primitives",
+  "profile": {
+    "release": true,
+    "lto": "fat",
+    "codegen_units": 1
+  },
+  "builds": {
+    "sqlite/extension": {
+      "incremental_build_seconds": null,
+      "binaries": {
+        "python": {
+          "bytes": 12007920,
+          "sha256": "de59e52f6db21c2e62d2abf5ce7ae614069a49aace6820d7a0732a97b247c4e5"
+        },
+        "node": {
+          "bytes": 10527728,
+          "sha256": "83ffe3a2fa257b14dd3869d1a3d399ee943c55d1c0999f343fff2ba550ad8881"
+        }
+      },
+      "generated_execution_sha256": "f189d0d92b061332f7c29ef8fe34df572d9515583e6f13338b12af10ede837a0"
+    },
+    "sqlite/builtin": {
+      "incremental_build_seconds": 115.60151779098669,
+      "binaries": {
+        "python": {
+          "bytes": 12007872,
+          "sha256": "730022cf669d1108b36800cdcbd5e5a2c03c0486be85514c60e2147c11c9a884"
+        },
+        "node": {
+          "bytes": 10527680,
+          "sha256": "d4b2bd85b5696bfa1c0c60cd473540e513beed9836750f489f99c816bb8004f8"
+        }
+      },
+      "handwritten_execution_sha256": "16387a2b11cca842423c830ecbf794d958152856ef32d0b4e7aa6db03790da72"
+    },
+    "postgres/extension": {
+      "incremental_build_seconds": 141.88379204200464,
+      "binaries": {
+        "python": {
+          "bytes": 12007920,
+          "sha256": "fc25c80603f17a839b28d71feffb96f7fdcf820131d24406619aa044e7569abe"
+        },
+        "node": {
+          "bytes": 10527728,
+          "sha256": "d8ef0981fc8634c9fd187c73bf0175a391689fb9329f5071e1af182a14a1a315"
+        }
+      },
+      "generated_execution_sha256": "f189d0d92b061332f7c29ef8fe34df572d9515583e6f13338b12af10ede837a0"
+    },
+    "postgres/builtin": {
+      "incremental_build_seconds": 126.2329518750048,
+      "binaries": {
+        "python": {
+          "bytes": 12007904,
+          "sha256": "13ea4d4f47674ee6649995188014a3f2c184efce1d8ff4f89cd63bea52208fb3"
+        },
+        "node": {
+          "bytes": 10527360,
+          "sha256": "630cf5d4bf7b70dc538d03dc704733ba57947ebb70fd7656ee06487f6eaf70aa"
+        }
+      },
+      "handwritten_execution_sha256": "16387a2b11cca842423c830ecbf794d958152856ef32d0b4e7aa6db03790da72"
+    }
+  }
+}

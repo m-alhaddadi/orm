@@ -78,7 +78,7 @@ fn main() {
                 name if name.starts_with("computed-")=>{
                     let len=name.split('-').nth(1).unwrap().parse().unwrap();
                     let rows=Box::new(Rows {len,label: black_box("alice").to_owned()});
-                    let output=behavior::results(black_box(&[kind]),Outcome::Rows {model:0,rows: black_box(rows),types:types.clone()}).unwrap();
+                    let output=behavior::results(black_box(&[kind]),Outcome::Rows {model:0,rows: black_box(rows),types:types.clone(),shape:None}).unwrap();
                     let Outcome::Rows {rows,types,..}=output else { unreachable!() };
                     black_box(rows.cell(len-1,4,types[4]).unwrap());
                     black_box(rows);
