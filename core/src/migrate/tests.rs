@@ -167,6 +167,48 @@ fn renames_keep_data_and_rename_generated_names() {
     settled(&v2, &p2);
 }
 
+/// The rename of `renames_keep_data_and_rename_generated_names`, then a later column with both hints kept.
+fn kept_rename_hints(dialect: &str) -> (MigrationPlan, MigrationPlan) {
+    let renamed = |extra: Vec<Value>| {
+        let mut ir = blog(extra, json!({}));
+        ir["dialect"] = json!(dialect);
+        ir["models"][0]["table"] = json!("members");
+        ir["models"][0]["renamed_from"] = json!("users");
+        ir["models"][0]["fields"][1]["column"] = json!("mail");
+        ir["models"][0]["fields"][1]["renamed_from"] = json!("email");
+        schema(ir)
+    };
+    let mut v1 = blog(vec![], json!({}));
+    v1["dialect"] = json!(dialect);
+    let p1 = super::plan(&schema(v1), &DbSchema::default()).unwrap();
+    let p2 = super::plan(&renamed(vec![]), &p1.snapshot).unwrap();
+    let v3 = renamed(vec![json!({"name": "views", "column": "views", "type": "int", "default": 42})]);
+    let p3 = super::plan(&v3, &p2.snapshot).unwrap();
+    settled(&v3, &p3);
+    (p2, p3)
+}
+
+#[test]
+fn kept_rename_hints_do_nothing_after_the_rename() {
+    let (_, p3) = kept_rename_hints("postgres");
+    assert_eq!(sql(&p3.up), vec!["ALTER TABLE \"posts\" ADD COLUMN \"views\" integer DEFAULT 42 NOT NULL"]);
+    assert_eq!(sql(&p3.down), vec!["ALTER TABLE \"posts\" DROP COLUMN \"views\""]);
+}
+
+#[test]
+fn sqlite_rebuild_copies_from_the_current_name_when_the_hint_is_kept() {
+    let (p2, p3) = kept_rename_hints("sqlite");
+    let rename = &p2.up[0].sql;
+    assert!(rename.contains("INSERT INTO \"__orm_new_members\" (\"id\", \"mail\") SELECT \"id\", \"email\" FROM \"users\""), "{rename}");
+    assert!(rename.contains("WHERE name = 'users'), 0)) WHERE name = 'members'"), "{rename}");
+    for later in [&p3.up[0].sql, &p3.down[0].sql] {
+        assert!(later.contains("INSERT INTO \"__orm_new_members\" (\"id\", \"mail\") SELECT \"id\", \"mail\" FROM \"members\""), "{later}");
+        assert!(later.contains("WHERE name = 'members'), 0)) WHERE name = 'members'"), "{later}");
+    }
+    let undo = &p2.down[0].sql;
+    assert!(undo.contains("INSERT INTO \"__orm_new_users\" (\"id\", \"email\") SELECT \"id\", \"mail\" FROM \"members\""), "{undo}");
+}
+
 #[test]
 fn foreign_key_cycles_are_added_after_both_tables() {
     let s = schema(json!({"models": [

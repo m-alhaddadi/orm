@@ -94,25 +94,30 @@ pub fn steps(from: &DbSchema, to: &DbSchema, renames: &Renames) -> Result<Vec<St
     if sequence {
         sql.push("CREATE TEMP TABLE __orm_sequence AS SELECT name, seq FROM sqlite_sequence".into());
     }
+    // A rename hint applies only when the current name is new and the hinted name exists, as in `diff::diff`;
+    // a hint kept after its migration must not redirect the copy.
+    let source = |t: &Table| from.tables.iter().find(|o| o.name == t.name).or_else(|| {
+        renames.tables.get(&t.name).and_then(|h| from.tables.iter().find(|o| &o.name == h)).filter(|o| !to.tables.iter().any(|n| n.name == o.name))
+    });
     for t in &to.tables {
         if t.name.starts_with("__orm_") { return Err("SQLite table names beginning with __orm_ are reserved".into()); }
         let temp = format!("__orm_new_{}", t.name);
         sql.push(create_table(t, &temp, false));
-        let old_name = renames.tables.get(&t.name).unwrap_or(&t.name);
-        if let Some(old) = from.tables.iter().find(|o| &o.name == old_name) {
+        if let Some(old) = source(t) {
             let values = t.columns.iter().map(|c| {
-                let old_col = renames.columns.get(&(t.name.clone(), c.name.clone())).unwrap_or(&c.name);
-                if old.column(old_col).is_some() { ident(old_col) }
-                else { c.default.clone().unwrap_or_else(|| "NULL".into()) }
+                let old_col = old.column(&c.name).map(|_| &c.name).or_else(|| {
+                    renames.columns.get(&(t.name.clone(), c.name.clone())).filter(|h| old.column(h).is_some() && t.column(h).is_none())
+                });
+                match old_col { Some(col) => ident(col), None => c.default.clone().unwrap_or_else(|| "NULL".into()) }
             }).collect::<Vec<_>>().join(", ");
-            sql.push(format!("INSERT INTO {} ({}) SELECT {values} FROM {}", ident(&temp), ids(&t.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()), ident(old_name)));
+            sql.push(format!("INSERT INTO {} ({}) SELECT {values} FROM {}", ident(&temp), ids(&t.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()), ident(&old.name)));
         }
     }
     for old in &from.tables { sql.push(format!("DROP TABLE {}", ident(&old.name))); }
     for t in &to.tables {
         sql.push(format!("ALTER TABLE {} RENAME TO {}", ident(&format!("__orm_new_{}", t.name)), ident(&t.name)));
         if sequence && t.columns.iter().any(|c| c.identity) {
-            let old_name = renames.tables.get(&t.name).unwrap_or(&t.name);
+            let old_name = source(t).map_or(&t.name, |o| &o.name);
             sql.push(format!("UPDATE sqlite_sequence SET seq = MAX(seq, COALESCE((SELECT seq FROM __orm_sequence WHERE name = {}), 0)) WHERE name = {}", super::model::quote_literal(old_name), super::model::quote_literal(&t.name)));
         }
         sql.extend(t.indexes.iter().map(|ix| index(&t.name, ix, false)));

@@ -97,6 +97,40 @@ test("SQLite migrations, target checks and file persistence", async () => {
   }
 });
 
+test("SQLite rebuilds after a rename ignore the kept rename hints", async () => {
+  const root = [join(import.meta.dirname, "..", ".."), join(import.meta.dirname, "..", "..", "..")].find((d) => {
+    try { readFileSync(join(d, "examples/sqlite/schema.prisma")); return true; } catch { return false; }
+  })!;
+  const source = readFileSync(join(root, "examples/sqlite/schema.prisma"), "utf8");
+  const renamed = source.replace("  books      Book[]", "  books      Book[]\n  @@map(\"writer\")\n  @@renamed_from(\"author\")")
+    .replace("  title     String", "  name      String @renamed_from(\"title\")").replace("@@index([title]", "@@index([name]");
+  const regs = [source, renamed, renamed.replace("  pages     Int", "  added     Int @default(42)\n  pages     Int")].map((text) => {
+    const reg = new Registry();
+    loads(text, { registry: reg });
+    return reg;
+  });
+  const dir = mkdtempSync(join(tmpdir(), "orm-sqlite-"));
+  ["initial", "rename", "later"].forEach((name, i) => new Migrations(dir, regs[i]!).make(name));
+  const db = await connect("sqlite://:memory:", { registry: regs[0]!, default: false });
+  try {
+    const runner = new Migrator(db, new Migrations(dir, regs[0]!));
+    await runner.upgrade("1");
+    await db.execute("INSERT INTO author (id, email, name) VALUES (100, 'gone', 'gone'); DELETE FROM author; INSERT INTO author (email, name) VALUES ('kept', 'kept')");
+    await db.execute("INSERT INTO book (author_id, title) VALUES (101, 'kept')");
+    await runner.upgrade("2");
+    await runner.upgrade();
+    assert.deepEqual(await db.fetchText("SELECT w.email, b.name, b.added FROM writer w JOIN book b ON b.author_id = w.id"), [["kept", "kept", "42"]]);
+    assert.deepEqual(await db.fetchText("PRAGMA foreign_key_check"), []);
+    await db.execute("INSERT INTO writer (email, name) VALUES ('next', 'next')");
+    assert.equal((await db.fetchText("SELECT max(id) FROM writer"))[0]![0], "102");
+    await runner.downgrade();
+    assert.deepEqual(await db.fetchText("SELECT w.email, b.name FROM writer w JOIN book b ON b.author_id = w.id"), [["kept", "kept"]]);
+  } finally {
+    await db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("SQLite UUID, date, timestamp and inline trigger conversions", async () => {
   const registry = new Registry();
   const Event = loads(`

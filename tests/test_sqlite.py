@@ -111,6 +111,31 @@ async def test_migrations_rebuild_preserve_rows_and_sequences(tmp_path):
         await db.close()
 
 
+async def test_kept_rename_hints_do_not_redirect_later_rebuilds(tmp_path):
+    from orm.migrations import Migrations, Migrator
+    renamed = SOURCE.replace("  books      Book[]", '  books      Book[]\n  @@map("writer")\n  @@renamed_from("author")').replace("  title     String", '  name      String @renamed_from("title")').replace("@@index([title]", "@@index([name]")
+    regs = [models(source)[0] for source in (SOURCE, renamed, renamed.replace("  pages     Int", "  added     Int @default(42)\n  pages     Int"))]
+    directory = str(tmp_path / "migrations")
+    for reg, name in zip(regs, ("initial", "rename", "later")):
+        Migrations(directory, reg).make(name)
+    db = await orm.connect("sqlite://:memory:", registry=regs[0], default=False)
+    runner = Migrator(db, Migrations(directory, regs[0]))
+    try:
+        await runner.upgrade("1")
+        await db.execute("INSERT INTO author (id, email, name) VALUES (100, 'gone', 'gone'); DELETE FROM author; INSERT INTO author (email, name) VALUES ('kept', 'kept')")
+        await db.execute("INSERT INTO book (author_id, title) VALUES (101, 'kept')")
+        await runner.upgrade("2")
+        await runner.upgrade()
+        assert await db._fetch_text("SELECT w.email, b.name, b.added FROM writer w JOIN book b ON b.author_id = w.id") == [("kept", "kept", "42")]
+        assert await db._fetch_text("PRAGMA foreign_key_check") == []
+        await db.execute("INSERT INTO writer (email, name) VALUES ('next', 'next')")
+        assert (await db._fetch_text("SELECT max(id) FROM writer"))[0][0] == "102"
+        await runner.downgrade()
+        assert await db._fetch_text("SELECT w.email, b.name FROM writer w JOIN book b ON b.author_id = w.id") == [("kept", "kept")]
+    finally:
+        await db.close()
+
+
 async def test_file_database_and_target_mismatch(tmp_path):
     reg, _ = models()
     url = f"sqlite://{tmp_path / 'database.db'}"
