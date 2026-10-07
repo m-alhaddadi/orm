@@ -317,6 +317,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -775,6 +784,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
  "crypto-common 0.1.7",
+ "subtle",
 ]
 
 [[package]]
@@ -1588,9 +1598,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "orm-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "orm-core"
 version = "0.1.0"
 dependencies = [
+ "orm-contracts",
  "serde",
  "serde_json",
  "toml",
@@ -1601,6 +1620,7 @@ name = "orm-engine"
 version = "0.1.0"
 dependencies = [
  "bigdecimal",
+ "blake2",
  "bytes",
  "chrono",
  "deadpool-postgres",
