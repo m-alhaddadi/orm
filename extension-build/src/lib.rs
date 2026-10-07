@@ -15,6 +15,12 @@ impl Composition {
         self.manifests.iter().any(|m| m.capabilities.iter().any(|c| c == capability))
     }
 
+    /// Host Cargo features that the selected manifests turn on, in a stable order.
+    pub fn host_features(&self) -> Vec<String> {
+        orm_contracts::extension::HOST_FEATURE_CAPABILITIES.iter()
+            .filter(|feature| self.has_capability(feature)).map(|feature| (*feature).to_owned()).collect()
+    }
+
     pub fn resolve(mut manifests: Vec<Manifest>) -> Result<Self, String> {
         manifests.sort_by(|a, b| a.id.cmp(&b.id));
         let mut extensions = BTreeMap::new();
@@ -100,7 +106,7 @@ impl Composition {
             ..Default::default()
         };
         let mut artifact = artifact;
-        if self.has_capability(QUERY_DEFAULTS) { artifact.capabilities.push(QUERY_DEFAULTS.into()); }
+        artifact.capabilities.extend(self.host_features());
         if let Some(native) = native {
             artifact.specializations = native.specializations.clone();
             artifact.capabilities.extend(["native-string-values", "native-string-records", "native-string-results"].into_iter().map(str::to_owned));

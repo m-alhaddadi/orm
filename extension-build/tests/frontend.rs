@@ -98,18 +98,29 @@ fn manifest_capability_selects_the_host_feature() {
     let host = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
     let root = host.join("target/extension-proof-tests").join(format!("orm-extension-feature-test-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
-    let output = root.join("build");
-    let config = root.join("config.json");
-    fs::write(&config, serde_json::to_vec(&serde_json::json!({
-        "host": host, "output": output, "offline": true, "prepare_only": true,
-        "bindings": ["python", "node"], "dependencies": {"file_storage": {"package": "orm-file-storage-extension", "path": host.join("storage/orm-extension")}}
-    })).unwrap()).unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_orm-extension-build")).arg(config).output().unwrap();
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    for binding in ["python", "node"] {
-        let manifest: toml::Value = toml::from_str(&fs::read_to_string(output.join("bindings").join(binding).join("Cargo.toml")).unwrap()).unwrap();
-        assert!(manifest["features"]["default"].as_array().unwrap().contains(&toml::Value::String("file-storage".into())));
-        assert!(manifest["dependencies"]["orm-core"]["features"].as_array().unwrap().contains(&toml::Value::String("file-storage".into())));
+    for (feature, alias, package, path) in [
+        ("file-storage", "file_storage", "orm-file-storage-extension", "storage/orm-extension"),
+        ("query-defaults", "query_defaults", "orm-query-defaults", "query-defaults"),
+        ("model-composition", "composition", "orm-model-composition", "model-composition"),
+        ("proxy-models", "proxy", "orm-proxy", "extensions/proxy"),
+        ("generic-relations", "generic", "orm-generic", "extensions/generic"),
+    ] {
+        let output = root.join(feature);
+        let config = root.join(format!("{feature}.json"));
+        fs::write(&config, serde_json::to_vec(&serde_json::json!({
+            "host": host, "output": output, "offline": true, "prepare_only": true,
+            "bindings": ["python", "node"], "dependencies": {alias: {"package": package, "path": host.join(path)}}
+        })).unwrap()).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_orm-extension-build")).arg(config).output().unwrap();
+        assert!(result.status.success(), "{feature}: {}", String::from_utf8_lossy(&result.stderr));
+        let selected = toml::Value::String(feature.into());
+        for binding in ["python", "node"] {
+            let manifest: toml::Value = toml::from_str(&fs::read_to_string(output.join("bindings").join(binding).join("Cargo.toml")).unwrap()).unwrap();
+            assert!(manifest["features"]["default"].as_array().unwrap().contains(&selected), "{feature}: {binding} default features");
+            assert!(manifest["dependencies"]["orm-core"]["features"].as_array().unwrap().contains(&selected), "{feature}: {binding} orm-core features");
+        }
+        let artifact: serde_json::Value = serde_json::from_slice(&fs::read(output.join("artifact.json")).unwrap()).unwrap();
+        assert!(artifact["capabilities"].as_array().unwrap().contains(&serde_json::json!(feature)), "{feature}: {artifact}");
     }
     fs::remove_dir_all(root).unwrap();
 }

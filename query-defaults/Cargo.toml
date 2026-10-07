@@ -3,7 +3,6 @@ name = "orm-query-defaults"
 version = "0.1.0"
 edition = "2021"
 publish = false
-[workspace]
 [dependencies]
 orm-contracts = { path = "../contracts" }
 serde_json = "1"

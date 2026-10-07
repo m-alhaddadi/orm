@@ -20,6 +20,7 @@ host_contract = 1
 schema_contract = 1
 languages = ["python", "typescript"]
 databases = ["postgres", "sqlite"]
+capabilities = ["proxy-models"]
 
 [[package.metadata.orm-extension.passes]]
 id = "orm.proxy.lower"

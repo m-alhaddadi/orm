@@ -56,10 +56,8 @@ mod reference_tests {
     #[cfg(feature = "reference-loading")]
     #[test]
     fn loader_collisions_rejected_by_both_generators() {
-        let (mut ir, _) = schema();
-        let mut field = ir.models[1].fields[0].clone();
-        field.name = "load_author".into(); field.column = "load_author".into(); field.primary_key = false;
-        ir.models[1].fields.push(field);
+        // Declared in the source, so a composition build also captures its physical column.
+        let ir = crate::dsl::compile("model User {\n id Int @id\n posts Post[]\n}\nmodel Post {\n id Int @id\n load_author Int\n author_id Int?\n author User? @relation(fields: [author_id], references: [id])\n}", None).unwrap();
         let schema = crate::schema::Schema::from_ir(serde_json::from_value(serde_json::to_value(&ir).unwrap()).unwrap()).unwrap();
         assert!(python::generate(&ir, &schema, "schema.prisma").err().unwrap().contains("collides"));
         assert!(typescript::generate(&ir, &schema, "schema.prisma", "orm").err().unwrap().contains("collides"));

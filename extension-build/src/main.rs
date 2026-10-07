@@ -1,6 +1,6 @@
 //! `orm-extension-build CONFIG.json`: resolve selected Cargo dependencies, emit fixed
 //! composition, then build the ordinary bindings in an isolated workspace.
-use orm_extension_build::{Composition, QUERY_DEFAULTS};
+use orm_extension_build::Composition;
 use orm_contracts::extension::Manifest;
 use serde::Deserialize;
 use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command};
@@ -143,12 +143,15 @@ fn build() -> Result<(), String> {
     fs::copy(config.host.join("Cargo.lock"), config.output.join("Cargo.lock")).map_err(|e| e.to_string())?;
     let core_path = config.output.join("core/Cargo.toml");
     let mut core: toml::Value = toml::from_str(&fs::read_to_string(&core_path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    core["dependencies"]["orm-contracts"]["path"] = toml::Value::String(config.host.join("contracts").to_string_lossy().into());
-    core["dependencies"]["storage-reference"]["path"] = toml::Value::String(config.host.join("storage/reference").to_string_lossy().into());
-    // Optional in-tree consumer crates retain their original source location in
-    // the isolated native workspace, just like the shared contracts SDK.
-    if core["dependencies"].get("orm-proxy-runtime").is_some() {
-        core["dependencies"]["orm-proxy-runtime"]["path"] = toml::Value::String(config.host.join("extensions/proxy-runtime").to_string_lossy().into());
+    // Host path dependencies (contracts SDK, optional runtime crates) keep their source
+    // location, so a new feature runtime crate needs no builder change.
+    for dependency in core["dependencies"].as_table_mut().ok_or("orm-core dependencies must be a table")?.iter_mut().map(|(_, dependency)| dependency) {
+        if let Some(path) = dependency.get_mut("path") {
+            let relative = path.as_str().ok_or("orm-core dependency path must be a string")?;
+            if relative.starts_with("../") {
+                *path = toml::Value::String(config.host.join("core").join(relative).canonicalize().map_err(|e| e.to_string())?.to_string_lossy().into());
+            }
+        }
     }
     for (alias, dependency) in &config.dependencies {
         orm_extension_build::rust_path(&alias.replace('-', "_"))?;
@@ -226,7 +229,7 @@ fn main() -> Result<(), String> {
         let schema_inputs = config.output.join("schema-inputs.json");
         let mut command = Command::new("cargo");
         command.args(["run", "--quiet", "--locked", "--manifest-path"]).arg(config.output.join("Cargo.toml"))
-            .args(["-p", "orm-core", "--features", if composition.has_capability(QUERY_DEFAULTS) { "composition,query-defaults" } else { "composition" }, "--example", "orm_extension_normalize"]);
+            .args(["-p", "orm-core", "--features", &std::iter::once("composition".to_owned()).chain(composition.host_features()).collect::<Vec<_>>().join(","), "--example", "orm_extension_normalize"]);
         if config.offline { command.arg("--offline"); }
         command.arg("--").arg(base.join(&selected.schema)).arg(&normalized).arg(&schema_inputs)
             .env("ORM_CORE_COMPOSITION", config.output.join("composition.rs"));
@@ -255,9 +258,7 @@ fn main() -> Result<(), String> {
     }
     if !config.dependencies.is_empty() {
         // Features are selected through manifests, never through build-script cfg tricks.
-        let selected: Vec<String> = composition.manifests.iter().flat_map(|m| &m.capabilities)
-            .filter(|c| orm_contracts::extension::HOST_FEATURE_CAPABILITIES.contains(&c.as_str()))
-            .cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let selected = composition.host_features();
         for binding in &config.bindings {
             let path = config.output.join("bindings").join(binding).join("Cargo.toml");
             let mut manifest: toml::Value = toml::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;

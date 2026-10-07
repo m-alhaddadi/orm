@@ -6,37 +6,20 @@ mod composition { include!(env!("ORM_CORE_COMPOSITION")); }
 
 pub fn artifact() -> Artifact {
     #[cfg(feature = "composition")]
-    let artifact = composition::artifact();
+    let mut artifact = composition::artifact();
     #[cfg(not(feature = "composition"))]
-    let artifact = Artifact::default();
-    #[cfg(feature = "file-storage")]
-    let artifact = {
-        let mut artifact = artifact;
-        if !artifact.capabilities.iter().any(|c| c == "file-storage") {
-            artifact.capabilities.push("file-storage".into());
-        }
-        artifact
-    };
-    #[cfg(feature = "reference-loading")]
-    let artifact = {
-        let mut artifact = artifact;
-        artifact.capabilities.push("reference-loading".into());
-        artifact
-    };
-    #[cfg(feature = "proxy-models")]
-    let artifact = {
-        let mut artifact = artifact;
-        if !artifact.capabilities.iter().any(|c| c == "proxy-models") {
-            artifact.capabilities.push("proxy-models".into());
-        }
-        artifact
-    };
-    #[cfg(feature = "query-defaults")]
-    let artifact = {
-        let mut artifact = artifact;
-        if !artifact.capabilities.iter().any(|c| c == QUERY_DEFAULTS) { artifact.capabilities.push(QUERY_DEFAULTS.into()); }
-        artifact
-    };
+    let mut artifact = Artifact::default();
+    let compiled = [
+        (cfg!(feature = "file-storage"), "file-storage"),
+        (cfg!(feature = "reference-loading"), "reference-loading"),
+        (cfg!(feature = "model-composition"), "model-composition"),
+        (cfg!(feature = "proxy-models"), "proxy-models"),
+        (cfg!(feature = "generic-relations"), "generic-relations"),
+        (cfg!(feature = "query-defaults"), QUERY_DEFAULTS),
+    ];
+    for (_, capability) in compiled.into_iter().filter(|(on, _)| *on) {
+        if !artifact.capabilities.iter().any(|c| c == capability) { artifact.capabilities.push(capability.into()); }
+    }
     artifact
 }
 

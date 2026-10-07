@@ -68,7 +68,9 @@ metadata. It contributes no conventional multi-target foreign key. Database chec
 preserve pair validity for external scalar writes without promising target existence.
 
 **Delivery state:** this milestone implements identities and compiler contributions.
-The native generic routing/write/loading/prefetch/reverse APIs and binding unions
-are still being implemented. The compiler crate alone does not supply them. Native
-artifacts without the generic runtime capability reject generic setup metadata at
-definition. No capability is advertised on the basis of this compiler scaffolding.
+The `orm-generic` manifest declares the `generic-relations` capability, so selecting
+it in `orm-extension-build` compiles the native generic modules and the artifact
+accepts generic setup metadata. Native artifacts without it reject that metadata at
+definition. The binding generic routing/loading/prefetch/reverse APIs and binding
+unions are still being implemented; the key and discriminator columns are ordinary
+fields until then.

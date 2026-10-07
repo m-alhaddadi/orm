@@ -107,3 +107,28 @@ async def test_retirement_migration_requires_reference_cleanup(tmp_path, url, pr
         await db.drop_tables()
         await db.execute("DROP TABLE IF EXISTS orm_migrations")
         await db.close()
+
+
+async def test_generic_relation_schema_follows_the_artifact_capability(tmp_path):
+    from orm import _native
+
+    schema = tmp_path / "schema.prisma"
+    schema.write_text('datasource db {\nprovider = "sqlite"\n}\nmodel Post {\nid Int @id\n@@map("generic08_posts")\n}\n'
+                      'model Tag {\nid Int @id\ncontent_type ContentType?\nobject_id Int?\n'
+                      '@@generic.relation("target", type: "content_type", key: "object_id", targets: ["Post"])\n@@map("generic08_tags")\n}')
+    generate(schema)
+    if "generic-relations" not in json.loads(_native.native_artifact())["capabilities"]:
+        with pytest.raises(orm.SchemaError, match="rebuild"):
+            orm.load(schema, registry=orm.Registry())
+        return
+    registry = orm.Registry()
+    models = orm.load(schema, registry=registry)
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    try:
+        await db.create_tables()
+        await models["Post"].objects.using(db).insert(id=7)
+        await models["Tag"].objects.using(db).insert(id=1, content_type=models["ContentType"].Post, object_id=7)
+        tag = await models["Tag"].objects.using(db).get()
+        assert tag.content_type is models["ContentType"].Post and tag.object_id == 7
+    finally:
+        await db.close()

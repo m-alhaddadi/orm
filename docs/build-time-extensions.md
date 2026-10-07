@@ -62,6 +62,11 @@ Declare all selected behavioral extension crates in `dependencies`, including ex
 Cargo resolves Rust package versions;
 the frontend checks extension dependency constraints against that resolved selection.
 
+A manifest capability in `HOST_FEATURE_CAPABILITIES` (`file-storage`, `query-defaults`, `model-composition`,
+`proxy-models`, `generic-relations`) also turns on the host Cargo feature of the same name in both bindings.
+Do not add those features by hand; select the extension crate.
+`scripts/feature-check.sh` builds one artifact per such extension, and one with all of them, and runs every suite on each.
+
 Binding backend and generator defaults are preserved when composition is added.
 For explicit host selection, use `binding_features`, for example `{"python": ["sqlite"], "node": ["postgres"]}`.
 Each supplied entry replaces that binding's defaults with the listed features plus required static composition;

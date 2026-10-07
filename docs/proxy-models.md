@@ -73,5 +73,7 @@ can violate those hints. Strict validation requires a separately declared valida
 
 A native build without the feature excludes prepared proxy state, runtime
 dependencies, diagnostics and client defaults. Definition rejects proxy metadata without the
-compiled capability and asks for a rebuild. The build-time extension manifest selects
-the compiler; the runtime code alone does not install the source declarations.
+compiled capability and asks for a rebuild. The `orm-proxy` manifest declares the
+`proxy-models` capability, so selecting it in `orm-extension-build` selects both the
+compiler and the `proxy-models` host feature; the runtime code alone does not install
+the source declarations.

@@ -15,7 +15,7 @@ host_contract = 1
 schema_contract = 1
 languages = ["python", "typescript"]
 databases = ["postgres", "sqlite"]
-capabilities = ["physical-schema", "schema-transformations"]
+capabilities = ["physical-schema", "schema-transformations", "model-composition"]
 
 [[package.metadata.orm-extension.attributes]]
 name = "composition.model"

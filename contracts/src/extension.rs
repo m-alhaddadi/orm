@@ -541,10 +541,11 @@ pub const QUERY_DEFAULTS: &str = "query-defaults";
 pub const HOST_CAPABILITIES: &[&str] = &[
     "schema-transformations", "physical-schema", "native-string-values",
     "native-string-records", "native-string-results", "file-storage", QUERY_DEFAULTS,
+    "model-composition", "proxy-models", "generic-relations",
 ];
 
 /// Capabilities that a build selects as the host Cargo feature of the same name.
-pub const HOST_FEATURE_CAPABILITIES: &[&str] = &["file-storage", QUERY_DEFAULTS];
+pub const HOST_FEATURE_CAPABILITIES: &[&str] = &["file-storage", QUERY_DEFAULTS, "model-composition", "proxy-models", "generic-relations"];
 
 /// Combine one new declaration batch with an immutable definition context. Lowered
 /// declarations retain their phase state; new declarations are the only pass inputs.

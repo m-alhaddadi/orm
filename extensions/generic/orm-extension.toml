@@ -4,7 +4,7 @@ host_contract = 1
 schema_contract = 1
 languages = ["python", "typescript"]
 databases = ["postgres", "sqlite"]
-capabilities = ["schema-transformations", "physical-schema"]
+capabilities = ["schema-transformations", "physical-schema", "generic-relations"]
 
 [[attributes]]
 name = "generic.relation"
