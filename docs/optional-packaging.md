@@ -72,8 +72,8 @@ for extension manifests and build environment requirements.
 Build a custom Python artifact using the `custom` template. Record the exact Cargo
 features, Cargo.lock revision, Rust toolchain, target triple, Python version and
 extension manifest/compiler configuration with the artifact. This template has no
-backend by default; at least one backend must be explicitly selected. Additional
-features on the command line are additive to the template's extension-module flag.
+backend by default; at least one backend must be explicitly selected. The
+features on the command line replace the `features` list of the template pyproject.
 
 ```bash
 cd packaging/python/custom

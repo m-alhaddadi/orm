@@ -167,9 +167,14 @@ python -m pytest -q storage/python/tests storage/integration/python/tests
 (cd storage/typescript && npm install && npm test)
 (cd storage/integration/typescript && npm install && npm test)
 # End-to-end, against a file-storage build; set FILE_STORAGE_DATABASE_URL for Postgres.
-(cd packaging/python/tooling && maturin develop --features file-storage) && python storage/integration/tests/native_python.py
+(cd packaging/python/custom && maturin develop --features postgres,sqlite,file-storage)
+ORM_PROFILE=custom python storage/integration/tests/native_python.py
 cargo build -p orm-node --features file-storage && cp target/debug/liborm_node.dylib js/orm.node
 (cd js && npm run build) && node --test storage/integration/tests/native_node.mjs
 ```
 
-Rebuild the default bindings (`maturin develop` in `packaging/python/tooling`, `npm run build:native`) before the root checks.
+The Python line builds a `custom` profile artifact (see `docs/optional-packaging.md`).
+A named profile such as `tooling` does not accept extra features:
+`maturin develop --features` replaces the `profile-tooling` feature of its pyproject.
+Before the root checks, run `uv pip uninstall orm-native-custom`,
+and rebuild the default bindings (`maturin develop` in `packaging/python/tooling`, `npm run build:native`).
