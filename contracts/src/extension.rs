@@ -20,6 +20,9 @@ pub struct Declaration {
     pub attribute: String,
     pub model: String,
     pub field: Option<String>,
+    /// The declared type of the field a field attribute is on, as written: `Tag[]`, `Generic?`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_type: Option<String>,
     pub arguments: BTreeMap<String, serde_json::Value>,
     pub positional: Vec<serde_json::Value>,
     pub location: SourceLocation,
@@ -407,8 +410,9 @@ pub fn validate_declarations(ir: &SchemaIr, manifests: &[Manifest], language: Op
     let fail = |d: &Declaration, msg: String| format!("{}:{}:{}: @{}: {msg}",
         d.location.file, d.location.line, d.location.column, d.attribute);
     for d in &ir.behavior.declarations {
-        let found = manifests.iter().flat_map(|m| m.attributes.iter().map(move |a| (m, a)))
-            .find(|(_, a)| a.name == d.attribute);
+        // One name can have a model entry (`@@x`) and a field entry (`@x`).
+        let named = || manifests.iter().flat_map(|m| m.attributes.iter().map(move |a| (m, a))).filter(|(_, a)| a.name == d.attribute);
+        let found = named().find(|(_, a)| (a.target == AttributeTarget::Field) == d.field.is_some()).or_else(|| named().next());
         let (m, a) = found.ok_or_else(|| fail(d, "not compiled into this artifact; rebuild with its extension".into()))?;
         if m.host_contract != HOST_CONTRACT || m.schema_contract != SCHEMA_CONTRACT {
             return Err(fail(d, format!("{} requires incompatible host/schema contracts; rebuild", m.id)));
@@ -679,7 +683,7 @@ mod tests {
     fn schema(dialect: crate::dialect::Dialect) -> SchemaIr {
         let mut ir = SchemaIr { dialect, ..SchemaIr::default() };
         ir.behavior.declarations.push(Declaration {
-            attribute: "app.trim".into(), model: "User".into(), field: Some("name".into()),
+            attribute: "app.trim".into(), model: "User".into(), field: Some("name".into()), field_type: None,
             arguments: BTreeMap::new(), positional: vec![],
             location: SourceLocation { file: "schema.prisma".into(), line: 3, column: 7 }, lowered: false,
         });
@@ -705,6 +709,18 @@ mod tests {
         assert!(check("tags", serde_json::json!(["a", null])).unwrap_err().contains("wrong type for tags"));
         assert!(check("tags", serde_json::json!([{"k": 1}])).is_err());
         assert!(check("payload", serde_json::json!({"labels": [null]})).is_ok());
+    }
+
+    #[test]
+    fn one_name_has_a_model_entry_and_a_field_entry() {
+        let mut manifest = manifest(&["python"], &["sqlite"]);
+        manifest.attributes.push(serde_json::from_value(serde_json::json!({"name": "app.trim", "target": "model", "arguments": {"all": {"kind": "boolean", "required": true}}})).unwrap());
+        let mut ir = schema(crate::dialect::Dialect::Sqlite);
+        assert!(validate_declarations(&ir, std::slice::from_ref(&manifest), None).is_ok());
+        ir.behavior.declarations[0].field = None;
+        assert!(validate_declarations(&ir, std::slice::from_ref(&manifest), None).unwrap_err().contains("missing argument all"));
+        manifest.attributes.pop();
+        assert!(validate_declarations(&ir, std::slice::from_ref(&manifest), None).unwrap_err().contains("invalid declaration target"));
     }
 
     #[test]

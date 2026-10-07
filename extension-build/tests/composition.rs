@@ -49,6 +49,12 @@ fn attribute_ownership_and_phase_boundaries_are_checked() {
     let mut b = manifest("b", "b.lower", &[], &[]);
     b.attributes = a.attributes.clone();
     assert!(Composition::resolve(vec![a.clone(), b]).unwrap_err().contains("a.rename"));
+    let mut both = a.clone();
+    both.attributes.push(Attribute { name: "a.rename".into(), target: AttributeTarget::Model,
+        arguments: BTreeMap::new(), positional: vec![] });
+    assert!(Composition::resolve(vec![both.clone()]).is_ok());
+    both.attributes.push(both.attributes[1].clone());
+    assert!(Composition::resolve(vec![both]).unwrap_err().contains("a.rename"));
     let mut late = manifest("late", "late.lower", &[], &[]);
     late.passes[0].phase = Phase::Generation;
     a.passes[0].after.push("late.lower".into());

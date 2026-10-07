@@ -1,6 +1,6 @@
 //! Build frontend for fixed native composition. Cargo owns package resolution.
 pub use orm_contracts::extension::QUERY_DEFAULTS;
-use orm_contracts::extension::{Manifest, Pass, HOST_CONTRACT, SCHEMA_CONTRACT};
+use orm_contracts::extension::{AttributeTarget, Manifest, Pass, HOST_CONTRACT, SCHEMA_CONTRACT};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
@@ -43,7 +43,7 @@ impl Composition {
             }
             for a in &m.attributes {
                 if !a.name.contains('.') { return Err(format!("{}: attribute {} must be namespaced", m.id, a.name)); }
-                if let Some(owner) = attributes.insert(&a.name, &m.id) {
+                if let Some(owner) = attributes.insert((&a.name, a.target == AttributeTarget::Field), &m.id) {
                     return Err(format!("attribute {} has duplicate owners {owner} and {}", a.name, m.id));
                 }
             }

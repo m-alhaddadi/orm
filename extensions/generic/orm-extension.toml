@@ -15,13 +15,21 @@ type = { kind = "string", required = true }
 key = { kind = "string", required = true }
 targets = { kind = "list", required = true }
 
+# The field form: `target Generic? @generic.relation(targets: [...])` creates the pair fields.
+[[attributes]]
+name = "generic.relation"
+target = "field"
+[attributes.arguments]
+targets = { kind = "list", required = true }
+type = { kind = "string" }
+key = { kind = "string" }
+index = { kind = "boolean" }
+
 [[attributes]]
 name = "generic.reverse"
-target = "model"
-positional = [{ kind = "string", required = true }]
+target = "field"
 [attributes.arguments]
-source = { kind = "string", required = true }
-relation = { kind = "string", required = true }
+relation = { kind = "string" }
 
 [[passes]]
 id = "orm.generic.prepare"
