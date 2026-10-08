@@ -36,7 +36,7 @@ async function seed() {
     { author: alice, title: "hit", body: "...", published: true, views: 90 },
     { author: alice, title: "quiet", body: "...", published: true, views: 1 },
     { author: bob, title: "bob", body: "...", published: true, views: 70 },
-  ]);
+  ]).returning();
   return { alice, bob, posts: rows };
 }
 
@@ -66,7 +66,7 @@ test("query-set classes", async (t) => {
     assert.ok(alice.posts instanceof RelatedSet && alice.posts instanceof PostQueries);
     assert.deepEqual((await (set.published().orderBy("views") as unknown as PostQueries)).map((p) => p.title), ["quiet", "hit"]);
     assert.deepEqual((await (alice.posts.filter(Post.views.gt(5)) as unknown as PostQueries).published()).map((p) => p.title), ["hit"]);
-    const tags = await Tag.objects.insertMany([{ name: "python" }, { name: "rust" }]);
+    const tags = await Tag.objects.insertMany([{ name: "python" }, { name: "rust" }]).returning();
     await rows[1]!.tags.add(...tags);
     assert.ok(rows[1]!.tags instanceof ManyRelatedSet);
     assert.deepEqual((await (rows[1]!.tags as unknown as TagQueries).named("py")).map((t) => t.name), ["python"]);
@@ -112,7 +112,7 @@ test("prefetch reads keys from the instances, to-one and many-to-many", async ()
   await prefetch(comments, Comment.post.author);
   const loaded = comments as unknown as { post: { title: string; author: { name: string } } }[];
   assert.deepEqual(loaded.map((c) => [c.post.title, c.post.author.name]), [["draft", "Alice"], ["bob", "Bob"]]);
-  const tags = await Tag.objects.insertMany([{ name: "a" }, { name: "b" }]);
+  const tags = await Tag.objects.insertMany([{ name: "a" }, { name: "b" }]).returning();
   await rows[0]!.tags.add(...tags);
   const posts = await Post.objects.orderBy("id");
   await prefetch(posts, Post.tags);

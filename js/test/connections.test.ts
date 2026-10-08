@@ -245,9 +245,9 @@ for (const dialect of ['postgres', 'sqlite']) {
     await sdb.dropTables();
     await sdb.createTables();
     try {
-      const [s1, s2] = await Shop.objects.using(sdb).insertMany([{ name: 'one' }, { name: 'two' }]);
+      const [s1, s2] = await Shop.objects.using(sdb).insertMany([{ name: 'one' }, { name: 'two' }]).returning();
       const orders = Order.objects.using(sdb);
-      const [, , o3] = await orders.insertMany([{ shopId: s1.id, total: 10 }, { shopId: s1.id, total: 20 }, { shopId: s2.id, total: 30 }]);
+      const [, , o3] = await orders.insertMany([{ shopId: s1.id, total: 10 }, { shopId: s1.id, total: 20 }, { shopId: s2.id, total: 30 }]).returning();
       for (const read of [() => orders.all(), () => orders.count(), () => Shop.objects.using(sdb).filter(Shop.orders.total.gt(25)).count()]) {
         await assert.rejects(read(), /scope\.shop/);
       }

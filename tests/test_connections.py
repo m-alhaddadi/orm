@@ -301,10 +301,10 @@ async def test_scope_values_in_default_filters_are_closed_by_default(db, dialect
     await sdb.drop_tables()
     await sdb.create_tables()
     try:
-        s1, s2 = await Shop.objects.using(sdb).insert_many([{"name": "one"}, {"name": "two"}])
+        s1, s2 = await Shop.objects.using(sdb).insert_many([{"name": "one"}, {"name": "two"}]).returning()
         orders = Order.objects.using(sdb)
         o1, o2, o3 = await orders.insert_many(
-            [{"shop_id": s1.id, "total": 10}, {"shop_id": s1.id, "total": 20}, {"shop_id": s2.id, "total": 30}])
+            [{"shop_id": s1.id, "total": 10}, {"shop_id": s1.id, "total": 20}, {"shop_id": s2.id, "total": 30}]).returning()
         for read in (lambda: orders.all(), lambda: orders.count(), lambda: orders.filter(Order.total > 0).exists(),
                      lambda: Shop.objects.using(sdb).filter(Shop.orders.total > 25).count()):
             with pytest.raises(orm.QueryError, match=r"scope\.shop"):

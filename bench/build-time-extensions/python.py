@@ -59,7 +59,7 @@ async def main():
     for side in [0, 1]:
         rows = await models[side].objects.using(dbs[side]).insert_many([
             {'label': seed_label(side, i), 'number': i, 'data': {'n': i}} for i in range(1000)
-        ])
+        ]).returning()
         seeds.append(rows)
 
     def query(side, size):
@@ -112,7 +112,7 @@ async def main():
             rows = await m.objects.using(db).insert_many([
                 {'label': write_label(side), 'number': i, 'data': {'n': i}}
                 for i in range(50 if case == 'bulk-insert-50' else 1)
-            ])
+            ]).returning()
             assert len(rows) == (50 if case == 'bulk-insert-50' else 1)
             assert rows[-1].data == {'n': len(rows) - 1}
             return rows

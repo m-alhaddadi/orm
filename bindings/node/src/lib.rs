@@ -621,7 +621,8 @@ impl Engine {
         )
     }
 
-    /// `INSERT ... RETURNING` every column; the promise gives `{model, rows}`.
+    /// `INSERT ... RETURNING` every column; the promise gives `{model, rows}`, or without
+    /// `returning` (default true) the affected-row count.
     ///
     /// `rows` are arrays aligned with `fields` (`undefined`: the column's default). With
     /// `conflict` (unique field names) rows hitting that constraint update the `update`
@@ -647,7 +648,9 @@ impl Engine {
         batch_size: Option<u32>,
         conflict_where: Option<String>,
         trace: Option<&Trace>,
+        returning: Option<bool>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
+        let returning = returning.unwrap_or(true);
         protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
             Some(json) => serde_json::from_str(&json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
@@ -663,14 +666,14 @@ impl Engine {
         });
         let values = convert_rows(env, &self.schema, &model, &fields, rows, true)?;
         let p = params(env, params_)?;
-        let plans = exec::plan_inserts(&self.schema, self.target, &model, &fields, values, conflict, &p, batch_size.map(|n| n as usize))
+        let plans = exec::plan_inserts(&self.schema, self.target, &model, &fields, values, conflict, &p, batch_size.map(|n| n as usize), returning)
             .map_err(engine_err)?;
         let target = self.target;
         let conn = self.traced(tx, trace);
         let own_tx = tx.is_none();
         let schema = self.schema.clone();
         env.spawn_future_with_callback(
-            async move { exec::run_inserts(conn.as_ref(), target, plans, own_tx).await.map_err(engine_err) },
+            async move { exec::run_inserts(conn.as_ref(), target, plans, own_tx, returning).await.map_err(engine_err) },
             move |env, out| outcome_js(env, &schema, out),
         )
     }

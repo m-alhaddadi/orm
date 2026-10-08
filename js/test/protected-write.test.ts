@@ -48,7 +48,7 @@ test("every write method fails outside allowWrites and works inside", async () =
   const writes: (() => Promise<unknown>)[] = [
     () => posts().insert({ id: 1, title: "a" }),
     () => posts().insertMany([{ id: 2, title: "b" }, { id: 3, title: "c" }]),
-    () => posts().insert({ id: 1, title: "upsert" }, { onConflict: Post.id, doUpdate: true }),
+    () => posts().insert({ id: 1, title: "upsert" }).onConflict(Post.id, { update: true }),
     () => posts().filter(Post.id.eq(1)).update({ title: "x" }),
     () => posts().updateMany([{ id: 2, title: "y" }]),
     () => posts().filter(Post.id.eq(3)).delete(),

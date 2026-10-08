@@ -13,7 +13,7 @@ model Item {
 fn batches(target: Target, rows: usize, batch_size: Option<usize>) -> Vec<usize> {
     let (_, schema) = dsl::check(dsl::compile(SOURCE, None).unwrap()).unwrap();
     let rows = (0..rows).map(|i| vec![Some(Value::String(Some(format!("n{i}"))))]).collect();
-    let plans = exec::plan_inserts(&schema, target, "Item", &["name".into()], rows, None, &NoParams, batch_size).unwrap();
+    let plans = exec::plan_inserts(&schema, target, "Item", &["name".into()], rows, None, &NoParams, batch_size, true).unwrap();
     plans
         .iter()
         .map(|p| match p {
@@ -36,7 +36,7 @@ fn batch_size_caps_the_rows_per_statement() {
     assert_eq!(batches(Target::new(Dialect::Postgres), 5, Some(3)), vec![3, 2]);
     assert_eq!(batches(Target::new(Dialect::Postgres), 2, Some(3)), vec![2]);
     let (_, schema) = dsl::check(dsl::compile(SOURCE, None).unwrap()).unwrap();
-    let err = exec::plan_inserts(&schema, Target::new(Dialect::Postgres), "Item", &[], vec![], None, &NoParams, Some(0));
+    let err = exec::plan_inserts(&schema, Target::new(Dialect::Postgres), "Item", &[], vec![], None, &NoParams, Some(0), true);
     assert!(err.is_err());
 }
 
@@ -51,4 +51,22 @@ fn conflict_target_takes_a_partial_index_predicate() {
     let plan = exec::plan_insert(&schema, target, "Doc", &["slug".into()], rows, Some(conflict), &NoParams).unwrap();
     let sql = exec::statement(target, &plan);
     assert!(sql.contains(r#"ON CONFLICT ("slug") WHERE "doc"."deleted_at" IS NULL DO NOTHING"#), "{sql}");
+}
+
+#[test]
+fn a_count_insert_has_no_returning_clause() {
+    let (_, schema) = dsl::check(dsl::compile(SOURCE, None).unwrap()).unwrap();
+    let target = Target::new(Dialect::Postgres);
+    let plan = |returning| {
+        let rows = vec![vec![Some(Value::String(Some("a".into())))]];
+        let plans = exec::plan_inserts(&schema, target, "Item", &["name".into()], rows, None, &NoParams, None, returning).unwrap();
+        exec::statement(target, &plans[0])
+    };
+    assert!(!plan(false).contains("RETURNING"), "{}", plan(false));
+    assert!(plan(true).contains("RETURNING"), "{}", plan(true));
+    // SQLite before 3.35 has no RETURNING; a count insert does not need it.
+    let old = Target::new(Dialect::Sqlite).without(&["returning".into()]).unwrap();
+    let rows = vec![vec![Some(Value::String(Some("a".into())))]];
+    assert!(exec::plan_inserts(&schema, old, "Item", &["name".into()], rows.clone(), None, &NoParams, None, false).is_ok());
+    assert!(exec::plan_inserts(&schema, old, "Item", &["name".into()], rows, None, &NoParams, None, true).is_err());
 }

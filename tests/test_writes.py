@@ -16,7 +16,7 @@ from conftest import DATABASE_URL
 
 async def test_insert_many_splits_by_the_parameter_limit(clean):
     # One field per row: 70 000 rows are 70 000 parameters, more than Postgres's 65 535.
-    tags = await Tag.objects.insert_many([{"name": f"t{i}"} for i in range(70_000)])
+    tags = await Tag.objects.insert_many([{"name": f"t{i}"} for i in range(70_000)]).returning()
     assert len(tags) == 70_000
     assert [t.name for t in tags[:2]] == ["t0", "t1"]
     assert tags[-1].name == "t69999"
@@ -27,8 +27,8 @@ async def test_insert_many_batch_size(clean):
     # One statement can't update a row twice; one row per statement can.
     rows = [{"email": "a@x.io", "name": "A1"}, {"email": "a@x.io", "name": "A2"}]
     with pytest.raises(orm.DatabaseError, match="second time"):
-        await User.objects.insert_many(rows).on_conflict(User.email).do_update()
-    users = await User.objects.insert_many(rows, batch_size=1).on_conflict(User.email).do_update()
+        await User.objects.insert_many(rows).on_conflict(User.email, update=True)
+    users = await User.objects.insert_many(rows, batch_size=1).on_conflict(User.email, update=True).returning()
     assert [u.name for u in users] == ["A1", "A2"]
     assert (await User.objects.get(User.email == "a@x.io")).name == "A2"
 
@@ -48,7 +48,7 @@ async def test_insert_many_batches_by_max_params(clean):
         # Two parameters per row: two rows per statement, so the duplicate email
         # appears once in each statement.
         rows = [rows[0], {"email": "b@x.io", "name": "B"}, rows[1], {"email": "c@x.io", "name": "C"}]
-        users = await User.objects.using(db).insert_many(rows).on_conflict(User.email).do_update()
+        users = await User.objects.using(db).insert_many(rows).on_conflict(User.email, update=True).returning()
         assert [u.name for u in users] == ["U0", "B", "U1", "C"]
     finally:
         await db.close()
@@ -75,14 +75,13 @@ async def test_on_conflict_where_picks_a_partial_index(anon_index):
     post = await Post.objects.insert(author=alice, title="t", body="b")
     first = await Comment.objects.insert(post=post, body="hi")
     with pytest.raises(orm.DatabaseError, match="no unique or exclusion constraint"):
-        await Comment.objects.insert(post=post, body="hi").on_conflict(Comment.post_id, Comment.body).do_nothing()
+        await Comment.objects.insert(post=post, body="hi").on_conflict(Comment.post_id, Comment.body, update=False)
     where = Comment.author_id.is_null()
-    assert await Comment.objects.insert(post=post, body="hi").on_conflict(Comment.post_id, Comment.body, where=where).do_nothing() is None
+    assert await Comment.objects.insert(post=post, body="hi").on_conflict(Comment.post_id, Comment.body, where=where, update=False).returning() is None
     later = datetime(2030, 1, 1, tzinfo=timezone.utc)
     again = await (
         Comment.objects.insert(post=post, body="hi", created_at=later)
-        .on_conflict(Comment.post_id, Comment.body, where=where)
-        .do_update(Comment.created_at)
+        .on_conflict(Comment.post_id, Comment.body, where=where, update=True, update_fields=[Comment.created_at]).returning()
     )
     assert again.id == first.id and again.created_at == later
     # The other rows of the index predicate's complement are not unique.
@@ -96,8 +95,7 @@ async def test_on_conflict_where_with_set_parameters(anon_index):
     await Comment.objects.insert(post=post, body="hi")
     row = await (
         Comment.objects.insert(post=post, body="hi")
-        .on_conflict(Comment.post_id, Comment.body, where=Comment.author_id.is_null())
-        .do_update(body="hi again")
+        .on_conflict(Comment.post_id, Comment.body, where=Comment.author_id.is_null(), update=True, update_values={"body": "hi again"}).returning()
     )
     assert row.body == "hi again"
 
@@ -105,7 +103,85 @@ async def test_on_conflict_where_with_set_parameters(anon_index):
 async def test_on_conflict_where_reads_own_columns_only(anon_index):
     # Postgres refuses a relation path (a subquery) in an index predicate.
     with pytest.raises(orm.DatabaseError, match="subquery in index predicate"):
-        await Comment.objects.insert(post_id=1, body="x").on_conflict(Comment.post_id, where=Comment.post.title == "t").do_nothing()
+        await Comment.objects.insert(post_id=1, body="x").on_conflict(Comment.post_id, where=Comment.post.title == "t", update=False)
+
+
+# -- insert results and on_conflict options ---------------------------------------------------
+
+
+async def test_insert_many_gives_a_count_and_returning_the_rows(clean):
+    assert await Tag.objects.insert_many([{"name": "a"}, {"name": "b"}]) == 2
+    assert await Tag.objects.insert_many([]) == 0
+    assert await Tag.objects.insert_many([]).returning() == []
+    rows = await Tag.objects.insert_many([{"name": "c"}, {"name": "d"}]).returning()
+    assert [t.name for t in rows] == ["c", "d"] and all(t.id for t in rows)
+    # Each batch adds its count.
+    assert await Tag.objects.insert_many([{"name": f"e{i}"} for i in range(5)], batch_size=2) == 5
+    # Skipped conflicts are not counted and not returned; updated rows are.
+    new = [{"name": "a"}, {"name": "f"}, {"name": "g"}]
+    assert await Tag.objects.insert_many(new).on_conflict(Tag.name, update=False) == 2
+    tags = [{"name": "a", "priority": Priority.high}, {"name": "h"}, {"name": "b", "priority": Priority.high}]
+    out = await Tag.objects.insert_many(tags).on_conflict(Tag.name, update=False).returning()
+    assert [t.name for t in out] == ["h"]
+    out = await Tag.objects.insert_many(tags).on_conflict(Tag.name, update=True).returning()
+    assert [(t.name, t.priority) for t in out] == [("a", Priority.high), ("h", Priority.normal), ("b", Priority.high)]
+    assert await Tag.objects.insert_many(tags).on_conflict(Tag.name, update=True) == 3
+
+
+async def test_single_upsert_gives_a_count(clean):
+    alice = await User.objects.insert(email="a@x.io", name="A")
+    assert await User.objects.insert(email="a@x.io", name="B").on_conflict(User.email, update=False) == 0
+    assert await User.objects.insert(email="b@x.io", name="B").on_conflict(User.email, update=False) == 1
+    assert await User.objects.insert(email="a@x.io", name="A2").on_conflict(User.email, update=True) == 1
+    assert (await User.objects.get(User.id == alice.id)).name == "A2"
+
+
+async def test_on_conflict_update_fields_and_values(clean):
+    alice = await User.objects.insert(email="a@x.io", name="A")
+    p = await Post.objects.insert(author=alice, title="t", body="b", views=3)
+    again = {"id": p.id, "author": alice, "title": "t2", "body": "b2", "views": 4}
+    # Both options: the union; the other fields keep their values.
+    out = await (
+        Post.objects.insert(**again)
+        .on_conflict(Post.id, update=True, update_fields=[Post.title], update_values={"views": Post.views + orm.excluded(Post.views)})
+        .returning()
+    )
+    assert (out.title, out.views, out.body) == ("t2", 7, "b")
+    # update=True alone overwrites every given field except the conflict columns.
+    out = await Post.objects.insert(**again).on_conflict(Post.id, update=True).returning()
+    assert (out.title, out.views, out.body) == ("t2", 4, "b2")
+
+
+async def test_on_conflict_rejects_bad_options(clean):
+    ins = User.objects.insert(email="a@x.io", name="A")
+    with pytest.raises(TypeError, match="update"):
+        ins.on_conflict(User.email)  # type: ignore[call-overload]
+    with pytest.raises(TypeError, match="True or False"):
+        ins.on_conflict(User.email, update=1)  # type: ignore[call-overload]
+    with pytest.raises(TypeError, match="update=False"):
+        ins.on_conflict(User.email, update=False, update_fields=[User.name])
+    with pytest.raises(TypeError, match="update=False"):
+        ins.on_conflict(User.email, update=False, update_values={"name": "x"})
+    with pytest.raises(TypeError, match="updates nothing"):
+        ins.on_conflict(User.email, update=True, update_fields=[])
+    with pytest.raises(TypeError, match="updates nothing"):
+        ins.on_conflict(User.email, update=True, update_values={})
+    with pytest.raises(TypeError, match="name in both"):
+        ins.on_conflict(User.email, update=True, update_fields=[User.name], update_values={"name": "x"})
+    with pytest.raises(TypeError, match="unique constraint"):
+        ins.on_conflict(update=False)
+    with pytest.raises(TypeError, match="columns of User"):
+        ins.on_conflict([User.email], update=False)  # type: ignore[arg-type]
+    many = User.objects.insert_many([{"email": "a@x.io", "name": "A"}]).on_conflict(User.email, update=False)
+    with pytest.raises(TypeError, match="already given"):
+        many.on_conflict(User.email, update=True)
+    # Composite targets: one unique constraint over two columns.
+    alice = await User.objects.insert(email="a@x.io", name="A")
+    post = await Post.objects.insert(author=alice, title="t", body="b")
+    tag = await Tag.objects.insert(name="t")
+    link = {"post": post, "tag": tag}
+    await PostTag.objects.insert(**link)
+    assert await PostTag.objects.insert(**link).on_conflict(PostTag.post_id, PostTag.tag_id, update=False) == 0
 
 
 # -- get_or_insert ------------------------------------------------------------------------------
@@ -147,7 +223,7 @@ async def test_get_or_insert_checks_the_lookup(clean):
 async def test_add_with_through_defaults(clean):
     alice = await User.objects.insert(email="a@x.io", name="A")
     post = await Post.objects.insert(author=alice, title="t", body="b")
-    t1, t2, t3 = await Tag.objects.insert_many([{"name": "a"}, {"name": "b"}, {"name": "c"}])
+    t1, t2, t3 = await Tag.objects.insert_many([{"name": "a"}, {"name": "b"}, {"name": "c"}]).returning()
     await post.tags.add(t1, t2, through_defaults={"position": 1})
     # An existing link keeps its values.
     await post.tags.add(t2, t3, through_defaults={"position": 2})
@@ -214,7 +290,7 @@ async def test_copy_in_a_transaction(clean):
 
 async def test_copy_rejections(clean):
     with pytest.raises(TypeError, match="on_conflict"):
-        Tag.objects.insert_many([{"name": "a"}], copy=True).on_conflict(Tag.name)
+        Tag.objects.insert_many([{"name": "a"}], copy=True).on_conflict(Tag.name, update=False)
     with pytest.raises(TypeError, match="batch_size"):
         Tag.objects.insert_many([{"name": "a"}], copy=True, batch_size=2)  # type: ignore[call-overload]
     with pytest.raises(orm.QueryError, match="some rows only"):

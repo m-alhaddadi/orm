@@ -19,13 +19,13 @@ async function seed() {
     { email: "alice@example.com", name: "Alice" },
     { email: "bob@example.com", name: "Bob" },
     { email: "carol@example.com", name: "Carol" },
-  ])) as [User, User, User];
+  ]).returning()) as [User, User, User];
   const posts = (await Post.objects.insertMany([
     { author: alice, title: "a1", body: "", views: 5, createdAt: daysAgo(3) },
     { author: alice, title: "a2", body: "", views: 50, createdAt: daysAgo(2) },
     { author: alice, title: "a3", body: "", views: 20, createdAt: daysAgo(1) },
     { author: bob, title: "b1", body: "", views: 100, createdAt: daysAgo(5) },
-  ])) as [Post, Post, Post, Post];
+  ]).returning()) as [Post, Post, Post, Post];
   const [, a2, , b1] = posts;
   await Comment.objects.insertMany([
     { post: a2, author: bob, body: "c1" },
@@ -271,7 +271,7 @@ test("joining a CTE", async () => {
 });
 
 test("a recursive CTE with a join", async () => {
-  const users = await User.objects.insertMany(Array.from({ length: 5 }, (_, i) => ({ email: `u${i}@x.io`, name: `u${i}` })));
+  const users = await User.objects.insertMany(Array.from({ length: 5 }, (_, i) => ({ email: `u${i}@x.io`, name: `u${i}` }))).returning();
   const first = users[0]!.id;
   const walk = User.objects
     .filter(User.id.eq(first))
@@ -327,7 +327,7 @@ test("CTE select() and subqueries", async () => {
 });
 
 test("recursive CTEs", async () => {
-  const users = await User.objects.insertMany(Array.from({ length: 5 }, (_, i) => ({ email: `u${i}@x.io`, name: `u${i}` })));
+  const users = await User.objects.insertMany(Array.from({ length: 5 }, (_, i) => ({ email: `u${i}@x.io`, name: `u${i}` }))).returning();
   const first = users[0]!.id;
   const chain = User.objects.filter(User.id.eq(first)).cte("chain", {
     recursive: (c) => User.objects.filter(User.id.eq(c.c.id.add(1)), User.id.lt(first + 3n)),
@@ -459,8 +459,8 @@ test("prefetch splits keys", async () => {
   // A pool whose statements take at most 5 parameters, so prefetches split after a few parents.
   const db = await connect(DATABASE_URL, { maxConnections: 2, default: false, disable: ["max_params=5"] });
   try {
-    const users = await User.objects.insertMany(Array.from({ length: 12 }, (_, i) => ({ email: `u${i}@x.io`, name: `u${i}` })));
-    const posts = await Post.objects.insertMany(users.flatMap((u) => [0, 1, 2].map((j) => ({ author: u, title: `${u.name}-${j}`, body: "", views: j }))));
+    const users = await User.objects.insertMany(Array.from({ length: 12 }, (_, i) => ({ email: `u${i}@x.io`, name: `u${i}` }))).returning();
+    const posts = await Post.objects.insertMany(users.flatMap((u) => [0, 1, 2].map((j) => ({ author: u, title: `${u.name}-${j}`, body: "", views: j })))).returning();
     await Comment.objects.insertMany(posts.filter((_, i) => i % 2 === 0).map((p) => ({ post: p, body: `on ${p.title}` })));
     const qs = User.objects.prefetchRelated(User.posts.comments).orderBy(User.id);
     const shape = (us: Awaited<ReturnType<typeof qs.all>>) => us.map((u) => u.posts.cached.map((p) => [p.title, p.comments.cached.map((c) => c.body)]));

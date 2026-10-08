@@ -29,7 +29,7 @@ for (const root of [args.before, args.after]) {
   await db.createTables(); dbs.push(db);
 }
 for (const side of [0, 1]) {
-  seeds.push(await models[side].objects.using(dbs[side]).insertMany(Array.from({ length: 1000 }, (_, i) => ({ label: seedLabel(side,i), number: i, data: { n: i } }))));
+  seeds.push(await models[side].objects.using(dbs[side]).insertMany(Array.from({ length: 1000 }, (_, i) => ({ label: seedLabel(side,i), number: i, data: { n: i } }))).returning());
 }
 const query = (side, size) => {
   const m = models[side];
@@ -75,7 +75,7 @@ for (const name of ['definition', 'construct', 'plan-native', 'construct+sql', '
       const n = await m.objects.using(db).updateMany(seeds[side].slice(0, 50).map((r, i) => ({ id: r.id, label: seedLabel(side,i) })));
       assert.equal(n, 50); return n;
     }
-    const rows = await m.objects.using(db).insertMany(Array.from({ length: name === 'bulk-insert-50' ? 50 : 1 }, (_, i) => ({ label: writeLabel(side), number: i, data: { n: i } })));
+    const rows = await m.objects.using(db).insertMany(Array.from({ length: name === 'bulk-insert-50' ? 50 : 1 }, (_, i) => ({ label: writeLabel(side), number: i, data: { n: i } }))).returning();
     assert.equal(rows.length, name === 'bulk-insert-50' ? 50 : 1);
     assert.deepEqual(rows.at(-1).data, { n: rows.length - 1 });
     return rows;

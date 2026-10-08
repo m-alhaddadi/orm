@@ -173,13 +173,15 @@ class Database:
         db: Database | None = None,
         batch_size: int | None = None,
         where: dict[str, Any] | None = None,
-    ) -> list[Any]:
+        *,
+        returning: bool = True,
+    ) -> Any:
         set_json, params = (json.dumps(set_[0]), set_[1]) if set_ is not None else (None, [])
         tx, allowed = self._tx(), allowed_writes()
         wh = None if where is None else json.dumps(where)
         return await self._call(
             lambda t: self._engine.insert(
-                model, fields, rows, conflict, update, set_json, params, tx, db, allowed, batch_size, wh, t
+                model, fields, rows, conflict, update, set_json, params, tx, db, allowed, batch_size, wh, t, returning
             )
         )
 

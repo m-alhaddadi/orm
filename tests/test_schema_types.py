@@ -143,8 +143,8 @@ async def blog():
             {"author": alice, "title": "two", "body": "."},
             {"author": bob, "title": "three", "body": "."},
         ]
-    )
-    news, rust, py = await Tag.objects.insert_many([{"name": "news"}, {"name": "rust"}, {"name": "python"}])
+    ).returning()
+    news, rust, py = await Tag.objects.insert_many([{"name": "news"}, {"name": "rust"}, {"name": "python"}]).returning()
     await p1.tags.add(news, rust)
     await p2.tags.add(rust.id)  # keys work too
     await p2.tags.add(rust)  # existing links are left alone

@@ -141,7 +141,7 @@ async def check():
             assert "computed" in str(e)
         else:
             raise AssertionError("native computation incorrectly offered SQL filtering")
-        rows = await User.objects.insert_many([{"username": "carol"}, {"username": "dave"}])
+        rows = await User.objects.insert_many([{"username": "carol"}, {"username": "dave"}]).returning()
         assert [r.display for r in rows] == ["Hello, carol!", "Hello, dave!"]
         await User.objects.update_many([{"id": rows[0].id, "username": " eve "}, {"id": rows[1].id, "username": " frank "}])
         loaded = await User.objects.filter(User.id >= rows[0].id).order_by(User.id)

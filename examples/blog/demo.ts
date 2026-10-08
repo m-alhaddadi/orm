@@ -29,10 +29,10 @@ async function main(url: string): Promise<void> {
   const [old, fresh] = await Post.objects.insertMany([
     { author: alice, title: "Hello", body: "...", createdAt: new Date(now.getTime() - 3 * DAY) },
     { author: bob, title: "Fresh", body: "...", published: true },
-  ]);
+  ]).returning();
   await fresh!.comments.insert({ body: "first!", author: alice });
   // Upsert on the unique email.
-  bob = await User.objects.insert({ email: "bob@example.com", name: "Robert" }, { onConflict: User.email, doUpdate: true });
+  bob = await User.objects.insert({ email: "bob@example.com", name: "Robert" }).onConflict(User.email, { update: true }).returning();
   console.log("upserted:", bob);
 
   // Query sets are lazy: nothing runs until one is awaited (or a terminal method such as

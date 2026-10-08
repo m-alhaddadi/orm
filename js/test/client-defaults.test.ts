@@ -49,11 +49,11 @@ for (const dialect of ["sqlite", "postgres"]) {
       // An explicit value, also null, wins over both defaults.
       const explicit = await Item.objects.using(db).insert({ note: null, status: "old", n: 9 }) as Item;
       assert.equal(explicit.note, null); assert.equal(explicit.status, "old"); assert.equal(explicit.n, 9);
-      const rows = await Item.objects.using(db).insertMany([{ note: "x" }, {}, { note: null }]) as Item[];
+      const rows = await Item.objects.using(db).insertMany([{ note: "x" }, {}, { note: null }]).returning() as Item[];
       assert.deepEqual(rows.map((r) => r.note), ["x", "note", null]);
       assert.equal(new Set([...rows.map((r) => r.id), item.id, explicit.id]).size, 5);
       const columns = Item as unknown as Record<string, never>;
-      const upserted = await Item.objects.using(db).insert({ id: item.id, n: 4 }, { onConflict: columns.id!, doUpdate: [columns.n!, columns.token!] as never }) as Item;
+      const upserted = await Item.objects.using(db).insert({ id: item.id, n: 4 }).onConflict(columns.id!, { update: true, updateFields: [columns.n!, columns.token!] as never }).returning() as Item;
       assert.equal(upserted.id, item.id); assert.equal(upserted.n, 4); assert.notEqual(upserted.token, item.token);
       // Other writers get only the database default.
       await db.execute("INSERT INTO client_default_node_items (id, token, at, meta, n, prisma) VALUES ('0192f7e2-0000-7000-8000-000000000002', 't', '2026-01-01T00:00:00Z', '{}', 1, 'p')");

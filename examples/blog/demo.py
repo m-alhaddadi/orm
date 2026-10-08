@@ -33,10 +33,10 @@ async def main(url: str) -> None:
             {"author": alice, "title": "Hello", "body": "...", "created_at": now - timedelta(days=3)},
             {"author": bob, "title": "Fresh", "body": "...", "published": True},
         ]
-    )
+    ).returning()
     await new.comments.insert(body="first!", author=alice)
     # Upsert on the unique email.
-    bob = await User.objects.insert(email="bob@example.com", name="Robert").on_conflict(User.email).do_update()
+    bob = await User.objects.insert(email="bob@example.com", name="Robert").on_conflict(User.email, update=True).returning()
     print("upserted:", bob)
 
     # Filters follow relations; to-many hops compile to EXISTS (no duplicate rows).

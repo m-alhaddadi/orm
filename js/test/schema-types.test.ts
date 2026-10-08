@@ -135,8 +135,8 @@ async function blog() {
     { author: alice, title: "one", body: "." },
     { author: alice, title: "two", body: "." },
     { author: bob, title: "three", body: "." },
-  ])) as [Post, Post, Post];
-  const [news, rust, py] = (await Tag.objects.insertMany([{ name: "news" }, { name: "rust" }, { name: "python" }])) as [Tag, Tag, Tag];
+  ]).returning()) as [Post, Post, Post];
+  const [news, rust, py] = (await Tag.objects.insertMany([{ name: "news" }, { name: "rust" }, { name: "python" }]).returning()) as [Tag, Tag, Tag];
   await p1.tags.add(news, rust);
   await p2.tags.add(rust.id); // keys work too
   await p2.tags.add(rust); // existing links are left alone

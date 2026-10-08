@@ -56,7 +56,7 @@ test('reference writes, shared objects, null and explicit opening', () => fixtur
 test('unsupported shapes and invalid ordinary values reject before upload', () => fixture(async ({ Report, storage }) => {
   for (const run of [() => Report.objects.insertMany([{ id: 1, file: new Upload(Buffer.from('x')) }]),
     () => Report.objects.update({ file: new Upload(Buffer.from('x')) }),
-    () => Report.objects.insert({ id: 1, file: new Upload(Buffer.from('x')) }, { onConflict: Report.id, doNothing: true }),
+    () => Report.objects.insert({ id: 1, file: new Upload(Buffer.from('x')) }).onConflict(Report.id, { update: false }),
     () => Report.objects.insert({ id: 'invalid', file: new Upload(Buffer.from('x')) })]) {
     await assert.rejects(async () => run());
   }

@@ -142,7 +142,7 @@ def test_writes_validate_when_built():
     with pytest.raises(TypeError):
         excluded(User.posts.views)
     with pytest.raises(TypeError):
-        User.objects.insert(email="a", name="b").on_conflict(User.email).do_update(User.name, name="x")
+        User.objects.insert(email="a", name="b").on_conflict(User.email, update=True, update_fields=[User.name], update_values={"name": "x"})
 
 
 def native():

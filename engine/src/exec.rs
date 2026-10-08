@@ -65,9 +65,12 @@ pub async fn run(conn: &dyn Executor, target: Target, plan: Plan) -> Result<Outc
             let (sql, args) = db::build(d, &s);
             count_or_rows(conn, sql, args, returning).await?
         }
-        Plan::Insert(s, (model, types)) => {
+        Plan::Insert(s, returned) => {
             let (sql, args) = db::build(d, &s);
-            Outcome::Rows { model, rows: conn.query(sql, args).await?, types, shape: None }
+            match returned {
+                Some((model, types)) => Outcome::Rows { model, rows: conn.query(sql, args).await?, types, shape: None },
+                None => Outcome::Affected(conn.execute(sql, args).await?),
+            }
         }
         #[cfg(feature = "model-composition")]
         Plan::ComposedInsert(insert) => return crate::composed::run_insert(conn, target, *insert).await,
@@ -351,6 +354,22 @@ pub fn plan_insert(
     conflict: Option<Conflict>,
     params: &dyn Params,
 ) -> Result<Plan> {
+    plan_insert_with(schema, target, model, fields, rows, conflict, params, true)
+}
+
+/// [`plan_insert`]; without `returning` the insert gives the affected-row count. A
+/// composed model's insert reads its rows back in any case.
+#[allow(clippy::too_many_arguments)]
+fn plan_insert_with(
+    schema: &Schema,
+    target: Target,
+    model: &str,
+    fields: &[String],
+    rows: Vec<Vec<Option<Value>>>,
+    conflict: Option<Conflict>,
+    params: &dyn Params,
+    returning: bool,
+) -> Result<Plan> {
     #[cfg(feature = "model-composition")]
     if crate::composed::is_composed(schema, model)? {
         if conflict.is_some() { return Err(Error::query("composed inserts do not support on_conflict")); }
@@ -362,13 +381,14 @@ pub fn plan_insert(
         Conflict::Update { target, filter, update, set } => plan::OnConflict::Update(target, filter, update, set),
     });
     let (stmt, types): (InsertStatement, _) =
-        plan::plan_insert(schema, target, model, fields, rows, on_conflict, params)?;
-    Ok(Plan::Insert(stmt, (model_idx, types)))
+        plan::plan_insert(schema, target, model, fields, rows, on_conflict, params, returning)?;
+    Ok(Plan::Insert(stmt, returning.then_some((model_idx, types))))
 }
 
 /// `insert_many`'s plans: [`plan_insert`] for each batch of rows. A batch holds as many
 /// rows as fit in the dialect's parameter limit (less the conflict clause's own
-/// parameters), or `batch_size` rows when that is smaller. Run them with [`run_inserts`].
+/// parameters), or `batch_size` rows when that is smaller. Without `returning` the plans
+/// give the affected-row count. Run them with [`run_inserts`].
 #[allow(clippy::too_many_arguments)]
 pub fn plan_inserts(
     schema: &Schema,
@@ -379,13 +399,14 @@ pub fn plan_inserts(
     conflict: Option<Conflict>,
     params: &dyn Params,
     batch_size: Option<usize>,
+    returning: bool,
 ) -> Result<Vec<Plan>> {
     if batch_size == Some(0) {
         return Err(Error::query("batch_size must be at least 1"));
     }
     #[cfg(feature = "model-composition")]
     if crate::composed::is_composed(schema, model)? {
-        return Ok(vec![plan_insert(schema, target, model, fields, rows, conflict, params)?]);
+        return Ok(vec![plan_insert_with(schema, target, model, fields, rows, conflict, params, returning)?]);
     }
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
     // Client defaults can add columns, so the row width is known only after them.
@@ -399,22 +420,26 @@ pub fn plan_inserts(
     }
     let chunk = chunk.max(1);
     if rows.len() <= chunk {
-        return Ok(vec![plan_insert(schema, target, model, &fields, rows, conflict, params)?]);
+        return Ok(vec![plan_insert_with(schema, target, model, &fields, rows, conflict, params, returning)?]);
     }
     let mut plans = Vec::with_capacity(rows.len().div_ceil(chunk));
     while !rows.is_empty() {
         let rest = rows.split_off(chunk.min(rows.len()));
         let conflict = conflict.clone();
-        plans.push(plan_insert(schema, target, model, &fields, std::mem::replace(&mut rows, rest), conflict, params)?);
+        plans.push(plan_insert_with(schema, target, model, &fields, std::mem::replace(&mut rows, rest), conflict, params, returning)?);
     }
     Ok(plans)
 }
 
 /// Runs [`plan_inserts`]' plans, in a transaction of their own when there are several
-/// and `conn` isn't one already (`own_tx`). Gives the inserted rows in input order.
-pub async fn run_inserts(conn: &dyn Executor, target: Target, mut plans: Vec<Plan>, own_tx: bool) -> Result<Outcome> {
+/// and `conn` isn't one already (`own_tx`). Gives the inserted rows in input order, or
+/// without `returning` the affected-row count.
+pub async fn run_inserts(conn: &dyn Executor, target: Target, mut plans: Vec<Plan>, own_tx: bool, returning: bool) -> Result<Outcome> {
     if plans.len() == 1 {
-        return run(conn, target, plans.pop().expect("one plan")).await;
+        return Ok(match run(conn, target, plans.pop().expect("one plan")).await? {
+            Outcome::Rows { rows, .. } if !returning => Outcome::Affected(rows.len() as u64),
+            out => out,
+        });
     }
     let tx = if own_tx { Some(conn.begin().await?) } else { None };
     let exec: &dyn Executor = match &tx {
@@ -423,14 +448,17 @@ pub async fn run_inserts(conn: &dyn Executor, target: Target, mut plans: Vec<Pla
     };
     let mut parts = Vec::with_capacity(plans.len());
     let mut returned = None;
+    let mut affected = 0;
     let mut failed = None;
     for plan in plans {
         match run(exec, target, plan).await {
             Ok(Outcome::Rows { model, rows, types, .. }) => {
+                affected += rows.len() as u64;
                 returned = Some((model, types));
                 parts.push(rows);
             }
-            Ok(_) => unreachable!("an insert plan returns rows"),
+            Ok(Outcome::Affected(n)) => affected += n,
+            Ok(_) => unreachable!("an insert plan returns rows or a count"),
             Err(e) => {
                 failed = Some(e);
                 break;
@@ -448,8 +476,12 @@ pub async fn run_inserts(conn: &dyn Executor, target: Target, mut plans: Vec<Pla
     if let Some(e) = failed {
         return Err(e);
     }
-    let (model, types) = returned.expect("several plans");
-    Ok(Outcome::Rows { model, rows: Box::new(ChainedRows::new(parts)), types, shape: None })
+    Ok(match returned {
+        Some((model, types)) if returning => {
+            Outcome::Rows { model, rows: Box::new(ChainedRows::new(parts)), types, shape: None }
+        }
+        _ => Outcome::Affected(affected),
+    })
 }
 
 /// A bulk load planned by [`plan_copy`]: run it with [`run_copy`].

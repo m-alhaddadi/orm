@@ -13,7 +13,7 @@ from orm import Prefetch, QueryError, param
 async def seed():
     alice, bob = await User.objects.insert_many(
         [{"email": "alice@example.com", "name": "Alice"}, {"email": "bob@example.com", "name": "Bob"}]
-    )
+    ).returning()
     posts = await Post.objects.insert_many(
         [
             {"author": alice, "title": "a1", "body": "", "views": 5},
@@ -21,7 +21,7 @@ async def seed():
             {"author": alice, "title": "a3", "body": "", "views": 20},
             {"author": bob, "title": "b1", "body": "", "views": 100},
         ]
-    )
+    ).returning()
     return (alice, bob), posts
 
 

@@ -1,8 +1,9 @@
 /**
  * Query sets: immutable query builders. Nothing runs until a terminal method is called:
- * `all()`, `first()`, `get()`, `count()`, `insert()`, `update()`, ... (or `for await`).
+ * `all()`, `first()`, `get()`, `count()`, `update()`, ... (or `for await`); `insert()` runs when awaited.
  */
 
+import { AsyncResource } from "node:async_hooks";
 import { Builder } from "./build.js";
 import { resolve, withScope, type Database } from "./db.js";
 import {
@@ -177,14 +178,21 @@ export interface LockOptions {
   readonly skipLocked?: boolean;
 }
 
-export interface ConflictOptions<M extends ModelSpec> {
-  /** The column(s) of the unique constraint the rows may hit. */
-  readonly onConflict: OwnColumn<M> | readonly OwnColumn<M>[];
+/**
+ * `onConflict(columns, options)`: rows that hit the unique constraint on `columns`.
+ * `update: false` keeps the existing row (`DO NOTHING`). `update: true` updates it:
+ * `updateFields` copy the proposed values, `updateValues` set plain values or
+ * expressions such as `{ views: Post.views.add(excluded(Post.views)) }`. With neither,
+ * every field given to the insert except the conflict columns is overwritten.
+ */
+export interface OnConflictOptions<M extends ModelSpec, U extends boolean = boolean> {
+  readonly update: U;
+  readonly updateFields?: readonly OwnColumn<M>[];
+  readonly updateValues?: M["update"];
   /** The predicate of a partial unique index: `ON CONFLICT (...) WHERE ...`. */
   readonly where?: Expression<boolean | null, string, unknown>;
 }
 
-/** `ON CONFLICT DO NOTHING`: keep the existing row. */
 /** A checked single-row insert (`QuerySet.prepareInsert`). */
 export interface PreparedInsert<M extends ModelSpec> {
   /** Inserts `values` (by default the checked values) and gives the new instance. */
@@ -199,29 +207,11 @@ export interface PreparedUpdate<M extends ModelSpec> {
   execute(values?: M["update"], options?: { readonly returning?: boolean }): Promise<number | M["row"][]>;
 }
 
-export interface DoNothing<M extends ModelSpec> extends ConflictOptions<M> {
-  readonly doNothing: true;
-}
-
-/**
- * `ON CONFLICT DO UPDATE`: overwrite `doUpdate` columns with the proposed values (`true`:
- * every field given to the insert except the conflict columns), and apply `set`
- * (plain values or expressions such as `Post.views.add(excluded(Post.views))`).
- */
-export interface DoUpdate<M extends ModelSpec> extends ConflictOptions<M> {
-  readonly doUpdate?: true | readonly OwnColumn<M>[];
-  readonly set?: M["update"];
-}
-
-type InsertOptions<M extends ModelSpec> = DoNothing<M> | DoUpdate<M>;
-
 /** `insertMany`: rows per statement. By default as many as fit in the parameter limit;
  * the statements run in one transaction. */
 export interface BatchOptions {
   readonly batchSize?: number;
 }
-
-type InsertManyOptions<M extends ModelSpec> = (InsertOptions<M> & BatchOptions) | BatchOptions;
 
 /** `insertMany(rows, { copy: true })`: a Postgres `COPY`. */
 export interface CopyOptions {
@@ -1265,15 +1255,11 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
 
   /**
    * `INSERT` one row; gives the new instance with database defaults (ids, timestamps)
-   * filled in. With `onConflict`, an upsert: `doUpdate` / `set` update the existing row,
-   * `doNothing` keeps it (and gives `null`).
+   * filled in. `.onConflict(...)` makes it an upsert that gives the affected-row count,
+   * or the row with `.returning()`.
    */
-  insert(values: M["insert"]): Promise<M["row"]>;
-  insert(values: M["insert"], options: DoNothing<M>): Promise<M["row"] | null>;
-  insert(values: M["insert"], options: DoUpdate<M>): Promise<M["row"]>;
-  async insert(values: M["insert"], options?: InsertOptions<M>): Promise<M["row"] | null> {
-    const rows = await this.insertRows([values], options);
-    return rows[0] ?? null;
+  insert(values: M["insert"]): InsertOne<M> {
+    return new InsertOne(bound((conflict, returning) => this.insertRows([values], conflict, returning, null)));
   }
 
   /**
@@ -1291,7 +1277,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       if (found.length) {
         return [one(this.meta, found) as M["row"], false];
       }
-      const row = await this.insert(values, { onConflict: cols as never, doNothing: true });
+      const row = await this.insert(values).onConflict(cols as never, { update: false }).returning();
       if (row !== null) {
         return [row, true];
       }
@@ -1308,18 +1294,19 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][])[0]!;
   }
 
-  /** `INSERT` many rows; gives the new instances in input order (rows skipped by
-   * `doNothing` are left out). Rows beyond the parameter limit, or beyond `batchSize`,
-   * go to further statements in one transaction. */
-  insertMany(rows: readonly M["insert"][], options?: InsertManyOptions<M>): Promise<M["row"][]>;
+  /** `INSERT` many rows; gives the number of rows inserted, or the new instances in
+   * input order with `.returning()`. Rows beyond the parameter limit, or beyond
+   * `batchSize`, go to further statements in one transaction. */
+  insertMany(rows: readonly M["insert"][], options?: BatchOptions): InsertMany<M>;
   /** `{ copy: true }`: load the rows with Postgres `COPY`, for large imports; gives the
    * row count. No `onConflict`, no instances. */
   insertMany(rows: readonly M["insert"][], options: CopyOptions): Promise<number>;
-  insertMany(rows: readonly M["insert"][], options?: InsertManyOptions<M> | CopyOptions): Promise<M["row"][] | number> {
+  insertMany(rows: readonly M["insert"][], options?: BatchOptions | CopyOptions): InsertMany<M> | Promise<number> {
     if (options && "copy" in options && options.copy) {
       return this.copyRows(rows, options);
     }
-    return this.insertRows(rows, options as InsertManyOptions<M> | undefined);
+    const batchSize = (options as BatchOptions | undefined)?.batchSize ?? null;
+    return new InsertMany(bound((conflict, returning) => this.insertRows(rows, conflict, returning, batchSize)));
   }
 
   /** @internal */
@@ -1343,64 +1330,201 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     this.db();
     const prepared = prepareRows(this.meta, [values]);
     call(() => this.meta.registry.native().validateInsert(this.meta.name, prepared.fields, prepared.rows, allowedWrites()));
-    return { execute: async (data = values) => (await this.insertRows([data], undefined))[0]! };
+    return { execute: async (data = values) => ((await this.insertRows([data], undefined, true, null)) as M["row"][])[0]! };
   }
 
   /** @internal */
-  protected async insertRows(rows: readonly object[], options: InsertManyOptions<M> | undefined): Promise<M["row"][]> {
+  protected async insertRows(
+    rows: readonly object[],
+    onConflict: Conflict | undefined,
+    returning: boolean,
+    batchSize: number | null,
+  ): Promise<M["row"][] | number> {
     const prepared = prepareRows(this.meta, rows);
     let conflict: string[] | null = null;
     let update: string[] | null = null;
     let set: string | null = null;
     const params: unknown[] = [];
     let conflictWhere: string | null = null;
-    const batchSize = options?.batchSize ?? null;
     if (batchSize !== null && !(Number.isInteger(batchSize) && batchSize >= 1)) {
       throw new TypeError("batchSize must be an integer of at least 1");
     }
-    if (options && "onConflict" in options) {
-      conflict = ownFields(this.meta, toArray(options.onConflict), "onConflict");
+    if (onConflict) {
+      const o = onConflict.options as OnConflictOptions<M>;
+      conflict = ownFields(this.meta, onConflict.columns as OwnColumn<M>[], "onConflict");
       if (!conflict.length) {
         throw new TypeError("onConflict needs the column(s) of a unique constraint");
       }
-      if (options.where !== undefined) {
-        conflictWhere = JSON.stringify(asCondition(options.where).ir(new IRContext(this.meta, params)));
+      if (typeof o?.update !== "boolean") {
+        throw new TypeError("onConflict needs { update: true } or { update: false }");
       }
-      if ("doNothing" in options && options.doNothing) {
-        if ("doUpdate" in options || "set" in options) {
-          throw new TypeError("doNothing can't be combined with doUpdate / set");
+      if (o.where !== undefined) {
+        conflictWhere = JSON.stringify(asCondition(o.where).ir(new IRContext(this.meta, params)));
+      }
+      if (!o.update && (o.updateFields !== undefined || o.updateValues !== undefined)) {
+        throw new TypeError("onConflict { update: false } skips conflicting rows; it takes no updateFields or updateValues");
+      }
+      if (o.update) {
+        if (o.updateFields !== undefined && !o.updateFields.length) {
+          throw new TypeError("onConflict { updateFields: [] } updates nothing; use { update: false } to skip conflicting rows");
         }
-      } else {
-        const o = options as DoUpdate<M>;
+        if (o.updateValues !== undefined && !Object.keys(o.updateValues).length) {
+          throw new TypeError("onConflict { updateValues: {} } updates nothing; use { update: false } to skip conflicting rows");
+        }
         const target = conflict;
         update =
-          Array.isArray(o.doUpdate)
-            ? ownFields(this.meta, o.doUpdate, "doUpdate")
-            : o.doUpdate === true || o.set === undefined
+          o.updateFields !== undefined
+            ? ownFields(this.meta, o.updateFields, "updateFields")
+            : o.updateValues === undefined
               ? prepared.fields.filter((f) => prepared.provided.has(f) && !target.includes(f) && f !== this.meta.pk.ir)
               : [];
-        if (o.set !== undefined) {
-          const items = assignments(this.meta, o.set, new IRContext(this.meta, params));
-          const twice = items.map((a) => a["field"] as string).filter((f) => update!.includes(f));
-          if (twice.length) {
-            throw new TypeError(`the upsert sets ${twice.join(", ")} twice`);
+        if (o.updateValues !== undefined) {
+          const items = assignments(this.meta, o.updateValues, new IRContext(this.meta, params));
+          const both = items.map((a) => a["field"] as string).filter((f) => update!.includes(f));
+          if (both.length) {
+            throw new TypeError(`onConflict updates ${both.join(", ")} in both updateFields and updateValues`);
           }
           set = JSON.stringify(items);
         }
       }
     }
     if (!prepared.rows.length) {
-      return [];
+      return returning ? [] : 0;
     }
     const db = this.db();
     const res = await db_wait(db, (tx, allowed, trace) =>
-      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowed, batchSize, conflictWhere, trace),
+      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowed, batchSize, conflictWhere, trace, returning),
     );
-    return new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][];
+    return returning ? (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][]) : (res as number);
   }
 
   toString(): string {
     return `QuerySet(${this.meta.name})`;
+  }
+}
+
+/** The conflict target and options of an upsert. */
+interface Conflict {
+  readonly columns: readonly unknown[];
+  readonly options: OnConflictOptions<ModelSpec>;
+}
+
+/** Runs an insert: the rows with `returning`, else the affected-row count. */
+type RunInsert = (conflict: Conflict | undefined, returning: boolean) => Promise<unknown[] | number>;
+
+/** `run` in the async context of the caller (its transaction, `allowWrites` and
+ * `scope`), however late the statement is awaited. */
+function bound(run: RunInsert): RunInsert {
+  return AsyncResource.bind(run);
+}
+
+/** A statement that runs once, when first awaited (or given `then` / `catch` /
+ * `finally`). */
+abstract class Statement<T> implements Promise<T> {
+  #promise: Promise<T> | undefined;
+
+  get [Symbol.toStringTag](): string {
+    return this.constructor.name;
+  }
+
+  /** @internal */
+  protected abstract execute(): Promise<T>;
+
+  private start(): Promise<T> {
+    return (this.#promise ??= this.execute());
+  }
+
+  then<A = T, B = never>(onfulfilled?: ((value: T) => A | PromiseLike<A>) | null, onrejected?: ((reason: unknown) => B | PromiseLike<B>) | null): Promise<A | B> {
+    return this.start().then(onfulfilled, onrejected);
+  }
+
+  catch<B = never>(onrejected?: ((reason: unknown) => B | PromiseLike<B>) | null): Promise<T | B> {
+    return this.start().catch(onrejected);
+  }
+
+  finally(onfinally?: (() => void) | null): Promise<T> {
+    return this.start().finally(onfinally);
+  }
+}
+
+/** `insert(values)`: awaiting it gives the new instance. */
+export class InsertOne<M extends ModelSpec> extends Statement<M["row"]> {
+  readonly #run: RunInsert;
+
+  /** @internal */
+  constructor(run: RunInsert) {
+    super();
+    this.#run = run;
+  }
+
+  /** @internal */
+  protected async execute(): Promise<M["row"]> {
+    return ((await this.#run(undefined, true)) as M["row"][])[0]!;
+  }
+
+  /** An upsert on the unique constraint of `columns`: awaiting it gives the
+   * affected-row count (0 or 1), `.returning()` the row. */
+  onConflict<U extends boolean>(
+    columns: OwnColumn<M> | readonly OwnColumn<M>[],
+    options: OnConflictOptions<M, U>,
+  ): UpsertOne<M, [U] extends [true] ? M["row"] : M["row"] | null> {
+    return new UpsertOne(this.#run, { columns: toArray(columns), options: options as OnConflictOptions<ModelSpec> });
+  }
+}
+
+/** `insert(values).onConflict(...)`: awaiting it gives the affected-row count. */
+export class UpsertOne<M extends ModelSpec, R> extends Statement<number> {
+  readonly #run: RunInsert;
+  readonly #conflict: Conflict;
+
+  /** @internal */
+  constructor(run: RunInsert, conflict: Conflict) {
+    super();
+    this.#run = run;
+    this.#conflict = conflict;
+  }
+
+  /** @internal */
+  protected async execute(): Promise<number> {
+    return (await this.#run(this.#conflict, false)) as number;
+  }
+
+  /** `RETURNING` the row: the inserted or updated instance; `null` when
+   * `{ update: false }` skipped the row. */
+  async returning(): Promise<R> {
+    return (((await this.#run(this.#conflict, true)) as M["row"][])[0] ?? null) as R;
+  }
+}
+
+/** `insertMany(rows)`: awaiting it gives the number of rows inserted or updated. */
+export class InsertMany<M extends ModelSpec> extends Statement<number> {
+  readonly #run: RunInsert;
+  readonly #conflict: Conflict | undefined;
+
+  /** @internal */
+  constructor(run: RunInsert, conflict?: Conflict) {
+    super();
+    this.#run = run;
+    this.#conflict = conflict;
+  }
+
+  /** @internal */
+  protected async execute(): Promise<number> {
+    return (await this.#run(this.#conflict, false)) as number;
+  }
+
+  /** An upsert on the unique constraint of `columns`. */
+  onConflict(columns: OwnColumn<M> | readonly OwnColumn<M>[], options: OnConflictOptions<M>): InsertMany<M> {
+    if (this.#conflict) {
+      throw new TypeError("onConflict() is already given");
+    }
+    return new InsertMany(this.#run, { columns: toArray(columns), options: options as OnConflictOptions<ModelSpec> });
+  }
+
+  /** `RETURNING` the rows: the instances in input order; rows that
+   * `{ update: false }` skipped are left out. */
+  async returning(): Promise<M["row"][]> {
+    return (await this.#run(this.#conflict, true)) as M["row"][];
   }
 }
 
@@ -1614,24 +1738,21 @@ export class RelatedSet<M extends ModelSpec, L extends string = never> extends Q
   }
 
   /** Inserts a related row pointing at this instance. */
-  override insert(values: DistributiveOmit<M["insert"], L>): Promise<M["row"]>;
-  override insert(values: DistributiveOmit<M["insert"], L>, options: DoNothing<M>): Promise<M["row"] | null>;
-  override insert(values: DistributiveOmit<M["insert"], L>, options: DoUpdate<M>): Promise<M["row"]>;
-  override async insert(values: object, options?: InsertOptions<M>): Promise<M["row"] | null> {
-    const rows = await this.insertRows([{ ...values, ...this.link() }], options);
-    return rows[0] ?? null;
+  override insert(values: DistributiveOmit<M["insert"], L>): InsertOne<M> {
+    return new InsertOne(bound((conflict, returning) => this.insertRows([{ ...values, ...this.link() }], conflict, returning, null)));
   }
 
   /** Inserts related rows pointing at this instance. */
-  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: InsertManyOptions<M>): Promise<M["row"][]>;
+  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: BatchOptions): InsertMany<M>;
   override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options: CopyOptions): Promise<number>;
-  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: InsertManyOptions<M> | CopyOptions): Promise<M["row"][] | number> {
+  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: BatchOptions | CopyOptions): InsertMany<M> | Promise<number> {
     const link = this.link();
     const linked = rows.map((r) => ({ ...r, ...link }));
     if (options && "copy" in options && options.copy) {
       return this.copyRows(linked, options);
     }
-    return this.insertRows(linked, options as InsertManyOptions<M> | undefined);
+    const batchSize = (options as BatchOptions | undefined)?.batchSize ?? null;
+    return new InsertMany(bound((conflict, returning) => this.insertRows(linked, conflict, returning, batchSize)));
   }
 
 }
@@ -1798,20 +1919,20 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     await this.add(...(keys as never[]), { throughDefaults: options?.throughDefaults ?? {} });
   }
 
-  /** Inserts a related row and links it, in one transaction. */
-  override insert(values: M["insert"]): Promise<M["row"]>;
-  override insert(values: M["insert"], options: DoNothing<M>): Promise<M["row"] | null>;
-  override insert(values: M["insert"], options: DoUpdate<M>): Promise<M["row"]>;
-  override async insert(values: M["insert"], options?: InsertOptions<M>): Promise<M["row"] | null> {
-    const db = resolve(this.state.db ?? (this.instance[DB] as Database | undefined));
-    return db.transaction(async () => {
-      const qs = new QuerySet<M>(this.meta).using(this.state.db ?? (this.instance[DB] as Database | undefined));
-      const [obj] = await (qs as unknown as { insertRows: QuerySet<M>["insertRows"] }).insertRows([values], options);
-      if (obj) {
-        await this.add(obj as never);
+  /** Inserts a related row and links it, in one transaction. No `onConflict`: upsert
+   * on the model's query set, then `add()`. */
+  override insert(values: M["insert"]): InsertOne<M> {
+    return new InsertOne(bound(async (conflict) => {
+      if (conflict) {
+        throw new TypeError(`${this.relation.name}.insert(...).onConflict() isn't supported; upsert with ${this.meta.name}.objects, then add()`);
       }
-      return obj ?? null;
-    });
+      const db = resolve(this.state.db ?? (this.instance[DB] as Database | undefined));
+      return db.transaction(async () => {
+        const obj = await new QuerySet<M>(this.meta).using(this.state.db ?? (this.instance[DB] as Database | undefined)).insert(values);
+        await this.add(obj as never);
+        return [obj];
+      });
+    }));
   }
 
   /** Not supported: `getOrInsert()` on the model's query set, then `add()`. */

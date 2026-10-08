@@ -394,7 +394,8 @@ impl Engine {
         })
     }
 
-    /// `INSERT ... RETURNING` every column; returns the inserted rows as instances.
+    /// `INSERT ... RETURNING` every column; returns the inserted rows as instances, or
+    /// without `returning` the affected-row count.
     ///
     /// With `conflict` (unique field names) rows hitting that constraint update the
     /// `update` fields from the new row and apply the `set` assignments (JSON list of
@@ -403,7 +404,7 @@ impl Engine {
     /// partial unique index.
     /// Rows beyond the parameter limit, or beyond `batch_size`, go to further statements
     /// in one transaction (inside `tx` when given).
-    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![], batch_size = None, conflict_where = None, trace = None))]
+    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![], batch_size = None, conflict_where = None, trace = None, returning = true))]
     #[allow(clippy::too_many_arguments)]
     fn insert<'py>(
         &self,
@@ -421,6 +422,7 @@ impl Engine {
         batch_size: Option<usize>,
         conflict_where: Option<&str>,
         trace: Option<&Bound<'py, Trace>>,
+        returning: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
@@ -437,7 +439,7 @@ impl Engine {
         });
         let values = convert_rows(&self.schema, model, &fields, rows, true)?;
         let plans =
-            exec::plan_inserts(&self.schema, self.target, model, &fields, values, conflict, &PyParams(&params), batch_size)
+            exec::plan_inserts(&self.schema, self.target, model, &fields, values, conflict, &PyParams(&params), batch_size, returning)
                 .map_err(engine_err)?;
         let target = self.target;
         let conn = self.traced(tx, trace);
@@ -445,7 +447,7 @@ impl Engine {
         let classes = self.classes.clone();
         let db = db.map(Bound::unbind);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let out = exec::run_inserts(conn.as_ref(), target, plans, own_tx).await.map_err(engine_err)?;
+            let out = exec::run_inserts(conn.as_ref(), target, plans, own_tx, returning).await.map_err(engine_err)?;
             Python::attach(|py| outcome_to_py(py, out, &classes, db, None))
         })
     }

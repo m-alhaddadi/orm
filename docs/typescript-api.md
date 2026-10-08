@@ -310,13 +310,39 @@ type error. `from()` accepts only a CTE that has the model's columns.
 
 ## Writes
 
-Writes run when they are called and return a `Promise`:
+`insert()` and `insertMany()` give a statement that runs when it is awaited, once, in
+the async context where it was built (its transaction, `allowWrites` and `scope`).
+The other writes run when they are called and return a `Promise`:
 
-* `insert(row, { onConflict, doNothing | doUpdate | set })` gives the stored row (or
-  `null` with `doNothing`). `insertMany(rows, ...)` is the bulk version. A field left
-  out gets its `@client_default` (filled natively, as in Python), else the database
-  default; an explicit value, also `null`, wins.
-* `{ onConflict: [...], where: cond }` picks a partial unique index:
+* `insert(row)` gives the stored row. A field left out gets its `@client_default`
+  (filled natively, as in Python), else the database default; an explicit value, also
+  `null`, wins.
+* `insertMany(rows)` and every `.onConflict(...)` give the number of rows inserted or
+  updated (no `RETURNING` in the SQL); `.returning()` gives the rows. One row with
+  `{ update: true }` gives the row; with `{ update: false }` (or a `boolean` that is not
+  a literal) the row or `null`. Many rows give an array in input order, without the
+  rows that `{ update: false }` skipped.
+
+  ```ts
+  const n = await Post.objects.insertMany(rows);
+  const posts = await Post.objects.insertMany(rows).returning();
+  const bob = await User.objects.insert(row).onConflict(User.email, { update: true }).returning();
+  const maybe = await User.objects.insert(row).onConflict(User.email, { update: false }).returning(); // null if it existed
+  await Post.objects.insertMany(rows).onConflict(Post.slug, {
+    update: true,
+    updateFields: [Post.title],
+    updateValues: { views: Post.views.add(excluded(Post.views)) },
+  });
+  ```
+* `onConflict(columns, { update, updateFields, updateValues, where })`: `columns` are
+  the column(s) of one unique constraint. `update` is required. `update: false` keeps
+  the existing row (`DO NOTHING`). `update: true` updates it: `updateFields` copy the
+  proposed values, `updateValues` set plain values or expressions (keys are field
+  names). Both together update the union; a field in both throws. The fields you don't
+  name keep their values. With neither option, every field given to the insert except
+  the conflict columns is overwritten. An empty `updateFields` or `updateValues`, and
+  either one with `update: false`, throw `TypeError`.
+* `onConflict(columns, { where: cond, update })` picks a partial unique index:
   `ON CONFLICT (...) WHERE cond`. The condition must match the index predicate
   without parameters (`Task.deletedAt.isNull()`, a boolean column).
 * `insertMany(rows, { copy: true })` loads the rows with Postgres `COPY` (binary) and

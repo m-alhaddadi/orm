@@ -30,7 +30,7 @@ async def seed():
             {"author": alice, "title": "quiet", "body": "...", "published": True, "views": 1},
             {"author": bob, "title": "bob", "body": "...", "published": True, "views": 70},
         ]
-    )
+    ).returning()
     return alice, bob, posts
 
 
@@ -64,7 +64,7 @@ async def test_relation_sets_have_the_custom_methods(clean, custom):
     assert [p.title for p in await alice.posts.published().order_by(Post.views)] == ["quiet", "hit"]
     assert [p.title for p in await alice.posts.filter(Post.views > 5).published()] == ["hit"]
     assert isinstance(alice.posts, orm.RelatedSet)
-    tags = await Tag.objects.insert_many([{"name": "python"}, {"name": "rust"}])
+    tags = await Tag.objects.insert_many([{"name": "python"}, {"name": "rust"}]).returning()
     await posts[1].tags.add(*tags)
     assert [t.name for t in await posts[1].tags.named("py")] == ["python"]
     assert isinstance(posts[1].tags, orm.ManyRelatedSet)
@@ -183,7 +183,7 @@ async def test_prefetch_onto_loaded_instances(clean):
 
 async def test_prefetch_to_one_and_many_to_many(clean):
     _, _, posts = await seed()
-    tags = await Tag.objects.insert_many([{"name": "a"}, {"name": "b"}])
+    tags = await Tag.objects.insert_many([{"name": "a"}, {"name": "b"}]).returning()
     await posts[0].tags.add(*tags)
     loaded = await Post.objects.order_by(Post.id)
     await orm.prefetch(loaded, Post.author, Post.tags)
