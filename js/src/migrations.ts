@@ -23,7 +23,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -158,7 +158,17 @@ type DataRun = (db: Database) => Promise<unknown>;
 async function dataStep(m: Migration): Promise<DataRun | null> {
   const file = join(m.path, "data.ts");
   if (!existsSync(file)) return null;
-  const module = (await import(pathToFileURL(file).href)) as { run?: unknown };
+  // the version query makes an edited file load again: ESM caches modules by URL
+  const url = `${pathToFileURL(file).href}?v=${statSync(file).mtimeMs}`;
+  let module: { run?: unknown };
+  try {
+    module = (await import(url)) as { run?: unknown };
+  } catch (e) {
+    if ((e as { code?: string }).code === "ERR_UNKNOWN_FILE_EXTENSION") {
+      throw new MigrationError(`${file}: this runtime does not load TypeScript; use Node 22.18+ (type stripping) or Bun`);
+    }
+    throw e;
+  }
   if (typeof module.run !== "function") throw new MigrationError(`${file}: needs \`export async function run(db)\``);
   return module.run as DataRun;
 }
@@ -172,11 +182,20 @@ export function hasDataSteps(directory: string): boolean {
  * `Migrator.upgrade()`. The data modules are imported first, so the models they import
  * are in the default registry when the database connects. */
 export async function migrateCommand(schema: string, directory: string, url: string, target: string | null): Promise<number> {
-  for (const [name, path] of call(() => native().listMigrations(directory))) await dataStep(new Migration(name!, path!));
-  if ([...defaultRegistry].length === 0) load(schema);
-  const db = await connect(url, { maxConnections: 2 });
+  const dialect = url.startsWith("sqlite:") ? "sqlite" : undefined;
+  const probe = await connect(url, { maxConnections: 1, default: false, registry: emptyRegistry(dialect) });
+  let pending: Pending;
   try {
-    const done = await new Migrator(db, new Migrations(directory, schema)).upgrade(target ?? undefined);
+    pending = await new Migrator(probe, new Migrations(directory, schema)).loadPending(target);
+  } finally {
+    await probe.close();
+  }
+  if ([...defaultRegistry].length === 0 && existsSync(schema)) load(schema);
+  // data steps that use db.execute only, and no schema file (e.g. a deploy image)
+  const registry = [...defaultRegistry].length === 0 ? emptyRegistry(dialect) : defaultRegistry;
+  const db = await connect(url, { maxConnections: 2, registry });
+  try {
+    const done = await new Migrator(db, new Migrations(directory, schema)).apply(pending);
     for (const m of done) process.stdout.write(`Applied ${m.name}\n`);
     if (done.length === 0) process.stdout.write("Nothing to apply.\n");
   } finally {
@@ -184,6 +203,14 @@ export async function migrateCommand(schema: string, directory: string, url: str
   }
   return 0;
 }
+
+function emptyRegistry(dialect: string | undefined): Registry {
+  const registry = new Registry();
+  if (dialect !== undefined) registry.addExtra({ dialect, models: [] });
+  return registry;
+}
+
+type Pending = [Migration, DataRun | null][];
 
 export interface Status {
   readonly migration: Migration;
@@ -227,22 +254,39 @@ export class Migrator {
    * the SQL, the data changes and the record.
    */
   async upgrade(target?: string): Promise<Migration[]> {
-    const done: Migration[] = [];
-    for (const [name, path] of await wait(() => this.db.engine.migrationPending(this.dir, target ?? null))) {
-      const m = new Migration(name!, path!);
+    return this.apply(await this.loadPending(target ?? null));
+  }
+
+  /** @internal The pending migrations with their loaded data steps; refuses before anything runs. */
+  async loadPending(target: string | null): Promise<Pending> {
+    const todo = (await wait(() => this.db.engine.migrationPending(this.dir, target))).map(([name, path]) => new Migration(name!, path!));
+    for (const m of todo) {
       if (existsSync(join(m.path, "data.py"))) {
         throw new MigrationError(`${m.name} has a data step (data.py); apply it with python -m orm migrate`);
       }
-      const run = await dataStep(m);
+    }
+    const out: Pending = [];
+    for (const m of todo) out.push([m, await dataStep(m)]);
+    return out;
+  }
+
+  /** @internal */
+  async apply(pending: Pending): Promise<Migration[]> {
+    const done: Migration[] = [];
+    for (const [m, run] of pending) {
       const tx = await wait(() => this.db.engine.migrationBegin(m.name, m.path));
       if (tx === null) continue;
+      let after: (() => unknown)[];
       try {
-        if (run !== null) await inTransaction(this.db, tx, () => run(this.db));
+        after = await inTransaction(this.db, tx, async () => {
+          if (run !== null) await run(this.db);
+        });
       } catch (e) {
         await wait(() => tx.rollback()).catch(() => undefined);
         throw e;
       }
       await wait(() => this.db.engine.migrationFinish(tx, m.name, m.path));
+      for (const fn of after) await fn();
       done.push(m);
     }
     return done;

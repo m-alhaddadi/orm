@@ -632,20 +632,35 @@ async def run(db):
 
 The step runs after `up.sql`, in the same transaction and under the same advisory lock,
 before the migration's `orm_migrations` row. Queries on `db` inside it, and ORM queries
-on that database, go into that transaction, so they see the new columns. An error rolls
-back the SQL, the data changes and the row. `makemigrations --empty name` gives a folder
-for a step without schema changes.
+on that database, go into that transaction, so they see the new columns. A
+`db.transaction()` block in the step is a savepoint, and `db.on_commit()` callbacks run
+after the migration commits. An error rolls back the SQL, the data changes and the row,
+and drops the callbacks. `makemigrations --empty name` gives a folder for a step without
+schema changes.
+
+The models are the current ones, not the models at the time of the migration. A later
+migration can change them, and then the step fails on a new database. Use `db.execute`
+and `db.fetch` in a data step; use model queries only in a step that you delete later.
 
 * Python applies `data.py`: `Migrator.upgrade()`, or `python -m orm migrate`, which then
-  runs through `Migrator` instead of the Rust runner. It imports the data modules
-  before it connects, so the models they import are in the default registry.
-* TypeScript applies `data.ts` the same way: `Migrator.upgrade()` or `npx orm migrate`
-  (Node strips the types of a `.ts` file, by default in current versions; Bun runs it).
+  runs through `Migrator` instead of the Rust runner. It imports the data modules of the
+  pending migrations before it connects, so the models they import are in the default
+  registry. Without a schema file, it connects with no models.
+* TypeScript applies `data.ts` the same way: `Migrator.upgrade()` or `npx orm migrate`.
+  Node 22.18 and later strip the types of a `.ts` file; Bun runs it.
 * Each tool refuses the other's file, and the standalone `orm` binary refuses both,
   before it applies anything.
-* `rollback` runs `down.sql` only; a data step has no down step.
+* A data module is a single file: it cannot import a sibling file with a relative import.
+  Put shared code in your package.
+* Await every query in `run`. A query that runs after `run` returns fails, because the
+  transaction is closed.
+* `rollback` runs `down.sql` only; a data step has no down step. A later `migrate` runs
+  the step again, so write steps that you can run two times.
 * The checksum covers `up.sql` only, so a change to a data step after it ran is not
   detected.
+* SQLite runs a migration with foreign keys off (`PRAGMA foreign_keys` has no effect in
+  a transaction), so `ON DELETE CASCADE` does not fire in a data step. A second migrator
+  waits 5 seconds for the database lock, then fails with `database is locked`.
 
 ### Adopting a live database: pull, baseline, drift
 
