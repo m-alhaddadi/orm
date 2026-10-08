@@ -34,7 +34,7 @@ function normalize(meta: ModelMeta, row: object, what: string, expressions: bool
 /**
  * Validates insert rows and aligns them on one column list: the fields any row sets
  * (IR names, schema order), each row's values in that order (`undefined`: the column's
- * default), and the fields given explicitly (the default `doUpdate` columns).
+ * default), and the fields given explicitly (the default `onConflict(..., { update: true })` columns).
  */
 export function prepareRows(
   meta: ModelMeta,

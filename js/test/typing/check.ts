@@ -141,8 +141,25 @@ export async function loading() {
 export async function writes() {
   const u = await User.objects.insert({ email: "a", name: "A" });
   same<typeof u, User>();
-  const maybe = await User.objects.insert({ email: "a", name: "A" }, { onConflict: User.email, doNothing: true });
+  const maybe = await User.objects.insert({ email: "a", name: "A" }).onConflict(User.email, { update: false }).returning();
   same<typeof maybe, User | null>();
+  const upserted = await User.objects.insert({ email: "a", name: "A" }).onConflict(User.email, { update: true, updateFields: [User.name] }).returning();
+  same<typeof upserted, User>();
+  const flag = u.name === "A";
+  const either = await User.objects.insert({ email: "a", name: "A" }).onConflict(User.email, { update: flag }).returning();
+  same<typeof either, User | null>();
+  const upsertCount = await User.objects.insert({ email: "a", name: "A" }).onConflict(User.email, { update: true });
+  same<typeof upsertCount, number>();
+  const inserted = await User.objects.insertMany([{ email: "a", name: "A" }]);
+  same<typeof inserted, number>();
+  const kept = await User.objects.insertMany([{ email: "a", name: "A" }]).onConflict([User.email], { update: false }).returning();
+  same<typeof kept, User[]>();
+  // @ts-expect-error update is required
+  void User.objects.insert({ email: "a", name: "A" }).onConflict(User.email, {});
+  // @ts-expect-error updateValues keys are fields
+  void User.objects.insert({ email: "a", name: "A" }).onConflict(User.email, { update: true, updateValues: { nope: 1 } });
+  // @ts-expect-error a plain insert gives the instance
+  void User.objects.insert({ email: "a", name: "A" }).returning();
   await Post.objects.insert({ author: u, title: "t", body: "b" });
   await Post.objects.insert({ authorId: 1, title: "t", body: "b" });
   await u.posts.insert({ title: "t", body: "b" });
@@ -154,14 +171,14 @@ export async function writes() {
   await Post.objects.updateMany([{ id: 1, title: "x" }]);
   await post.tags.add(tag, 3n);
   await post.tags.add(tag, { throughDefaults: { position: 1 } });
-  const batched = await User.objects.insertMany([{ email: "a", name: "A" }], { batchSize: 10 });
+  const batched = await User.objects.insertMany([{ email: "a", name: "A" }], { batchSize: 10 }).returning();
   same<typeof batched, User[]>();
   const copied = await User.objects.insertMany([{ email: "a", name: "A" }], { copy: true });
   same<typeof copied, number>();
   const [got, created] = await User.objects.getOrInsert({ email: "a" }, { defaults: { name: "A" } });
   same<typeof got, User>();
   same<typeof created, boolean>();
-  await User.objects.insert({ email: "a", name: "A" }, { onConflict: User.email, where: User.name.isNull(), doNothing: true });
+  await User.objects.insert({ email: "a", name: "A" }).onConflict(User.email, { where: User.name.isNull(), update: false });
   // @ts-expect-error a required field is missing
   User.objects.insert({ email: "a" });
   // @ts-expect-error an unknown field

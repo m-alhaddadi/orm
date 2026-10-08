@@ -62,7 +62,7 @@ try {
   await assert.rejects(async () => User.objects.update({ username: null }), /non-null/);
   await assert.rejects(async () => User.objects.filter(User.id.eq(row.id)).update({ username: User.username.add("x") }), /expressions/);
   assert.throws(() => User.objects.filter(User.display.eq("Hello, bob!")).sql(), /computed/);
-  const rows = await User.objects.insertMany([{ username: "carol" }, { username: "dave" }]);
+  const rows = await User.objects.insertMany([{ username: "carol" }, { username: "dave" }]).returning();
   assert.deepEqual(rows.map(r => r.display), ["Hello, carol!", "Hello, dave!"]);
   await User.objects.updateMany([{ id: rows[0].id, username: " eve " }, { id: rows[1].id, username: " frank " }]);
   const loaded = await User.objects.filter(User.id.gte(rows[0].id)).orderBy(User.id);

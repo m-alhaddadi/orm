@@ -59,10 +59,10 @@ async def check() -> None:
     if c is not None:
         assert_type(c.author, User | None)
     assert_type(await User.objects.count(), int)
-    assert_type(await User.objects.insert_many([{"email": "a", "name": "A"}], batch_size=10), list[User])
+    assert_type(await User.objects.insert_many([{"email": "a", "name": "A"}], batch_size=10).returning(), list[User])
     assert_type(await User.objects.insert_many([{"email": "a", "name": "A"}], copy=True), int)
     assert_type(await User.objects.get_or_insert(email="a", defaults={"name": "A"}), tuple[User, bool])
-    await User.objects.insert(email="a", name="A").on_conflict(User.email, where=User.name == "A").do_nothing()
+    await User.objects.insert(email="a", name="A").on_conflict(User.email, where=User.name == "A", update=False)
     async for p in Post.objects.order_by(Post.created_at.desc())[:10]:
         assert_type(p, Post)
     assert_type(-Post.created_at, Ordering)
@@ -77,18 +77,23 @@ async def check() -> None:
     alice = await User.objects.insert(email="a@b.c", name="A")
     assert_type(alice, User)
     rows: list[PostInsert] = [{"author": alice, "title": "t", "body": "b"}]
-    assert_type(await Post.objects.insert_many(rows), list[Post])
-    upserted = await User.objects.insert(email="a@b.c", name="A2").on_conflict(User.email).do_update()
+    assert_type(await Post.objects.insert_many(rows).returning(), list[Post])
+    upserted = await User.objects.insert(email="a@b.c", name="A2").on_conflict(User.email, update=True).returning()
     assert_type(upserted, User)
-    skipped = await User.objects.insert(email="a@b.c", name="A").on_conflict(User.email).do_nothing()
+    skipped = await User.objects.insert(email="a@b.c", name="A").on_conflict(User.email, update=False).returning()
     assert_type(skipped, User | None)
+    assert_type(await Post.objects.insert_many(rows), int)
+    assert_type(await Post.objects.insert_many(rows).on_conflict(Post.id, update=False).returning(), list[Post])
+    assert_type(await User.objects.insert(email="a@b.c", name="A").on_conflict(User.email, update=True), int)
+    flag = alice.name == "A"
+    assert_type(await User.objects.insert(email="a@b.c", name="A").on_conflict(User.email, update=flag).returning(), User | None)
+    User.objects.insert(email="a@b.c", name="A").on_conflict(User.email)  # E: update is required
+    User.objects.insert(email="a@b.c", name="A").returning()  # E: a plain insert gives the instance
     assert_type(await Post.objects.filter(Post.id == 1).update(views=Post.views + 1), int)
     assert_type(await Post.objects.filter(Post.id == 1).update(views=1).returning(), list[Post])
     assert_type(await Post.objects.filter(Post.id == 1).delete(), int)
     assert_type(await Post.objects.filter(Post.id == 1).delete().returning(), list[Post])
-    bumped = await Post.objects.insert(author=alice, title="t", body="b").on_conflict(Post.id).do_update(
-        views=Post.views + excluded(Post.views)
-    )
+    bumped = await Post.objects.insert(author=alice, title="t", body="b").on_conflict(Post.id, update=True, update_values={"views": Post.views + excluded(Post.views)}).returning()
     assert_type(bumped, Post)
     assert_type(await Post.objects.update_many([{"id": 1, "views": 2}]), int)
     assert_type(await Post.objects.update_many([{"id": 1, "author": alice}]).returning(), list[Post])

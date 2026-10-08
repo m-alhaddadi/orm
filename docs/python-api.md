@@ -444,7 +444,7 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
 * A condition is a boolean column once labelled: `select(User.name, (User.id > 3).label("big"))`.
 * **`CASE`** is `func.case((cond, value), ..., default=v)`: the value of the first true
   condition, else `default` (`None` without one). It is a value like any other, in
-  `select()`, `filter()`, `order_by()`, `update()` and `do_update()`:
+  `select()`, `filter()`, `order_by()`, `update()` and `on_conflict(update_values=...)`:
 
   ```python
   heat = func.case((Post.views >= 50, "hot"), (Post.views >= 20, "warm"), default="cold")
@@ -594,18 +594,24 @@ constructed. Every write is a statement you await, named after its SQL:
 ```python
 # INSERT ... RETURNING: the instance comes back with id, defaults, timestamps
 alice = await User.objects.insert(email="a@x.io", name="Alice")
-posts = await Post.objects.insert_many([          # one statement per batch
-    {"author": alice, "title": "Hi", "body": "..."},
-    {"author_id": alice.id, "title": "Yo", "body": "...", "views": 3},
-])
 await alice.posts.insert(title="...", body="...")   # FK filled in
 
-# Upsert: INSERT ... ON CONFLICT (email) DO UPDATE / DO NOTHING
-alice = await User.objects.insert(email="a@x.io", name="Al").on_conflict(User.email).do_update()
-maybe = await User.objects.insert(email="a@x.io", name="Al").on_conflict(User.email).do_nothing()  # None if it existed
-await User.objects.insert_many(rows).on_conflict(User.email).do_update(User.name)
+# Many rows: one statement per batch; the row count, or the rows with RETURNING
+n = await Post.objects.insert_many(rows)
+posts = await Post.objects.insert_many([
+    {"author": alice, "title": "Hi", "body": "..."},
+    {"author_id": alice.id, "title": "Yo", "body": "...", "views": 3},
+]).returning()                                      # list[Post], in input order
+
+# Upsert: INSERT ... ON CONFLICT (email) DO UPDATE / DO NOTHING; the row count, or
+# the row(s) with .returning()
+alice = await User.objects.insert(email="a@x.io", name="Al").on_conflict(User.email, update=True).returning()
+maybe = await User.objects.insert(email="a@x.io", name="Al").on_conflict(User.email, update=False).returning()  # None if it existed
+n = await User.objects.insert_many(rows).on_conflict(User.email, update=True, update_fields=[User.name])
 # ... with expressions: the existing row is `Post.<col>`, the proposed one `excluded(Post.<col>)`
-await Post.objects.insert_many(rows).on_conflict(Post.slug).do_update(views=Post.views + excluded(Post.views))
+await Post.objects.insert_many(rows).on_conflict(
+    Post.slug, update=True, update_values={"views": Post.views + excluded(Post.views)}
+)
 
 # Read, or insert when missing: (row, created). The lookup is one unique constraint.
 user, created = await User.objects.get_or_insert(email="a@x.io", defaults={"name": "Al"})
@@ -627,6 +633,12 @@ await post.delete()
 await post.refresh()
 ```
 
+* `insert(...)` gives the instance. `insert_many(...)` and every insert with
+  `on_conflict(...)` give the number of rows inserted or updated (no `RETURNING` in
+  the SQL), as `update()` does; `.returning()` gives the rows. One row with
+  `update=True` gives the instance; with `update=False` (or a `bool` that the type
+  checker can't see) the instance or `None`. Many rows give a list in input order,
+  without the rows that `update=False` skipped.
 * `insert` validates eagerly. Unknown fields, expressions as values and missing
   required fields raise before any SQL runs. Fields left out get their
   `@client_default`, else the column's database default (`DEFAULT` in the VALUES
@@ -643,10 +655,21 @@ await post.refresh()
   `batch_size`, SQLite, composed models, models with native write behavior and fields
   that write through an SQL template (other than enums) raise.
   `bench/copy_insert.py` compares it with `insert_many(rows)`: 200,000 posts in 1.6 s
-  against 3.2 s (measured once on a loaded machine; the batched insert also builds
-  the instances).
-* `on_conflict(*columns, where=cond)` picks a partial unique index:
-  `.on_conflict(Task.shop, Task.task_type, where=Task.deleted_at.is_null())` gives
+  against 3.2 s (measured once on a loaded machine, when the batched insert also
+  built the instances).
+* `on_conflict(*columns, where=None, update, update_fields=None, update_values=None)`:
+  `columns` are the columns of one unique constraint (several for a composite one;
+  unpack a list with `*cols`). `update` is required and keyword-only.
+  `update=False` keeps the existing row (`DO NOTHING`). `update=True` updates it:
+  `update_fields=[Post.title]` copies the proposed values, and
+  `update_values={"views": Post.views + excluded(Post.views)}` sets plain values or
+  expressions (keys are field names). Both together update the union; a field in
+  both raises `TypeError`. The fields you don't name keep their values. With neither
+  option, every field passed to the insert except the conflict columns is
+  overwritten, so `created_at` isn't reset to `now()`. An empty `update_fields` or
+  `update_values`, and either one with `update=False`, raise `TypeError`.
+* `on_conflict(*columns, where=cond, update=...)` picks a partial unique index:
+  `.on_conflict(Task.shop, Task.task_type, where=Task.deleted_at.is_null(), update=False)` gives
   `ON CONFLICT (shop, task_type) WHERE deleted_at IS NULL`. Postgres uses the
   condition to find the index, so it must match the index predicate without
   parameters (`is_null()`, a boolean column); a compared value is a parameter and
@@ -657,11 +680,6 @@ await post.refresh()
   So concurrent calls give one row, and exactly one call gets `created=True`.
   The lookup fields must be the fields of one unique constraint; Postgres raises
   otherwise. A `None` lookup value raises, because `NULL` never conflicts.
-* `do_update()` with no columns overwrites the fields you passed except the conflict
-  columns, so `created_at` isn't reset to `now()`. Pass columns to choose them.
-* `do_update(*columns, **values)`: `columns` take the proposed values, `values` are
-  plain values or expressions. With neither, every field passed to the insert except
-  the conflict columns is overwritten.
 * `update()` and `delete()` validate when called and return a statement: awaiting it
   gives the row count (no `RETURNING` in the SQL), `.returning()` gives the rows.
 * `update_many(rows)` is Django's `bulk_update` without mutated instances: each row is a
@@ -684,7 +702,7 @@ Where the ideas come from:
 |---|---|---|---|
 | insert one | `session.add(User(...)); await session.commit()` | `User.create(email: ...)` | `await User.objects.insert(email=...)` |
 | insert many | `await s.execute(insert(User).returning(User), rows)` | `User.insert_all(rows)` | `await User.objects.insert_many(rows)` |
-| upsert | `pg_insert(User).on_conflict_do_update(...)` | `User.upsert_all(rows, unique_by: :email)` | `.insert_many(rows).on_conflict(User.email).do_update()` |
+| upsert | `pg_insert(User).on_conflict_do_update(...)` | `User.upsert_all(rows, unique_by: :email)` | `.insert_many(rows).on_conflict(User.email, update=True)` |
 | update a set | `update(User).where(...).values(...)` | `User.where(...).update_all(...)` | `await User.objects.filter(...).update(...)` |
 | update rows to different values | `session.execute(update(User), rows)` | `User.update(ids, rows)` (one by one) | `await User.objects.update_many(rows)` |
 | update a row | mutate + flush (unit of work) | `user.update(name: "B")` | `await user.update(name="B")` |

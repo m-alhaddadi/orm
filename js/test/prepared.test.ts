@@ -13,13 +13,13 @@ async function seed() {
   const [alice, bob] = (await User.objects.insertMany([
     { email: "alice@example.com", name: "Alice" },
     { email: "bob@example.com", name: "Bob" },
-  ])) as [User, User];
+  ]).returning()) as [User, User];
   const posts = (await Post.objects.insertMany([
     { author: alice, title: "a1", body: "", views: 5 },
     { author: alice, title: "a_2%", body: "", views: 50 },
     { author: alice, title: "a3", body: "", views: 20 },
     { author: bob, title: "b1", body: "", views: 100 },
-  ])) as [Post, Post, Post, Post];
+  ]).returning()) as [Post, Post, Post, Post];
   return { alice, bob, posts };
 }
 

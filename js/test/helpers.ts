@@ -42,7 +42,7 @@ export async function seed() {
     { author: alice, title: "old draft", body: "...", createdAt: LAST_WEEK, views: 5 },
     { author: alice, title: "new post", body: "...", published: true, views: 50 },
     { author: bob, title: "bob's old", body: "...", createdAt: LAST_WEEK, published: true, views: 100 },
-  ])) as [Post, Post, Post];
+  ]).returning()) as [Post, Post, Post];
   await Comment.objects.insertMany([
     { post: a2, author: bob, body: "nice, 100% agree" },
     { post: a2, author: null, body: "anonymous" },

@@ -8,8 +8,8 @@ type Values = Record<string, unknown>;
 /** The public ORM interface that file models use: `QuerySet.prepareInsert`,
  * `QuerySet.prepareUpdate` and `ModelMeta.addRowDecoder`. */
 export interface HostQuerySet {
-  insert(values: Values, options?: unknown): Promise<unknown>;
-  insertMany(rows: readonly Values[], options?: unknown): Promise<unknown>;
+  insert(values: Values): PromiseLike<unknown>;
+  insertMany(rows: readonly Values[], options?: unknown): PromiseLike<unknown>;
   update(values: Values, options?: unknown): Promise<unknown>;
   updateMany(rows: readonly Values[], options?: unknown): Promise<unknown>;
   prepareInsert(values: Values): { execute(values?: Values): Promise<unknown> };
@@ -38,11 +38,19 @@ export function installQueries(meta: HostModel, adapter: ModelAdapter): void {
       ? new Reference({ v: 1, storage: adapter.fields.get(name)!.storage, key: "preflight" }).toJSON() : value]));
   }
   class FileQuerySet extends Base {
-    override insert(values: Values, options?: unknown): Promise<unknown> {
+    override insert(values: Values): PromiseLike<unknown> {
       values = normalize(values, true);
-      if (!Object.values(values).some(value => value instanceof Upload)) return super.insert(values, options);
-      if (options !== undefined) throw new FileFieldError("Upload is unsupported in conflict writes");
-      return this.prepareFileInsert(values).execute();
+      if (!Object.values(values).some(value => value instanceof Upload)) return super.insert(values);
+      const file = this.prepareFileInsert(values);
+      // Uploads start when the insert is awaited, so a rejected onConflict uploads nothing.
+      let started: Promise<unknown> | undefined;
+      const run = () => (started ??= file.execute());
+      return {
+        onConflict(): never { throw new FileFieldError("Upload is unsupported in conflict writes"); },
+        then: (onfulfilled, onrejected) => run().then(onfulfilled, onrejected),
+        catch: (onrejected: (reason: unknown) => unknown) => run().catch(onrejected),
+        finally: (onfinally: () => void) => run().finally(onfinally),
+      } as PromiseLike<unknown> & { onConflict(): never };
     }
     prepareFileInsert(values: Values) {
       values = normalize(values, true);
@@ -51,7 +59,7 @@ export function installQueries(meta: HostModel, adapter: ModelAdapter): void {
       const operation = adapter.prepareWrite(values, "insert");
       return { operation, execute: () => operation.execute(data => prepared.execute(data)) };
     }
-    override insertMany(rows: readonly Values[], options?: unknown): Promise<unknown> {
+    override insertMany(rows: readonly Values[], options?: unknown): PromiseLike<unknown> {
       return super.insertMany(rows.map(row => normalize(row)), options);
     }
     override update(values: Values, options?: { readonly returning?: boolean }): Promise<unknown> {

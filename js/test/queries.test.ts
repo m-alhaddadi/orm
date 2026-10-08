@@ -72,11 +72,11 @@ test("insertMany with mixed columns", async () => {
   const posts = await Post.objects.insertMany([
     { authorId: u.id, title: "a", body: "b" },
     { authorId: u.id, title: "c", body: "d", views: 7, createdAt: LAST_WEEK },
-  ]);
+  ]).returning();
   assert.deepEqual(posts.map((p) => [p.title, p.views]), [["a", 0], ["c", 7]]);
   assert.equal(posts[1]!.createdAt.getTime(), LAST_WEEK.getTime());
   assert.ok(posts[0]!.createdAt > LAST_WEEK);
-  assert.deepEqual(await Post.objects.insertMany([]), []);
+  assert.deepEqual(await Post.objects.insertMany([]).returning(), []);
 });
 
 test("insert validation", async () => {
@@ -89,19 +89,19 @@ test("insert validation", async () => {
 
 test("upsert", async () => {
   const u = await User.objects.insert({ email: "a@example.com", name: "A" });
-  const same = await User.objects.insert({ email: "a@example.com", name: "A2" }, { onConflict: User.email, doUpdate: true });
+  const same = await User.objects.insert({ email: "a@example.com", name: "A2" }).onConflict(User.email, { update: true }).returning();
   assert.deepEqual([same.id, same.name, same.createdAt.getTime()], [u.id, "A2", u.createdAt.getTime()]);
-  const skipped = await User.objects.insert({ email: "a@example.com", name: "A3" }, { onConflict: User.email, doNothing: true });
+  const skipped = await User.objects.insert({ email: "a@example.com", name: "A3" }).onConflict(User.email, { update: false }).returning();
   assert.equal(skipped, null);
-  let rows = await User.objects.insertMany(
-    [{ email: "a@example.com", name: "A4" }, { email: "b@example.com", name: "B" }],
-    { onConflict: [User.email], doNothing: true },
-  );
+  let rows = await User.objects
+    .insertMany([{ email: "a@example.com", name: "A4" }, { email: "b@example.com", name: "B" }])
+    .onConflict([User.email], { update: false })
+    .returning();
   assert.deepEqual(rows.map((r) => r.email), ["b@example.com"]);
-  rows = await User.objects.insertMany(
-    [{ email: "a@example.com", name: "A5" }, { email: "b@example.com", name: "B2" }],
-    { onConflict: User.email, doUpdate: [User.name] },
-  );
+  rows = await User.objects
+    .insertMany([{ email: "a@example.com", name: "A5" }, { email: "b@example.com", name: "B2" }])
+    .onConflict(User.email, { update: true, updateFields: [User.name] })
+    .returning();
   assert.deepEqual(rows.map((r) => r.name), ["A5", "B2"]);
   assert.equal(await User.objects.count(), 2);
 });
@@ -181,7 +181,7 @@ test("related sets: queries and inserts", async () => {
   assert.equal(await alice.posts.filter(Post.published).count(), 1);
   const p = await alice.posts.insert({ title: "via relation", body: "b" });
   assert.equal(p.authorId, alice.id);
-  const more = await alice.posts.insertMany([{ title: "x", body: "y" }, { title: "z", body: "w" }]);
+  const more = await alice.posts.insertMany([{ title: "x", body: "y" }, { title: "z", body: "w" }]).returning();
   assert.deepEqual(new Set(more.map((q) => q.authorId)), new Set([alice.id]));
   assert.equal(await alice.posts.count(), 5);
 });
@@ -248,14 +248,14 @@ test("upsert with expressions", async () => {
   const alice = await User.objects.insert({ email: "a@x.io", name: "Alice" });
   const p = await Post.objects.insert({ author: alice, title: "t", body: "b", views: 3 });
   const again = { id: p.id, author: alice, title: "t2", body: "b", views: 4 };
-  const p2 = await Post.objects.insert(again, { onConflict: Post.id, set: { views: Post.views.add(excluded(Post.views)) } });
+  const p2 = await Post.objects.insert(again).onConflict(Post.id, { update: true, updateValues: { views: Post.views.add(excluded(Post.views)) } }).returning();
   assert.deepEqual([p2.id, p2.views, p2.title], [p.id, 7, "t"]); // only the given assignment ran
-  const p3 = await Post.objects.insert(again, { onConflict: Post.id, doUpdate: [Post.title], set: { published: true } });
+  const p3 = await Post.objects.insert(again).onConflict(Post.id, { update: true, updateFields: [Post.title], updateValues: { published: true } }).returning();
   assert.deepEqual([p3.views, p3.title, p3.published], [7, "t2", true]);
-  const out = await Post.objects.insertMany(
-    [{ ...again, views: 1 }, { author: alice, title: "new", body: "b", views: 2 }],
-    { onConflict: Post.id, set: { views: excluded(Post.views).mul(100) } },
-  );
+  const out = await Post.objects
+    .insertMany([{ ...again, views: 1 }, { author: alice, title: "new", body: "b", views: 2 }])
+    .onConflict(Post.id, { update: true, updateValues: { views: excluded(Post.views).mul(100) } })
+    .returning();
   assert.deepEqual(out.map((o) => o.views).sort((x, y) => x - y), [2, 100]);
   await assert.rejects(Post.objects.update({ views: excluded(Post.views) }), QueryError);
 });
@@ -366,7 +366,7 @@ test("subqueries with in()", async () => {
 
 test("batches", async () => {
   const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
-  const posts = await Post.objects.insertMany(Array.from({ length: 25 }, (_, i) => ({ author: alice, title: `p${i}`, body: "b" })));
+  const posts = await Post.objects.insertMany(Array.from({ length: 25 }, (_, i) => ({ author: alice, title: `p${i}`, body: "b" }))).returning();
   assert.deepEqual((await collect(Post.objects.batches(10))).map((b) => b.length), [10, 10, 5]);
   const seen = (await collect(Post.objects.filter(Post.views.eq(0)).iterate(7))).map((p) => p.id);
   assert.deepEqual(seen, posts.map((p) => p.id).sort((a, b) => (a < b ? -1 : 1)));

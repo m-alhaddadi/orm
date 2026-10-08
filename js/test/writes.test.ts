@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DatabaseError, Decimal, IntegrityError, connect, getDatabase } from "../src/index.js";
-import { Comment, Post, PostTag, Profile, Tag, User } from "./blog/models.js";
+import { DatabaseError, Decimal, IntegrityError, connect, excluded, getDatabase } from "../src/index.js";
+import { Comment, Post, PostTag, Priority, Profile, Tag, User, type TagInsert } from "./blog/models.js";
 import { DATABASE_URL, useDatabase } from "./helpers.js";
 
 useDatabase();
@@ -14,7 +14,7 @@ useDatabase();
 
 test("insertMany splits by the parameter limit", async () => {
   // One field per row: 70 000 rows are 70 000 parameters, more than Postgres's 65 535.
-  const tags = await Tag.objects.insertMany(Array.from({ length: 70_000 }, (_, i) => ({ name: `t${i}` })));
+  const tags = await Tag.objects.insertMany(Array.from({ length: 70_000 }, (_, i) => ({ name: `t${i}` }))).returning();
   assert.equal(tags.length, 70_000);
   assert.deepEqual(tags.slice(0, 2).map((t) => t.name), ["t0", "t1"]);
   assert.equal(tags.at(-1)!.name, "t69999");
@@ -27,8 +27,8 @@ test("insertMany batchSize", async () => {
     { email: "a@x.io", name: "A1" },
     { email: "a@x.io", name: "A2" },
   ];
-  await assert.rejects(User.objects.insertMany(rows, { onConflict: User.email }), (e) => e instanceof DatabaseError && /second time/.test(e.message));
-  const users = await User.objects.insertMany(rows, { onConflict: User.email, batchSize: 1 });
+  await assert.rejects(User.objects.insertMany(rows).onConflict(User.email, { update: true }), (e) => e instanceof DatabaseError && /second time/.test(e.message));
+  const users = await User.objects.insertMany(rows, { batchSize: 1 }).onConflict(User.email, { update: true }).returning();
   assert.deepEqual(users.map((u) => u.name), ["A1", "A2"]);
   assert.equal((await User.objects.get(User.email.eq("a@x.io"))).name, "A2");
 });
@@ -51,7 +51,7 @@ test("insertMany batches by max_params", async () => {
       { email: "dup@x.io", name: "U1" },
       { email: "c@x.io", name: "C" },
     ];
-    const users = await User.objects.using(db).insertMany(rows, { onConflict: User.email });
+    const users = await User.objects.using(db).insertMany(rows).onConflict(User.email, { update: true }).returning();
     assert.deepEqual(users.map((u) => u.name), ["U0", "B", "U1", "C"]);
   } finally {
     await db.close();
@@ -80,12 +80,15 @@ test("onConflict where picks a partial unique index", () =>
     const post = await Post.objects.insert({ author: alice, title: "t", body: "b" });
     const first = await Comment.objects.insert({ post, body: "hi" });
     await assert.rejects(
-      Comment.objects.insert({ post, body: "hi" }, { onConflict: [Comment.postId, Comment.body], doNothing: true }),
+      Comment.objects.insert({ post, body: "hi" }).onConflict([Comment.postId, Comment.body], { update: false }),
       /no unique or exclusion constraint/,
     );
     const where = Comment.authorId.isNull();
-    assert.equal(await Comment.objects.insert({ post, body: "hi" }, { onConflict: [Comment.postId, Comment.body], where, doNothing: true }), null);
-    const row = await Comment.objects.insert({ post, body: "hi" }, { onConflict: [Comment.postId, Comment.body], where, set: { body: "hi again" } });
+    assert.equal(await Comment.objects.insert({ post, body: "hi" }).onConflict([Comment.postId, Comment.body], { where, update: false }).returning(), null);
+    const row = await Comment.objects
+      .insert({ post, body: "hi" })
+      .onConflict([Comment.postId, Comment.body], { where, update: true, updateValues: { body: "hi again" } })
+      .returning();
     assert.equal(row.id, first.id);
     assert.equal(row.body, "hi again");
     await Comment.objects.insertMany([
@@ -96,6 +99,70 @@ test("onConflict where picks a partial unique index", () =>
   }));
 
 // -- getOrInsert ----------------------------------------------------------------------------------
+
+// -- insert results and onConflict options ---------------------------------------------------
+
+test("insertMany gives a count; returning gives the rows", async () => {
+  assert.equal(await Tag.objects.insertMany([{ name: "a" }, { name: "b" }]), 2);
+  assert.equal(await Tag.objects.insertMany([]), 0);
+  assert.deepEqual(await Tag.objects.insertMany([]).returning(), []);
+  const rows = await Tag.objects.insertMany([{ name: "c" }, { name: "d" }]).returning();
+  assert.deepEqual(rows.map((t) => t.name), ["c", "d"]);
+  // Each batch adds its count.
+  assert.equal(await Tag.objects.insertMany(Array.from({ length: 5 }, (_, i) => ({ name: `e${i}` })), { batchSize: 2 }), 5);
+  // Skipped conflicts are not counted and not returned; updated rows are.
+  assert.equal(await Tag.objects.insertMany([{ name: "a" }, { name: "f" }, { name: "g" }]).onConflict(Tag.name, { update: false }), 2);
+  const tags: TagInsert[] = [{ name: "a", priority: Priority.high }, { name: "h" }, { name: "b", priority: Priority.high }];
+  const kept = await Tag.objects.insertMany(tags).onConflict(Tag.name, { update: false }).returning();
+  assert.deepEqual(kept.map((t) => t.name), ["h"]);
+  const out = await Tag.objects.insertMany(tags).onConflict(Tag.name, { update: true }).returning();
+  assert.deepEqual(out.map((t) => [t.name, t.priority]), [["a", Priority.high], ["h", Priority.normal], ["b", Priority.high]]);
+  assert.equal(await Tag.objects.insertMany(tags).onConflict(Tag.name, { update: true }), 3);
+});
+
+test("a single upsert gives a count", async () => {
+  const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+  assert.equal(await User.objects.insert({ email: "a@x.io", name: "B" }).onConflict(User.email, { update: false }), 0);
+  assert.equal(await User.objects.insert({ email: "b@x.io", name: "B" }).onConflict(User.email, { update: false }), 1);
+  assert.equal(await User.objects.insert({ email: "a@x.io", name: "A2" }).onConflict(User.email, { update: true }), 1);
+  assert.equal((await User.objects.get(User.id.eq(alice.id))).name, "A2");
+  // A statement runs once, however often it is awaited.
+  const once = User.objects.insert({ email: "c@x.io", name: "C" });
+  assert.equal((await once).id, (await once).id);
+});
+
+test("onConflict updateFields and updateValues", async () => {
+  const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+  const p = await Post.objects.insert({ author: alice, title: "t", body: "b", views: 3 });
+  const again = { id: p.id, author: alice, title: "t2", body: "b2", views: 4 };
+  // Both options: the union; the other fields keep their values.
+  let out = await Post.objects
+    .insert(again)
+    .onConflict(Post.id, { update: true, updateFields: [Post.title], updateValues: { views: Post.views.add(excluded(Post.views)) } })
+    .returning();
+  assert.deepEqual([out.title, out.views, out.body], ["t2", 7, "b"]);
+  // update: true alone overwrites every given field except the conflict columns.
+  out = await Post.objects.insert(again).onConflict(Post.id, { update: true }).returning();
+  assert.deepEqual([out.title, out.views, out.body], ["t2", 4, "b2"]);
+});
+
+test("onConflict rejects bad options", async () => {
+  const ins = () => User.objects.insert({ email: "a@x.io", name: "A" });
+  await assert.rejects(ins().onConflict(User.email, {} as never), /update: true/);
+  await assert.rejects(ins().onConflict(User.email, { update: false, updateFields: [User.name] } as never), /update: false/);
+  await assert.rejects(ins().onConflict(User.email, { update: false, updateValues: { name: "x" } } as never), /update: false/);
+  await assert.rejects(ins().onConflict(User.email, { update: true, updateFields: [] }), /updates nothing/);
+  await assert.rejects(ins().onConflict(User.email, { update: true, updateValues: {} }), /updates nothing/);
+  await assert.rejects(ins().onConflict(User.email, { update: true, updateFields: [User.name], updateValues: { name: "x" } }), /name in both/);
+  const many = User.objects.insertMany([{ email: "a@x.io", name: "A" }]).onConflict(User.email, { update: false });
+  assert.throws(() => many.onConflict(User.email, { update: true }), /already given/);
+  // Composite targets: one unique constraint over two columns.
+  const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+  const post = await Post.objects.insert({ author: alice, title: "t", body: "b" });
+  const tag = await Tag.objects.insert({ name: "t" });
+  await PostTag.objects.insert({ post, tag });
+  assert.equal(await PostTag.objects.insert({ post, tag }).onConflict([PostTag.postId, PostTag.tagId], { update: false }), 0);
+});
 
 test("getOrInsert", async () => {
   const [user, created] = await User.objects.getOrInsert({ email: "a@x.io" }, { defaults: { name: "A" } });
@@ -133,7 +200,7 @@ test("getOrInsert checks the lookup", async () => {
 test("add with throughDefaults", async () => {
   const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
   const post = await Post.objects.insert({ author: alice, title: "t", body: "b" });
-  const [t1, t2, t3] = (await Tag.objects.insertMany([{ name: "a" }, { name: "b" }, { name: "c" }])) as [Tag, Tag, Tag];
+  const [t1, t2, t3] = (await Tag.objects.insertMany([{ name: "a" }, { name: "b" }, { name: "c" }]).returning()) as [Tag, Tag, Tag];
   await post.tags.add(t1, t2, { throughDefaults: { position: 1 } });
   // An existing link keeps its values.
   await post.tags.add(t2, t3, { throughDefaults: { position: 2 } });
@@ -206,7 +273,7 @@ test("insertMany copy in a transaction", async () => {
 });
 
 test("insertMany copy rejections", async () => {
-  await assert.rejects(Tag.objects.insertMany([{ name: "a" }], { copy: true, onConflict: Tag.name } as never), /onConflict/);
+  await assert.rejects(Tag.objects.insertMany([{ name: "a" }], { copy: true, batchSize: 2 } as never), /batchSize/);
   await assert.rejects(Tag.objects.insertMany([{ name: "a" }, { name: "b", priority: 1 }], { copy: true }), /some rows only/);
   assert.equal(await Tag.objects.insertMany([], { copy: true }), 0);
 });

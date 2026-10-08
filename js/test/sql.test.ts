@@ -103,8 +103,8 @@ test("writes validate before any SQL", async () => {
   await assert.rejects(User.objects.update({ nope: 1 } as never), TypeError);
   await assert.rejects(User.objects.slice(0, 3).delete(), QueryError);
   assert.throws(() => excluded(User.posts.views), TypeError);
-  await assert.rejects(User.objects.insert({ email: "a", name: "b" }, { onConflict: User.email, doUpdate: [User.name], set: { name: "x" } }), /twice/);
-  await assert.rejects(User.objects.insert({ email: "a", name: "b" }, { onConflict: [] }), /onConflict needs/);
+  await assert.rejects(User.objects.insert({ email: "a", name: "b" }).onConflict(User.email, { update: true, updateFields: [User.name], updateValues: { name: "x" } }), /in both/);
+  await assert.rejects(User.objects.insert({ email: "a", name: "b" }).onConflict([], { update: false }), /onConflict needs/);
 });
 
 test("updateMany joins a VALUES list", () => {

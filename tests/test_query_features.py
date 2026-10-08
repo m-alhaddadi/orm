@@ -20,7 +20,7 @@ async def seed():
             {"email": "bob@example.com", "name": "Bob"},
             {"email": "carol@example.com", "name": "Carol"},
         ]
-    )
+    ).returning()
     posts = await Post.objects.insert_many(
         [
             {"author": alice, "title": "a1", "body": "", "views": 5, "created_at": NOW - timedelta(days=3)},
@@ -28,7 +28,7 @@ async def seed():
             {"author": alice, "title": "a3", "body": "", "views": 20, "created_at": NOW - timedelta(days=1)},
             {"author": bob, "title": "b1", "body": "", "views": 100, "created_at": NOW - timedelta(days=5)},
         ]
-    )
+    ).returning()
     a1, a2, a3, b1 = posts
     await Comment.objects.insert_many(
         [
@@ -330,7 +330,7 @@ async def test_join_cte(clean):
 
 
 async def test_recursive_cte_with_join(clean):
-    users = await User.objects.insert_many([{"email": f"u{i}@x.io", "name": f"u{i}"} for i in range(5)])
+    users = await User.objects.insert_many([{"email": f"u{i}@x.io", "name": f"u{i}"} for i in range(5)]).returning()
     first = users[0].id
     walk = User.objects.filter(User.id == first).select(User.id, User.name, func.abs(User.id - User.id).label("depth")).cte(
         "walk",
@@ -394,7 +394,7 @@ async def test_cte_select_and_subqueries(clean):
 
 
 async def test_recursive_cte(clean):
-    users = await User.objects.insert_many([{"email": f"u{i}@x.io", "name": f"u{i}"} for i in range(5)])
+    users = await User.objects.insert_many([{"email": f"u{i}@x.io", "name": f"u{i}"} for i in range(5)]).returning()
     first = users[0].id
     chain = User.objects.filter(User.id == first).cte(
         "chain", recursive=lambda c: User.objects.filter(User.id == c.c.id + 1, User.id < first + 3)
@@ -545,10 +545,10 @@ async def test_max_params_option_is_checked(clean):
 
 async def test_prefetch_splits_keys(small_params):
     db = small_params
-    users = await User.objects.insert_many([{"email": f"u{i}@x.io", "name": f"u{i}"} for i in range(12)])
+    users = await User.objects.insert_many([{"email": f"u{i}@x.io", "name": f"u{i}"} for i in range(12)]).returning()
     posts = await Post.objects.insert_many(
         [{"author": u, "title": f"{u.name}-{j}", "body": "", "views": j} for u in users for j in range(3)]
-    )
+    ).returning()
     await Comment.objects.insert_many([{"post": p, "body": f"on {p.title}"} for p in posts[::2]])
 
     def shape(us):

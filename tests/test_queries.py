@@ -46,7 +46,7 @@ async def seed() -> tuple[User, User, User, tuple[Post, Post, Post]]:
                 "views": 100,
             },
         ]
-    )
+    ).returning()
     await Comment.objects.insert_many(
         [
             {"post": a2, "author": bob, "body": "nice, 100% agree"},
@@ -85,10 +85,10 @@ async def test_insert_many_mixed_columns(clean):
                 "created_at": LAST_WEEK,
             },
         ]
-    )
+    ).returning()
     assert [(p.title, p.views) for p in posts] == [("a", 0), ("c", 7)]
     assert posts[1].created_at == LAST_WEEK and posts[0].created_at > LAST_WEEK
-    assert await Post.objects.insert_many([]) == []
+    assert await Post.objects.insert_many([]).returning() == []
 
 
 async def test_insert_validation(clean):
@@ -104,14 +104,12 @@ async def test_upsert(clean):
     u = await User.objects.insert(email="a@example.com", name="A")
     same = (
         await User.objects.insert(email="a@example.com", name="A2")
-        .on_conflict(User.email)
-        .do_update()
+        .on_conflict(User.email, update=True).returning()
     )
     assert (same.id, same.name, same.created_at) == (u.id, "A2", u.created_at)
     skipped = (
         await User.objects.insert(email="a@example.com", name="A3")
-        .on_conflict(User.email)
-        .do_nothing()
+        .on_conflict(User.email, update=False).returning()
     )
     assert skipped is None
     rows = (
@@ -121,8 +119,7 @@ async def test_upsert(clean):
                 {"email": "b@example.com", "name": "B"},
             ]
         )
-        .on_conflict(User.email)
-        .do_nothing()
+        .on_conflict(User.email, update=False).returning()
     )
     assert [r.email for r in rows] == ["b@example.com"]
     rows = (
@@ -132,8 +129,7 @@ async def test_upsert(clean):
                 {"email": "b@example.com", "name": "B2"},
             ]
         )
-        .on_conflict(User.email)
-        .do_update(User.name)
+        .on_conflict(User.email, update=True, update_fields=[User.name]).returning()
     )
     assert [r.name for r in rows] == ["A5", "B2"]
     assert await User.objects.count() == 2
@@ -290,7 +286,7 @@ async def test_related_set_queries_and_insert(clean):
     assert p.author_id == alice.id
     more = await alice.posts.insert_many(
         [{"title": "x", "body": "y"}, {"title": "z", "body": "w"}]
-    )
+    ).returning()
     assert {q.author_id for q in more} == {alice.id}
     assert await alice.posts.count() == 5
 
@@ -385,8 +381,7 @@ async def test_upsert_with_expressions(clean):
     again = {"id": p.id, "author": alice, "title": "t2", "body": "b", "views": 4}
     p2 = (
         await Post.objects.insert(**again)
-        .on_conflict(Post.id)
-        .do_update(views=Post.views + orm.excluded(Post.views))
+        .on_conflict(Post.id, update=True, update_values={"views": Post.views + orm.excluded(Post.views)}).returning()
     )
     assert (p2.id, p2.views, p2.title) == (
         p.id,
@@ -395,8 +390,7 @@ async def test_upsert_with_expressions(clean):
     )  # only the given assignment ran
     p3 = (
         await Post.objects.insert(**again)
-        .on_conflict(Post.id)
-        .do_update(Post.title, published=True)
+        .on_conflict(Post.id, update=True, update_fields=[Post.title], update_values={"published": True}).returning()
     )
     assert (p3.views, p3.title, p3.published) == (7, "t2", True)
     rows = [
@@ -405,8 +399,7 @@ async def test_upsert_with_expressions(clean):
     ]
     out = (
         await Post.objects.insert_many(rows)
-        .on_conflict(Post.id)
-        .do_update(views=orm.excluded(Post.views) * 100)
+        .on_conflict(Post.id, update=True, update_values={"views": orm.excluded(Post.views) * 100}).returning()
     )
     assert sorted(o.views for o in out) == [2, 100]
     with pytest.raises(orm.QueryError):
@@ -629,7 +622,7 @@ async def test_batches(clean, monkeypatch):
     alice = await User.objects.insert(email="a@x.io", name="A")
     posts = await Post.objects.insert_many(
         [{"author": alice, "title": f"p{i}", "body": "b"} for i in range(25)]
-    )
+    ).returning()
     sizes = [len(b) async for b in Post.objects.batches(10)]
     assert sizes == [10, 10, 5]
     import json

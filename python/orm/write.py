@@ -4,23 +4,26 @@ Writes are explicit statements, never side effects of touching an instance::
 
     user = await User.objects.insert(email="a@b.c", name="A")
     users = await User.objects.insert_many([{"email": ..., "name": ...}, ...])
-    user = await User.objects.insert(email="a@b.c", name="A2").on_conflict(User.email).do_update()
-    await User.objects.insert_many(rows).on_conflict(User.email).do_nothing()
+    n = await User.objects.insert_many(rows)
+    users = await User.objects.insert_many(rows).returning()
+    user = await User.objects.insert(email="a@b.c", name="A2").on_conflict(User.email, update=True).returning()
+    n = await User.objects.insert_many(rows).on_conflict(User.email, update=False)
     n = await Post.objects.filter(...).update(views=Post.views + 1)
     posts = await Post.objects.filter(...).update(views=Post.views + 1).returning()
     n = await Post.objects.filter(...).delete()
     n = await Post.objects.update_many([{"id": 1, "title": "a"}, {"id": 2, "title": "b"}])
 
-A statement runs when awaited. Inserts are one ``INSERT ... RETURNING`` that also fills
-in database defaults (ids, timestamps) on the returned instances. Updates and deletes
-return a row count, and use ``RETURNING`` only when ``.returning()`` asks for the rows.
+A statement runs when awaited. ``insert()`` is one ``INSERT ... RETURNING`` that also
+fills in database defaults (ids, timestamps) on the returned instance. ``insert_many()``,
+upserts, updates and deletes return a row count, and use ``RETURNING`` only when
+``.returning()`` asks for the rows.
 """
 
 from __future__ import annotations
 
 import warnings
 from collections.abc import Generator, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, NoReturn, TypeVar, overload
 
 from . import _native
 from .expr import ColumnRef, ConditionLike, Expression, IRContext, Ordering, as_condition
@@ -31,15 +34,15 @@ if TYPE_CHECKING:
     from .model import Model
     from .query import QuerySet
 
-R = TypeVar("R")
+R_co = TypeVar("R_co", covariant=True)
 M = TypeVar("M", bound="Model")
 
 __all__ = [
     "InsertOne",
     "InsertMany",
+    "UpsertOne",
+    "InsertReturning",
     "CopyInsert",
-    "OnConflictOne",
-    "OnConflictMany",
     "Update",
     "UpdateMany",
     "Delete",
@@ -59,7 +62,7 @@ def prepare_rows(
 
     Returns (fields, rows, provided): the fields any row sets, each row as values in
     that order (``DEFAULT`` where a row leaves a field out), and the fields the caller
-    gave explicitly (the default ``do_update()`` columns).
+    gave explicitly (the default ``on_conflict(..., update=True)`` columns).
     """
     meta = model._meta
     normalized: list[dict[str, Any]] = []
@@ -199,34 +202,61 @@ class _Insert:
         self._provided = provided
         self._conflict = conflict
         self._where = where  # partial unique index predicate (IR), parameters in `_set`
-        self._update = update
+        self._update = update  # None: DO NOTHING
         self._set = set_  # DO UPDATE assignments (IR) and their parameters
         self._batch_size = batch_size
         self._used = False
 
-    def _derive(
+    def _with_conflict(
         self,
         cls: type[Any],
-        conflict: list[str],
-        update: list[str] | None,
-        set_: tuple[list[dict[str, Any]], list[Any]] | None = None,
-        where: dict[str, Any] | None = None,
+        columns: tuple[ColumnRef[Any], ...],
+        where: ConditionLike | None,
+        update: bool,
+        update_fields: Iterable[ColumnRef[Any]] | None,
+        update_values: Mapping[str, Any] | None,
     ) -> Any:
         self._used = True
-        return cls(self._qs, self._fields, self._rows, self._provided, conflict, update, set_, self._batch_size, where)
+        if self._conflict is not None:
+            raise TypeError("on_conflict() is already given")
+        model = self._qs.model
+        target = _field_names(model, columns, "on_conflict")
+        if not target:
+            raise TypeError("on_conflict() needs the column(s) of a unique constraint")
+        if not isinstance(update, bool):
+            raise TypeError(f"on_conflict(update=...) must be True or False, got {update!r}")
+        if not update and (update_fields is not None or update_values is not None):
+            raise TypeError("on_conflict(update=False) skips conflicting rows; it takes no update_fields or update_values")
+        params: list[Any] = []
+        where_ir = None if where is None else as_condition(where)._ir(IRContext(model, params))
+        set_: tuple[list[dict[str, Any]], list[Any]] | None = None if where_ir is None else ([], params)
+        if not update:
+            return cls(self._qs, self._fields, self._rows, self._provided, target, None, set_, self._batch_size, where_ir)
+        fields = None if update_fields is None else _field_names(model, tuple(update_fields), "update_fields")
+        if fields is not None and not fields:
+            raise TypeError("on_conflict(update_fields=[]) updates nothing; use update=False to skip conflicting rows")
+        if update_values is not None and not update_values:
+            raise TypeError("on_conflict(update_values={}) updates nothing; use update=False to skip conflicting rows")
+        if fields is None and update_values is None:
+            pk = model._meta.pk.name
+            fields = [f for f in self._fields if f in self._provided and f not in target and f != pk]
+        if update_values is not None:
+            set_ = (assignments(model, update_values, IRContext(model, params)), params)
+            overlap = set(fields or ()) & {a["field"] for a in set_[0]}
+            if overlap:
+                raise TypeError(f"on_conflict() updates {', '.join(sorted(overlap))} in both update_fields and update_values")
+        return cls(self._qs, self._fields, self._rows, self._provided, target, fields or [], set_, self._batch_size, where_ir)
 
-    async def _execute(self) -> list[Any]:
+    async def _execute(self, returning: bool) -> Any:
         from .db import resolve
 
         if not self._rows:
-            return []
-        model = self._qs.model
+            return [] if returning else 0
         db = resolve(self._qs._db)
-        objs: list[Any] = await db._insert(
-            model._meta.name, self._fields, self._rows, self._conflict, self._update, self._set, self._qs._db,
-            self._batch_size, self._where,
+        return await db._insert(
+            self._qs.model._meta.name, self._fields, self._rows, self._conflict, self._update, self._set, self._qs._db,
+            self._batch_size, self._where, returning=returning,
         )
-        return objs
 
     def __del__(self) -> None:
         if not getattr(self, "_used", True):
@@ -235,47 +265,145 @@ class _Insert:
     def __repr__(self) -> str:
         clause = ""
         if self._conflict is not None:
-            names = [*(self._update or ()), *(a["field"] + "=..." for a in (self._set or ([], []))[0])]
-            action = "do_nothing()" if self._update is None else f"do_update({', '.join(names)})"
-            where = " where=..." if self._where is not None else ""
-            clause = f" on_conflict({', '.join(self._conflict)}{where}).{action}"
+            options = [f"update={self._update is not None}"]
+            if self._update:
+                options.append(f"update_fields=[{', '.join(self._update)}]")
+            if self._set and self._set[0]:
+                options.append(f"update_values={{{', '.join(a['field'] + ': ...' for a in self._set[0])}}}")
+            if self._where is not None:
+                options.append("where=...")
+            clause = f" on_conflict({', '.join([*self._conflict, *options])})"
         return f"<{type(self).__name__} {self._qs.model.__name__} x{len(self._rows)}{clause}>"
 
 
-class InsertOne(_Insert, Generic[R]):
-    """``await`` gives the inserted instance (``None`` if skipped by ``do_nothing()``)."""
+class InsertOne(_Insert, Generic[M]):
+    """``await`` gives the inserted instance. ``on_conflict()`` makes it an upsert."""
 
     __slots__ = ()
 
-    def on_conflict(self, *columns: ColumnRef[Any], where: ConditionLike | None = None) -> OnConflictOne[R]:
-        """Handle rows that violate the unique constraint on ``columns``. ``where`` is the
-        predicate of a partial unique index (``ON CONFLICT (...) WHERE ...``)."""
-        return OnConflictOne(self, _field_names(self._qs.model, columns, "on_conflict"), where)
+    @overload
+    def on_conflict(
+        self,
+        *columns: ColumnRef[Any],
+        where: ConditionLike | None = None,
+        update: Literal[True],
+        update_fields: Iterable[ColumnRef[Any]] | None = None,
+        update_values: Mapping[str, Any] | None = None,
+    ) -> UpsertOne[M]: ...
+    @overload
+    def on_conflict(
+        self,
+        *columns: ColumnRef[Any],
+        where: ConditionLike | None = None,
+        update: bool,
+        update_fields: Iterable[ColumnRef[Any]] | None = None,
+        update_values: Mapping[str, Any] | None = None,
+    ) -> UpsertOne[M | None]: ...
+    def on_conflict(
+        self,
+        *columns: ColumnRef[Any],
+        where: ConditionLike | None = None,
+        update: bool,
+        update_fields: Iterable[ColumnRef[Any]] | None = None,
+        update_values: Mapping[str, Any] | None = None,
+    ) -> UpsertOne[Any]:
+        """Handle a row that violates the unique constraint on ``columns``; ``where`` is
+        the predicate of a partial unique index (``ON CONFLICT (...) WHERE ...``).
 
-    def __await__(self) -> Generator[Any, None, R]:
+        ``update=False`` keeps the existing row (``DO NOTHING``). ``update=True`` updates
+        it: ``update_fields`` copy the new values, ``update_values`` set values or
+        expressions such as ``{"views": Post.views + excluded(Post.views)}``. With
+        neither, every given field except the conflict columns is overwritten.
+        ``await`` gives the affected-row count; ``.returning()`` the row."""
+        return self._with_conflict(UpsertOne, columns, where, update, update_fields, update_values)  # type: ignore[no-any-return]
+
+    def __await__(self) -> Generator[Any, None, M]:
         self._used = True
         return self._one().__await__()
 
-    async def _one(self) -> R:
-        objs = await self._execute()
-        return objs[0] if objs else None  # type: ignore[return-value]
+    async def _one(self) -> M:
+        objs: list[M] = await self._execute(True)
+        return objs[0]
 
 
-class InsertMany(_Insert, Generic[M]):
-    """``await`` gives the inserted instances, in input order (rows skipped by
-    ``do_nothing()`` are left out). Rows beyond the parameter limit, or beyond
-    ``batch_size``, go to further statements in one transaction."""
+class UpsertOne(_Insert, Generic[R_co]):
+    """``insert(...).on_conflict(...)``: ``await`` gives the affected-row count (0 or 1);
+    ``.returning()`` the inserted or updated instance (``None`` for a skipped row)."""
 
     __slots__ = ()
 
-    def on_conflict(self, *columns: ColumnRef[Any], where: ConditionLike | None = None) -> OnConflictMany[M]:
-        """Handle rows that violate the unique constraint on ``columns``. ``where`` is the
-        predicate of a partial unique index (``ON CONFLICT (...) WHERE ...``)."""
-        return OnConflictMany(self, _field_names(self._qs.model, columns, "on_conflict"), where)
-
-    def __await__(self) -> Generator[Any, None, list[M]]:
+    def returning(self) -> InsertReturning[R_co]:
+        """``RETURNING`` the row: ``await`` gives the instance, ``None`` when
+        ``update=False`` skipped the row."""
         self._used = True
-        return self._execute().__await__()
+        return InsertReturning(self, one=True)
+
+    def __await__(self) -> Generator[Any, None, int]:
+        self._used = True
+        return self._execute(False).__await__()
+
+
+class InsertMany(_Insert, Generic[M]):
+    """``await`` gives the number of rows inserted or updated; ``.returning()`` the
+    instances. Rows beyond the parameter limit, or beyond ``batch_size``, go to further
+    statements in one transaction."""
+
+    __slots__ = ()
+
+    def on_conflict(
+        self,
+        *columns: ColumnRef[Any],
+        where: ConditionLike | None = None,
+        update: bool,
+        update_fields: Iterable[ColumnRef[Any]] | None = None,
+        update_values: Mapping[str, Any] | None = None,
+    ) -> InsertMany[M]:
+        """Handle rows that violate the unique constraint on ``columns``; ``where`` is
+        the predicate of a partial unique index (``ON CONFLICT (...) WHERE ...``).
+
+        ``update=False`` skips conflicting rows (``DO NOTHING``). ``update=True``
+        updates them: ``update_fields`` copy the new values, ``update_values`` set values
+        or expressions such as ``{"views": Post.views + excluded(Post.views)}``. With
+        neither, every given field except the conflict columns is overwritten."""
+        return self._with_conflict(InsertMany, columns, where, update, update_fields, update_values)  # type: ignore[no-any-return]
+
+    def returning(self) -> InsertReturning[list[M]]:
+        """``RETURNING`` the rows: ``await`` gives the instances in input order; rows
+        that ``update=False`` skipped are left out."""
+        self._used = True
+        return InsertReturning(self, one=False)
+
+    def __await__(self) -> Generator[Any, None, int]:
+        self._used = True
+        return self._execute(False).__await__()
+
+
+class InsertReturning(Generic[R_co]):
+    """An insert with ``.returning()``: ``await`` gives the instance(s)."""
+
+    __slots__ = ("_insert", "_one", "_used")
+
+    def __init__(self, insert: _Insert, *, one: bool) -> None:
+        self._insert = insert
+        self._one = one
+        self._used = False
+
+    async def _rows(self) -> Any:
+        objs: list[Any] = await self._insert._execute(True)
+        if self._one:
+            return objs[0] if objs else None
+        return objs
+
+    def __await__(self) -> Generator[Any, None, R_co]:
+        self._used = True
+        return self._rows().__await__()
+
+    def __del__(self) -> None:
+        if not getattr(self, "_used", True):
+            warnings.warn(f"{self!r} was never awaited, so nothing was inserted", RuntimeWarning, stacklevel=2)
+
+    def __repr__(self) -> str:
+        return f"{self._insert!r}.returning()"
 
 
 class CopyInsert(Generic[M]):
@@ -290,7 +418,14 @@ class CopyInsert(Generic[M]):
         self._rows = rows
         self._used = False
 
-    def on_conflict(self, *columns: ColumnRef[Any], where: ConditionLike | None = None) -> NoReturn:
+    def on_conflict(
+        self,
+        *columns: ColumnRef[Any],
+        where: ConditionLike | None = None,
+        update: bool,
+        update_fields: Iterable[ColumnRef[Any]] | None = None,
+        update_values: Mapping[str, Any] | None = None,
+    ) -> NoReturn:
         self._used = True
         raise TypeError("insert_many(copy=True) can't be combined with on_conflict(); COPY stops at the first conflict")
 
@@ -312,75 +447,6 @@ class CopyInsert(Generic[M]):
 
     def __repr__(self) -> str:
         return f"<CopyInsert {self._qs.model.__name__} x{len(self._rows)}>"
-
-
-class _OnConflict:
-    __slots__ = ("_insert", "_target", "_where")
-
-    def __init__(self, insert: _Insert, target: list[str], where: ConditionLike | None = None) -> None:
-        if not target:
-            raise TypeError("on_conflict() needs the column(s) of a unique constraint")
-        insert._used = True
-        self._insert = insert
-        self._target = target
-        self._where = None if where is None else as_condition(where)
-
-    def _where_ir(self, params: list[Any]) -> dict[str, Any] | None:
-        model = self._insert._qs.model
-        return None if self._where is None else self._where._ir(IRContext(model, params))
-
-    def _do_nothing(self, cls: type[Any]) -> Any:
-        params: list[Any] = []
-        where = self._where_ir(params)
-        return self._insert._derive(cls, self._target, None, None if where is None else ([], params), where)
-
-    def _do_update(self, cls: type[Any], columns: tuple[ColumnRef[Any], ...], values: dict[str, Any]) -> Any:
-        model = self._insert._qs.model
-        if columns or values:
-            update = _field_names(model, columns, "do_update")
-        else:
-            pk = model._meta.pk.name
-            ins = self._insert
-            update = [f for f in ins._fields if f in ins._provided and f not in self._target and f != pk]
-        params: list[Any] = []
-        where = self._where_ir(params)
-        set_: tuple[list[dict[str, Any]], list[Any]] | None = None if where is None else ([], params)
-        if values:
-            set_ = (assignments(model, values, IRContext(model, params)), params)
-            overlap = set(update) & {a["field"] for a in set_[0]}
-            if overlap:
-                raise TypeError(f"do_update() sets {', '.join(sorted(overlap))} twice")
-        return self._insert._derive(cls, self._target, update, set_, where)
-
-
-class OnConflictOne(_OnConflict, Generic[R]):
-    __slots__ = ()
-
-    def do_update(self, *columns: ColumnRef[Any], **values: Any) -> InsertOne[R]:
-        """``ON CONFLICT DO UPDATE``: overwrite ``columns`` with the new values, and set
-        ``values`` (plain values or expressions such as
-        ``views=Post.views + excluded(Post.views)``). With neither, every field given to
-        ``insert`` is overwritten, except the conflict columns."""
-        return self._do_update(InsertOne, columns, values)  # type: ignore[no-any-return]
-
-    def do_nothing(self) -> InsertOne[R | None]:
-        """``ON CONFLICT DO NOTHING``: keep the existing row; ``await`` gives ``None``."""
-        return self._do_nothing(InsertOne)  # type: ignore[no-any-return]
-
-
-class OnConflictMany(_OnConflict, Generic[M]):
-    __slots__ = ()
-
-    def do_update(self, *columns: ColumnRef[Any], **values: Any) -> InsertMany[M]:
-        """``ON CONFLICT DO UPDATE``: overwrite ``columns`` with the new values, and set
-        ``values`` (plain values or expressions such as
-        ``views=Post.views + excluded(Post.views)``). With neither, every field given in
-        the rows is overwritten, except the conflict columns."""
-        return self._do_update(InsertMany, columns, values)  # type: ignore[no-any-return]
-
-    def do_nothing(self) -> InsertMany[M]:
-        """``ON CONFLICT DO NOTHING``: skip conflicting rows."""
-        return self._do_nothing(InsertMany)  # type: ignore[no-any-return]
 
 
 # -- UPDATE / DELETE -----------------------------------------------------------------------

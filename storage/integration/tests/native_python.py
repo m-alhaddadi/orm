@@ -63,7 +63,7 @@ class NativeFileTest(unittest.IsolatedAsyncioTestCase):
     async def test_unsupported_and_invalid_values_before_upload(self):
         for call in [lambda: self.Report.objects.insert_many([{'id': 1, 'file': Upload(b'x')}]),
                      lambda: self.Report.objects.update(file=Upload(b'x')),
-                     lambda: self.Report.objects.insert(id=1, file=Upload(b'x')).on_conflict(self.Report.id),
+                     lambda: self.Report.objects.insert(id=1, file=Upload(b'x')).on_conflict(self.Report.id, update=False),
                      lambda: self.Report.objects.insert(id='invalid integer', file=Upload(b'x'))]:
             with self.assertRaises((FileFieldError, ValueError, TypeError)):
                 call()

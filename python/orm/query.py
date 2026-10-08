@@ -816,7 +816,7 @@ class QuerySet(Generic[M]):
                 return await self.get(*(c == key[c._field.name] for c in cols)), False
             except self._model.DoesNotExist:
                 pass
-            row: M | None = await self.insert(**values).on_conflict(*cols).do_nothing()
+            row = await self.insert(**values).on_conflict(*cols, update=False).returning()
             if row is not None:
                 return row, True
         raise QueryError(
@@ -839,7 +839,8 @@ class QuerySet(Generic[M]):
     def insert_many(
         self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: bool = False
     ) -> InsertMany[M] | CopyInsert[M]:
-        """``INSERT`` many rows; ``await`` gives the new instances. One statement per
+        """``INSERT`` many rows; ``await`` gives the number of rows inserted, and
+        ``await qs.insert_many(rows).returning()`` the new instances. One statement per
         ``batch_size`` rows (by default as many as fit in the parameter limit), all in
         one transaction.
 

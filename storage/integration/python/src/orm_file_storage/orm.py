@@ -36,7 +36,7 @@ def install_queries(model: type[Any], adapter: ModelAdapter) -> None:
             self.prepared = prepare_insert(qs, placeholders(values))
             self.operation = adapter.prepare_write(values, shape="insert")
 
-        def on_conflict(self, *columns: Any) -> Any:
+        def on_conflict(self, *columns: Any, **options: Any) -> Any:
             raise FileFieldError("Upload is unsupported in conflict writes")
 
         def __await__(self) -> Generator[Any, None, Any]:

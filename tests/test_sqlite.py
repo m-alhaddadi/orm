@@ -35,7 +35,7 @@ async def test_crud_relations_defaults_and_upserts(sqlite):
         {"author_id": a.id, "title": "one"},
         {"author_id": a.id, "title": "two", "pages": 7, "metadata": {"tags": [1, True]}},
         {"author_id": b.id, "title": "three", "status": m["Status"].published},
-    ])
+    ]).returning()
     assert [x.pages for x in books] == [0, 7, 0]
     assert books[0].status is m["Status"].draft
     assert books[1].metadata == {"tags": [1, True]}
@@ -46,7 +46,7 @@ async def test_crud_relations_defaults_and_upserts(sqlite):
     assert await Author.objects.using(db).filter(Author.books.pages > 0).count() == 1
     assert await Book.objects.using(db).exists()
     assert await Author.objects.using(db).filter(Author.name.icontains("ali")).count() == 1
-    same = await Author.objects.using(db).insert(email=a.email, name="Updated").on_conflict(Author.email).do_update()
+    same = await Author.objects.using(db).insert(email=a.email, name="Updated").on_conflict(Author.email, update=True).returning()
     assert same.id == a.id and same.name == "Updated"
     rows = await Book.objects.using(db).filter(Book.pages > 0).update(pages=Book.pages + 1).returning()
     assert rows[0].pages == 8
@@ -65,7 +65,7 @@ async def test_bulk_writes(sqlite):
         await Author.objects.using(db).insert_many([{"email": "a@x.io", "name": "A"}], copy=True)
     # 32 766 parameters at most: 20 000 rows of two fields go to two statements.
     rows = [{"email": f"u{i}@x.io", "name": f"U{i}"} for i in range(20_000)]
-    assert len(await Author.objects.using(db).insert_many(rows)) == 20_000
+    assert len(await Author.objects.using(db).insert_many(rows).returning()) == 20_000
     first, created = await Author.objects.using(db).get_or_insert(email="u0@x.io", defaults={"name": "x"})
     assert not created and first.name == "U0"
 
@@ -244,11 +244,11 @@ async def test_aggregates_windows_ctes_sliced_prefetch_and_bulk_updates(sqlite):
     Author, Book = m["Author"], m["Book"]
     authors = await Author.objects.using(db).insert_many([
         {"email": "a", "name": "A"}, {"email": "b", "name": "B"},
-    ])
+    ]).returning()
     books = await Book.objects.using(db).insert_many([
         {"author_id": a.id, "title": f"{a.name}{pages}", "pages": pages}
         for a in authors for pages in [3, 7, 11]
-    ])
+    ]).returning()
     assert await Book.objects.using(db).select(func.sum(Book.pages)).scalar() == 42
     rank = func.row_number().over(partition_by=Book.author_id, order_by=Book.pages.desc())
     rows = await Book.objects.using(db).select(Book.title, rank.label("rank")).order_by(Book.title)
@@ -464,7 +464,7 @@ async def test_self_many_to_many_has_both_sides():
     await db.create_tables()
     try:
         people = Person.objects.using(db)
-        ann, bob, cat = await people.insert_many([{"name": "ann"}, {"name": "bob"}, {"name": "cat"}])
+        ann, bob, cat = await people.insert_many([{"name": "ann"}, {"name": "bob"}, {"name": "cat"}]).returning()
         await ann.following.using(db).add(bob, cat)
         await bob.following.using(db).add(cat)
         assert await Follow.objects.using(db).count() == 3

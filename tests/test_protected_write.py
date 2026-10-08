@@ -53,7 +53,7 @@ async def test_every_write_method_fails_outside_the_scope_and_works_inside(blog)
     writes = [
         lambda: posts.insert(id=1, title="a"),
         lambda: posts.insert_many([{"id": 2, "title": "b"}, {"id": 3, "title": "c"}]),
-        lambda: posts.insert(id=1, title="upsert").on_conflict(Post.id).do_update(),
+        lambda: posts.insert(id=1, title="upsert").on_conflict(Post.id, update=True),
         lambda: posts.filter(Post.id == 1).update(title="x"),
         lambda: posts.update_many([{"id": 2, "title": "y"}]),
         lambda: posts.filter(Post.id == 3).delete(),

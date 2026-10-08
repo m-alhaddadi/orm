@@ -516,7 +516,7 @@ class ColumnRef(Expression[T]):
 
 class Excluded(Expression[T]):
     """``excluded(Post.views)``: the value a conflicting insert proposed for a column,
-    usable in ``on_conflict(...).do_update(views=Post.views + excluded(Post.views))``."""
+    usable in ``on_conflict(..., update=True, update_values={"views": Post.views + excluded(Post.views)})``."""
 
     __slots__ = ("_column",)
 

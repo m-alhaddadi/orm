@@ -103,6 +103,7 @@ export interface NativeEngine {
     allowed?: readonly string[],
     batchSize?: number | null,
     conflictWhere?: string | null,
+    returning?: boolean,
   ): Promise<unknown>;
   copyInsert(model: string, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<number>;
   attach(model: string, parentId: unknown, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<unknown>;

@@ -113,8 +113,8 @@ pub enum Plan {
     Update(UpdateStatement, Option<Returned>),
     /// The model and column types of the returned rows when the delete has `RETURNING`.
     Delete(DeleteStatement, Option<Returned>),
-    /// `INSERT ... RETURNING`: the model and column types of the returned rows.
-    Insert(InsertStatement, (usize, Vec<ValueType>)),
+    /// The model and column types of the returned rows when the insert has `RETURNING`.
+    Insert(InsertStatement, Option<(usize, Vec<ValueType>)>),
     #[cfg(feature = "model-composition")]
     ComposedInsert(Box<crate::composed::Insert>),
     #[cfg(feature = "model-composition")]
@@ -1169,7 +1169,7 @@ impl<'s> Planner<'s> {
             Expr::Text { value } => bind(sea_query::Value::from(value.clone()), hint.field),
             Expr::Excluded { name } => {
                 if !self.allow_excluded {
-                    return Err(Error::query("excluded() can only be used in on_conflict(...).do_update()"));
+                    return Err(Error::query("excluded() can only be used in on_conflict(..., update=True)"));
                 }
                 #[cfg(feature = "composition")]
                 self.reject_computed(self.model(self.root), name)?;
@@ -1399,7 +1399,7 @@ impl<'s> Planner<'s> {
             Expr::Param { .. } | Expr::Scope { .. } => {
                 return Err(Error::query("select() takes columns and expressions, not plain values"))
             }
-            Expr::Excluded { .. } => return Err(Error::query("excluded() is only valid in do_update()")),
+            Expr::Excluded { .. } => return Err(Error::query("excluded() is only valid in on_conflict(..., update=True)")),
         })
     }
 
@@ -2461,10 +2461,11 @@ pub enum OnConflict {
     Update(Vec<String>, Option<Expr>, Vec<String>, Vec<Assignment>),
 }
 
-/// `INSERT INTO <table> (<fields>) VALUES ... [ON CONFLICT ...] RETURNING <all columns>`.
+/// `INSERT INTO <table> (<fields>) VALUES ... [ON CONFLICT ...] [RETURNING <all columns>]`.
 ///
 /// `rows` hold a value per field (converted by `field_types`); `None` is the SQL
 /// `DEFAULT` keyword.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_insert(
     schema: &Schema,
     target: Target,
@@ -2473,6 +2474,7 @@ pub fn plan_insert(
     rows: Vec<Vec<Option<sea_query::Value>>>,
     on_conflict: Option<OnConflict>,
     params: &dyn Params,
+    returning: bool,
 ) -> Result<(InsertStatement, Vec<ValueType>)> {
     crate::db::require_dialect(target.dialect)?;
     let idx = schema.model_idx(model).map_err(query_err)?;
@@ -2528,7 +2530,9 @@ pub fn plan_insert(
     }
     let caps = target.caps;
     let require = |ok: bool, feature: &str| target.require(ok, feature).map_err(query_err);
-    require(caps.returning, "insert ... RETURNING")?;
+    if returning {
+        require(caps.returning, "insert ... RETURNING")?;
+    }
     if let Some(oc) = on_conflict {
         require(caps.on_conflict, "insert(...).on_conflict()")?;
         let columns = |names: &[String]| -> Result<Vec<Alias>> {
@@ -2556,7 +2560,7 @@ pub fn plan_insert(
             }
             OnConflict::Update(conflict, filter, update, set) => {
                 if update.is_empty() && set.is_empty() {
-                    return Err(Error::query("on_conflict(...).do_update() has no columns to update"));
+                    return Err(Error::query("on_conflict(..., update=True) has no columns to update"));
                 }
                 let mut clause = sea_query::OnConflict::columns(columns(&conflict)?);
                 clause.target_and_where_option(index_where(filter)?);
@@ -2591,10 +2595,12 @@ pub fn plan_insert(
         };
         stmt.on_conflict(clause);
     }
-    #[cfg(feature = "composition")]
-    stmt.returning(Query::returning().exprs(m.fields().iter().enumerate().map(|(pos, f)| if m.native.computed().contains(&pos) { SExpr::cust("NULL") } else { returning_col(f) })));
-    #[cfg(not(feature = "composition"))]
-    stmt.returning(Query::returning().exprs(m.fields().iter().map(returning_col)));
+    if returning {
+        #[cfg(feature = "composition")]
+        stmt.returning(Query::returning().exprs(m.fields().iter().enumerate().map(|(pos, f)| if m.native.computed().contains(&pos) { SExpr::cust("NULL") } else { returning_col(f) })));
+        #[cfg(not(feature = "composition"))]
+        stmt.returning(Query::returning().exprs(m.fields().iter().map(returning_col)));
+    }
     Ok((stmt, m.fields().iter().map(|f| f.value_type()).collect()))
 }
 
