@@ -554,7 +554,7 @@ impl Builder<'_> {
             let target = schema.model(schema.model_idx(&r.target)?);
             let column = m.field(&r.from)?.column.clone();
             table.foreign_keys.push(ForeignKey {
-                name: self.claim(object_name(&[&t, &column, "fkey"]), m)?,
+                name: self.claim(r.fk_name.clone().unwrap_or_else(|| object_name(&[&t, &column, "fkey"])), m)?,
                 columns: vec![column],
                 ref_table: target.table().to_owned(),
                 ref_columns: vec![target.field(&r.to)?.column.clone()],

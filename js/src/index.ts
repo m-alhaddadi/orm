@@ -66,5 +66,5 @@ export {
 } from "./errors.js";
 export { allowWrites } from "./protection.js";
 export * as debug from "./debug.js";
-export { Migration, MigrationError, Migrations, Migrator } from "./migrations.js";
-export type { Plan, Status, Step, SchemaSource } from "./migrations.js";
+export { Migration, MigrationError, Migrations, Migrator, Pulled, pull } from "./migrations.js";
+export type { Drift, Plan, Status, Step, SchemaSource } from "./migrations.js";

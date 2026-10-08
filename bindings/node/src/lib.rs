@@ -657,6 +657,35 @@ impl Engine {
         })
     }
 
+    /// The live database as a schema file: JSON `{schema, gaps, steps: [{summary, sql}]}`
+    /// (see `orm_engine::introspect::pull`).
+    #[napi]
+    pub fn pull_schema<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, String>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let p = orm_engine::introspect::pull(&*driver).await.map_err(engine_err)?;
+            Ok(serde_json::json!({"schema": p.schema, "gaps": p.gaps, "steps": p.steps}).to_string())
+        })
+    }
+
+    /// The live database against the newest snapshot of `dir`: JSON
+    /// `{migration, steps: [{summary, sql}], gaps}`.
+    #[napi]
+    pub fn migration_drift<'env>(&self, env: &'env Env, dir: String) -> napi::Result<PromiseRaw<'env, String>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let d = orm_engine::introspect::drift(&*driver, Path::new(&dir)).await.map_err(engine_err)?;
+            Ok(serde_json::json!({"migration": d.migration, "steps": d.steps, "gaps": d.gaps}).to_string())
+        })
+    }
+
+    /// Records the first migration of `dir` as applied without running it; its name.
+    #[napi]
+    pub fn migrate_baseline<'env>(&self, env: &'env Env, dir: String) -> napi::Result<PromiseRaw<'env, String>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move { Ok(engine_migrate::baseline(&*driver, Path::new(&dir)).await.map_err(engine_err)?.name) })
+    }
+
     /// Reverts the last `steps` migrations, or every one after `target`; the names reverted.
     #[napi]
     pub fn migrate_down<'env>(

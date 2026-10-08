@@ -119,6 +119,9 @@ export interface NativeEngine {
   migrationStatus(dir: string): Promise<string>;
   migrateUp(dir: string, target: string | null): Promise<string[]>;
   migrateDown(dir: string, steps: number, target: string | null): Promise<string[]>;
+  pullSchema(): Promise<string>;
+  migrationDrift(dir: string): Promise<string>;
+  migrateBaseline(dir: string): Promise<string>;
   createTables(): Promise<void>;
   dropTables(): Promise<void>;
   close(): Promise<void>;

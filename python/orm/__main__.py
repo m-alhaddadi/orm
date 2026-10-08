@@ -8,6 +8,9 @@
     python -m orm migrate [target]
     python -m orm rollback [--steps N | --to <migration>|zero]
     python -m orm showmigrations
+    python -m orm pull [-o schema.prisma] [--force]
+    python -m orm baseline
+    python -m orm drift
 
 The schema file and migrations directory come from ``--schema`` / ``--dir`` or from
 ``[tool.orm]`` in ``pyproject.toml`` (``schema = "schema.prisma"``,

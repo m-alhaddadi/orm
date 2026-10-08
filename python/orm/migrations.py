@@ -15,8 +15,12 @@ each migration with a checksum in the ``orm_migrations`` table and refuses to co
 if an applied file changed. Both are the same Rust code the ``orm`` command line and the
 TypeScript package run, so every tool writes and applies the same files.
 
+Adopting a live database: :func:`pull` writes its schema file, :meth:`Migrator.baseline`
+marks the first migration as applied without running it, and :meth:`Migrator.drift`
+compares the database with the newest migration's snapshot.
+
 From the command line: ``python -m orm makemigrations / migrate / rollback /
-showmigrations / sqlmigrate`` (see ``python -m orm --help``).
+showmigrations / sqlmigrate / pull / baseline / drift`` (see ``python -m orm --help``).
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from .db import Database
 from ._native import MigrationError
 from .model import Registry
 
-__all__ = ["Migration", "Migrations", "Migrator", "MigrationError", "Plan", "Status", "Step"]
+__all__ = ["Drift", "Migration", "Migrations", "Migrator", "MigrationError", "Plan", "Pulled", "Status", "Step", "pull"]
 
 
 @dataclass(frozen=True)
@@ -133,6 +137,44 @@ class Migrations:
 
 
 @dataclass(frozen=True)
+class Pulled:
+    """A schema file read from a live database (:func:`pull`)."""
+
+    schema: str
+    #: What the schema leaves out (rules, views, unsupported types, ...), one line each.
+    gaps: list[str]
+    #: What a migration from ``schema`` would still change on the database; empty when
+    #: the schema reproduces it.
+    differences: list[Step]
+
+    def write(self, path: str | os.PathLike[str]) -> None:
+        Path(path).write_text(self.schema)
+
+
+async def pull(db: Database) -> Pulled:
+    """Reads the database ``db`` connects to (Postgres: its current schema) as a schema
+    file, and checks the result by creating it again in a shadow schema that is rolled
+    back (SQLite: an in-memory database)."""
+    schema, gaps, steps = await db._engine.pull_schema()
+    return Pulled(schema, gaps, [Step(summary, sql) for summary, sql in steps])
+
+
+@dataclass(frozen=True)
+class Drift:
+    """The live database against the newest migration's snapshot (:meth:`Migrator.drift`)."""
+
+    #: The migration compared with, or None for an empty directory.
+    migration: str | None
+    #: Steps that bring the database to the snapshot; empty when they match.
+    steps: list[Step]
+    #: Live objects drift does not compare (rules, views, ...).
+    gaps: list[str]
+
+    def __bool__(self) -> bool:
+        return bool(self.steps)
+
+
+@dataclass(frozen=True)
 class Status:
     migration: Migration
     applied: bool
@@ -164,6 +206,23 @@ class Migrator:
         """Apply pending migrations up to and including ``target`` (default: all)."""
         names = await self.db._engine.migrate_up(self._dir, target)
         return [Migration(n, self.migrations.directory / n) for n in names]
+
+    async def drift(self) -> Drift:
+        """Compares the database with the snapshot of the newest migration. The snapshot is
+        created in a shadow (a Postgres schema in a transaction that is rolled back, or an
+        in-memory SQLite database) and read back, so both sides use the database's text."""
+        migration, steps, gaps = await self.db._engine.migration_drift(self._dir)
+        return Drift(migration, [Step(summary, sql) for summary, sql in steps], gaps)
+
+    async def baseline(self) -> Migration:
+        """Marks the first migration as applied without running it, for a database that
+        already has the schema (after :func:`pull`). Writes the first migration from the
+        schema when the directory has none. Fails once any migration is applied."""
+        if not self.migrations.all():
+            await self.status()  # fails first if the database has applied migrations
+            self.migrations.make()
+        name = await self.db._engine.migrate_baseline(self._dir)
+        return Migration(name, self.migrations.directory / name)
 
     async def downgrade(self, steps: int = 1, *, target: str | None = None) -> list[Migration]:
         """Revert the last ``steps`` applied migrations, or every one after ``target``

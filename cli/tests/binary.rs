@@ -87,3 +87,40 @@ fn identity_cli_allocates_explicitly_and_compile_never_mutates() {
     assert!(ts.contains("Post: 1"), "{ts}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn pull_baseline_and_drift_on_sqlite() {
+    let dir = std::env::temp_dir().join(format!("orm-cli-pull-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let url = format!("sqlite://{}", dir.join("live.db").display());
+    let source = format!("datasource db {{\n  provider = \"sqlite\"\n}}\n\n{SCHEMA}");
+    std::fs::write(dir.join("made.prisma"), &source).unwrap();
+    let made = ["--url", url.as_str(), "--schema", "made.prisma", "--dir", "made"];
+    assert!(orm(&dir, &[&made[..], &["makemigrations"]].concat()).status.success());
+    assert!(orm(&dir, &[&made[..], &["migrate"]].concat()).status.success());
+
+    // pull writes the configured schema file, and refuses to overwrite one
+    let pulled = orm(&dir, &["--url", &url, "pull"]);
+    assert!(pulled.status.success(), "{}", text(&pulled.stderr));
+    assert!(text(&pulled.stdout).contains("The schema reproduces the database."), "{}", text(&pulled.stdout));
+    assert!(std::fs::read_to_string(dir.join("schema.prisma")).unwrap().contains("model Book {"));
+    assert_eq!(orm(&dir, &["--url", &url, "pull"]).status.code(), Some(2));
+
+    // baseline refuses a database that has applied migrations, before writing one
+    let refused = orm(&dir, &["--url", &url, "baseline"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(text(&refused.stderr).contains("already has applied migrations"), "{}", text(&refused.stderr));
+    assert!(!dir.join("migrations").exists());
+
+    let drift = orm(&dir, &[&made[..], &["drift"]].concat());
+    assert_eq!(drift.status.code(), Some(0), "{}", text(&drift.stdout));
+    assert!(text(&drift.stdout).contains("No drift from 0001_initial."));
+    // a newer snapshot than the database: drift exits 1 and names the change
+    std::fs::write(dir.join("made.prisma"), source.replace("title String", "title String\n  pages Int @default(0)")).unwrap();
+    assert!(orm(&dir, &[&made[..], &["makemigrations"]].concat()).status.success());
+    let drift = orm(&dir, &[&made[..], &["drift"]].concat());
+    assert_eq!(drift.status.code(), Some(1));
+    assert!(text(&drift.stdout).contains("add column book.pages"), "{}", text(&drift.stdout));
+    let _ = std::fs::remove_dir_all(&dir);
+}

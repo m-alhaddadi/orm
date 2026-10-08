@@ -723,6 +723,9 @@ Rust took these from ~2.3 / ~4.3 ms, below the Phase 0 prototype's 2.5 / 4.7 ms
    `using()`.
 8. `db.create_tables()` / `drop_tables()` stay as a development helper (idempotent
    `IF NOT EXISTS` DDL). Evolving databases use migrations: see [`schema.md`](schema.md).
+   An existing database is adopted with `await orm.migrations.pull(db)` (its schema file),
+   `Migrator.baseline()` and `Migrator.drift()`
+   (see [`schema.md`](schema.md#adopting-a-live-database-pull-baseline-drift)).
 9. **Async only**, no sync API (see `PLAN.md`, Decisions).
 
 ## Drivers and dialects

@@ -507,6 +507,34 @@ impl Engine {
         })
     }
 
+    /// The live database as a schema file: `(schema, gaps, [(summary, sql)])`, the steps
+    /// being what a migration from the schema would still change (see `orm_engine::introspect`).
+    fn pull_schema<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let p = orm_engine::introspect::pull(&*driver).await.map_err(engine_err)?;
+            Ok((p.schema, p.gaps, p.steps.into_iter().map(|s| (s.summary, s.sql)).collect::<Vec<_>>()))
+        })
+    }
+
+    /// The live database against the newest snapshot of `dir`:
+    /// `(migration, [(summary, sql)], gaps)`.
+    fn migration_drift<'py>(&self, py: Python<'py>, dir: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let d = orm_engine::introspect::drift(&*driver, &dir).await.map_err(engine_err)?;
+            Ok((d.migration, d.steps.into_iter().map(|s| (s.summary, s.sql)).collect::<Vec<_>>(), d.gaps))
+        })
+    }
+
+    /// Records the first migration of `dir` as applied without running it; its name.
+    fn migrate_baseline<'py>(&self, py: Python<'py>, dir: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(engine_migrate::baseline(&*driver, &dir).await.map_err(engine_err)?.name)
+        })
+    }
+
     /// Reverts the last `steps` migrations, or every one after `target`; the names reverted.
     #[pyo3(signature = (dir, steps = 1, target = None))]
     fn migrate_down<'py>(

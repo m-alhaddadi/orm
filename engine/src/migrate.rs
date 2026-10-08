@@ -217,6 +217,30 @@ pub async fn upgrade(conn: &dyn Executor, dir: &Path, target: Option<&str>) -> R
     Ok(done)
 }
 
+/// The names of the applied migrations, in order.
+pub async fn applied_names(conn: &dyn Executor) -> Result<Vec<String>> {
+    ensure_table(conn).await?;
+    Ok(applied(conn).await?.into_keys().collect())
+}
+
+/// Records the first migration of `dir` as applied without running it, for a database
+/// that already has its schema (`orm pull`). Refused once any migration is applied.
+pub async fn baseline(conn: &dyn Executor, dir: &Path) -> Result<Migration> {
+    let first = list(dir)?.into_iter().next().ok_or_else(|| Error::Migration(format!("no migration in {}", dir.display())))?;
+    ensure_table(conn).await?;
+    let record = format!("INSERT INTO {TABLE} (name, checksum) VALUES ({}, {})", lit(&first.name), lit(&first.checksum()?));
+    let mut applied = vec![];
+    let ran = locked(conn, |now| {
+        applied = now.keys().cloned().collect();
+        now.is_empty().then(|| ["SELECT 1".to_owned(), record])
+    })
+    .await?;
+    if !ran {
+        return Err(Error::Migration(format!("the database already has applied migrations ({}); baseline only marks the first", applied.join(", "))));
+    }
+    Ok(first)
+}
+
 /// Reverts applied migrations, newest first; gives the ones it reverted.
 pub async fn downgrade(conn: &dyn Executor, dir: &Path, down: Down) -> Result<Vec<Migration>> {
     let applied: Vec<Migration> = status(conn, dir).await?.into_iter().filter(|s| s.applied).map(|s| s.migration).collect();
