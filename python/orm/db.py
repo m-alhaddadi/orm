@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import math
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Literal, overload
@@ -16,6 +16,9 @@ from .protection import allowed_writes
 from .model import Registry, registry
 
 __all__ = ["Database", "connect", "get_database"]
+
+# Statements a replica may answer.
+_READS = frozenset({"select", "count", "exists"})
 
 _default: Database | None = None
 # The innermost open transaction of the current task, with the database it belongs to.
@@ -29,14 +32,34 @@ _callbacks: ContextVar[dict[Database, list[Callable[[], Any]]]] = ContextVar("or
 class Database:
     """A connection pool. Created by :func:`connect`."""
 
-    def __init__(self, engine: _native.Engine, url: str, registry: Registry = registry) -> None:
+    def __init__(
+        self, engine: _native.Engine, url: str, registry: Registry = registry, replicas: Sequence[_native.Engine] = ()
+    ) -> None:
         self._engine = engine
         self.url = url
         self._registry = registry
+        self._replicas = list(replicas)
+        self._turn = 0
+        # The database a `primary` view belongs to: they share transactions and callbacks.
+        self._root: Database = self
+
+    @property
+    def primary(self) -> Database:
+        """This database without its replicas: every statement goes to the primary."""
+        view = Database(self._engine, self.url, self._registry)
+        view._root = self._root
+        return view
 
     def _tx(self) -> _native.Transaction | None:
         cur = _current_tx.get()
-        return cur[1] if cur is not None and cur[0] is self else None
+        return cur[1] if cur is not None and cur[0]._root is self._root else None
+
+    def _reader(self) -> _native.Engine:
+        """The engine for a read: the next replica outside a transaction, else the primary."""
+        if not self._replicas or self._tx() is not None:
+            return self._engine
+        self._turn = (self._turn + 1) % len(self._replicas)
+        return self._replicas[self._turn]
 
     async def _run(
         self, ir: dict[str, Any], params: list[Any], row_cls: type | None = None, db: Database | None = None
@@ -45,7 +68,8 @@ class Database:
         op = json.dumps(ir)
         if debug._scope.get() is not None:
             debug.record("run:" + op, lambda: self._registry.native().statement(op, params))
-        return await self._engine.run(op, params, self._tx(), row_cls, db, allowed_writes())
+        engine = self._reader() if ir["op"] in _READS else self._engine
+        return await engine.run(op, params, self._tx(), row_cls, db, allowed_writes())
 
     async def _insert(
         self,
@@ -106,12 +130,12 @@ class Database:
 
     def _collect_callbacks(self) -> tuple[list[Callable[[], Any]], Any]:
         callbacks: list[Callable[[], Any]] = []
-        return callbacks, _callbacks.set({**_callbacks.get(), self: callbacks})
+        return callbacks, _callbacks.set({**_callbacks.get(), self._root: callbacks})
 
     async def _after_commit(self, callbacks: list[Callable[[], Any]], outer: bool) -> None:
         """A released savepoint hands its callbacks to the enclosing transaction."""
         if not outer:
-            _callbacks.get()[self].extend(callbacks)
+            _callbacks.get()[self._root].extend(callbacks)
             return
         for fn in callbacks:
             result = fn()
@@ -124,7 +148,7 @@ class Database:
         inside it). Outside a transaction, ``fn()`` runs at once. An awaitable result is
         awaited. Callbacks run in order, outside the transaction; an error in one goes to
         the caller of ``transaction()`` and the later ones do not run."""
-        callbacks = _callbacks.get().get(self)
+        callbacks = _callbacks.get().get(self._root)
         if callbacks is not None and self._tx() is not None:
             callbacks.append(fn)
             return
@@ -239,8 +263,13 @@ class Database:
         await self._engine.drop_tables()
 
     async def close(self) -> None:
+        """Close the pools of the primary and of each replica."""
         global _default
+        if self._root is not self:
+            return await self._root.close()
         await self._engine.close()
+        for replica in self._replicas:
+            await replica.close()
         if _default is self:
             _default = None
 
@@ -254,6 +283,7 @@ async def connect(
     max_connections: int = 10,
     default: bool = True,
     registry: Registry = registry,
+    replicas: Sequence[str] = (),
     _disable: tuple[str, ...] = (),
 ) -> Database:
     """Open a connection pool. Import your model modules first: the schema is compiled
@@ -261,12 +291,16 @@ async def connect(
     given).
 
     With ``default=True`` (the default) queries use this database unless
-    ``.using(db)`` says otherwise. ``_disable`` switches database capabilities off
+    ``.using(db)`` says otherwise. With ``replicas`` (URLs of read replicas of
+    ``url``), reads outside a transaction go to a replica, in turn; writes and every
+    statement in a transaction go to ``url``. ``_disable`` switches database capabilities off
     (``"ilike"``, ``"update_from_values"``, ...) to test the SQL other databases get.
     """
     global _default
-    engine = await _native.connect(url, registry.prepare(), max_connections, list(_disable))
-    db = Database(engine, url, registry)
+    schema = registry.prepare()
+    engine = await _native.connect(url, schema, max_connections, list(_disable))
+    readers = [await _native.connect(r, schema, max_connections, list(_disable)) for r in replicas]
+    db = Database(engine, url, registry, readers)
     if default:
         _default = db
     return db

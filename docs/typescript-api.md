@@ -297,6 +297,15 @@ See `docs/schema.md`, "Protected writes".
 
 The transaction-scoped forms throw `TransactionRequired` when called outside a transaction.
 
+### Read replicas
+
+`connect(primaryUrl, { replicas: [replica1Url, replica2Url] })` sends reads (`select`, `count`, `exists`, prepared queries) outside a transaction to the next replica, in turn.
+Writes, raw `db.execute`, migrations, and every statement inside `db.transaction()` go to the primary.
+`db.primary` is a view of the database without its replicas; it shares the transactions of `db`.
+`qs.using("primary")` is `qs.using(<the query set's database>.primary)`, resolved when it is called.
+A replica can lag behind the primary: to read your own write, read in the same transaction or use `using("primary")`.
+There are no health checks or failover. `maxConnections` applies to each pool, and `db.close()` closes all of them.
+
 ### Finding N+1 queries: `debug`
 
 The ORM never loads a relation by itself, so an N+1 comes from explicit code: a `loadX()` call or a query in a loop.

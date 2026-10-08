@@ -147,3 +147,57 @@ async def test_session_lock_validation():
                 pass
     finally:
         await db.close()
+
+
+async def replica_url(db):
+    """A second database with the same tables, standing in for a replica."""
+    url = db.url.rsplit("/", 1)[0] + "/orm_s6_replica"
+    if not await db._fetch_text("SELECT 1 FROM pg_database WHERE datname = 'orm_s6_replica'"):
+        await db.execute("CREATE DATABASE orm_s6_replica")
+    replica = await orm.connect(url, default=False, max_connections=1)
+    try:
+        await replica.drop_tables()
+        await replica.create_tables()
+        await User.objects.using(replica).insert(email="r@example.com", name="Replica")
+    finally:
+        await replica.close()
+    return url
+
+
+async def test_replicas_answer_reads_outside_a_transaction(clean):
+    db = clean
+    url = await replica_url(db)
+    routed = await orm.connect(db.url, replicas=[url, url], default=False, max_connections=2)
+    try:
+        await User.objects.using(routed).insert(email="p@example.com", name="Primary")
+        users = User.objects.using(routed)
+        assert [u.name for u in await users] == ["Replica"]
+        assert [u.name for u in await users.filter(User.name == "Replica")] == ["Replica"]
+        assert await users.count() == 1
+        assert [u.name for u in await users.filter(User.name == orm.param("n")).prepare()(n="Replica")] == ["Replica"]
+        assert [u.name for u in await users.using("primary")] == ["Primary"]
+        assert [u.name for u in await User.objects.using(routed.primary)] == ["Primary"]
+        async with routed.transaction():
+            # A fresh query set: an awaited one keeps its rows.
+            assert [u.name for u in await User.objects.using(routed)] == ["Primary"]
+            # A primary view shares the transaction.
+            assert routed.primary._tx() is routed._tx() is not None
+        # Writes go to the primary.
+        assert await users.filter(User.name == "Primary").update(name="P2") == 1
+        assert [u.name for u in await User.objects.using(db)] == ["P2"]
+    finally:
+        await routed.close()
+
+
+async def test_using_primary_resolves_the_default_database(clean):
+    db = clean
+    url = await replica_url(db)
+    routed = await orm.connect(db.url, replicas=[url], max_connections=2)
+    try:
+        assert [u.name for u in await User.objects] == ["Replica"]
+        assert [u.name for u in await User.objects.using("primary")] == []
+        with pytest.raises(ValueError, match="primary"):
+            User.objects.using("replica")  # type: ignore[arg-type]
+    finally:
+        await routed.close()
+        orm.db._default = db

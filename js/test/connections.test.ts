@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { connect, getDatabase, loads, Registry } from '../src/index.js';
+import { connect, getDatabase, loads, param, Registry } from '../src/index.js';
 import { User } from './blog/models.js';
 import { useDatabase, otherDatabase } from './helpers.js';
 
@@ -117,5 +117,47 @@ test('a session lock needs Postgres', async () => {
     await assert.rejects(db.lock(1, { session: true }, async () => {}), { name: 'QueryError', message: 'sqlite does not support advisory locks' });
   } finally {
     await db.close();
+  }
+});
+
+/** A second database with the same tables, standing in for a replica. */
+async function replicaUrl(): Promise<string> {
+  const db = getDatabase();
+  const url = db.url.replace(/\/[^/]*$/, '/orm_s6_replica_js');
+  if ((await db.fetchText("SELECT 1 FROM pg_database WHERE datname = 'orm_s6_replica_js'")).length === 0) {
+    await db.execute('CREATE DATABASE orm_s6_replica_js');
+  }
+  const replica = await connect(url, { default: false, maxConnections: 1 });
+  try {
+    await replica.dropTables();
+    await replica.createTables();
+    await User.objects.using(replica).insert({ email: 'r@example.com', name: 'Replica' });
+  } finally {
+    await replica.close();
+  }
+  return url;
+}
+
+test('replicas answer reads outside a transaction; writes and transactions use the primary', async () => {
+  const db = getDatabase(), url = await replicaUrl();
+  const routed = await connect(db.url, { replicas: [url, url], default: false, maxConnections: 2 });
+  try {
+    await User.objects.using(routed).insert({ email: 'p@example.com', name: 'Primary' });
+    const users = User.objects.using(routed);
+    assert.deepEqual((await users).map((u) => u.name), ['Replica']);
+    assert.equal(await users.count(), 1);
+    const byName = users.filter(User.name.eq(param('n'))).prepare();
+    assert.deepEqual((await byName.all({ n: 'Replica' })).map((u) => u.name), ['Replica']);
+    assert.deepEqual((await users.using('primary')).map((u) => u.name), ['Primary']);
+    assert.deepEqual((await User.objects.using(routed.primary)).map((u) => u.name), ['Primary']);
+    await routed.transaction(async () => {
+      assert.deepEqual((await User.objects.using(routed)).map((u) => u.name), ['Primary']);
+      assert.equal(routed.primary.tx(), routed.tx());
+    });
+    assert.equal(await users.filter(User.name.eq('Primary')).update({ name: 'P2' }), 1);
+    assert.deepEqual((await User.objects.using(db)).map((u) => u.name), ['P2']);
+    assert.throws(() => User.objects.using('replica' as never), TypeError);
+  } finally {
+    await routed.close();
   }
 });

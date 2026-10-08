@@ -598,8 +598,15 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return this.clone({ lock: { exclusive, nowait, skip_locked: skipLocked } }) as never;
   }
 
-  /** Run on `db` instead of the default database. */
-  using(db: Database | undefined): this {
+  /** Run on `db` instead of the default database. `"primary"` sends reads of this query
+   * set to the primary of its database (the default one, resolved now), not to a replica. */
+  using(db: Database | "primary" | undefined): this {
+    if (typeof db === "string") {
+      if (db !== "primary") {
+        throw new TypeError(`using() takes a Database or "primary", got ${JSON.stringify(db)}`);
+      }
+      return this.clone({ db: resolve(this.state.db).primary });
+    }
     return this.clone({ db });
   }
 

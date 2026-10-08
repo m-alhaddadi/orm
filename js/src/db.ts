@@ -36,19 +36,43 @@ export interface SessionLockOptions {
   readonly timeout?: number;
 }
 
+/** Statements a replica may answer (the IR starts with its `op`). */
+const READ = /^\{"op":"(select|count|exists)"/;
+
 /** A connection pool. Created by {@link connect}. */
 export class Database {
+  private turn = 0;
+  /** @internal The database a `primary` view belongs to: they share transactions and callbacks. */
+  root: Database = this;
+
   /** @internal */
   constructor(
     readonly engine: NativeEngine,
     readonly url: string,
     readonly registry: Registry,
+    private readonly replicas: readonly NativeEngine[] = [],
   ) {}
+
+  /** This database without its replicas: every statement goes to the primary. */
+  get primary(): Database {
+    const view = new Database(this.engine, this.url, this.registry);
+    view.root = this.root;
+    return view;
+  }
 
   /** @internal The transaction queries on this database run in, if any. */
   tx(): NativeTransaction | null {
     const c = current.getStore();
-    return c !== undefined && c.db === this ? c.tx : null;
+    return c !== undefined && c.db.root === this.root ? c.tx : null;
+  }
+
+  /** @internal The engine for a read: the next replica outside a transaction, else the primary. */
+  reader(): NativeEngine {
+    if (this.replicas.length === 0 || this.tx() !== null) {
+      return this.engine;
+    }
+    this.turn = (this.turn + 1) % this.replicas.length;
+    return this.replicas[this.turn]!;
   }
 
   /** @internal */
@@ -59,7 +83,8 @@ export class Database {
   /** @internal */
   runJson(json: string, params: unknown[]): Promise<unknown> {
     if (debugging()) record(`run:${json}`, () => this.registry.native().statement(json, params));
-    return wait(() => this.engine.run(json, params, this.tx(), allowedWrites()));
+    const engine = READ.test(json) ? this.reader() : this.engine;
+    return wait(() => engine.run(json, params, this.tx(), allowedWrites()));
   }
 
   /**
@@ -71,7 +96,7 @@ export class Database {
     const outer = this.tx() === null;
     const tx = await wait(() => this.engine.begin(this.tx()));
     const mine: (() => unknown)[] = [];
-    const scoped = new Map(callbacks.getStore() ?? []).set(this, mine);
+    const scoped = new Map(callbacks.getStore() ?? []).set(this.root, mine);
     let result: T;
     try {
       result = await current.run({ db: this, tx }, () => callbacks.run(scoped, fn));
@@ -87,7 +112,7 @@ export class Database {
   /** A released savepoint hands its callbacks to the enclosing transaction. */
   private async afterCommit(mine: readonly (() => unknown)[], outer: boolean): Promise<void> {
     if (!outer) {
-      callbacks.getStore()!.get(this)!.push(...mine);
+      callbacks.getStore()!.get(this.root)!.push(...mine);
       return;
     }
     for (const fn of mine) {
@@ -103,7 +128,7 @@ export class Database {
    * `transaction()` and the later ones do not run.
    */
   async onCommit(fn: () => unknown): Promise<void> {
-    const mine = callbacks.getStore()?.get(this);
+    const mine = callbacks.getStore()?.get(this.root);
     if (mine !== undefined && this.tx() !== null) {
       mine.push(fn);
       return;
@@ -200,8 +225,15 @@ export class Database {
     return wait(() => this.engine.dropTables());
   }
 
+  /** Closes the pools of the primary and of each replica. */
   async close(): Promise<void> {
+    if (this.root !== this) {
+      return this.root.close();
+    }
     await wait(() => this.engine.close());
+    for (const replica of this.replicas) {
+      await wait(() => replica.close());
+    }
     if (defaultDb === this) {
       defaultDb = undefined;
     }
@@ -221,6 +253,9 @@ export interface ConnectOptions {
   /** Switch database capabilities off (`"ilike"`, `"update_from_values"`, ...) to test
    * the SQL other databases get. */
   readonly disable?: readonly string[];
+  /** URLs of read replicas: reads outside a transaction go to one of them, in turn;
+   * writes and every statement in a transaction go to the primary. */
+  readonly replicas?: readonly string[];
 }
 
 /**
@@ -230,10 +265,14 @@ export interface ConnectOptions {
 export async function connect(url: string, options: ConnectOptions = {}): Promise<Database> {
   const reg = options.registry ?? defaultRegistry;
   const schema = reg.native();
-  const engine = await wait(() =>
-    call(() => native().connect(url, schema, options.maxConnections ?? 10, [...(options.disable ?? [])])),
-  );
-  const db = new Database(engine, url, reg);
+  const open = (u: string) =>
+    wait(() => call(() => native().connect(u, schema, options.maxConnections ?? 10, [...(options.disable ?? [])])));
+  const engine = await open(url);
+  const readers: NativeEngine[] = [];
+  for (const replica of options.replicas ?? []) {
+    readers.push(await open(replica));
+  }
+  const db = new Database(engine, url, reg, readers);
   if (options.default ?? true) {
     defaultDb = db;
   }

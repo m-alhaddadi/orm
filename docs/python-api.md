@@ -661,6 +661,22 @@ async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction ne
   server releases the lock.
 * No optimistic locking (version columns) on purpose.
 
+### Read replicas
+
+```python
+db = await orm.connect(primary_url, replicas=[replica1_url, replica2_url])
+users = await User.objects.filter(...)                  # a replica, in turn
+fresh = await User.objects.using("primary").get(...)    # the primary
+```
+
+* Reads (`select`, `count`, `exists`, prepared queries) outside a transaction go to the next replica, in turn.
+* Writes, raw `db.execute`, migrations, and every statement inside `db.transaction()` go to the primary.
+* `db.primary` is a view of the database without its replicas; it shares the transactions of `db`.
+  `.using("primary")` is `.using(<the query set's database>.primary)`, resolved when it is called.
+* A replica can lag behind the primary. To read your own write, read in the same transaction or use `.using("primary")`.
+* No health checks or failover: an error on a replica goes to the caller.
+* `max_connections` applies to each pool. `db.close()` closes all of them.
+
 ### Finding N+1 queries: `orm.debug`
 
 The ORM never loads a relation by itself, so an N+1 comes from explicit code: a `load_x()` call or a query in a loop.
