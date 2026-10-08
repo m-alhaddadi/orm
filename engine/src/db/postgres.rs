@@ -45,7 +45,13 @@ fn pg_err(e: tokio_postgres::Error) -> DbError {
                 message.push_str("\nDETAIL: ");
                 message.push_str(detail);
             }
-            DbError { kind, message }
+            DbError {
+                kind,
+                message,
+                sqlstate: Some(code.to_owned()),
+                constraint: db.constraint().map(str::to_owned),
+                detail: db.detail().map(str::to_owned),
+            }
         }
         None => DbError::other(e.to_string()),
     }

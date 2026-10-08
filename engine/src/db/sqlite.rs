@@ -17,7 +17,22 @@ fn sqlite_err(e: rusqlite::Error) -> DbError {
         rusqlite::Error::SqliteFailure(e, _) if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => ErrorKind::LockNotAvailable,
         _ => ErrorKind::Other,
     };
-    DbError { kind, message: e.to_string() }
+    let sqlstate = match &e {
+        rusqlite::Error::SqliteFailure(e, _) => sqlstate(e.extended_code),
+        _ => None,
+    };
+    DbError { sqlstate: sqlstate.map(str::to_owned), ..DbError::new(kind, e.to_string()) }
+}
+
+/// The Postgres SQLSTATE of a SQLite constraint failure, so one handler serves both.
+fn sqlstate(extended_code: std::os::raw::c_int) -> Option<&'static str> {
+    Some(match extended_code {
+        rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE | rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY => "23505",
+        rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY => "23503",
+        rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL => "23502",
+        rusqlite::ffi::SQLITE_CONSTRAINT_CHECK => "23514",
+        _ => return None,
+    })
 }
 
 fn closed() -> DbError { DbError::other("SQLite connection or transaction is closed") }
@@ -214,7 +229,7 @@ impl SqliteTx {
                 if migration && commit {
                     let mut stmt = c.prepare("PRAGMA foreign_key_check").map_err(sqlite_err)?;
                     if stmt.query([]).map_err(sqlite_err)?.next().map_err(sqlite_err)?.is_some() {
-                        return Err(DbError { kind: ErrorKind::Integrity, message: "SQLite migration violates foreign key constraints".into() });
+                        return Err(DbError { sqlstate: Some("23503".into()), ..DbError::new(ErrorKind::Integrity, "SQLite migration violates foreign key constraints") });
                     }
                 }
                 let sql = match (&name, commit) {

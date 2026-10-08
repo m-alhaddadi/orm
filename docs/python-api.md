@@ -594,6 +594,45 @@ async with db.transaction():          # commit on success, rollback on exception
 The current transaction lives in a `ContextVar`, so queries inside the block use it
 without passing it around. Tasks started inside the block inherit it.
 
+### Database errors
+
+An `orm.DatabaseError` (and its subclasses `IntegrityError`, `LockNotAvailable`) has three attributes:
+
+* `sqlstate`: the five-character SQLSTATE, for example `"23505"` (unique), `"23503"` (foreign key), `"23502"` (not null), `"23514"` (check).
+  SQLite constraint failures get the same Postgres codes; other SQLite errors give `None`.
+* `constraint`: the name of the violated constraint (Postgres only), for example `"users_email_key"`.
+* `detail`: the database's DETAIL line (Postgres only), for example `"Key (email)=(a@example.com) already exists."`.
+
+Each is `None` when the database did not give it.
+
+```python
+try:
+    await User.objects.insert(email=email, name=name)
+except orm.IntegrityError as e:
+    if e.constraint != "users_email_key":
+        raise
+    ...  # the email is taken
+```
+
+The ORM does not retry a transaction.
+A transaction that fails with a serialization failure (`40001`) or a deadlock (`40P01`) can run again:
+
+```python
+async def transfer(db, a, b, amount, attempts=3):
+    for attempt in range(attempts):
+        try:
+            async with db.transaction():
+                ...  # the whole transaction, reads included
+            return
+        except orm.DatabaseError as e:
+            if e.sqlstate not in ("40001", "40P01") or attempt == attempts - 1:
+                raise
+            await asyncio.sleep(0.05 * 2**attempt)
+```
+
+Retry the whole transaction, never one statement in it: Postgres aborts the transaction on these errors.
+`40001` occurs only at the `REPEATABLE READ` and `SERIALIZABLE` isolation levels; the default `READ COMMITTED` gives deadlocks only.
+
 ### Protected writes
 
 `@@protected_write` is an application-level check in the ORM. It does not protect the database.

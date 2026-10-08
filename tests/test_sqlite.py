@@ -50,8 +50,12 @@ async def test_crud_relations_defaults_and_upserts(sqlite):
     assert same.id == a.id and same.name == "Updated"
     rows = await Book.objects.using(db).filter(Book.pages > 0).update(pages=Book.pages + 1).returning()
     assert rows[0].pages == 8
-    with pytest.raises(orm.IntegrityError):
+    with pytest.raises(orm.IntegrityError) as e:
         await Book.objects.using(db).insert(author_id=999, title="orphan")
+    assert (e.value.sqlstate, e.value.constraint) == ("23503", None)
+    with pytest.raises(orm.IntegrityError) as e:
+        await Author.objects.using(db).insert(email=a.email, name="dup")
+    assert e.value.sqlstate == "23505"
     with pytest.raises(orm.IntegrityError):
         await Book.objects.using(db).insert(author_id=a.id, title="bad", status="invalid")
     assert await Book.objects.using(db).filter(Book.id == books[0].id).delete() == 1

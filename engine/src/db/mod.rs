@@ -44,11 +44,22 @@ pub enum ErrorKind {
 pub struct DbError {
     pub kind: ErrorKind,
     pub message: String,
+    /// The five-character SQLSTATE (`23505`); SQLite constraint failures get the
+    /// Postgres code too.
+    pub sqlstate: Option<String>,
+    /// The violated constraint's name (Postgres only).
+    pub constraint: Option<String>,
+    /// The database's DETAIL line (Postgres only).
+    pub detail: Option<String>,
 }
 
 impl DbError {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        DbError { kind, message: message.into(), sqlstate: None, constraint: None, detail: None }
+    }
+
     pub fn other(message: impl Into<String>) -> Self {
-        DbError { kind: ErrorKind::Other, message: message.into() }
+        DbError::new(ErrorKind::Other, message)
     }
 }
 

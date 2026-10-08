@@ -329,6 +329,35 @@ Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,
 `NotLoaded`, `TransactionRequired`, `DoesNotExist`, `MultipleObjectsReturned`,
 `MigrationError` and `WriteProtected`. Values of the wrong type throw a `TypeError` before any SQL runs.
 
+A `DatabaseError` (and its subclasses) has `sqlstate`, `constraint` and `detail`, each `null` when the database did not give it.
+They are the same as in Python (see `docs/python-api.md`, "Database errors"): SQLite constraint failures get the Postgres SQLSTATE, and only Postgres gives `constraint` and `detail`.
+
+```ts
+try {
+  await User.objects.insert({ email, name });
+} catch (e) {
+  if (!(e instanceof IntegrityError) || e.constraint !== "users_email_key") throw e;
+  // the email is taken
+}
+```
+
+The ORM does not retry a transaction.
+Run the whole transaction again on a serialization failure (`40001`) or a deadlock (`40P01`):
+
+```ts
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await db.transaction(fn);
+    } catch (e) {
+      const retry = e instanceof DatabaseError && (e.sqlstate === "40001" || e.sqlstate === "40P01");
+      if (!retry || attempt === attempts - 1) throw e;
+      await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
+    }
+  }
+}
+```
+
 ## Migrations and the CLI
 
 `npx orm` is the one `orm` command line (Rust, `cli/`), run through the addon: the same

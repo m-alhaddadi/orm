@@ -54,12 +54,23 @@ fn db_kind(e: &DbError) -> &'static str {
     }
 }
 
+/// A database error; with SQLSTATE fields the tag is `[orm:<Kind>+] <json>\n<message>`
+/// (JSON escapes newlines, so the first line is the whole object).
+fn db_tagged(e: DbError) -> napi::Error {
+    let kind = db_kind(&e);
+    if e.sqlstate.is_none() && e.constraint.is_none() && e.detail.is_none() {
+        return tagged(kind, e);
+    }
+    let fields = serde_json::json!({ "sqlstate": e.sqlstate, "constraint": e.constraint, "detail": e.detail });
+    napi::Error::from_reason(format!("[orm:{kind}+] {fields}\n{}", e.message))
+}
+
 fn engine_err(e: Error) -> napi::Error {
     match e {
         Error::Query(m) => tagged("QueryError", m),
         Error::Schema(m) => tagged("SchemaError", m),
         Error::Migration(m) => tagged("MigrationError", m),
-        Error::Db(e) => tagged(db_kind(&e), e),
+        Error::Db(e) => db_tagged(e),
         Error::Value(m) => tagged("TypeError", m),
         Error::WriteProtected(m) => tagged("WriteProtected", format!("{m} is write-protected (@@protected_write); write it inside allowWrites([{m}], ...)")),
         Error::Binding(e) => tagged("TypeError", e),
@@ -131,7 +142,7 @@ fn rows_js(c: Conv, rows: &dyn RowSet, types: &[ValueType]) -> napi::Result<V> {
     let mut k = 0u32;
     for r in 0..rows.len() {
         for (col, ty) in types.iter().enumerate() {
-            let cell = rows.cell(r, col, *ty).map_err(|e| tagged(db_kind(&e), e))?;
+            let cell = rows.cell(r, col, *ty).map_err(db_tagged)?;
             js.set_element(values, k, c.cell(cell)?)?;
             k += 1;
         }
@@ -204,9 +215,9 @@ fn prefetched_js(c: Conv, schema: &schema::Schema, fetched: &[Fetched]) -> napi:
 /// rows a write returned.
 fn outcome_js(env: &Env, schema: &schema::Schema, out: Outcome) -> napi::Result<Raw> {
     #[cfg(feature = "composition")]
-    let out = orm_engine::behavior::results(&schema.native_models, out).map_err(|e| tagged(db_kind(&e), e))?;
+    let out = orm_engine::behavior::results(&schema.native_models, out).map_err(db_tagged)?;
     #[cfg(feature = "proxy-models")]
-    orm_engine::proxy::emit(&orm_engine::proxy::diagnostics(&schema.proxy_models, &out).map_err(|e| tagged(db_kind(&e), e))?);
+    orm_engine::proxy::emit(&orm_engine::proxy::diagnostics(&schema.proxy_models, &out).map_err(db_tagged)?);
     let c = conv(env)?;
     let js = c.js;
     Ok(Raw(match out {
@@ -418,13 +429,13 @@ impl Transaction {
     #[napi]
     pub fn commit<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
         let tx = self.inner.clone();
-        env.spawn_future(async move { tx.commit().await.map_err(|e| tagged(db_kind(&e), e)) })
+        env.spawn_future(async move { tx.commit().await.map_err(db_tagged) })
     }
 
     #[napi]
     pub fn rollback<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
         let tx = self.inner.clone();
-        env.spawn_future(async move { tx.rollback().await.map_err(|e| tagged(db_kind(&e), e)) })
+        env.spawn_future(async move { tx.rollback().await.map_err(db_tagged) })
     }
 }
 
@@ -566,7 +577,7 @@ impl Engine {
     pub fn begin<'env>(&self, env: &'env Env, tx: Option<&Transaction>) -> napi::Result<PromiseRaw<'env, Transaction>> {
         let conn = self.conn(tx);
         env.spawn_future(async move {
-            let inner = conn.begin().await.map_err(|e| tagged(db_kind(&e), e))?;
+            let inner = conn.begin().await.map_err(db_tagged)?;
             Ok(Transaction { inner })
         })
     }
@@ -583,7 +594,7 @@ impl Engine {
         };
         let conn = self.conn(Some(tx));
         env.spawn_future(async move {
-            conn.advisory_lock(key, exclusive, nowait).await.map_err(|e| tagged(db_kind(&e), e))
+            conn.advisory_lock(key, exclusive, nowait).await.map_err(db_tagged)
         })
     }
 
@@ -591,7 +602,7 @@ impl Engine {
     #[napi]
     pub fn execute<'env>(&self, env: &'env Env, sql: String, tx: Option<&Transaction>) -> napi::Result<PromiseRaw<'env, f64>> {
         let conn = self.conn(tx);
-        env.spawn_future(async move { conn.batch(sql).await.map(|n| n as f64).map_err(|e| tagged(db_kind(&e), e)) })
+        env.spawn_future(async move { conn.batch(sql).await.map(|n| n as f64).map_err(db_tagged) })
     }
 
     /// Raw query whose columns are all read as text. For tooling such as the migration
@@ -604,7 +615,7 @@ impl Engine {
         tx: Option<&Transaction>,
     ) -> napi::Result<PromiseRaw<'env, Vec<Vec<Option<String>>>>> {
         let conn = self.conn(tx);
-        env.spawn_future(async move { conn.query_text(sql).await.map_err(|e| tagged(db_kind(&e), e)) })
+        env.spawn_future(async move { conn.query_text(sql).await.map_err(db_tagged) })
     }
 
     #[napi]
@@ -700,7 +711,7 @@ pub fn connect<'env>(
 ) -> napi::Result<PromiseRaw<'env, Engine>> {
     let schema = schema.inner.clone();
     env.spawn_future(async move {
-        let driver = db::connect(&url, max_connections as usize).await.map_err(|e| tagged(db_kind(&e), e))?;
+        let driver = db::connect(&url, max_connections as usize).await.map_err(db_tagged)?;
         if driver.dialect() != schema.dialect {
             driver.close().await;
             return Err(schema_err(format!("schema targets {}, connection uses {}", schema.dialect.name(), driver.dialect().name())));

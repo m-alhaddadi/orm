@@ -681,6 +681,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
     m.add_class::<Transaction>()?;
     m.add("DEFAULT", Py::new(py, DefaultMarker)?)?;
+    errors::add_defaults(py)?;
     m.add("DatabaseError", py.get_type::<errors::DatabaseError>())?;
     m.add("IntegrityError", py.get_type::<errors::IntegrityError>())?;
     m.add("LockNotAvailable", py.get_type::<errors::LockNotAvailable>())?;
