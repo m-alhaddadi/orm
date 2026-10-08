@@ -119,6 +119,15 @@ export async function writes() {
   await post.update({ title: "x", views: Post.views.mul(2) });
   await Post.objects.updateMany([{ id: 1, title: "x" }]);
   await post.tags.add(tag, 3n);
+  await post.tags.add(tag, { throughDefaults: { position: 1 } });
+  const batched = await User.objects.insertMany([{ email: "a", name: "A" }], { batchSize: 10 });
+  same<typeof batched, User[]>();
+  const copied = await User.objects.insertMany([{ email: "a", name: "A" }], { copy: true });
+  same<typeof copied, number>();
+  const [got, created] = await User.objects.getOrInsert({ email: "a" }, { defaults: { name: "A" } });
+  same<typeof got, User>();
+  same<typeof created, boolean>();
+  await User.objects.insert({ email: "a", name: "A" }, { onConflict: User.email, where: User.name.isNull(), doNothing: true });
   // @ts-expect-error a required field is missing
   User.objects.insert({ email: "a" });
   // @ts-expect-error an unknown field

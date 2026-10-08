@@ -372,6 +372,75 @@ pub async fn run_inserts(conn: &dyn Executor, target: Target, mut plans: Vec<Pla
     Ok(Outcome::Rows { model, rows: Box::new(ChainedRows::new(parts)), types, shape: None })
 }
 
+/// A bulk load planned by [`plan_copy`]: run it with [`run_copy`].
+pub struct Copy {
+    table: String,
+    columns: Vec<String>,
+    rows: Vec<Vec<Value>>,
+}
+
+/// Plans `insert_many(rows, copy=True)`: Postgres `COPY ... FROM STDIN (FORMAT binary)`.
+/// `rows` are converted by [`field_types`] (`None`: the column's default); client
+/// defaults fill values first. COPY has no per-row `DEFAULT`, so a field must be set in
+/// every row or in none. COPY writes values as they are, so models whose writes run
+/// native code or SQL templates are rejected.
+pub fn plan_copy(schema: &Schema, target: Target, model: &str, fields: &[String], rows: Vec<Vec<Option<Value>>>) -> Result<Copy> {
+    if target.dialect != orm_core::dialect::Dialect::Postgres {
+        return Err(Error::query("insert_many(copy=True) needs Postgres"));
+    }
+    #[cfg(feature = "model-composition")]
+    if crate::composed::is_composed(schema, model)? {
+        return Err(Error::query("insert_many(copy=True) does not support composed models"));
+    }
+    let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+    #[cfg(feature = "composition")]
+    {
+        crate::ownership::require_local_write(m)?;
+        if !matches!(m.native, orm_core::behavior::NativeModel::None) {
+            return Err(Error::query(format!("insert_many(copy=True): {} has native write behavior; use insert_many()", m.ir.name)));
+        }
+    }
+    let (fields, rows) = crate::client_default::fill(m, fields, rows)?;
+    #[cfg(feature = "file-storage")]
+    crate::file_storage::rows(m, &fields, &rows)?;
+    let mut columns = vec![];
+    let mut keep = vec![];
+    for (i, name) in fields.iter().enumerate() {
+        let f = m.field(name).map_err(query_err)?;
+        if f.write_sql.is_some() && f.enum_name.is_none() {
+            return Err(Error::query(format!("insert_many(copy=True): {}.{name} writes through SQL; use insert_many()", m.ir.name)));
+        }
+        let set = rows.iter().filter(|r| r.get(i).is_some_and(Option::is_some)).count();
+        if set == 0 {
+            continue; // the database default for every row
+        }
+        if set != rows.len() {
+            return Err(Error::query(format!(
+                "insert_many(copy=True): {}.{name} is set in some rows only; COPY has no per-row DEFAULT",
+                m.ir.name
+            )));
+        }
+        columns.push(f.column.clone());
+        keep.push(i);
+    }
+    if columns.is_empty() && !rows.is_empty() {
+        return Err(Error::query("insert_many(copy=True) needs at least one field"));
+    }
+    let rows = rows
+        .into_iter()
+        .map(|mut r| keep.iter().map(|&i| r[i].take().expect("checked above")).collect())
+        .collect();
+    Ok(Copy { table: m.table().to_owned(), columns, rows })
+}
+
+/// Runs a [`plan_copy`] load on `conn` (the pool or a transaction): the rows written.
+pub async fn run_copy(conn: &dyn Executor, copy: Copy) -> Result<u64> {
+    if copy.rows.is_empty() {
+        return Ok(0);
+    }
+    Ok(conn.copy_in(copy.table, copy.columns, copy.rows).await?)
+}
+
 /// `update_many`'s statements, SQL built: run them with [`run_update_many`].
 pub struct UpdateMany {
     pub statements: Vec<(String, Vec<Value>)>,

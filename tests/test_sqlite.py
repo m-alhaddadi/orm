@@ -58,6 +58,18 @@ async def test_crud_relations_defaults_and_upserts(sqlite):
     assert registry.ir()["dialect"] == "sqlite"
 
 
+async def test_bulk_writes(sqlite):
+    db, m, _ = sqlite
+    Author = m["Author"]
+    with pytest.raises(orm.QueryError, match="needs Postgres"):
+        await Author.objects.using(db).insert_many([{"email": "a@x.io", "name": "A"}], copy=True)
+    # 32 766 parameters at most: 20 000 rows of two fields go to two statements.
+    rows = [{"email": f"u{i}@x.io", "name": f"U{i}"} for i in range(20_000)]
+    assert len(await Author.objects.using(db).insert_many(rows)) == 20_000
+    first, created = await Author.objects.using(db).get_or_insert(email="u0@x.io", defaults={"name": "x"})
+    assert not created and first.name == "U0"
+
+
 async def test_outer_through_a_relation_path(sqlite):
     db, m, _ = sqlite
     Author, Book = m["Author"], m["Book"]

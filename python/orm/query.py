@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Unpack, overload
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Unpack, overload
 
 from ._cache import cached
 from .errors import QueryError, TransactionRequired
@@ -31,7 +31,7 @@ from .fields import BelongsTo, HasMany, ManyToMany
 from .pagination import Page
 from .protection import allowed_writes
 from . import debug
-from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, assignments, lookup_values, prepare_rows
+from .write import CopyInsert, Delete, InsertMany, InsertOne, Update, UpdateMany, assignments, lookup_values, prepare_rows
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -816,11 +816,26 @@ class QuerySet(Generic[M]):
 
         return await attach(self, parent_id, values)
 
-    def insert_many(self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None) -> InsertMany[M]:
+    @overload
+    def insert_many(
+        self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: Literal[False] = False
+    ) -> InsertMany[M]: ...
+    @overload
+    def insert_many(self, rows: Iterable[Mapping[str, Any]], *, copy: Literal[True]) -> CopyInsert[M]: ...
+    def insert_many(
+        self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: bool = False
+    ) -> InsertMany[M] | CopyInsert[M]:
         """``INSERT`` many rows; ``await`` gives the new instances. One statement per
         ``batch_size`` rows (by default as many as fit in the parameter limit), all in
-        one transaction."""
+        one transaction.
+
+        ``copy=True`` loads the rows with Postgres ``COPY`` instead, for large imports:
+        ``await`` gives the row count, and ``on_conflict()`` is not available."""
         fields, aligned, provided = prepare_rows(self._model, rows)
+        if copy:
+            if batch_size is not None:
+                raise TypeError("insert_many(copy=True) takes no batch_size: COPY is one statement")
+            return CopyInsert(self, fields, aligned)
         return InsertMany(self, fields, aligned, provided, batch_size=batch_size)
 
     def __repr__(self) -> str:
@@ -988,10 +1003,23 @@ class RelatedSet(QuerySet[M]):
         """Insert a related row pointing at this instance."""
         return super().insert(**values, **self._link())
 
-    def insert_many(self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None) -> InsertMany[M]:
+    @overload
+    def insert_many(
+        self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: Literal[False] = False
+    ) -> InsertMany[M]: ...
+    @overload
+    def insert_many(self, rows: Iterable[Mapping[str, Any]], *, copy: Literal[True]) -> CopyInsert[M]: ...
+    def insert_many(
+        self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: bool = False
+    ) -> InsertMany[M] | CopyInsert[M]:
         """Insert related rows pointing at this instance."""
         link = self._link()
-        return super().insert_many(({**r, **link} for r in rows), batch_size=batch_size)
+        linked = ({**r, **link} for r in rows)
+        if copy:
+            if batch_size is not None:
+                raise TypeError("insert_many(copy=True) takes no batch_size: COPY is one statement")
+            return super().insert_many(linked, copy=True)
+        return super().insert_many(linked, batch_size=batch_size)
 
     def _link(self) -> dict[str, Any]:
         return {self._relation.via: self._instance._field_value(self._relation.from_)}
@@ -1140,7 +1168,9 @@ class ManyRelatedSet(QuerySet[M]):
             f"use {self._model.__name__}.objects.get_or_insert(), then add()"
         )
 
-    def insert_many(self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None) -> InsertMany[M]:
+    def insert_many(  # type: ignore[override]
+        self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: bool = False
+    ) -> InsertMany[M]:
         raise TypeError(
             f"{self._relation.model.__name__}.{self._relation.name}.insert_many() isn't supported; "
             f"insert the rows, then link them with add()"

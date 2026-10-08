@@ -361,6 +361,25 @@ impl Engine {
         })
     }
 
+    /// Bulk load with Postgres `COPY` (`insert_many(rows, copy=True)`); returns the number
+    /// of rows written. `rows` are sequences aligned with `fields`.
+    #[pyo3(signature = (model, fields, rows, tx = None, allowed = vec![]))]
+    fn copy_insert<'py>(
+        &self,
+        py: Python<'py>,
+        model: &str,
+        fields: Vec<String>,
+        rows: &Bound<'py, PyList>,
+        tx: Option<&Bound<'py, Transaction>>,
+        allowed: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
+        let values = convert_rows(&self.schema, model, &fields, rows, true)?;
+        let copy = exec::plan_copy(&self.schema, self.target, model, &fields, values).map_err(engine_err)?;
+        let conn = self.conn(tx);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { exec::run_copy(conn.as_ref(), copy).await.map_err(engine_err) })
+    }
+
     /// Attach local values to an existing shared-key parent.
     #[cfg(feature = "model-composition")]
     #[pyo3(signature = (model, parent_id, fields, rows, tx = None, db = None, allowed = vec![]))]

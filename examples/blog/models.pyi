@@ -14,11 +14,11 @@ from collections.abc import Iterable
 from datetime import datetime
 from decimal import Decimal
 from enum import IntEnum, StrEnum
-from typing import ClassVar, NotRequired, Required, TypedDict
+from typing import ClassVar, Literal, NotRequired, Required, TypedDict, overload
 
 from typing_extensions import Unpack
 
-from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update, UpdateMany
+from orm import ColumnRef, CopyInsert, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update, UpdateMany
 from orm import fields as f
 
 # -- Role -------------------------------------------------------------------------------
@@ -81,7 +81,10 @@ class UserUpdateRow(TypedDict, total=False):
 
 class UserQuerySet(QuerySet[User]):
     def insert(self, **values: Unpack[UserInsert]) -> InsertOne[User]: ...  # type: ignore[override]
-    def insert_many(self, rows: Iterable[UserInsert], *, batch_size: int | None = None) -> InsertMany[User]: ...  # type: ignore[override]
+    @overload  # type: ignore[override]
+    def insert_many(self, rows: Iterable[UserInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[User]: ...
+    @overload
+    def insert_many(self, rows: Iterable[UserInsert], *, copy: Literal[True]) -> CopyInsert[User]: ...
     def update(self, **values: Unpack[UserUpdate]) -> Update[User]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[UserUpdateRow], *, batch_size: int | None = None) -> UpdateMany[User]: ...  # type: ignore[override]
 
@@ -136,7 +139,10 @@ class ProfileUpdateRow(TypedDict, total=False):
 
 class ProfileQuerySet(QuerySet[Profile]):
     def insert(self, **values: Unpack[ProfileInsert]) -> InsertOne[Profile]: ...  # type: ignore[override]
-    def insert_many(self, rows: Iterable[ProfileInsert], *, batch_size: int | None = None) -> InsertMany[Profile]: ...  # type: ignore[override]
+    @overload  # type: ignore[override]
+    def insert_many(self, rows: Iterable[ProfileInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[Profile]: ...
+    @overload
+    def insert_many(self, rows: Iterable[ProfileInsert], *, copy: Literal[True]) -> CopyInsert[Profile]: ...
     def update(self, **values: Unpack[ProfileUpdate]) -> Update[Profile]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[ProfileUpdateRow], *, batch_size: int | None = None) -> UpdateMany[Profile]: ...  # type: ignore[override]
 
@@ -207,7 +213,10 @@ class PostUpdateRow(TypedDict, total=False):
 
 class PostQuerySet(QuerySet[Post]):
     def insert(self, **values: Unpack[PostInsert]) -> InsertOne[Post]: ...  # type: ignore[override]
-    def insert_many(self, rows: Iterable[PostInsert], *, batch_size: int | None = None) -> InsertMany[Post]: ...  # type: ignore[override]
+    @overload  # type: ignore[override]
+    def insert_many(self, rows: Iterable[PostInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[Post]: ...
+    @overload
+    def insert_many(self, rows: Iterable[PostInsert], *, copy: Literal[True]) -> CopyInsert[Post]: ...
     def update(self, **values: Unpack[PostUpdate]) -> Update[Post]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[PostUpdateRow], *, batch_size: int | None = None) -> UpdateMany[Post]: ...  # type: ignore[override]
 
@@ -268,7 +277,10 @@ class CommentUpdateRow(TypedDict, total=False):
 
 class CommentQuerySet(QuerySet[Comment]):
     def insert(self, **values: Unpack[CommentInsert]) -> InsertOne[Comment]: ...  # type: ignore[override]
-    def insert_many(self, rows: Iterable[CommentInsert], *, batch_size: int | None = None) -> InsertMany[Comment]: ...  # type: ignore[override]
+    @overload  # type: ignore[override]
+    def insert_many(self, rows: Iterable[CommentInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[Comment]: ...
+    @overload
+    def insert_many(self, rows: Iterable[CommentInsert], *, copy: Literal[True]) -> CopyInsert[Comment]: ...
     def update(self, **values: Unpack[CommentUpdate]) -> Update[Comment]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[CommentUpdateRow], *, batch_size: int | None = None) -> UpdateMany[Comment]: ...  # type: ignore[override]
 
@@ -310,7 +322,10 @@ class TagUpdateRow(TypedDict, total=False):
 
 class TagQuerySet(QuerySet[Tag]):
     def insert(self, **values: Unpack[TagInsert]) -> InsertOne[Tag]: ...  # type: ignore[override]
-    def insert_many(self, rows: Iterable[TagInsert], *, batch_size: int | None = None) -> InsertMany[Tag]: ...  # type: ignore[override]
+    @overload  # type: ignore[override]
+    def insert_many(self, rows: Iterable[TagInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[Tag]: ...
+    @overload
+    def insert_many(self, rows: Iterable[TagInsert], *, copy: Literal[True]) -> CopyInsert[Tag]: ...
     def update(self, **values: Unpack[TagUpdate]) -> Update[Tag]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[TagUpdateRow], *, batch_size: int | None = None) -> UpdateMany[Tag]: ...  # type: ignore[override]
 
@@ -367,7 +382,10 @@ class PostTagUpdateRow(TypedDict, total=False):
 
 class PostTagQuerySet(QuerySet[PostTag]):
     def insert(self, **values: Unpack[PostTagInsert]) -> InsertOne[PostTag]: ...  # type: ignore[override]
-    def insert_many(self, rows: Iterable[PostTagInsert], *, batch_size: int | None = None) -> InsertMany[PostTag]: ...  # type: ignore[override]
+    @overload  # type: ignore[override]
+    def insert_many(self, rows: Iterable[PostTagInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[PostTag]: ...
+    @overload
+    def insert_many(self, rows: Iterable[PostTagInsert], *, copy: Literal[True]) -> CopyInsert[PostTag]: ...
     def update(self, **values: Unpack[PostTagUpdate]) -> Update[PostTag]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[PostTagUpdateRow], *, batch_size: int | None = None) -> UpdateMany[PostTag]: ...  # type: ignore[override]
 

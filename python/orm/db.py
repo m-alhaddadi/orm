@@ -63,6 +63,12 @@ class Database:
             None if where is None else json.dumps(where),
         )
 
+    async def _copy(self, model: str, fields: list[str], rows: list[list[Any]]) -> int:
+        if debug._scope.get() is not None:
+            debug.record(f"copy:{model}:{fields}", lambda: f"COPY {model} ({', '.join(fields)}) FROM STDIN (FORMAT binary)")
+        n: int = await self._engine.copy_insert(model, fields, rows, self._tx(), allowed_writes())
+        return n
+
     async def _update_many(
         self,
         model: str,

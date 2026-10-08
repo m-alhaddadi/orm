@@ -555,6 +555,16 @@ await post.refresh()
   the database accepts (65,535 on Postgres, 32,766 on SQLite).
   `insert_many(rows, batch_size=n)` sets a lower number of rows for each statement.
   All the statements run in one transaction (or in the current one).
+* `insert_many(rows, copy=True)` loads the rows with Postgres
+  `COPY ... FROM STDIN (FORMAT binary)`, for large imports. `await` gives the row
+  count, not instances. It is one statement: a duplicate key stops the whole load and
+  no row is written. Client defaults fill values first; a field must be set in every
+  row or in none, because COPY has no per-row `DEFAULT`. `on_conflict()`,
+  `batch_size`, SQLite, composed models, models with native write behavior and fields
+  that write through an SQL template (other than enums) raise.
+  `bench/copy_insert.py` compares it with `insert_many(rows)`: 200,000 posts in 1.6 s
+  against 3.2 s (measured once on a loaded machine; the batched insert also builds
+  the instances).
 * `on_conflict(*columns, where=cond)` picks a partial unique index:
   `.on_conflict(Task.shop, Task.task_type, where=Task.deleted_at.is_null())` gives
   `ON CONFLICT (shop, task_type) WHERE deleted_at IS NULL`. Postgres uses the

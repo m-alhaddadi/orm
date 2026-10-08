@@ -536,6 +536,25 @@ impl Engine {
         )
     }
 
+    /// Bulk load with Postgres `COPY` (`insertMany(rows, { copy: true })`); the promise
+    /// gives the number of rows written. `rows` are arrays aligned with `fields`.
+    #[napi]
+    pub fn copy_insert<'env>(
+        &self,
+        env: &'env Env,
+        model: String,
+        fields: Vec<String>,
+        rows: Unknown<'_>,
+        tx: Option<&Transaction>,
+        allowed: Option<Vec<String>>,
+    ) -> napi::Result<PromiseRaw<'env, f64>> {
+        protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
+        let values = convert_rows(env, &self.schema, &model, &fields, rows, true)?;
+        let copy = exec::plan_copy(&self.schema, self.target, &model, &fields, values).map_err(engine_err)?;
+        let conn = self.conn(tx);
+        env.spawn_future(async move { exec::run_copy(conn.as_ref(), copy).await.map(|n| n as f64).map_err(engine_err) })
+    }
+
     /// Updates each row (an array aligned with `fields`, the primary key first) to its
     /// own values, among the rows matching `filtersJson`. Several statements run in one
     /// transaction (inside `tx` when given). Gives the number of rows updated, or

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DatabaseError, IntegrityError, connect, getDatabase } from "../src/index.js";
+import { DatabaseError, Decimal, IntegrityError, connect, getDatabase } from "../src/index.js";
 import { Comment, Post, PostTag, Profile, Tag, User } from "./blog/models.js";
 import { DATABASE_URL, useDatabase } from "./helpers.js";
 
@@ -163,4 +163,50 @@ test("throughDefaults cannot set the link keys", async () => {
     await assert.rejects(post.tags.add(tag, { throughDefaults: { [key]: 1 } }), /link's key/);
   }
   assert.equal(await PostTag.objects.count(), 0);
+});
+
+// -- COPY -----------------------------------------------------------------------------------------
+
+test("insertMany copy loads many rows", async () => {
+  const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+  const rows = Array.from({ length: 100_000 }, (_, i) => ({ author: alice, title: `t${i}`, body: "b", views: i }));
+  assert.equal(await Post.objects.insertMany(rows, { copy: true }), 100_000);
+  assert.equal(await Post.objects.count(), 100_000);
+  const last = await Post.objects.get(Post.title.eq("t99999"));
+  assert.equal(last.views, 99_999);
+  assert.equal(last.published, false);
+});
+
+test("insertMany copy column types", async () => {
+  const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+  assert.equal(await Profile.objects.insertMany([{ user: alice, role: "admin", balance: new Decimal("12.50"), links: ["x", "y"] }], { copy: true }), 1);
+  const p = await Profile.objects.get(Profile.userId.eq(alice.id));
+  assert.equal(p.role, "admin");
+  assert.equal(p.balance.toString(), "12.5");
+  assert.deepEqual(p.links, ["x", "y"]);
+});
+
+test("insertMany copy stops at a duplicate key", async () => {
+  await Tag.objects.insert({ name: "taken" });
+  const rows = [...Array.from({ length: 1000 }, (_, i) => ({ name: `n${i}` })), { name: "taken" }];
+  await assert.rejects(Tag.objects.insertMany(rows, { copy: true }), IntegrityError);
+  assert.equal(await Tag.objects.count(), 1);
+});
+
+test("insertMany copy in a transaction", async () => {
+  await assert.rejects(
+    getDatabase().transaction(async () => {
+      assert.equal(await Tag.objects.insertMany([{ name: "a" }, { name: "b" }], { copy: true }), 2);
+      assert.equal(await Tag.objects.count(), 2);
+      throw new RangeError("roll back");
+    }),
+    RangeError,
+  );
+  assert.equal(await Tag.objects.count(), 0);
+});
+
+test("insertMany copy rejections", async () => {
+  await assert.rejects(Tag.objects.insertMany([{ name: "a" }], { copy: true, onConflict: Tag.name } as never), /onConflict/);
+  await assert.rejects(Tag.objects.insertMany([{ name: "a" }, { name: "b", priority: 1 }], { copy: true }), /some rows only/);
+  assert.equal(await Tag.objects.insertMany([], { copy: true }), 0);
 });

@@ -3,9 +3,10 @@ links with extra fields, COPY."""
 
 import asyncio
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
-from blog.models import Comment, Post, PostTag, Profile, Tag, User
+from blog.models import Comment, Post, PostTag, Priority, Profile, Role, Tag, User
 
 import orm
 from conftest import DATABASE_URL
@@ -165,3 +166,57 @@ async def test_through_defaults_cannot_set_the_link_keys(clean):
         with pytest.raises(TypeError, match="link's key"):
             await post.tags.add(tag, through_defaults={key: 1})
     assert await PostTag.objects.count() == 0
+
+
+# -- COPY -------------------------------------------------------------------------------------
+
+
+async def test_copy_loads_many_rows(clean):
+    alice = await User.objects.insert(email="a@x.io", name="A")
+    rows = [{"author": alice, "title": f"t{i}", "body": "b", "views": i} for i in range(100_000)]
+    assert await Post.objects.insert_many(rows, copy=True) == 100_000
+    assert await Post.objects.count() == 100_000
+    last = await Post.objects.get(Post.title == "t99999")
+    assert last.views == 99_999 and last.published is False and last.created_at is not None
+
+
+async def test_copy_column_types(clean):
+    # A native enum, a decimal, a text array, and an int-stored enum.
+    alice = await User.objects.insert(email="a@x.io", name="A")
+    bob = await User.objects.insert(email="b@x.io", name="B")
+    rows = [
+        {"user": alice, "role": Role.admin, "balance": Decimal("12.50"), "links": ["x", "y"]},
+        {"user": bob, "role": Role.member, "balance": Decimal("0"), "links": []},
+    ]
+    assert await Profile.objects.insert_many(rows, copy=True) == 2
+    p = await Profile.objects.get(Profile.user_id == alice.id)
+    assert (p.role, p.balance, p.links) == (Role.admin, Decimal("12.50"), ["x", "y"])
+    assert await Tag.objects.insert_many([{"name": "a", "priority": Priority.high}], copy=True) == 1
+    assert (await Tag.objects.get(Tag.name == "a")).priority == Priority.high
+
+
+async def test_copy_stops_at_a_duplicate_key(clean):
+    await Tag.objects.insert(name="taken")
+    rows = [{"name": f"n{i}"} for i in range(1000)] + [{"name": "taken"}]
+    with pytest.raises(orm.IntegrityError):
+        await Tag.objects.insert_many(rows, copy=True)
+    assert await Tag.objects.count() == 1
+
+
+async def test_copy_in_a_transaction(clean):
+    with pytest.raises(RuntimeError):
+        async with clean.transaction():
+            assert await Tag.objects.insert_many([{"name": "a"}, {"name": "b"}], copy=True) == 2
+            assert await Tag.objects.count() == 2
+            raise RuntimeError
+    assert await Tag.objects.count() == 0
+
+
+async def test_copy_rejections(clean):
+    with pytest.raises(TypeError, match="on_conflict"):
+        Tag.objects.insert_many([{"name": "a"}], copy=True).on_conflict(Tag.name)
+    with pytest.raises(TypeError, match="batch_size"):
+        Tag.objects.insert_many([{"name": "a"}], copy=True, batch_size=2)  # type: ignore[call-overload]
+    with pytest.raises(orm.QueryError, match="some rows only"):
+        await Tag.objects.insert_many([{"name": "a"}, {"name": "b", "priority": Priority.low}], copy=True)
+    assert await Tag.objects.insert_many([], copy=True) == 0

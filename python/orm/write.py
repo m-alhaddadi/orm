@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Generator, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeVar
 
 from . import _native
 from .expr import ColumnRef, ConditionLike, Expression, IRContext, as_condition
@@ -37,6 +37,7 @@ M = TypeVar("M", bound="Model")
 __all__ = [
     "InsertOne",
     "InsertMany",
+    "CopyInsert",
     "OnConflictOne",
     "OnConflictMany",
     "Update",
@@ -273,6 +274,42 @@ class InsertMany(_Insert, Generic[M]):
     def __await__(self) -> Generator[Any, None, list[M]]:
         self._used = True
         return self._execute().__await__()
+
+
+class CopyInsert(Generic[M]):
+    """``insert_many(rows, copy=True)``: a Postgres ``COPY``. ``await`` gives the number
+    of rows written; there is no ``RETURNING``, so no instances."""
+
+    __slots__ = ("_qs", "_fields", "_rows", "_used")
+
+    def __init__(self, qs: QuerySet[M], fields: list[str], rows: list[list[Any]]) -> None:
+        self._qs = qs
+        self._fields = fields
+        self._rows = rows
+        self._used = False
+
+    def on_conflict(self, *columns: ColumnRef[Any], where: ConditionLike | None = None) -> NoReturn:
+        self._used = True
+        raise TypeError("insert_many(copy=True) can't be combined with on_conflict(); COPY stops at the first conflict")
+
+    async def _count(self) -> int:
+        from .db import resolve
+
+        if not self._rows:
+            return 0
+        n: int = await resolve(self._qs._db)._copy(self._qs.model._meta.name, self._fields, self._rows)
+        return n
+
+    def __await__(self) -> Generator[Any, None, int]:
+        self._used = True
+        return self._count().__await__()
+
+    def __del__(self) -> None:
+        if not getattr(self, "_used", True):
+            warnings.warn(f"{self!r} was never awaited, so nothing was inserted", RuntimeWarning, stacklevel=2)
+
+    def __repr__(self) -> str:
+        return f"<CopyInsert {self._qs.model.__name__} x{len(self._rows)}>"
 
 
 class _OnConflict:

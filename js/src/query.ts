@@ -221,6 +221,11 @@ export interface BatchOptions {
 
 type InsertManyOptions<M extends ModelSpec> = (InsertOptions<M> & BatchOptions) | BatchOptions;
 
+/** `insertMany(rows, { copy: true })`: a Postgres `COPY`. */
+export interface CopyOptions {
+  readonly copy: true;
+}
+
 // -- prefetch -------------------------------------------------------------------------------------
 
 /**
@@ -1160,8 +1165,29 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   /** `INSERT` many rows; gives the new instances in input order (rows skipped by
    * `doNothing` are left out). Rows beyond the parameter limit, or beyond `batchSize`,
    * go to further statements in one transaction. */
-  insertMany(rows: readonly M["insert"][], options?: InsertManyOptions<M>): Promise<M["row"][]> {
-    return this.insertRows(rows, options);
+  insertMany(rows: readonly M["insert"][], options?: InsertManyOptions<M>): Promise<M["row"][]>;
+  /** `{ copy: true }`: load the rows with Postgres `COPY`, for large imports; gives the
+   * row count. No `onConflict`, no instances. */
+  insertMany(rows: readonly M["insert"][], options: CopyOptions): Promise<number>;
+  insertMany(rows: readonly M["insert"][], options?: InsertManyOptions<M> | CopyOptions): Promise<M["row"][] | number> {
+    if (options && "copy" in options && options.copy) {
+      return this.copyRows(rows, options);
+    }
+    return this.insertRows(rows, options as InsertManyOptions<M> | undefined);
+  }
+
+  /** @internal */
+  protected async copyRows(rows: readonly object[], options: CopyOptions): Promise<number> {
+    if ("onConflict" in options || "batchSize" in options) {
+      throw new TypeError("insertMany(rows, { copy: true }) can't be combined with onConflict or batchSize");
+    }
+    const prepared = prepareRows(this.meta, rows);
+    if (!prepared.rows.length) {
+      return 0;
+    }
+    const db = this.db();
+    if (debugging()) record(`copy:${this.meta.name}:${prepared.fields}`, () => `COPY ${this.meta.name} (${prepared.fields.join(", ")}) FROM STDIN (FORMAT binary)`);
+    return (await db_wait(db, (tx) => db.engine.copyInsert(this.meta.name, prepared.fields, prepared.rows, tx, allowedWrites()))) as number;
   }
 
   /**
@@ -1450,10 +1476,17 @@ export class RelatedSet<M extends ModelSpec, L extends string = never> extends Q
   }
 
   /** Inserts related rows pointing at this instance. */
-  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: InsertManyOptions<M>): Promise<M["row"][]> {
+  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: InsertManyOptions<M>): Promise<M["row"][]>;
+  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options: CopyOptions): Promise<number>;
+  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: InsertManyOptions<M> | CopyOptions): Promise<M["row"][] | number> {
     const link = this.link();
-    return this.insertRows(rows.map((r) => ({ ...r, ...link })), options);
+    const linked = rows.map((r) => ({ ...r, ...link }));
+    if (options && "copy" in options && options.copy) {
+      return this.copyRows(linked, options);
+    }
+    return this.insertRows(linked, options as InsertManyOptions<M> | undefined);
   }
+
 }
 
 /** Options of a many-to-many `add()` / `set()`. */

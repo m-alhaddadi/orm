@@ -114,6 +114,12 @@ pub trait Executor: Send + Sync {
     }
     /// A transaction, or a savepoint when called on a transaction.
     fn begin(&self) -> BoxFuture<'_, DbResult<Arc<dyn Transaction>>>;
+    /// Bulk load: `COPY table (columns) FROM STDIN`, one value per column in each row.
+    /// Gives the number of rows written.
+    fn copy_in(&self, table: String, columns: Vec<String>, rows: Vec<Vec<Value>>) -> BoxFuture<'_, DbResult<u64>> {
+        let _ = (table, columns, rows);
+        Box::pin(async { Err(DbError::other("COPY is not supported by this database")) })
+    }
 }
 
 pub trait Transaction: Executor {
