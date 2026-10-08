@@ -296,9 +296,11 @@ pub struct JsSchema {
 
 #[napi]
 impl JsSchema {
-    /// Converts and plans a single-row insert without SQL or I/O (`prepareInsert`).
+    /// Converts and plans a single-row insert without SQL or I/O (`prepareInsert`); the
+    /// write protection check runs here too, before a caller's own I/O.
     #[napi]
-    pub fn validate_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>) -> napi::Result<()> {
+    pub fn validate_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>, allowed: Vec<String>) -> napi::Result<()> {
+        protect::ensure_writable(&self.inner, &model, &allowed).map_err(engine_err)?;
         let values = convert_rows(env, &self.inner, &model, &fields, rows, true)?;
         exec::plan_insert(&self.inner, Target::new(self.inner.dialect), &model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
         Ok(())
@@ -307,8 +309,11 @@ impl JsSchema {
     /// Plans an update without SQL or I/O; true when its filters pin one row by a
     /// non-null primary key or unique field (`prepareUpdate`).
     #[napi]
-    pub fn unique_row_update(&self, env: &Env, op_json: String, params_: Unknown<'_>) -> napi::Result<bool> {
+    pub fn unique_row_update(&self, env: &Env, op_json: String, params_: Unknown<'_>, allowed: Vec<String>) -> napi::Result<bool> {
         let op = parse_op(&op_json).map_err(engine_err)?;
+        if let ir::Operation::Update(ir::Update { model, .. }) = &op {
+            protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
+        }
         let p = params(env, params_)?;
         plan::unique_row_update(&self.inner, Target::new(self.inner.dialect), &op, &p).map_err(engine_err)
     }

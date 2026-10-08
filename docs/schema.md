@@ -464,13 +464,14 @@ model Post {
 * Reads are not changed.
 * `@@protected_write` creates no trigger, no grant and no DDL. Migrations ignore it.
 
-A database-level option is a trigger that rejects writes (PostgreSQL):
+A database-level option is a trigger that rejects writes (PostgreSQL).
+It rejects every writer, also the service that should write; exempt that service with a database role or grants, not with this trigger:
 
 ```prisma
 model Post {
   id    Int    @id
   title String
-  @@trigger(read_only, before: [insert, update, delete], body: "BEGIN RAISE EXCEPTION 'posts are written only by the publishing service'; END;")
+  @@trigger(read_only, before: [insert, update, delete], body: "BEGIN RAISE EXCEPTION 'posts are read-only'; END;")
 }
 ```
 

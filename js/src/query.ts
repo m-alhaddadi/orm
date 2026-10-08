@@ -41,7 +41,7 @@ import { call, wait, type NativeReturned, type NativeSelect } from "./native.js"
 import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
 import { after, decodeCursor, encodeCursor, fingerprint, keyset, type Page, type PageOptions } from "./pagination.js";
 import { allowedWrites } from "./protection.js";
-import { active as debugging, record, relationLoad } from "./debug.js";
+import { active as debugging, internalLoop, record, relationLoad } from "./debug.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
 import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./select.js";
 
@@ -686,9 +686,10 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     }
     const pk = this.meta.column(this.meta.pk);
     let last: unknown = undefined;
+    const seen = new Set<string>();
     for (;;) {
       const page = last === undefined ? this : this.clone({ filters: [...this.state.filters, pk.gt(last as never)] });
-      const objs = (await page.clone({ order: [pk.asc()], limit: size }).fetch()) as R[];
+      const objs = (await internalLoop(seen, () => page.clone({ order: [pk.asc()], limit: size }).fetch())) as R[];
       if (objs.length) {
         yield objs;
       }
@@ -1004,8 +1005,9 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       return out;
     }
     const keys = [...new Set(ids)];
+    const seen = new Set<string>();
     for (let i = 0; i < keys.length; i += IN_BULK_CHUNK) {
-      add(await this.clone({ modelHelpers: [...(this.state.modelHelpers ?? []), col.field.ir], filters: [...this.state.filters, col.in(keys.slice(i, i + IN_BULK_CHUNK) as never)] }).fetch());
+      add(await internalLoop(seen, () => this.clone({ modelHelpers: [...(this.state.modelHelpers ?? []), col.field.ir], filters: [...this.state.filters, col.in(keys.slice(i, i + IN_BULK_CHUNK) as never)] }).fetch()));
     }
     return out;
   }
@@ -1041,7 +1043,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     this.db();
     const params: unknown[] = [];
     const ir = this.mutationIr("update", params, values);
-    const unique = call(() => this.meta.registry.native().uniqueRowUpdate(JSON.stringify(ir), params));
+    const unique = call(() => this.meta.registry.native().uniqueRowUpdate(JSON.stringify(ir), params, allowedWrites()));
     return { unique, execute: (data = values, options = {}) => this.updateValues(data, options.returning ?? false) };
   }
 
@@ -1135,7 +1137,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   prepareInsert(values: M["insert"]): PreparedInsert<M> {
     this.db();
     const prepared = prepareRows(this.meta, [values]);
-    call(() => this.meta.registry.native().validateInsert(this.meta.name, prepared.fields, prepared.rows));
+    call(() => this.meta.registry.native().validateInsert(this.meta.name, prepared.fields, prepared.rows, allowedWrites()));
     return { execute: async (data = values) => (await this.insertRows([data], undefined))[0]! };
   }
 
@@ -1430,6 +1432,10 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     const pristine = s.filters.length === 1 && !s.order.length && s.limit === undefined && s.offset === undefined && !s.prefetch.length && !s.related.length;
     if (rows !== undefined && pristine) {
       return [...rows] as M["row"][];
+    }
+    if (debugging() && pristine) {
+      const owner = (this.instance.constructor as unknown as { meta: { name: string } }).meta.name;
+      return relationLoad(owner, this.relation.name, "prefetchRelated", () => super.fetch());
     }
     return super.fetch();
   }

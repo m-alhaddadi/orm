@@ -15,11 +15,16 @@ const none: readonly string[] = [];
  * scope too. It starts no transaction. Gives what `fn` gives.
  */
 export function allowWrites<T>(models: readonly { readonly _meta: ModelMeta }[], fn: () => Promise<T>): Promise<T> {
-  const names = models.map((m: unknown) => {
-    const meta = typeof m === "object" && m !== null ? (m as { _meta?: ModelMeta })._meta : undefined;
-    if (!meta) throw new TypeError("allowWrites() takes models");
-    return meta.name;
-  });
+  // A Promise API: wrong arguments reject, they do not throw.
+  if (!Array.isArray(models) || typeof fn !== "function") {
+    return Promise.reject(new TypeError("allowWrites() takes a list of models and a function: allowWrites([Post], async () => ...)"));
+  }
+  const names: string[] = [];
+  for (const m of models as readonly unknown[]) {
+    const meta = (typeof m === "object" || typeof m === "function") && m !== null ? (m as { _meta?: ModelMeta })._meta : undefined;
+    if (!meta) return Promise.reject(new TypeError(`allowWrites() takes models, got ${String(m)}`));
+    names.push(meta.name);
+  }
   return scope.run([...allowedWrites(), ...names], fn);
 }
 

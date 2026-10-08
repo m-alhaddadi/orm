@@ -13,6 +13,8 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
+from . import debug
+
 T = TypeVar("T")
 
 
@@ -23,6 +25,6 @@ async def cached(owner: Any, fetch: Callable[[], Coroutine[Any, Any, list[T]]], 
     loop = asyncio.get_running_loop()
     task: asyncio.Task[list[T]] | None = owner._result
     if task is None or task.get_loop() is not loop or (task.done() and (task.cancelled() or task.exception() is not None)):
-        task = loop.create_task(fetch())
+        task = debug.spawn(loop, fetch())
         owner._result = task
     return list(await asyncio.shield(task))

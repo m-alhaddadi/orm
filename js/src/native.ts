@@ -65,8 +65,8 @@ export interface NativeTransaction {
 }
 
 export interface NativeSchema {
-  validateInsert(model: string, fields: string[], rows: unknown[][]): void;
-  uniqueRowUpdate(opJson: string, params: unknown[]): boolean;
+  validateInsert(model: string, fields: string[], rows: unknown[][], allowed: readonly string[]): void;
+  uniqueRowUpdate(opJson: string, params: unknown[], allowed: readonly string[]): boolean;
   sql(opJson: string, params: unknown[]): string;
   statement(opJson: string, params: unknown[]): string;
   updateManySql(

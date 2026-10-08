@@ -22,6 +22,9 @@ export interface Shape {
   readonly fix: string | null;
 }
 
+/** Longer SQL, such as a chunk of 10 000 placeholders, is cut in the message. */
+const sqlLimit = 500;
+
 /** The queries of one {@link nPlusOne} scope, by shape. */
 export class Report {
   readonly shapes = new Map<string, Shape>();
@@ -33,7 +36,8 @@ export class Report {
   }
 
   message(): string {
-    return this.repeated.map((s) => `${s.count} queries with one shape \`${s.sql}\`\n  at ${s.site}${s.fix ? `; use ${s.fix}` : ""}`).join("\n");
+    const cut = (sql: string) => (sql.length <= sqlLimit ? sql : `${sql.slice(0, sqlLimit)} ...`);
+    return this.repeated.map((s) => `${s.count} queries with one shape \`${cut(s.sql)}\`\n  at ${s.site}${s.fix ? `; use ${s.fix}` : ""}`).join("\n");
   }
 }
 
@@ -53,7 +57,11 @@ export interface NPlusOneOptions {
 }
 
 const scope = new AsyncLocalStorage<Report>();
+/** The reports of the enclosing scopes, which count the inner queries too. */
+const outers = new AsyncLocalStorage<readonly Report[]>();
 const hint = new AsyncLocalStorage<{ readonly fix: string; readonly site: string }>();
+/** The shapes that the current internal ORM loop (batches, chunked inBulk) already counted. */
+const loop = new AsyncLocalStorage<Set<string>>();
 const here = dirname(fileURLToPath(import.meta.url)) + sep;
 
 /**
@@ -66,7 +74,9 @@ const here = dirname(fileURLToPath(import.meta.url)) + sep;
 export async function nPlusOne<T>(fn: () => Promise<T>, options: NPlusOneOptions = {}): Promise<T> {
   const report = new Report(options.threshold ?? 5);
   if (!(report.threshold >= 1)) throw new RangeError("threshold must be at least 1");
-  const result = await scope.run(report, fn);
+  const current = scope.getStore();
+  const enclosing = current ? [...(outers.getStore() ?? []), current] : (outers.getStore() ?? []);
+  const result = await outers.run(enclosing, () => scope.run(report, fn));
   if (report.repeated.length) {
     if (options.fail) throw new NPlusOne(report);
     process.emitWarning(report.message(), { type: "NPlusOneWarning" });
@@ -96,6 +106,11 @@ export function callSite(): string {
   return "<unknown>";
 }
 
+/** @internal Counts each shape of `fn` once for the ORM loop that owns `seen`: its pages are one query to the user. */
+export function internalLoop<T>(seen: Set<string>, fn: () => Promise<T>): Promise<T> {
+  return loop.run(seen, fn);
+}
+
 /** @internal Marks the queries of a relation load, so the report names the fix. */
 export function relationLoad<T>(model: string, relation: string, fix: string, fn: () => Promise<T>): Promise<T> {
   return hint.run({ fix: `${fix}(${model}.${relation})`, site: callSite() }, fn);
@@ -105,6 +120,11 @@ export function relationLoad<T>(model: string, relation: string, fix: string, fn
 export function record(key: string, sql: () => string): void {
   const report = scope.getStore();
   if (report === undefined) return;
+  const seen = loop.getStore();
+  if (seen !== undefined) {
+    if (seen.has(key)) return;
+    seen.add(key);
+  }
   let shape = report.shapes.get(key);
   if (shape === undefined) {
     const h = hint.getStore();
@@ -112,4 +132,12 @@ export function record(key: string, sql: () => string): void {
     report.shapes.set(key, shape);
   }
   shape.count++;
+  for (const outer of outers.getStore() ?? []) {
+    let counted = outer.shapes.get(key);
+    if (counted === undefined) {
+      counted = { key, sql: shape.sql, count: 0, site: shape.site, fix: shape.fix };
+      outer.shapes.set(key, counted);
+    }
+    counted.count++;
+  }
 }

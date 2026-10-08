@@ -478,9 +478,12 @@ class QuerySet(Generic[M]):
             raise QueryError("batches() can't be used on a sliced query set")
         pk = self._model._meta.pk_ref()
         last: Any = None
+        seen: set[str] = set()
         while True:
             page = self if last is None else self.filter(pk > last)
-            objs = await page.order_by(pk)[:size]._fetch()
+            # No `yield` inside: the loop scope must not reach the consumer's queries.
+            with debug.internal_loop(seen):
+                objs = await page.order_by(pk)[:size]._fetch()
             if objs:
                 yield objs
             if len(objs) < size:
@@ -749,8 +752,11 @@ class QuerySet(Generic[M]):
             return {o._field_value(name): o for o in await self._clone(_model_helpers=(*self._model_helpers, name))._fetch()}
         keys = list(dict.fromkeys(ids))
         out: dict[Any, M] = {}
+        seen: set[str] = set()
         for i in range(0, len(keys), IN_BULK_CHUNK):
-            for o in await self.filter(col.in_(keys[i : i + IN_BULK_CHUNK]))._clone(_model_helpers=(*self._model_helpers, name))._fetch():
+            with debug.internal_loop(seen):
+                chunk = await self.filter(col.in_(keys[i : i + IN_BULK_CHUNK]))._clone(_model_helpers=(*self._model_helpers, name))._fetch()
+            for o in chunk:
                 out[o._field_value(name)] = o
         return out
 
@@ -1010,6 +1016,9 @@ class ManyRelatedSet(QuerySet[M]):
         pristine = len(self._filters) == 1 and not self._order and self._limit is None and self._offset is None
         if rows is not None and pristine and not self._prefetch and not self._related:
             return list(rows)
+        if debug._scope.get() is not None and pristine:
+            with debug.relation_load(self._relation.model.__name__, self._relation.name, "prefetch_related"):
+                return await super()._fetch()
         return await super()._fetch()
 
     # -- links ------------------------------------------------------------------------------

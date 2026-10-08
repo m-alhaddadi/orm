@@ -131,7 +131,9 @@ impl PySchema {
     }
 
     /// Converts and plans a single-row insert without SQL or I/O (`orm.hooks.prepare_insert`).
-    fn validate_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>) -> PyResult<()> {
+    /// `allowed`: the write protection check runs here too, before a caller's own I/O.
+    fn validate_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>, allowed: Vec<String>) -> PyResult<()> {
+        protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
         let values = convert_rows(&self.inner, model, &fields, rows, true)?;
         exec::plan_insert(&self.inner, Target::new(self.inner.dialect), model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
         Ok(())
@@ -139,8 +141,11 @@ impl PySchema {
 
     /// Plans an update without SQL or I/O; true when its filters pin one row by a
     /// non-null primary key or unique field (`orm.hooks.prepare_update`).
-    fn unique_row_update(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<bool> {
+    fn unique_row_update(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>, allowed: Vec<String>) -> PyResult<bool> {
         let op = parse_op(op_json).map_err(engine_err)?;
+        if let Operation::Update(ir::Update { model, .. }) = &op {
+            protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
+        }
         plan::unique_row_update(&self.inner, Target::new(self.inner.dialect), &op, &PyParams(&params)).map_err(engine_err)
     }
 

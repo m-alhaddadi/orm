@@ -80,7 +80,15 @@ test("the check is on the model the SQL writes; scopes nest; work started inside
     let started!: Promise<unknown>;
     await allowWrites([Post], async () => { started = Post.objects.using(db).insert({ id: 2, title: "b" }); });
     await started;
-    assert.throws(() => allowWrites(["Post"] as never, async () => {}), TypeError);
+    await assert.rejects(allowWrites(["Post"] as never, async () => {}), TypeError);
+    await assert.rejects(allowWrites(Post as never, async () => {}), /takes a list of models and a function/);
+    // A package checks its write with prepareInsert/prepareUpdate before its own I/O (file uploads).
+    assert.throws(() => Post.objects.using(db).prepareInsert({ id: 3, title: "c" }), WriteProtected);
+    assert.throws(() => Post.objects.using(db).filter(Post.id.eq(1)).prepareUpdate({ title: "c" }), WriteProtected);
+    await allowWrites([Post], async () => {
+      Post.objects.using(db).prepareInsert({ id: 3, title: "c" });
+      Post.objects.using(db).filter(Post.id.eq(1)).prepareUpdate({ title: "c" });
+    });
     // Reads are unchanged, and raw SQL still writes.
     assert.equal(await Post.objects.using(db).count(), 2);
     assert.equal(await db.execute("UPDATE post SET title = 'raw'"), 2);
@@ -128,5 +136,8 @@ model Employee {
     await assert.rejects(Employee.objects.using(db).insert({ name: "a", salary: 1 }), (e: Error) => e instanceof WriteProtected && /Person/.test(e.message));
     const alice: Any = await allowWrites([Employee, Person], () => Employee.objects.using(db).insert({ name: "a", salary: 1 }));
     await assert.rejects(Employee.objects.using(db).filter(Employee.id.eq(alice.id)).update({ name: "b" }), WriteProtected);
+    const bob: Any = await allowWrites([Person], () => Person.objects.using(db).insert({ name: "b" }));
+    await assert.rejects(Employee.objects.using(db).attach(bob.id, { salary: 2 }), WriteProtected);
+    await allowWrites([Employee, Person], () => Employee.objects.using(db).attach(bob.id, { salary: 2 }));
   } finally { await db.close(); }
 });
