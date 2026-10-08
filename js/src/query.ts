@@ -840,6 +840,24 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return call(() => this.meta.registry.native().sql(JSON.stringify(ir), params));
   }
 
+  /**
+   * The database's plan for this query's SELECT (not for its prefetch queries).
+   *
+   * Postgres gives `EXPLAIN` text; `analyze: true` runs the query with
+   * `EXPLAIN (ANALYZE, BUFFERS)` and adds the real times and row counts. SQLite gives
+   * `EXPLAIN QUERY PLAN`, each step indented under its parent, and has no `analyze`.
+   */
+  async explain(options: { readonly analyze?: boolean } = {}): Promise<string> {
+    const analyze = options.analyze ?? false;
+    if (analyze && this.state.lock) {
+      throw new QueryError("explain({ analyze: true }) would run the query and take its row locks; drop lock() to explain it");
+    }
+    const params: unknown[] = [];
+    const json = JSON.stringify(this.selectIr("select", params));
+    const db = this.db();
+    return db.send((tx, trace) => db.engine.explain(json, params, analyze, tx, trace));
+  }
+
   // -- execution ------------------------------------------------------------------------------
 
   /** @internal */

@@ -613,6 +613,25 @@ class QuerySet(Generic[M]):
         sql: str = self._native().sql(json.dumps(ir), params)
         return sql
 
+    async def explain(self, analyze: bool = False) -> str:
+        """The database's plan for this query's SELECT (not for its prefetch queries).
+
+        Postgres gives ``EXPLAIN`` text; ``analyze=True`` runs the query with
+        ``EXPLAIN (ANALYZE, BUFFERS)`` and adds the real times and row counts. SQLite gives
+        ``EXPLAIN QUERY PLAN``, each step indented under its parent, and has no
+        ``analyze``.
+        """
+        from .db import resolve
+
+        if analyze and self._lock is not None:
+            raise QueryError("explain(analyze=True) would run the query and take its row locks; drop lock() to explain it")
+        params: list[Any] = []
+        op = json.dumps(self._select_ir("select", params))
+        db = resolve(self._db)
+        tx = db._tx()
+        plan: str = await db._call(lambda t: db._engine.explain(op, params, analyze, tx, t))
+        return plan
+
     # -- execution -----------------------------------------------------------------------
 
     async def _run(self, ir: dict[str, Any], params: list[Any], row_cls: type | None = None) -> Any:

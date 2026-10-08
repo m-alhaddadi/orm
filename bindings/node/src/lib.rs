@@ -655,6 +655,56 @@ impl Engine {
         env.spawn_future(async move { conn.batch(sql).await.map(|n| n as f64).map_err(db_tagged) })
     }
 
+    /// The query plan of a read IR document (see `exec::explain`), as text.
+    #[napi]
+    pub fn explain<'env>(
+        &self,
+        env: &'env Env,
+        op_json: String,
+        params_: Unknown<'_>,
+        analyze: bool,
+        tx: Option<&Transaction>,
+        trace: Option<&Trace>,
+    ) -> napi::Result<PromiseRaw<'env, String>> {
+        let op = parse_op(&op_json).map_err(engine_err)?;
+        let target = self.target;
+        let plan = Planner::plan(&self.schema, target, &op, &params(env, params_)?).map_err(engine_err)?;
+        let conn = self.traced(tx, trace);
+        env.spawn_future(async move { exec::explain(conn.as_ref(), target, &plan, analyze).await.map_err(engine_err) })
+    }
+
+    /// Raw SQL with parameters (types taken from the values); an array of objects by
+    /// column name, cells typed by the database.
+    #[napi(ts_return_type = "Promise<Record<string, unknown>[]>")]
+    pub fn fetch<'env>(
+        &self,
+        env: &'env Env,
+        sql: String,
+        params_: Unknown<'_>,
+        tx: Option<&Transaction>,
+        trace: Option<&Trace>,
+    ) -> napi::Result<PromiseRaw<'env, Raw>> {
+        let c = conv(env)?;
+        let args = c.js.elements(params_.raw())?.into_iter().map(|v| c.value(v, None)).collect::<orm_engine::Result<Vec<_>>>().map_err(engine_err)?;
+        let conn = self.traced(tx, trace);
+        env.spawn_future_with_callback(
+            async move { conn.fetch(sql, args).await.map_err(db_tagged) },
+            move |env, rows| {
+                let c = conv(env)?;
+                let js = c.js;
+                let out = js.array(rows.len())?;
+                for r in 0..rows.len() {
+                    let obj = js.object()?;
+                    for (col, name) in rows.columns().iter().enumerate() {
+                        js.set(obj, name, c.cell(rows.cell(r, col).map_err(db_tagged)?)?)?;
+                    }
+                    js.set_element(out, r as u32, obj)?;
+                }
+                Ok(Raw(out))
+            },
+        )
+    }
+
     /// Raw query whose columns are all read as text. For tooling such as the migration
     /// runner, not for application queries.
     #[napi]

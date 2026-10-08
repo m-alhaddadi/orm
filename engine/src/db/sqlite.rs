@@ -6,7 +6,7 @@ use rusqlite::{Connection, types::Value as SqlValue};
 use sea_query::Value;
 use tokio::sync::{oneshot, Mutex as AsyncMutex, OwnedMutexGuard};
 
-use super::{BoxFuture, Cell, DbError, DbResult, Driver, ErrorKind, Executor, RowSet, Transaction};
+use super::{BoxFuture, Cell, DbError, DbResult, Driver, ErrorKind, Executor, RawRows, RowSet, Transaction};
 use orm_core::{dialect::Dialect, ir::{ColType, ValueType}};
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -142,6 +142,39 @@ fn query(conn: &mut Connection, sql: String, args: Vec<Value>) -> DbResult<Box<d
     Ok(Box::new(Rows(out)))
 }
 
+fn fetch(conn: &mut Connection, sql: String, args: Vec<Value>) -> DbResult<Box<dyn RawRows>> {
+    let args = args.into_iter().map(bind).collect::<DbResult<Vec<_>>>()?;
+    let mut stmt = conn.prepare_cached(&sql).map_err(sqlite_err)?;
+    let columns: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
+    let width = columns.len();
+    let mut rows = stmt.query(rusqlite::params_from_iter(args)).map_err(sqlite_err)?;
+    let mut out = vec![];
+    while let Some(row) = rows.next().map_err(sqlite_err)? {
+        out.push((0..width).map(|i| row.get::<_, SqlValue>(i).map_err(sqlite_err)).collect::<DbResult<Vec<_>>>()?);
+    }
+    Ok(Box::new(RawSqliteRows { columns, rows: Rows(out) }))
+}
+
+/// Raw rows, each cell by its storage class.
+struct RawSqliteRows {
+    columns: Vec<String>,
+    rows: Rows,
+}
+
+impl RawRows for RawSqliteRows {
+    fn columns(&self) -> &[String] { &self.columns }
+    fn len(&self) -> usize { self.rows.0.len() }
+    fn cell(&self, row: usize, col: usize) -> DbResult<Cell<'_>> {
+        Ok(match self.rows.get(row, col)? {
+            SqlValue::Null => Cell::Null,
+            SqlValue::Integer(v) => Cell::BigInt(*v),
+            SqlValue::Real(v) => Cell::Float(*v),
+            SqlValue::Text(v) => Cell::Text(v),
+            SqlValue::Blob(_) => return Err(DbError::other(format!("column {:?} is a blob, which fetch() does not read", self.columns[col]))),
+        })
+    }
+}
+
 fn execute(conn: &mut Connection, sql: String, args: Vec<Value>) -> DbResult<u64> {
     let args = args.into_iter().map(bind).collect::<DbResult<Vec<_>>>()?;
     conn.execute(&sql, rusqlite::params_from_iter(args)).map(|n| n as u64).map_err(sqlite_err)
@@ -171,6 +204,7 @@ fn query_text(conn: &mut Connection, sql: String) -> DbResult<Vec<Vec<Option<Str
 impl Executor for SqliteDriver {
     fn dialect(&self) -> Dialect { Dialect::Sqlite }
     fn query(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RowSet>>> { Box::pin(self.with(move |c| query(c, sql, args))) }
+    fn fetch(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RawRows>>> { Box::pin(self.with(move |c| fetch(c, sql, args))) }
     fn execute(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<u64>> { Box::pin(self.with(move |c| execute(c, sql, args))) }
     fn batch(&self, sql: String) -> BoxFuture<'_, DbResult<u64>> { Box::pin(self.with(move |c| batch(c, sql))) }
     fn query_text(&self, sql: String) -> BoxFuture<'_, DbResult<Vec<Vec<Option<String>>>>> { Box::pin(self.with(move |c| query_text(c, sql))) }
@@ -249,6 +283,7 @@ impl SqliteTx {
 impl Executor for SqliteTx {
     fn dialect(&self) -> Dialect { Dialect::Sqlite }
     fn query(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RowSet>>> { Box::pin(self.with(move |c| query(c, sql, args))) }
+    fn fetch(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RawRows>>> { Box::pin(self.with(move |c| fetch(c, sql, args))) }
     fn execute(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<u64>> { Box::pin(self.with(move |c| execute(c, sql, args))) }
     fn batch(&self, sql: String) -> BoxFuture<'_, DbResult<u64>> { Box::pin(self.with(move |c| batch(c, sql))) }
     fn query_text(&self, sql: String) -> BoxFuture<'_, DbResult<Vec<Vec<Option<String>>>>> { Box::pin(self.with(move |c| query_text(c, sql))) }

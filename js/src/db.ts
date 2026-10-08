@@ -157,6 +157,19 @@ export class Database {
     return this.send((tx, trace) => this.engine.execute(sql, tx, trace));
   }
 
+  /**
+   * Runs one raw SQL query with parameters; gives its rows as objects by column name.
+   *
+   * Placeholders are `$1, $2, ...` on Postgres and `?` on SQLite. A parameter's type
+   * comes from its JS value (`bigint` and integer numbers are `bigint`, strings `text`,
+   * plain objects and arrays JSON); cast in the SQL where the column needs another type
+   * (`$1::uuid`). Cells come back by the column types the database reports. Runs in the
+   * current transaction, and query hooks see it.
+   */
+  fetch(sql: string, ...params: unknown[]): Promise<Record<string, unknown>[]> {
+    return this.send((tx, trace) => this.engine.fetch(sql, params, tx, trace));
+  }
+
   /** Raw query whose columns are all read as text. For tooling (migrations). */
   fetchText(sql: string): Promise<(string | null)[][]> {
     return wait(() => this.engine.fetchText(sql, this.tx()));

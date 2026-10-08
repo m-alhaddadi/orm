@@ -26,11 +26,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
 
 use crate::build::{Builder, Classes};
-use crate::convert::{py_to_value, PyParams};
+use crate::convert::{cell_to_py, py_to_value, PyParams};
 use crate::errors::{db_err, engine_err, query_err, schema_err};
 use orm_core::dialect::Target;
 use orm_engine::db::{self, Driver, Executor};
@@ -474,6 +474,57 @@ impl Engine {
     ) -> PyResult<Bound<'py, PyAny>> {
         let conn = self.traced(tx, trace);
         pyo3_async_runtimes::tokio::future_into_py(py, async move { conn.batch(sql).await.map_err(db_err) })
+    }
+
+    /// The query plan of a read IR document (see `exec::explain`), as text.
+    #[pyo3(signature = (op_json, params, analyze = false, tx = None, trace = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn explain<'py>(
+        &self,
+        py: Python<'py>,
+        op_json: &str,
+        params: Vec<Bound<'py, PyAny>>,
+        analyze: bool,
+        tx: Option<&Bound<'py, Transaction>>,
+        trace: Option<&Bound<'py, Trace>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let op = parse_op(op_json).map_err(engine_err)?;
+        let target = self.target;
+        let plan = Planner::plan(&self.schema, target, &op, &PyParams(&params)).map_err(engine_err)?;
+        let conn = self.traced(tx, trace);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            exec::explain(conn.as_ref(), target, &plan, analyze).await.map_err(engine_err)
+        })
+    }
+
+    /// Raw SQL with parameters (types taken from the values); a list of dicts by
+    /// column name, cells typed by the database.
+    #[pyo3(signature = (sql, params, tx = None, trace = None))]
+    fn fetch<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        params: Vec<Bound<'py, PyAny>>,
+        tx: Option<&Bound<'py, Transaction>>,
+        trace: Option<&Bound<'py, Trace>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let args = params.iter().map(|p| py_to_value(p, None)).collect::<PyResult<Vec<_>>>()?;
+        let conn = self.traced(tx, trace);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let rows = conn.fetch(sql, args).await.map_err(db_err)?;
+            Python::attach(|py| {
+                let names: Vec<Bound<'_, PyString>> = rows.columns().iter().map(|c| PyString::new(py, c)).collect();
+                let out = PyList::empty(py);
+                for r in 0..rows.len() {
+                    let row = PyDict::new(py);
+                    for (c, name) in names.iter().enumerate() {
+                        row.set_item(name, cell_to_py(py, rows.cell(r, c).map_err(db_err)?)?)?;
+                    }
+                    out.append(row)?;
+                }
+                out.into_py_any(py)
+            })
+        })
     }
 
     /// Raw query returning rows of text: every selected column is read as text.

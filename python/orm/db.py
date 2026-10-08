@@ -186,6 +186,18 @@ class Database:
         tx = self._tx()
         return await self._call(lambda t: self._engine.execute(sql, tx, t))
 
+    async def fetch(self, sql: str, *params: Any) -> list[dict[str, Any]]:
+        """Run one raw SQL query with parameters; returns its rows as dicts by column name.
+
+        Placeholders are ``$1, $2, ...`` on Postgres and ``?`` on SQLite. A parameter's
+        type comes from its Python value (``int`` is ``bigint``, ``str`` is ``text``,
+        ``dict`` / ``list`` are JSON); cast in the SQL where the column needs another
+        type (``$1::uuid``). Cells come back by the column types the database reports.
+        Runs in the current transaction, and query hooks see it.
+        """
+        tx, args = self._tx(), list(params)
+        return await self._call(lambda t: self._engine.fetch(sql, args, tx, t))
+
     async def _fetch_text(self, sql: str) -> list[tuple[str | None, ...]]:
         return await self._engine.fetch_text(sql, self._tx())
 

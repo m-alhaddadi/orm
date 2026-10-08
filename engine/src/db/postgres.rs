@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 use tokio_postgres::types::{to_sql_checked, FromSql, IsNull, Kind, ToSql, Type};
 use tokio_postgres::{NoTls, Row, SimpleQueryMessage, Statement};
 
-use super::{numeric, BoxFuture, Cell, DbError, DbResult, Driver, ErrorKind, Executor, RowSet, Transaction};
+use super::{numeric, BoxFuture, Cell, DbError, DbResult, Driver, ErrorKind, Executor, RawRows, RowSet, Transaction};
 use orm_core::ir::{ColType, ValueType};
 
 const STATEMENT_CACHE_MAX: usize = 512;
@@ -157,6 +157,75 @@ async fn query(c: &ClientWrapper, sql: &str, args: &[Value]) -> DbResult<Box<dyn
     let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
     let rows = c.query(&stmt, &refs).await.map_err(pg_err)?;
     Ok(Box::new(PgRows(rows)))
+}
+
+async fn fetch(c: &ClientWrapper, sql: &str, args: &[Value]) -> DbResult<Box<dyn RawRows>> {
+    let stmt = prepare(c, sql, args).await?;
+    let params: Vec<Param<'_>> = args.iter().map(Param).collect();
+    let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+    let types = stmt.columns().iter().map(|c| raw_type(c.name(), c.type_())).collect::<DbResult<Vec<_>>>()?;
+    let columns = stmt.columns().iter().map(|c| c.name().to_owned()).collect();
+    let rows = c.query(&stmt, &refs).await.map_err(pg_err)?;
+    Ok(Box::new(PgRawRows { columns, types, rows }))
+}
+
+/// How a raw column decodes. `int2` and `float4` have no `ValueType` of their own.
+#[derive(Clone, Copy)]
+enum RawType {
+    Value(ValueType),
+    SmallInt,
+    Real,
+}
+
+fn raw_type(name: &str, ty: &Type) -> DbResult<RawType> {
+    let (scalar, array) = match ty.kind() {
+        Kind::Array(inner) => (inner, true),
+        _ => (ty, false),
+    };
+    let col = match *scalar {
+        Type::INT2 if !array => return Ok(RawType::SmallInt),
+        Type::FLOAT4 if !array => return Ok(RawType::Real),
+        Type::INT8 => ColType::BigInt,
+        Type::INT4 => ColType::Int,
+        Type::FLOAT8 => ColType::Float,
+        Type::BOOL => ColType::Bool,
+        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => ColType::Text,
+        Type::TIMESTAMPTZ => ColType::DateTime,
+        Type::DATE => ColType::Date,
+        Type::UUID => ColType::Uuid,
+        Type::JSON | Type::JSONB => ColType::Json,
+        Type::NUMERIC => ColType::Decimal,
+        _ if matches!(scalar.kind(), Kind::Enum(_)) => ColType::Text,
+        _ => {
+            return Err(DbError::other(format!(
+                "column {name:?} has type {ty}, which fetch() does not read; cast it in the SQL (for example ::text)"
+            )))
+        }
+    };
+    Ok(RawType::Value(ValueType { ty: col, array, enum_idx: None }))
+}
+
+struct PgRawRows {
+    columns: Vec<String>,
+    types: Vec<RawType>,
+    rows: Vec<Row>,
+}
+
+impl RawRows for PgRawRows {
+    fn columns(&self) -> &[String] {
+        &self.columns
+    }
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+    fn cell(&self, row: usize, col: usize) -> DbResult<Cell<'_>> {
+        let r = &self.rows[row];
+        match self.types[col] {
+            RawType::Value(ty) => cell(r, col, ty),
+            RawType::SmallInt => opt(r, col, |v: i16| Cell::Int(v.into())),
+            RawType::Real => opt(r, col, |v: f32| Cell::Float(v.into())),
+        }
+    }
 }
 
 async fn execute(c: &ClientWrapper, sql: &str, args: &[Value]) -> DbResult<u64> {
@@ -346,6 +415,10 @@ impl Executor for PgDriver {
         Box::pin(async move { let c = get_client(&self.pool).await?; query(&c, &sql, &args).await })
     }
 
+    fn fetch(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RawRows>>> {
+        Box::pin(async move { let c = get_client(&self.pool).await?; fetch(&c, &sql, &args).await })
+    }
+
     fn execute(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<u64>> {
         Box::pin(async move { let c = get_client(&self.pool).await?; execute(&c, &sql, &args).await })
     }
@@ -452,6 +525,10 @@ impl Executor for PgTx {
     }
     fn query(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RowSet>>> {
         Box::pin(async move { self.with(|c| Box::pin(async move { query(c, &sql, &args).await })).await })
+    }
+
+    fn fetch(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RawRows>>> {
+        Box::pin(async move { self.with(|c| Box::pin(async move { fetch(c, &sql, &args).await })).await })
     }
 
     fn execute(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<u64>> {

@@ -11,7 +11,7 @@ use crate::db::{self, BoxFuture, Cell, DbError, DbResult, Executor, RowSet};
 use crate::error::{query_err, Error, Result};
 use crate::params::{null_of, Params};
 use crate::plan::{self, Plan, PrefetchPlan, SelectPlan};
-use orm_core::dialect::Target;
+use orm_core::dialect::{Dialect, Target};
 use orm_core::ir::{self, ValueType};
 use orm_core::schema::Schema;
 
@@ -102,6 +102,44 @@ pub fn statement(target: Target, plan: &Plan) -> String {
         #[cfg(feature = "model-composition")]
         Plan::ComposedInsert(_) | Plan::ComposedMutation(_) => sql(target, plan),
     }
+}
+
+/// The query plan of a read's main statement (not of its prefetch queries): Postgres
+/// `EXPLAIN`, with `analyze` `EXPLAIN (ANALYZE, BUFFERS)`, which runs the statement;
+/// SQLite `EXPLAIN QUERY PLAN`, each step indented under its parent.
+pub async fn explain(conn: &dyn Executor, target: Target, plan: &Plan, analyze: bool) -> Result<String> {
+    let d = target.dialect;
+    let (sql, args) = match plan {
+        Plan::Select(p) => db::build(d, &p.stmt),
+        Plan::Count(s) | Plan::Exists(s) => db::build(d, s),
+        _ => return Err(Error::query("explain() takes a read query")),
+    };
+    let mut lines = vec![];
+    if d == Dialect::Sqlite {
+        if analyze {
+            return Err(Error::query("sqlite has no EXPLAIN ANALYZE; call explain() without analyze"));
+        }
+        let rows = conn.fetch(format!("EXPLAIN QUERY PLAN {sql}"), args).await?;
+        // Columns: id, parent, notused, detail.
+        let mut depth = std::collections::HashMap::new();
+        for i in 0..rows.len() {
+            let (Cell::BigInt(id), Cell::BigInt(parent), Cell::Text(detail)) = (rows.cell(i, 0)?, rows.cell(i, 1)?, rows.cell(i, 3)?) else {
+                return Err(Error::query("unexpected EXPLAIN QUERY PLAN row"));
+            };
+            let level = if parent == 0 { 0 } else { depth.get(&parent).map_or(0, |l| l + 1) };
+            depth.insert(id, level);
+            lines.push(format!("{}{detail}", "  ".repeat(level)));
+        }
+    } else {
+        let prefix = if analyze { "EXPLAIN (ANALYZE, BUFFERS) " } else { "EXPLAIN " };
+        let rows = conn.fetch(format!("{prefix}{sql}"), args).await?;
+        for i in 0..rows.len() {
+            if let Cell::Text(line) = rows.cell(i, 0)? {
+                lines.push(line.to_owned());
+            }
+        }
+    }
+    Ok(lines.join("\n"))
 }
 
 /// An UPDATE / DELETE: the row count, or the rows when it has `RETURNING`.

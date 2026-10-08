@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use sea_query::Value;
 
-use crate::db::{BoxFuture, DbResult, Executor, RowSet, Transaction};
+use crate::db::{BoxFuture, DbResult, Executor, RawRows, RowSet, Transaction};
 use orm_core::dialect::Dialect;
 
 /// One statement the database ran.
@@ -89,6 +89,9 @@ impl Executor for Traced {
     }
     fn query(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RowSet>>> {
         Box::pin(self.timed(sql.clone(), self.conn.query(sql, args), |r| r.len() as u64))
+    }
+    fn fetch(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RawRows>>> {
+        Box::pin(self.timed(sql.clone(), self.conn.fetch(sql, args), |r| r.len() as u64))
     }
     fn execute(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<u64>> {
         Box::pin(self.timed(sql.clone(), self.conn.execute(sql, args), |n| *n))

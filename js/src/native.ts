@@ -129,6 +129,8 @@ export interface NativeEngine {
   begin(tx: NativeTransaction | null): Promise<NativeTransaction>;
   advisoryLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, tx: NativeTransaction, trace?: NativeTrace | null): Promise<boolean>;
   execute(sql: string, tx: NativeTransaction | null, trace?: NativeTrace | null): Promise<number>;
+  explain(opJson: string, params: unknown[], analyze: boolean, tx: NativeTransaction | null, trace?: NativeTrace | null): Promise<string>;
+  fetch(sql: string, params: unknown[], tx: NativeTransaction | null, trace?: NativeTrace | null): Promise<Record<string, unknown>[]>;
   fetchText(sql: string, tx: NativeTransaction | null): Promise<(string | null)[][]>;
   executeScript(statements: string[], tx: NativeTransaction | null): Promise<void>;
   migrationStatus(dir: string): Promise<string>;

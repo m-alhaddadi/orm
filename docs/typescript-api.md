@@ -310,6 +310,20 @@ await debug.nPlusOne(async () => {
 * In tests, `await debug.expectNoNPlusOne(fn, { threshold })` throws `NPlusOne` when `fn` sends an N+1.
   Without source maps (`node --enable-source-maps`), the call site is a line of the compiled JavaScript.
 
+### Raw SQL and query plans
+
+```ts
+const rows = await db.fetch("SELECT id, email FROM users WHERE created_at > $1 AND name = $2", since, "Ann");
+// [{ id: 7n, email: "ann@example.com" }]
+console.log(await Post.objects.filter(Post.authorId.eq(7n)).explain());
+console.log(await Post.objects.filter(Post.authorId.eq(7n)).explain({ analyze: true }));
+```
+
+`db.fetch(sql, ...params)` gives an array of objects by column name, and `qs.explain({ analyze })` gives the plan as text.
+They work as in Python (`docs/python-api.md`, "Raw SQL and query plans").
+A parameter's type comes from its JS value: `bigint` and integer numbers are `bigint`, strings are `text`, plain objects and arrays are JSON, and `Date` is `timestamptz`.
+`bigint` columns come back as `bigint`, and `timestamptz` and `date` as `Date`.
+
 ### Query hooks and OpenTelemetry
 
 `db.onQuery(hook)` calls `hook(event)` after each statement that the database runs, and gives a function that removes the hook:
