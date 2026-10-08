@@ -24,11 +24,16 @@ export interface Page<R> {
 
 /** `{ first, after }` reads forward from a cursor, `{ last, before }` reads back. */
 export type PageOptions =
-  | { readonly first: number; readonly after?: string | null | undefined; readonly last?: never; readonly before?: never }
-  | { readonly last: number; readonly before?: string | null | undefined; readonly first?: never; readonly after?: never };
+  | { readonly first: number; readonly after?: string | null | undefined; readonly last?: never; readonly before?: null }
+  | { readonly last: number; readonly before?: string | null | undefined; readonly first?: never; readonly after?: null };
 
 /** @internal */
 export type Key = readonly [FieldMeta, Ordering<string, unknown>];
+
+/** @internal Whether the column can hold NULL; a proxy can declare a nullable column non-null. */
+export function storedNullable(meta: ModelMeta, f: FieldMeta): boolean {
+  return f.nullable || meta.narrowed.has(f.ir);
+}
 
 // Column types with a cursor value; JSON, arrays and enums have none.
 const CURSOR_TYPES = new Set(["big_int", "int", "float", "bool", "string", "text", "date_time", "date", "uuid", "decimal"]);
@@ -42,15 +47,15 @@ export function keyset(meta: ModelMeta, order: readonly Ordering<string, unknown
     }
     const f = e.field;
     if (!CURSOR_TYPES.has(f.type) || f.array || f.enumName !== undefined) {
-      throw new QueryError(`paginate() can't order by ${String(e)}: a ${f.array ? "array" : f.enumName !== undefined ? "enum" : f.type} column has no cursor value`);
+      throw new QueryError(`paginate() can't order by ${String(e)}: ${f.array ? "array" : f.enumName !== undefined ? "enum" : f.type} columns have no cursor value`);
     }
-    if (f.nullable && o.nulls === undefined) {
+    if (storedNullable(meta, f) && o.nulls === undefined) {
       const direction = o.descending ? "desc" : "asc";
       throw new QueryError(`${String(e)} is nullable: order by ${String(e)}.${direction}({ nulls: "first" }) or ({ nulls: "last" }) to paginate`);
     }
     return [f, o] as const;
   });
-  if (!keys.some(([f]) => f.primaryKey || (f.unique && !f.nullable))) {
+  if (!keys.some(([f]) => f.primaryKey || (f.unique && !storedNullable(meta, f)))) {
     keys.push([meta.pk, meta.column(meta.pk).asc()]);
   }
   return keys;
@@ -62,18 +67,37 @@ export function fingerprint(meta: ModelMeta, keys: readonly Key[]): string {
   return Buffer.from(blake2b(new TextEncoder().encode(text), 8)).toString("hex");
 }
 
+/** The hidden property of a `Date` from a `DateTime` column with the microseconds
+ * below its milliseconds (set by the native driver). */
+const MICROS = "orm:micros";
+const INT32 = 2 ** 31;
+const INT64 = 2n ** 63n;
+const UUID = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
+const NONFINITE: Record<string, number> = { Infinity: Infinity, "-Infinity": -Infinity, NaN: NaN };
+
+// The cursor text of a DateTime is Python's `isoformat()`: microseconds and `+00:00`.
+function isoDateTime(d: Date): string {
+  const [day, time] = d.toISOString().split("T") as [string, string];
+  const us = d.getUTCMilliseconds() * 1000 + (((d as unknown as Record<string, unknown>)[MICROS] as number | undefined) ?? 0);
+  return `${day}T${time.slice(0, 8)}${us ? `.${String(us).padStart(6, "0")}` : ""}+00:00`;
+}
+
 function encode(f: FieldMeta, v: unknown): unknown {
   if (v === null || v === undefined) return null;
   switch (f.type) {
     case "float":
+      return Number.isFinite(v) ? v : String(v);
     case "bool":
     case "string":
     case "text":
       return v;
     case "date_time":
-      return (v as Date).toISOString();
+      return isoDateTime(v as Date);
     case "date":
-      return (v as Date).toISOString().slice(0, 10);
+      return (v as Date).toISOString().split("T")[0];
+    case "decimal":
+      if (!(v as Decimal).isFinite()) throw new QueryError(`paginate() can't make a cursor from the decimal ${String(v)}`);
+      return String(v);
     default:
       return String(v);
   }
@@ -83,29 +107,44 @@ function invalid(): never {
   throw new QueryError("invalid cursor");
 }
 
-function decode(f: FieldMeta, v: unknown): unknown {
-  if (v === null) return f.nullable ? null : invalid();
+function decodeDateTime(text: string): Date {
+  const m = /^[+-]?\d{4,6}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.(\d{1,9}))?(?:Z|[+-]\d\d:\d\d)$/.exec(text);
+  const d = m ? new Date(text) : undefined;
+  if (!d || Number.isNaN(d.getTime())) invalid();
+  const us = Number((m![1] ?? "").padEnd(6, "0").slice(3, 6));
+  if (us) Object.defineProperty(d, MICROS, { value: us });
+  return d;
+}
+
+function decode(f: FieldMeta, nullable: boolean, v: unknown): unknown {
+  if (v === null) return nullable ? null : invalid();
   const text = typeof v === "string" ? v : undefined;
   switch (f.type) {
-    case "big_int":
-      return text !== undefined && /^-?\d+$/.test(text) ? BigInt(text) : invalid();
-    case "int":
-      return text !== undefined && /^-?\d+$/.test(text) ? Number(text) : invalid();
+    case "big_int": {
+      const n = text !== undefined && /^-?\d+$/.test(text) ? BigInt(text) : invalid();
+      return n >= -INT64 && n < INT64 ? n : invalid();
+    }
+    case "int": {
+      const n = text !== undefined && /^-?\d+$/.test(text) ? Number(text) : invalid();
+      return n >= -INT32 && n < INT32 ? n : invalid();
+    }
     case "decimal":
       try {
-        return text !== undefined ? new Decimal(text) : invalid();
+        const d = text !== undefined ? new Decimal(text) : invalid();
+        return d.isFinite() ? d : invalid();
       } catch {
         return invalid();
       }
     case "uuid":
-      return text ?? invalid();
+      return text !== undefined && UUID.test(text) ? text : invalid();
     case "date_time":
+      return text !== undefined ? decodeDateTime(text) : invalid();
     case "date": {
-      const d = text !== undefined ? new Date(text) : undefined;
+      const d = text !== undefined && /^[+-]?\d{4,6}-\d\d-\d\d$/.test(text) ? new Date(text) : undefined;
       return d && !Number.isNaN(d.getTime()) ? d : invalid();
     }
     case "float":
-      return typeof v === "number" ? v : invalid();
+      return typeof v === "number" ? v : text !== undefined && Object.hasOwn(NONFINITE, text) ? NONFINITE[text] : invalid();
     case "bool":
       return typeof v === "boolean" ? v : invalid();
     default:
@@ -120,7 +159,7 @@ export function encodeCursor(fp: string, keys: readonly Key[], row: object): str
 }
 
 /** @internal */
-export function decodeCursor(cursor: string, fp: string, keys: readonly Key[]): unknown[] {
+export function decodeCursor(meta: ModelMeta, cursor: string, fp: string, keys: readonly Key[]): unknown[] {
   if (typeof cursor !== "string") throw new TypeError(`a cursor is a string, got ${String(cursor)}`);
   let data: unknown;
   try {
@@ -131,11 +170,16 @@ export function decodeCursor(cursor: string, fp: string, keys: readonly Key[]): 
   const d = data as { o?: unknown; v?: unknown } | null;
   if (typeof d !== "object" || d === null || !Array.isArray(d.v) || d.v.length !== keys.length) invalid();
   if (d.o !== fp) throw new QueryError("the cursor belongs to another order or model; paginate with the order that made it");
-  return keys.map(([f], i) => decode(f, (d.v as unknown[])[i]));
+  return keys.map(([f], i) => decode(f, storedNullable(meta, f), (d.v as unknown[])[i]));
 }
 
-/** @internal Rows after the position `values` in `order` (the expanded form of a row comparison). */
-export function after(order: readonly Ordering<string, unknown>[], values: readonly unknown[]): Condition<string, unknown> {
+/**
+ * @internal Rows after the position `values` in `order` (the expanded form of a row comparison).
+ *
+ * A NOT NULL first column also gets a plain bound (`a >= v`), which an index on the
+ * order can use to start at the cursor; the expanded form alone reads from the start.
+ */
+export function after(meta: ModelMeta, order: readonly Ordering<string, unknown>[], values: readonly unknown[]): Condition<string, unknown> {
   const branches: Condition<string, unknown>[] = [];
   order.forEach((o, k) => {
     const col = o.expr as Column<unknown, string>;
@@ -155,5 +199,9 @@ export function after(order: readonly Ordering<string, unknown>[], values: reado
       branches.push(and(...equal, step));
     }
   });
+  const first = order[0]!.expr as Column<unknown, string>;
+  if (order.length > 1 && !storedNullable(meta, first.field)) {
+    return and(order[0]!.descending ? first.lte(values[0] as never) : first.gte(values[0] as never), or(...branches));
+  }
   return or(...branches);
 }

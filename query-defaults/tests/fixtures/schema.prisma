@@ -6,3 +6,8 @@ model Policy {
   bio String @query.selectOut
   @@query.defaults(filter: "active == true", fields: ["id", "name"])
 }
+model Scoped {
+  id      Int @id @default(autoincrement())
+  shop_id Int
+  @@query.filter("shop_id == scope.shop")
+}

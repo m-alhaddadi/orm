@@ -141,7 +141,8 @@ const back = await Post.objects.orderBy("-createdAt").paginate({ last: 20, befor
 The rules are the same as Python's `paginate()` (see [`python-api.md`](python-api.md)).
 A nullable order column needs `{ nulls }`: `Post.rank.desc({ nulls: "last" })`.
 A cursor from Python works in TypeScript for the same schema and order, and the other way.
-A `Date` keeps milliseconds only. On Postgres, a `DateTime` order column with two values in one millisecond can skip or repeat rows: store such timestamps at millisecond precision, or order by another column.
+A `Date` holds milliseconds. A `DateTime` value read from the database keeps its microseconds in a hidden property, so its cursor and `filter(Post.createdAt.eq(row.createdAt))` find the exact row. `new Date(row.createdAt)` drops them.
+`{ first, before: null }` and `{ last, after: null }` are accepted, as in Python.
 
 ### Relation filters
 
@@ -256,6 +257,12 @@ when it throws. The current transaction follows the async call chain through
 `AsyncLocalStorage`, so queries inside it need no handle. Nested calls are savepoints.
 A transaction that is never finished is rolled back when it is garbage-collected.
 
+`await db.onCommit(fn)` calls `fn()` after the outermost transaction on `db` commits, and awaits a promise result.
+A rollback drops the callback. A rolled-back savepoint drops only the callbacks registered inside it.
+Outside a transaction, `fn()` runs at once.
+Callbacks run in registration order, outside the transaction.
+An error in a callback rejects the `transaction()` promise, and the later callbacks do not run; the transaction is already committed.
+
 ### Protected writes
 
 `@@protected_write` is an application-level check in the ORM. It does not protect the database.
@@ -272,6 +279,9 @@ Every ORM write to a `@@protected_write` model fails outside `allowWrites(models
 The check is on the table that the SQL writes, so `post.tags.add()` needs `allowWrites([PostTag], ...)` when `PostTag` is protected.
 The scope follows the async call chain through `AsyncLocalStorage`, like the transaction: work started inside `fn` gets it.
 A nested call adds its models to the outer ones. `allowWrites` starts no transaction and gives what `fn` gives.
+A write reads the scope when it is called, not when it is awaited (Python reads it at the `await`).
+`prepareInsert` and `prepareUpdate` also check protection, so a file field uploads nothing for a rejected write.
+Wrong arguments give a rejected promise with a `TypeError`.
 See `docs/schema.md`, "Protected writes".
 
 ### Locks
@@ -282,7 +292,31 @@ See `docs/schema.md`, "Protected writes".
   keys hash the way Python's do (BLAKE2b with an 8-byte digest), so both languages lock
   the same name.
 
-Both throw `TransactionRequired` when called outside a transaction.
+* `db.lock(key, { session: true, timeout: 5 }, async () => {...})` is a session advisory
+  lock: it holds the lock while the function runs, with no transaction, on a pool
+  connection of its own, and gives what the function gives. It waits at most `timeout`
+  seconds (no limit when absent, not at all with `nowait`) and throws `LockNotAvailable`
+  when another session still holds the lock. The lock is released when the function
+  settles; when the unlock fails, the connection is closed, so the server releases it.
+
+The transaction-scoped forms throw `TransactionRequired` when called outside a transaction.
+
+### Read replicas
+
+`connect(primaryUrl, { replicas: [replica1Url, replica2Url] })` sends reads (`select`, `count`, `exists`, prepared queries) outside a transaction to the next replica, in turn.
+Writes, raw `db.execute`, migrations, and every statement inside `db.transaction()` go to the primary.
+`db.primary` is a view of the database without its replicas; it shares the transactions of `db`.
+`qs.using("primary")` is `qs.using(<the query set's database>.primary)`, resolved when it is called.
+A replica can lag behind the primary: to read your own write, read in the same transaction or use `using("primary")`.
+There are no health checks or failover. `maxConnections` applies to each pool, and `db.close()` closes all of them.
+
+### Tenants and row-level security
+
+`await db.tenant(shop.id, async () => {...})` runs `SELECT set_config('app.tenant', '<id>', true)` (`SET LOCAL`) at the start of every transaction on `db` in the function, so RLS policies can read `current_setting('app.tenant', true)`.
+A statement outside a transaction runs in a transaction of its own (four round trips instead of one, estimated).
+A transaction that is already open keeps its setting, and the setting ends with each transaction.
+Replicas get the same setting. SQLite throws `QueryError`.
+`scope({ shop }, fn)` is the application-side filter (see `docs/selection-and-defaults.md`, "Scope values").
 
 ### Finding N+1 queries: `debug`
 
@@ -301,10 +335,11 @@ await debug.nPlusOne(async () => {
 
 * The scope counts the statements of `fn` by shape: the SQL with placeholders, without values.
   It reads the same events as `db.onQuery`, so prefetch queries and `updateMany` batches count one by one.
-  Work that `fn` starts counts too.
+  Work that `fn` starts counts too, and so do the queries of an inner scope.
+  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `inBulk()`) count as one query when they have one shape.
 * When `fn` resolves, a shape that ran more than `threshold` times (default 5) throws `debug.NPlusOne` with `fail: true`, or emits an `NPlusOneWarning` process warning.
   `error.report` has each shape, its SQL, its count, the call site of its first query and the fix.
-* The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated to-many query (`post.comments.all()`).
+* The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated unchanged to-many or many-to-many query (`post.comments.all()`, `post.tags.all()`).
 * The call site and the SQL text are captured only inside the scope.
   Outside it, each query pays one `AsyncLocalStorage` read (about 2 ns, measured).
 * In tests, `await debug.expectNoNPlusOne(fn, { threshold })` throws `NPlusOne` when `fn` sends an N+1.

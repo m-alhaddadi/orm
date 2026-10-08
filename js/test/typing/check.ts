@@ -37,6 +37,8 @@ export async function stringsAndArrays() {
   same<(typeof rows)[number], { first: string | null; link: string }>();
   const text = await Post.objects.select({ c: func.concat(Post.title, " ", Post.views), p: Post.title.concat("!"), i: func.strpos(Post.title, "x"), t: func.trim(Post.title) }).all();
   same<(typeof text)[number], { c: string; p: string; i: number; t: string }>();
+  const nullable = await Profile.objects.select({ a: Profile.links.element(1).concat("!"), b: func.unnest(Profile.links).concat(Profile.links.element(1)) }).all();
+  same<(typeof nullable)[number], { a: string | null; b: string | null }>();
   // @ts-expect-error concatenation takes strings
   Post.views.concat("!");
   // @ts-expect-error element access takes an array column

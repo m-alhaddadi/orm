@@ -146,6 +146,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       assert.deepEqual(names(await tq.all()), ["c", "d", "a", "b"]);
       assert.equal((await tq.first()).name, "c");
       assert.equal((await tq.last()).name, "b");
+      assert.equal((await tq.prepare().first()).name, "c");
       assert.deepEqual(names(await tq.orderBy(Topic.name.desc())), ["d", "c", "b", "a"]);
       assert.deepEqual(names(await tq.orderBy(Topic.rank.asc({ nulls: "first" }), Topic.id)), ["b", "a", "c", "d"]);
       assert.ok(!tq.withoutDefaults().sql().includes("ORDER BY"));

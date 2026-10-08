@@ -4,10 +4,8 @@ pub use orm_contracts::extension::*;
 #[cfg(feature = "composition")]
 mod composition { include!(env!("ORM_CORE_COMPOSITION")); }
 
-pub fn artifact() -> Artifact { compiled_artifact().clone() }
-
 /// Every schema preparation checks the artifact; build it once per process.
-fn compiled_artifact() -> &'static Artifact {
+pub fn artifact() -> &'static Artifact {
     static ARTIFACT: std::sync::OnceLock<Artifact> = std::sync::OnceLock::new();
     ARTIFACT.get_or_init(build_artifact)
 }
@@ -32,11 +30,11 @@ fn build_artifact() -> Artifact {
 }
 
 /// The manifests compiled into this artifact; none without composition.
-pub fn manifests() -> Vec<Manifest> {
+pub fn manifests() -> &'static [Manifest] {
     #[cfg(feature = "composition")]
     { composition::manifests() }
     #[cfg(not(feature = "composition"))]
-    { Vec::new() }
+    { &[] }
 }
 
 pub fn prepare(ir: &mut crate::ir::SchemaIr, language: Option<&str>) -> Result<(), String> {
@@ -45,7 +43,7 @@ pub fn prepare(ir: &mut crate::ir::SchemaIr, language: Option<&str>) -> Result<(
     { composition::prepare(ir, language)?; }
     #[cfg(not(feature = "composition"))]
     { validate_declarations(ir, &[], language)?; }
-    check_requirements(ir, compiled_artifact())
+    check_requirements(ir, artifact())
 }
 
 #[cfg(feature = "composition")]

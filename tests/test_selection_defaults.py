@@ -197,6 +197,10 @@ async def test_default_order(dialect):
         assert names(page.items) == ["c", "d", "a"]
         assert names((await t.paginate(first=3, after=page.next_cursor)).items) == ["b"]
         assert names((await t.without_defaults().paginate(first=3)).items) == ["a", "b", "c"]
+        assert (await t.from_(t.cte("all_topics")).first()).name == "a"
+        # Postgres rejects UPDATE ... ORDER BY, so these also show that writes take no default order.
+        assert await t.filter(Topic.name == "none").update(name="x") == 0
+        assert await t.filter(Topic.name == "none").delete() == 0
         c = await t.get(Topic.name == "c")
         for body in ["x", "z", "y"]:
             await n.insert(topic_id=c.pk, body=body)
@@ -219,3 +223,36 @@ def test_default_order_options_have_one_source():
         orm.loads(both, registry=orm.Registry())
     with pytest.raises(Exception, match=r"order column \"nope\" is not a field"):
         orm.loads(ORDERED.replace('"-body"', '"nope"'), registry=orm.Registry())
+    with pytest.raises(Exception, match=r'Topic: order column "rank" can be NULL: write "-rank nulls first" or "-rank nulls last"'):
+        orm.loads(ORDERED.replace('"-rank nulls last"', '"-rank"'), registry=orm.Registry())
+    with pytest.raises(Exception, match=r'elsewhere quote it: "-name"'):
+        orm.loads(ORDERED.replace('"-rank nulls last", "id"', "-name"), registry=orm.Registry())
+    with pytest.raises(Exception, match=r'order column "k" is json, which the database can\'t order'):
+        orm.loads(ORDERED.replace("  rank Int?\n", "  rank Int?\n  k Json @db.Json\n").replace('"-rank nulls last", "id"', '"k"').replace('"sqlite"', '"postgresql"'), registry=orm.Registry())
+
+
+@pytest.mark.skipif(not QUERY_DEFAULTS, reason="requires the query-defaults artifact")
+async def test_a_joined_model_brings_its_related_default():
+    def field(name, kind="string", **flags):
+        return {"name": name, "column": name, "type": kind, **flags}
+    ir = {"dialect": "sqlite", "models": [
+        {"name": "JAuthor", "table": "j_authors", "fields": [field("id", "int", primary_key=True), field("name")]},
+        {"name": "JBook", "table": "j_books", "fields": [field("id", "int", primary_key=True), field("author_id", "int")],
+         "relations": [{"name": "author", "kind": "one", "target": "JAuthor", "from": "author_id", "to": "id", "foreign_key": True}]},
+        {"name": "JShelf", "table": "j_shelves", "fields": [field("id", "int", primary_key=True), field("book_id", "int")],
+         "relations": [{"name": "book", "kind": "one", "target": "JBook", "from": "book_id", "to": "id", "foreign_key": True}]},
+    ], "behavior": {"schema_contract": 1, "query_defaults": [{"model": "JBook", "related": [["author"]]}]}}
+    registry = orm.Registry()
+    classes = orm.define(ir, registry=registry)
+    Author, Book, Shelf = classes["JAuthor"], classes["JBook"], classes["JShelf"]
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    try:
+        await db.create_tables()
+        await Author.objects.using(db).insert(id=1, name="ann")
+        await Book.objects.using(db).insert(id=1, author_id=1)
+        await Shelf.objects.using(db).insert(id=1, book_id=1)
+        # JBook's default joins its author also when JBook is itself joined.
+        shelf = await Shelf.objects.using(db).select_related(Shelf.book).get()
+        assert shelf.book.author.name == "ann"
+    finally:
+        await db.close()

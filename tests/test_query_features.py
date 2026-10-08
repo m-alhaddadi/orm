@@ -125,6 +125,8 @@ async def test_string_functions_and_concatenation(clean):
     ).first()
     assert row is not None and tuple(row) == ("b1", "b1", "b1", "B1", "1", 2)
     assert [p.title for p in await Post.objects.filter(Post.title.concat("!") == "a2!")] == ["a2"]
+    # A literal after a non-text column still binds as text.
+    assert await Post.objects.filter(Post.title == "b1").select(func.concat(Post.views, "!")).scalar() == "100!"
 
 
 async def test_outer_through_relation_paths(clean):

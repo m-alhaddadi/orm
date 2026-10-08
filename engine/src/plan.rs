@@ -277,6 +277,7 @@ fn col_paths<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
     match e {
         Expr::Col { path, .. } => out.push(path),
         Expr::Param { .. }
+        | Expr::Scope { .. }
         | Expr::Const { .. }
         | Expr::Excluded { .. }
         | Expr::Text { .. }
@@ -479,6 +480,13 @@ impl<'s> Planner<'s> {
     }
 
     pub fn plan(schema: &'s Schema, target: Target, op: &Operation, params: &'s dyn Params) -> Result<Plan> {
+        if op.scope().is_empty() {
+            return Planner::plan_op(schema, target, op, params);
+        }
+        Planner::plan_op(schema, target, op, &crate::params::Scoped { params, scope: op.scope() })
+    }
+
+    fn plan_op(schema: &'s Schema, target: Target, op: &Operation, params: &'s dyn Params) -> Result<Plan> {
         Ok(match op {
             Operation::Select(q) => Plan::Select(plan_select(schema, target, q, params)?),
             Operation::Count(q) | Operation::Exists(q) => {
@@ -994,6 +1002,16 @@ impl<'s> Planner<'s> {
     // -- value expressions --------------------------------------------------------------
 
     /// `i`, checked against the parameter list.
+    /// The parameter of `scope.<name>`; without one, the statement fails (closed by default).
+    fn scope_param(&self, name: &str) -> Result<usize> {
+        match self.params.scope(name) {
+            Some(i) => self.param(i),
+            None => Err(Error::query(format!(
+                "a default filter reads scope.{name}, which is not set: run the query inside `scope({name}=...)`, or use without_defaults()"
+            ))),
+        }
+    }
+
     fn param(&self, i: usize) -> Result<usize> {
         if i < self.params.len() {
             Ok(i)
@@ -1082,7 +1100,7 @@ impl<'s> Planner<'s> {
         if let Some(scope) = self.scopes.iter().rev().chain(self.joins.iter().map(|(s, _)| s)).find(|s| s.path == path) {
             if scope.model < self.schema.models.len() {
                 let model = self.model(scope.model);
-                return crate::ownership::column(self.schema, model, &alias, model.field(name).map_err(query_err)?);
+                return crate::ownership::column_at(self.schema, model, &alias, model.field_pos(name).map_err(query_err)?);
             }
         }
         Ok(col(&alias, &column))
@@ -1123,6 +1141,7 @@ impl<'s> Planner<'s> {
                 self.resolve(path, name)?
             },
             Expr::Param { i } => bind(self.params.value(self.param(*i)?, hint.ty)?, hint.field),
+            Expr::Scope { name } => bind(self.params.value(self.scope_param(name)?, hint.ty)?, hint.field),
             Expr::Const { value } => SExpr::val(*value),
             Expr::Int { value } => SExpr::cust(value.to_string()),
             Expr::Text { value } => bind(sea_query::Value::from(value.clone()), hint.field),
@@ -1149,7 +1168,11 @@ impl<'s> Planner<'s> {
                 SExpr::SubQuery(None, Box::new(self.subselect(select, false)?.into()))
             }
             Expr::Window { func, base, partition_by, order_by, frame } => {
-                self.window(func, base.as_deref(), partition_by, order_by, frame)?
+                // Postgres rejects a set-returning function in a window.
+                let unnest = std::mem::replace(&mut self.allow_unnest, false);
+                let e = self.window(func, base.as_deref(), partition_by, order_by, frame);
+                self.allow_unnest = unnest;
+                e?
             }
             Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
             Expr::Arith { op, l, r } => {
@@ -1236,7 +1259,7 @@ impl<'s> Planner<'s> {
             | Expr::Const { .. }
             | Expr::InSelect { .. }
             | Expr::Exists { .. } => scalar(ColType::Bool),
-            Expr::Param { .. } => {
+            Expr::Param { .. } | Expr::Scope { .. } => {
                 return Err(Error::query("select() takes columns and expressions, not plain values"))
             }
             Expr::Excluded { .. } => return Err(Error::query("excluded() is only valid in do_update()")),
@@ -1365,15 +1388,22 @@ impl<'s> Planner<'s> {
         if self.target.dialect == Dialect::Sqlite && name == "cardinality" {
             return Err(Error::query("sqlite does not support cardinality()"));
         }
-        if self.target.dialect == Dialect::Sqlite && matches!(name, "element" | "unnest") {
-            return Err(Error::query("sqlite does not support array element access or unnest()"));
+        // Below these bounds SQLite and Postgres give different results.
+        let below = |i: usize, min: i64| matches!(args.get(i), Some(Expr::Int { value }) if *value < min);
+        if name == "substr" && (below(1, 1) || below(2, 0)) {
+            return Err(Error::query("substr() takes a start of at least 1 and a length of at least 0"));
         }
         if name == "unnest" && !self.allow_unnest {
             return Err(Error::query("unnest() returns several rows: it can only be a select() column"));
         }
         let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
         let hint = Hint { ty: if TEXT_FUNCS.contains(&name) { Some(ValueType::scalar(ColType::Text)) } else { hint.ty }, field: None };
-        let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>()?;
+        // Postgres rejects a set-returning function inside an aggregate or `COALESCE`.
+        let unnest = self.allow_unnest;
+        self.allow_unnest &= !(is_aggregate(name) || name == "coalesce");
+        let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>();
+        self.allow_unnest = unnest;
+        let planned = planned?;
         let d = if distinct { "DISTINCT " } else { "" };
         let n = planned.len();
         let dialect = self.target.dialect;
@@ -1801,8 +1831,6 @@ impl<'s> Planner<'s> {
         }).collect() }))
     }
 
-    /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
-    /// columns.
     /// `q` with the root and joined query defaults; borrowed when no default applies.
     #[cfg(feature = "query-defaults")]
     fn with_query_defaults<'q>(&self, q: &'q Select) -> Result<std::borrow::Cow<'q, Select>> {
@@ -1825,6 +1853,8 @@ impl<'s> Planner<'s> {
         Ok(q)
     }
 
+    /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
+    /// columns.
     fn build_select(&mut self, q: &Select) -> Result<SelectPlan> {
         #[cfg(feature = "query-defaults")]
         let defaulted = self.with_query_defaults(q)?;

@@ -80,6 +80,8 @@ class ModelMeta:
         self.default_filter: dict[str, Any] | None = None
         # The schema default order: `{"field", "desc"?, "nulls"?}` per column.
         self.default_order: list[dict[str, Any]] = []
+        # Fields that a proxy declares non-null over a nullable stored column.
+        self.narrowed: frozenset[str] = frozenset()
 
     def pk_ref(self) -> ColumnRef[Any]:
         return ColumnRef(self.model, (), self.pk)
@@ -250,6 +252,8 @@ class Registry:
             policy: dict[str, Any] = next((d for d in prepared.get("behavior", {}).get("query_defaults", ()) if d["model"] == meta.name), {})
             meta.default_filter = policy.get("filter")
             meta.default_order = policy.get("order", [])
+            proxy: dict[str, Any] = next((p for p in prepared.get("behavior", {}).get("proxy_models", ()) if p["model"] == meta.name), {})
+            meta.narrowed = frozenset(f["field"] for f in proxy.get("fields", ()) if f.get("non_null"))
             meta.field_names = tuple(fields)
             pk_ir = next(f for f in ir["fields"] if f.get("primary_key"))
             meta.attach_fields = (

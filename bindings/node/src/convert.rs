@@ -6,13 +6,17 @@
 //! | `Int`       | an integer `number` in int32 range     | `number`                   |
 //! | `Float`     | `number`                               | `number`                   |
 //! | `Decimal`   | `Decimal`, finite `number`, decimal text | `Decimal`                |
-//! | `DateTime`  | a valid `Date`                         | `Date` (milliseconds)      |
+//! | `DateTime`  | a valid `Date`                         | `Date` (+ `MICROS`)        |
 //! | `Date`      | a valid `Date` (its UTC day)           | `Date` at 00:00 UTC        |
 //! | `Uuid`      | `string`                               | `string`                   |
 //! | `Json`      | anything `JSON.stringify` takes        | parsed JSON                |
 //! | arrays      | JS arrays of the element type          | JS arrays                  |
 //!
 //! Anything else is a `TypeError`, not a silent coercion.
+//!
+//! A `Date` holds milliseconds. A `DateTime` with a sub-millisecond part gets it as the
+//! hidden property `MICROS` (0-999), and a `Date` that has it binds at full precision, so
+//! a row's own value finds the row again.
 
 use std::str::FromStr;
 
@@ -28,6 +32,9 @@ use orm_engine::params::{array_type, null_of, Params};
 use orm_engine::{Error, Result};
 
 const MAX_SAFE: f64 = 9007199254740991.0;
+
+/// The hidden property of a `Date` with the microseconds below its milliseconds.
+const MICROS: &str = "orm:micros";
 
 fn raw(e: napi::Error) -> Error {
     Error::value(e.reason.clone())
@@ -130,6 +137,20 @@ impl Conv {
         DateTime::from_timestamp_millis(ms as i64).ok_or_else(|| Error::value("Date out of range"))
     }
 
+    /// A `DateTime` parameter: the `Date` plus its hidden microseconds, if any.
+    fn datetime_micros(self, v: V) -> Result<DateTime<Utc>> {
+        let d = self.datetime(v)?;
+        let us = self.js.get(v, MICROS).map_err(raw)?;
+        if self.js.type_of(us).map_err(raw)? != sys::ValueType::napi_number {
+            return Ok(d);
+        }
+        let us = self.js.f64(us).map_err(raw)?;
+        if us.fract() != 0.0 || !(0.0..1000.0).contains(&us) {
+            return Err(Error::value(format!("invalid {MICROS} {us}")));
+        }
+        Ok(d + chrono::Duration::microseconds(us as i64))
+    }
+
     fn decimal(self, v: V, kind: Kind) -> Result<BigDecimal> {
         let text = match kind {
             Kind::Decimal | Kind::BigInt => self.js.coerce_string(v).map_err(raw)?,
@@ -193,7 +214,7 @@ impl Conv {
                 _ => return Err(self.expected("a string", v)),
             },
             ColType::DateTime => match kind {
-                Kind::Date => Value::ChronoDateTimeWithTimeZone(Some(self.datetime(v)?.fixed_offset())),
+                Kind::Date => Value::ChronoDateTimeWithTimeZone(Some(self.datetime_micros(v)?.fixed_offset())),
                 _ => return Err(self.expected("a Date", v)),
             },
             ColType::Date => match kind {
@@ -228,7 +249,7 @@ impl Conv {
             }
             Kind::BigInt => Value::BigInt(self.i64_of(v, kind)?),
             Kind::String => Value::String(Some(self.js.string(v).map_err(raw)?)),
-            Kind::Date => Value::ChronoDateTimeWithTimeZone(Some(self.datetime(v)?.fixed_offset())),
+            Kind::Date => Value::ChronoDateTimeWithTimeZone(Some(self.datetime_micros(v)?.fixed_offset())),
             Kind::Decimal => Value::BigDecimal(Some(Box::new(self.decimal(v, kind)?))),
             Kind::Array | Kind::Object => Value::Json(Some(Box::new(self.json(v)?))),
             Kind::Null | Kind::Undefined | Kind::Other => {
@@ -249,7 +270,14 @@ impl Conv {
             Cell::BigInt(n) => js.bigint_from(n),
             Cell::Float(n) => js.number(n),
             Cell::Text(s) => js.str(s),
-            Cell::DateTime(d) => js.date(d.timestamp_millis() as f64),
+            Cell::DateTime(d) => {
+                let date = js.date(d.timestamp_millis() as f64)?;
+                let us = d.timestamp_subsec_micros() % 1000;
+                if us != 0 {
+                    js.define_hidden(date, MICROS, js.int(us as i32)?)?;
+                }
+                Ok(date)
+            }
             Cell::Date(d) => js.date(midnight_ms(d)),
             Cell::Uuid(u) => js.str(u.hyphenated().encode_lower(&mut uuid::Uuid::encode_buffer())),
             Cell::Json(j) => self.json_out(&j),

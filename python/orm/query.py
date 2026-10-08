@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Unpack, overload
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Unpack, overload
 
 from ._cache import cached
 from .errors import QueryError, TransactionRequired
@@ -351,7 +351,15 @@ class QuerySet(Generic[M]):
             raise ValueError("lock() takes nowait or skip_locked, not both")
         return self._clone(_lock={"exclusive": exclusive, "nowait": nowait, "skip_locked": skip_locked})
 
-    def using(self, db: Database | None) -> Self:
+    def using(self, db: Database | Literal["primary"] | None) -> Self:
+        """Run on ``db``; ``"primary"`` sends reads of this query set to the primary of
+        its database (the default one, resolved now), not to a replica."""
+        if isinstance(db, str):
+            if db != "primary":
+                raise ValueError(f'using() takes a Database or "primary", got {db!r}')
+            from .db import resolve
+
+            db = resolve(self._db).primary
         return self._clone(_db=db)
 
     # -- CTEs -------------------------------------------------------------------------------
@@ -478,9 +486,12 @@ class QuerySet(Generic[M]):
             raise QueryError("batches() can't be used on a sliced query set")
         pk = self._model._meta.pk_ref()
         last: Any = None
+        seen: set[str] = set()
         while True:
             page = self if last is None else self.filter(pk > last)
-            objs = await page.order_by(pk)[:size]._fetch()
+            # No `yield` inside: the loop scope must not reach the consumer's queries.
+            with debug.internal_loop(seen):
+                objs = await page.order_by(pk)[:size]._fetch()
             if objs:
                 yield objs
             if len(objs) < size:
@@ -621,15 +632,15 @@ class QuerySet(Generic[M]):
         ``EXPLAIN QUERY PLAN``, each step indented under its parent, and has no
         ``analyze``.
         """
-        from .db import resolve
+        from .db import _with_scope, resolve
 
         if analyze and self._lock is not None:
             raise QueryError("explain(analyze=True) would run the query and take its row locks; drop lock() to explain it")
         params: list[Any] = []
-        op = json.dumps(self._select_ir("select", params))
+        op, params = _with_scope(json.dumps(self._select_ir("select", params)), params)
         db = resolve(self._db)
-        tx = db._tx()
-        plan: str = await db._call(lambda t: db._engine.explain(op, params, analyze, tx, t))
+        engine, tx = db._reader(), db._tx()
+        plan: str = await db._call(lambda t: engine.explain(op, params, analyze, tx, t))
         return plan
 
     # -- execution -----------------------------------------------------------------------
@@ -703,7 +714,7 @@ class QuerySet(Generic[M]):
         qs = self._clone(_model_helpers=helpers)
         cursor = after if forward else before
         if cursor is not None:
-            qs = qs.filter(pagination.after(order, pagination.decode_cursor(cursor, fp, keys)))
+            qs = qs.filter(pagination.after(self._model, order, pagination.decode_cursor(self._model, cursor, fp, keys)))
         rows = await qs.order_by(*order)[: size + 1]._fetch()
         more = len(rows) > size
         rows = rows[:size] if forward else rows[:size][::-1]
@@ -768,8 +779,11 @@ class QuerySet(Generic[M]):
             return {o._field_value(name): o for o in await self._clone(_model_helpers=(*self._model_helpers, name))._fetch()}
         keys = list(dict.fromkeys(ids))
         out: dict[Any, M] = {}
+        seen: set[str] = set()
         for i in range(0, len(keys), IN_BULK_CHUNK):
-            for o in await self.filter(col.in_(keys[i : i + IN_BULK_CHUNK]))._clone(_model_helpers=(*self._model_helpers, name))._fetch():
+            with debug.internal_loop(seen):
+                chunk = await self.filter(col.in_(keys[i : i + IN_BULK_CHUNK]))._clone(_model_helpers=(*self._model_helpers, name))._fetch()
+            for o in chunk:
                 out[o._field_value(name)] = o
         return out
 
@@ -880,7 +894,7 @@ class Prepared(Generic[M]):
     def _start(self, kind: str, values: Mapping[str, Any]) -> Awaitable[Any]:
         """Starts the statement; the engine's awaitable comes back as is, without a
         coroutine around it, unless a query hook or an N+1 scope observes it."""
-        from .db import resolve
+        from .db import _with_scope, resolve
 
         c = self._statement(kind)
         params = c.bind(values, self._names)
@@ -888,8 +902,9 @@ class Prepared(Generic[M]):
         if qs._lock is not None:
             qs._check_lock()
         db = resolve(qs._db)
-        tx, allowed = db._tx(), allowed_writes()
-        return db._call(lambda t: db._engine.run(c.json, params, tx, None, qs._db, allowed, t))
+        op, params = _with_scope(c.json, params)
+        engine, tx, allowed = db._reader(), db._tx(), allowed_writes()
+        return db._call(lambda t: engine.run(op, params, tx, None, qs._db, allowed, t))
 
     def __call__(self, **values: Any) -> Awaitable[list[M]]:
         """The rows, like awaiting the query set."""
@@ -1028,6 +1043,9 @@ class ManyRelatedSet(QuerySet[M]):
         pristine = len(self._filters) == 1 and not self._order and self._limit is None and self._offset is None
         if rows is not None and pristine and not self._prefetch and not self._related:
             return list(rows)
+        if debug._scope.get() is not None and pristine:
+            with debug.relation_load(self._relation.model.__name__, self._relation.name, "prefetch_related"):
+                return await super()._fetch()
         return await super()._fetch()
 
     # -- links ------------------------------------------------------------------------------

@@ -74,6 +74,9 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
             || !placeholder.triggers.is_empty() || placeholder.renamed_from.is_some() {
             return Err(format!("{}: proxies cannot declare physical objects", spec.model));
         }
+        if placeholder.protected_write {
+            return Err(format!("{}: a proxy cannot declare @@protected_write; protect the root model {}", spec.model, spec.parent));
+        }
         let inherited = ir.behavior.proxy_models.iter().find(|p| p.model == spec.parent);
         let storage_owner = inherited.map(|p| p.storage_owner.clone()).unwrap_or_else(|| source.name.clone());
         let physical = ir.behavior.storage.as_ref().expect("captured storage").models.iter().find(|m| m.name == storage_owner)
@@ -173,6 +176,12 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
                 if values.iter().any(|v| !v.is_null() && !e.values.iter().any(|m| m.value == **v)) {
                     return Err(format!("{}.{}: client default must use physical parent enum values", spec.model, f.name));
                 }
+                let subset = prepared.fields.iter().find(|c| c.field == f.name).and_then(|c| c.subset.as_ref());
+                if let Some(subset) = subset {
+                    if values.iter().any(|v| !v.is_null() && !e.values.iter().any(|m| m.value == **v && subset.contains(&m.name))) {
+                        return Err(format!("{}.{}: client default is outside the enum subset {}({})", spec.model, f.name, e.name, subset.join(", ")));
+                    }
+                }
             }
         }
         model.name = spec.model.clone();
@@ -224,7 +233,8 @@ fn validate_default(field: &FieldIr, value: &serde_json::Value) -> Result<(), St
         ColType::Float => value.is_number(),
         ColType::Bool => value.is_boolean(),
         ColType::Json => true,
-        ColType::String | ColType::Text | ColType::DateTime | ColType::Date | ColType::Uuid | ColType::Decimal => value.is_string(),
+        ColType::Decimal => value.is_string() || value.is_number(),
+        ColType::String | ColType::Text | ColType::DateTime | ColType::Date | ColType::Uuid => value.is_string(),
     };
     if valid { Ok(()) } else { Err(format!("client default does not encode as {:?}", field.ty)) }
 }

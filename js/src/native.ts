@@ -64,9 +64,13 @@ export interface NativeTransaction {
   rollback(): Promise<void>;
 }
 
+export interface NativeSessionLock {
+  release(trace?: NativeTrace | null): Promise<void>;
+}
+
 export interface NativeSchema {
-  validateInsert(model: string, fields: string[], rows: unknown[][]): void;
-  uniqueRowUpdate(opJson: string, params: unknown[]): boolean;
+  validateInsert(model: string, fields: string[], rows: unknown[][], allowed: readonly string[]): void;
+  uniqueRowUpdate(opJson: string, params: unknown[], allowed: readonly string[]): boolean;
   sql(opJson: string, params: unknown[]): string;
   statement(opJson: string, params: unknown[]): string;
   updateManySql(
@@ -128,6 +132,8 @@ export interface NativeEngine {
   ): Promise<unknown>;
   begin(tx: NativeTransaction | null): Promise<NativeTransaction>;
   advisoryLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, tx: NativeTransaction, trace?: NativeTrace | null): Promise<boolean>;
+  withSettings(names: string[], values: string[]): NativeEngine;
+  sessionLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, timeoutMs: number | null, trace?: NativeTrace | null): Promise<NativeSessionLock | null>;
   execute(sql: string, tx: NativeTransaction | null, trace?: NativeTrace | null): Promise<number>;
   explain(opJson: string, params: unknown[], analyze: boolean, tx: NativeTransaction | null, trace?: NativeTrace | null): Promise<string>;
   fetch(sql: string, params: unknown[], tx: NativeTransaction | null, trace?: NativeTrace | null): Promise<Record<string, unknown>[]>;

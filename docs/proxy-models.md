@@ -32,6 +32,7 @@ keys that target a proxy refer to its root storage owner; logical relation loads
 still return the proxy model. Cycles, unknown sources, stored-field additions,
 encoding changes, key changes and physical object overrides fail during definition.
 A proxy cannot override a relation; inherited relations keep their targets.
+A proxy cannot declare `@@protected_write`; it shares the protection of its root model.
 
 **Inherited fields.** `@@proxy.fields(include: [...])` or
 `@@proxy.fields(exclude: [...])` selects the source fields and relations by name.
@@ -53,6 +54,10 @@ Definition fails with the field name when an omission breaks a rule:
   the proxy cannot be omitted.
 * A child proxy selects from the fields of its source proxy, not from the root model.
 
+An omitted nullable field also drops its `@client_default`: a proxy insert stores NULL, and a parent insert stores the default.
+A proxy inherits `@@query.defaults` of its source; when it names an omitted field, definition fails with `model P has no field "note"`.
+Override it on the proxy, for example with `@@query.defaults(filter: "none")` or a field list without the omitted field.
+
 **Redeclared fields** change only the logical view. A redeclared field must be in
 the inherited set, and it must equal the source field in everything except
 nullability, the enum subset and `@client_default`. It can leave out `@default`;
@@ -66,7 +71,7 @@ it keeps the database default, because a proxy cannot change it.
 * Client default: `@client_default(...)` (see [the schema](schema.md#client-defaults))
   replaces the inherited client default. A child proxy inherits the client defaults
   of its source, and a child redeclaration replaces the inherited one. An enum
-  default uses member names (`ACTIVE`). Defaults fill omitted insert values before
+  default uses member names (`ACTIVE`), and it must be in the field's enum subset. Defaults fill omitted insert values before
   native write transforms and validators. An explicit value, also SQL NULL, wins.
 
 The physical server default remains available to writes through the parent and
@@ -80,7 +85,7 @@ A physical decoding error remains a decoding error.
 Native diagnostics emit JSON to stderr once per operation/model/field/category:
 
 ```json
-{"code":"orm.proxy.shape","model":"ActiveUser","field":"status","expected_shape":{"non_null":true,"enum_members":["ACTIVE"]},"category":"enum_subset","occurrence_count":2}
+{"code":"orm.proxy.shape","model":"ActiveUser","field":"status","expected_shape":{"non_null":false,"enum_members":["ACTIVE"]},"category":"enum_subset","occurrence_count":2}
 ```
 
 The records contain schema metadata and counts, never raw field values. The checks

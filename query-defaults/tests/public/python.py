@@ -13,7 +13,8 @@ assert "query-defaults" in json.loads(_native.native_artifact())["capabilities"]
 
 async def run(provider: str, url: str) -> None:
     registry = orm.Registry()
-    Policy = orm.loads(FIXTURE.replace('"sqlite"', f'"{provider}"'), registry=registry)["Policy"]
+    models = orm.loads(FIXTURE.replace('"sqlite"', f'"{provider}"'), registry=registry)
+    Policy, Scoped = models["Policy"], models["Scoped"]
     db = await orm.connect(url, registry=registry, default=False)
     await db.drop_tables()
     await db.create_tables()
@@ -32,6 +33,15 @@ async def run(provider: str, url: str) -> None:
             raise AssertionError("a selected-out field was loaded")
         full = await Policy.objects.using(db).without_defaults().get(Policy.name == "hidden")
         assert full.bio == "large" and full.active is False
+        await Scoped.objects.using(db).insert_many([{"shop_id": 1}, {"shop_id": 2}])
+        try:
+            await Scoped.objects.using(db).count()
+        except orm.QueryError as e:
+            assert "scope.shop" in str(e), e
+        else:
+            raise AssertionError("a read with no scope ran")
+        with orm.scope(shop=2):
+            assert [r.shop_id for r in await Scoped.objects.using(db)] == [2]
     finally:
         await db.drop_tables()
         await db.close()

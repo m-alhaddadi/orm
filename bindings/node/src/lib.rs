@@ -290,9 +290,9 @@ fn update_many_plan(
         .into_iter()
         .map(|r| r.into_iter().map(|v| v.expect("no defaults in update_many")).collect())
         .collect();
-    let filters: Vec<ir::Expr> =
-        serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
+    let (filters, scope) = orm_engine::params::scoped_filters(filters_json).map_err(engine_err)?;
     let p = params(env, params_)?;
+    let p = orm_engine::params::Scoped { params: &p, scope: &scope };
     exec::plan_update_many(schema, target, model, fields, values, &filters, &p, returning, batch_size.map(|n| n as usize), without_defaults)
         .map_err(engine_err)
 }
@@ -307,9 +307,11 @@ pub struct JsSchema {
 
 #[napi]
 impl JsSchema {
-    /// Converts and plans a single-row insert without SQL or I/O (`prepareInsert`).
+    /// Converts and plans a single-row insert without SQL or I/O (`prepareInsert`); the
+    /// write protection check runs here too, before a caller's own I/O.
     #[napi]
-    pub fn validate_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>) -> napi::Result<()> {
+    pub fn validate_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>, allowed: Vec<String>) -> napi::Result<()> {
+        protect::ensure_writable(&self.inner, &model, &allowed).map_err(engine_err)?;
         let values = convert_rows(env, &self.inner, &model, &fields, rows, true)?;
         exec::plan_insert(&self.inner, Target::new(self.inner.dialect), &model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
         Ok(())
@@ -318,8 +320,11 @@ impl JsSchema {
     /// Plans an update without SQL or I/O; true when its filters pin one row by a
     /// non-null primary key or unique field (`prepareUpdate`).
     #[napi]
-    pub fn unique_row_update(&self, env: &Env, op_json: String, params_: Unknown<'_>) -> napi::Result<bool> {
+    pub fn unique_row_update(&self, env: &Env, op_json: String, params_: Unknown<'_>, allowed: Vec<String>) -> napi::Result<bool> {
         let op = parse_op(&op_json).map_err(engine_err)?;
+        if let ir::Operation::Update(ir::Update { model, .. }) = &op {
+            protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
+        }
         let p = params(env, params_)?;
         plan::unique_row_update(&self.inner, Target::new(self.inner.dialect), &op, &p).map_err(engine_err)
     }
@@ -327,7 +332,7 @@ impl JsSchema {
     #[napi(constructor)]
     pub fn new(schema_json: String) -> napi::Result<Self> {
         let mut ir: ir::SchemaIr =
-            serde_json::from_str(&schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+            ir::SchemaIr::from_json(&schema_json).map_err(schema_err)?;
         orm_core::behavior::prepare(&mut ir, Some("typescript")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         db::require_dialect(inner.dialect).map_err(|e| schema_err(e.to_string()))?;
@@ -477,6 +482,25 @@ impl Trace {
                 error: e.error,
             })
             .collect()
+    }
+}
+
+/// A held session advisory lock (`db.lock(key, { session: true }, fn)`).
+#[napi]
+pub struct SessionLock {
+    inner: Arc<dyn db::SessionLock>,
+    unlock: String,
+}
+
+#[napi]
+impl SessionLock {
+    #[napi]
+    pub fn release<'env>(&self, env: &'env Env, trace: Option<&Trace>) -> napi::Result<PromiseRaw<'env, ()>> {
+        let lock = self.inner.clone();
+        let (sql, trace) = (self.unlock.clone(), trace.map(|t| t.0.clone()));
+        env.spawn_future(async move {
+            orm_engine::trace::timed(trace.as_ref(), sql, lock.release(), |_| 1).await.map_err(db_tagged)
+        })
     }
 }
 
@@ -645,6 +669,36 @@ impl Engine {
         let conn = self.traced(Some(tx), trace);
         env.spawn_future(async move {
             conn.advisory_lock(key, exclusive, nowait).await.map_err(db_tagged)
+        })
+    }
+
+    /// This engine on the same pool, with `set_config(name, value, true)` for each
+    /// setting at the start of every transaction (statements outside one get their own).
+    #[napi]
+    pub fn with_settings(&self, names: Vec<String>, values: Vec<String>) -> Engine {
+        let driver: Arc<dyn Driver> = Arc::new(db::WithSettings::new(self.driver.clone(), names.into_iter().zip(values).collect()));
+        Engine { driver, target: self.target, schema: self.schema.clone() }
+    }
+
+    /// Session advisory lock on a pinned connection; `null` when it is not taken.
+    #[napi]
+    #[allow(clippy::too_many_arguments)]
+    pub fn session_lock<'env>(
+        &self, env: &'env Env, key: String, name: Option<napi::bindgen_prelude::Buffer>,
+        exclusive: bool, nowait: bool, timeout_ms: Option<u32>, trace: Option<&Trace>,
+    ) -> napi::Result<PromiseRaw<'env, Option<SessionLock>>> {
+        let key = match name {
+            Some(name) => orm_engine::advisory::key(&name),
+            None => key.parse::<i64>().map_err(|_| tagged("TypeError", "lock key must fit in 64 bits"))?,
+        };
+        let driver = self.driver.clone();
+        let trace = trace.map(|t| t.0.clone());
+        let sql = orm_engine::advisory::session_sql(key, exclusive, nowait);
+        let unlock = orm_engine::advisory::unlock_sql(key, exclusive);
+        env.spawn_future(async move {
+            let taken = driver.session_lock(key, exclusive, nowait, timeout_ms.map(u64::from));
+            let lock = orm_engine::trace::timed(trace.as_ref(), sql, taken, |l| l.is_some() as u64).await.map_err(db_tagged)?;
+            Ok(lock.map(|inner| SessionLock { inner, unlock }))
         })
     }
 
@@ -849,7 +903,7 @@ impl Engine {
 /// from, for error messages and `import` resolution.
 #[napi]
 pub fn prepare_schema(schema_json: String, context_json: Option<String>) -> napi::Result<String> {
-    let mut ir: ir::SchemaIr = serde_json::from_str(&schema_json).map_err(|e| schema_err(e.to_string()))?;
+    let mut ir = ir::SchemaIr::from_json(&schema_json).map_err(schema_err)?;
     if let Some(context) = context_json {
         let context = serde_json::from_str(&context).map_err(|e| schema_err(format!("invalid definition context: {e}")))?;
         ir = orm_core::behavior::merge_definition(context, ir).map_err(schema_err)?;

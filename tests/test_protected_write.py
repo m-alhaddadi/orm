@@ -93,6 +93,24 @@ async def test_the_check_is_on_the_model_the_sql_writes(blog):
     with pytest.raises(TypeError, match="model class"):
         with orm.allow_writes("Post"):  # type: ignore[arg-type]
             pass
+    with pytest.raises(TypeError, match="model class"):
+        with orm.allow_writes(post):
+            pass
+
+
+async def test_a_package_check_before_its_own_io_also_checks_protection(blog):
+    from orm.hooks import prepare_insert, prepare_update
+
+    models, db = blog
+    Post = models["Post"]
+    # A file field uploads after these checks, so a rejected write uploads nothing.
+    with pytest.raises(orm.WriteProtected, match="Post"):
+        prepare_insert(Post.objects.using(db), {"id": 1, "title": "a"})
+    with pytest.raises(orm.WriteProtected, match="Post"):
+        prepare_update(Post.objects.using(db).filter(Post.id == 1), {"title": "b"})
+    with orm.allow_writes(Post):
+        prepare_insert(Post.objects.using(db), {"id": 1, "title": "a"})
+        assert prepare_update(Post.objects.using(db).filter(Post.id == 1), {"title": "b"}).unique
 
 
 async def test_tasks_started_in_the_scope_get_it_and_reads_and_raw_sql_are_unchanged(blog):
@@ -142,6 +160,9 @@ async def test_a_proxy_writes_the_table_of_its_protected_root():
             await Draft.objects.using(db).filter(Draft.id == 1).delete()
     finally:
         await db.close()
+    # The proxy shares the protection of its root, so it cannot declare its own.
+    with pytest.raises(orm.SchemaError, match="Draft: a proxy cannot declare @@protected_write; protect the root model Post"):
+        orm.loads(SOURCE.replace("  @@protected_write\n", "", 1) + 'model Draft {\n  @@proxy.of(Post)\n  @@protected_write\n}\n', registry=orm.Registry())
 
 
 @pytest.mark.skipif("model-composition" not in CAPABILITIES, reason="requires a model-composition artifact")
@@ -171,5 +192,11 @@ model Employee {
             alice = await Employee.objects.using(db).insert(name="a", salary=1)
         with pytest.raises(orm.WriteProtected, match="Person"):
             await Employee.objects.using(db).filter(Employee.id == alice.id).update(name="b")
+        with orm.allow_writes(Person):
+            bob = await Person.objects.using(db).insert(name="b")
+        with pytest.raises(orm.WriteProtected):
+            await Employee.objects.using(db).attach(bob.id, {"salary": 2})
+        with orm.allow_writes(Employee, Person):
+            await Employee.objects.using(db).attach(bob.id, {"salary": 2})
     finally:
         await db.close()

@@ -18,6 +18,8 @@ pub enum Literal {
 
 impl Literal {
     fn parse(value: &Value, ty: ValueType) -> Result<Self, String> {
+        // On a Json field, null is the JSON value, like `@default("null")`.
+        if ty.ty == ColType::Json && !ty.array { return Ok(Self::Json(value.clone())); }
         if value.is_null() { return Ok(Self::Null(ty)); }
         if ty.array {
             return Ok(Self::Array(ty.ty, value.as_array().ok_or("requires an array")?.iter().map(|v| Self::parse(v, ty.element())).collect::<Result<_, _>>()?));
@@ -29,10 +31,14 @@ impl Literal {
             ColType::Float => Self::Float(value.as_f64().ok_or("requires a number")?),
             ColType::Bool => Self::Bool(value.as_bool().ok_or("requires a bool")?),
             ColType::String | ColType::Text => Self::Text(text()?.into()),
-            ColType::DateTime => Self::DateTime(chrono::DateTime::parse_from_rfc3339(text()?).map_err(|e| e.to_string())?),
+            ColType::DateTime => Self::DateTime(chrono::DateTime::parse_from_rfc3339(text()?)
+                .map_err(|e| format!("requires an RFC 3339 timestamp with an offset, such as 2026-01-01T00:00:00Z: {e}"))?),
             ColType::Date => Self::Date(chrono::NaiveDate::parse_from_str(text()?, "%Y-%m-%d").map_err(|e| e.to_string())?),
             ColType::Uuid => Self::Uuid(text()?.parse::<uuid::Uuid>().map_err(|e| e.to_string())?),
-            ColType::Decimal => Self::Decimal(text()?.parse::<bigdecimal::BigDecimal>().map_err(|e| e.to_string())?),
+            ColType::Decimal => {
+                let text = match value { Value::Number(n) => n.to_string(), _ => text()?.to_owned() };
+                Self::Decimal(text.parse::<bigdecimal::BigDecimal>().map_err(|e| e.to_string())?)
+            }
             ColType::Json => Self::Json(value.clone()),
         })
     }
@@ -93,6 +99,17 @@ mod tests {
     }
 
     #[test]
+    fn json_null_decimal_numbers_and_datetime_offsets() {
+        let fields = [field("a", ColType::Json, ClientDefaultIr::Value(json!(null))),
+            field("d", ColType::Decimal, ClientDefaultIr::Value(json!(1.5)))];
+        let prepared = prepare("M", &fields, &[]).unwrap();
+        assert!(matches!(&prepared[0].1, ClientDefault::Literal(Literal::Json(Value::Null))));
+        assert!(matches!(&prepared[1].1, ClientDefault::Literal(Literal::Decimal(d)) if d.to_string() == "1.5"));
+        let error = prepare("M", &[field("t", ColType::DateTime, ClientDefaultIr::Value(json!("2026-01-01T00:00:00")))], &[]).unwrap_err();
+        assert!(error.contains("requires an RFC 3339 timestamp with an offset"), "{error}");
+    }
+
+    #[test]
     fn calls_fit_only_their_types() {
         for (ty, call) in [(ColType::Int, ClientCall::Uuid), (ColType::Text, ClientCall::Now), (ColType::Bool, ClientCall::Uuid7)] {
             assert!(prepare("M", &[field("f", ty, ClientDefaultIr::Call(call))], &[]).unwrap_err().contains("does not fit"));
@@ -100,5 +117,12 @@ mod tests {
         for (ty, call) in [(ColType::String, ClientCall::Uuid), (ColType::Date, ClientCall::Now), (ColType::DateTime, ClientCall::Now)] {
             assert!(prepare("M", &[field("f", ty, ClientDefaultIr::Call(call))], &[]).is_ok());
         }
+        let array = FieldIr { array: true, ..field("f", ColType::String, ClientDefaultIr::Call(ClientCall::Uuid)) };
+        assert!(prepare("M", &[array], &[]).unwrap_err().contains("does not fit"));
+        let status: EnumIr = serde_json::from_value(json!({"name": "Status", "db_name": "status", "storage": "text", "values": [{"name": "A", "value": "a"}]})).unwrap();
+        let on_enum = |default| FieldIr { enum_name: Some("Status".into()), enum_idx: Some(0), ..field("f", ColType::String, default) };
+        assert!(prepare("M", &[on_enum(ClientDefaultIr::Call(ClientCall::Uuid))], std::slice::from_ref(&status)).unwrap_err().contains("does not fit"));
+        assert!(prepare("M", &[on_enum(ClientDefaultIr::Value(json!("zzz")))], std::slice::from_ref(&status)).unwrap_err().contains("must be a value of enum Status"));
+        assert!(prepare("M", &[on_enum(ClientDefaultIr::Value(json!("a")))], std::slice::from_ref(&status)).is_ok());
     }
 }

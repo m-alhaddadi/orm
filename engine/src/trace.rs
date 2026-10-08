@@ -54,6 +54,22 @@ pub fn wrap(conn: Arc<dyn Executor>, trace: Option<&Trace>) -> Arc<dyn Executor>
     }
 }
 
+/// Runs `run` and records it as statement `sql` into `trace`, when there is one: for
+/// work outside an executor, such as session advisory locks.
+pub async fn timed<T>(trace: Option<&Trace>, sql: String, run: impl Future<Output = DbResult<T>>, rows: impl Fn(&T) -> u64) -> DbResult<T> {
+    let Some(trace) = trace else { return run.await };
+    let start = SystemTime::now();
+    let clock = Instant::now();
+    let out = run.await;
+    let duration = clock.elapsed();
+    let (rows, error) = match &out {
+        Ok(v) => (rows(v), None),
+        Err(e) => (0, Some(e.message.clone())),
+    };
+    trace.push(QueryEvent { sql, start, duration, rows, error });
+    out
+}
+
 /// An executor that records each statement; transactions it begins record too.
 pub struct Traced {
     conn: Arc<dyn Executor>,
@@ -62,17 +78,8 @@ pub struct Traced {
 }
 
 impl Traced {
-    async fn timed<T>(&self, sql: String, run: impl Future<Output = DbResult<T>>, rows: impl Fn(&T) -> u64) -> DbResult<T> {
-        let start = SystemTime::now();
-        let clock = Instant::now();
-        let out = run.await;
-        let duration = clock.elapsed();
-        let (rows, error) = match &out {
-            Ok(v) => (rows(v), None),
-            Err(e) => (0, Some(e.message.clone())),
-        };
-        self.trace.push(QueryEvent { sql, start, duration, rows, error });
-        out
+    fn timed<'a, T: 'a>(&'a self, sql: String, run: impl Future<Output = DbResult<T>> + 'a, rows: impl Fn(&T) -> u64 + 'a) -> impl Future<Output = DbResult<T>> + 'a {
+        timed(Some(&self.trace), sql, run, rows)
     }
 
     fn traced_tx(&self, tx: Arc<dyn Transaction>) -> Arc<dyn Transaction> {

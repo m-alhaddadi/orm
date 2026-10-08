@@ -2,7 +2,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import { NotConnected, QueryError, TransactionRequired } from "./errors.js";
+import { LockNotAvailable, NotConnected, QueryError, TransactionRequired } from "./errors.js";
 import type { IR } from "./expr.js";
 import { registry as defaultRegistry, type Registry } from "./model.js";
 import { call, native, wait, type NativeEngine, type NativeTrace, type NativeTransaction } from "./native.js";
@@ -13,12 +13,19 @@ let defaultDb: Database | undefined;
 
 /** The innermost open transaction of the current async context, and its database. */
 const current = new AsyncLocalStorage<{ readonly db: Database; readonly tx: NativeTransaction }>();
+/** For each database in a `tenant()` call: its primary and replica engines with the tenant set. */
+const tenants = new AsyncLocalStorage<ReadonlyMap<Database, { readonly primary: NativeEngine; readonly replicas: readonly NativeEngine[] }>>();
+/** The `scope.<name>` values of default filters. */
+const scopeValues = new AsyncLocalStorage<Readonly<Record<string, unknown>>>();
+/** For each database with an open transaction: the onCommit callbacks of the innermost one. */
+const callbacks = new AsyncLocalStorage<ReadonlyMap<Database, (() => unknown)[]>>();
 
 export interface LockOptions {
   /** A shared lock (any number of shared holders, but no exclusive one). */
   readonly exclusive?: boolean;
   /** Give `false` instead of waiting when the lock is held. */
   readonly nowait?: boolean;
+  readonly session?: false;
 }
 
 /** One statement the database ran, given to the hooks of {@link Database.onQuery}. */
@@ -35,15 +42,35 @@ export interface QueryEvent {
   readonly error: string | null;
 }
 
+export interface SessionLockOptions {
+  /** Hold the lock while the function runs, on a connection of its own, outside any
+   * transaction. */
+  readonly session: true;
+  /** A shared lock (any number of shared holders, but no exclusive one). */
+  readonly exclusive?: boolean;
+  /** Throw `LockNotAvailable` at once when the lock is held. */
+  readonly nowait?: boolean;
+  /** Seconds to wait before `LockNotAvailable` (no limit when absent). */
+  readonly timeout?: number;
+}
+
+/** Statements a replica may answer (the IR starts with its `op`). */
+const READ = /^\{"op":"(select|count|exists)"/;
+
 /** A connection pool. Created by {@link connect}. */
 export class Database {
+  /** Hooks live on the root: `primary` views share them. */
   readonly #hooks: ((event: QueryEvent) => unknown)[] = [];
+  private turn = 0;
+  /** @internal The database a `primary` view belongs to: they share transactions and callbacks. */
+  root: Database = this;
 
   /** @internal */
   constructor(
-    readonly engine: NativeEngine,
+    private readonly base: NativeEngine,
     readonly url: string,
     readonly registry: Registry,
+    private readonly replicas: readonly NativeEngine[] = [],
   ) {}
 
   /**
@@ -56,10 +83,10 @@ export class Database {
    * An error the hook throws rejects that call.
    */
   onQuery(hook: (event: QueryEvent) => unknown): () => void {
-    this.#hooks.push(hook);
+    this.root.#hooks.push(hook);
     return () => {
-      const i = this.#hooks.indexOf(hook);
-      if (i >= 0) this.#hooks.splice(i, 1);
+      const i = this.root.#hooks.indexOf(hook);
+      if (i >= 0) this.root.#hooks.splice(i, 1);
     };
   }
 
@@ -67,7 +94,7 @@ export class Database {
    * N+1 scope listens. */
   send<T>(start: (tx: NativeTransaction | null, trace: NativeTrace | null) => Promise<T>): Promise<T> {
     const tx = this.tx();
-    if (!this.#hooks.length && !debugging()) return wait(() => start(tx, null));
+    if (!this.root.#hooks.length && !debugging()) return wait(() => start(tx, null));
     const trace = new (native().Trace)();
     return this.#observe(trace, capture(), wait(() => start(tx, trace)));
   }
@@ -78,14 +105,58 @@ export class Database {
     } finally {
       const events: QueryEvent[] = trace.take().map((e) => ({ ...e, error: e.error ?? null }));
       if (origin) for (const e of events) record(e.sql, origin);
-      for (const hook of [...this.#hooks]) for (const e of events) hook(e);
+      for (const hook of [...this.root.#hooks]) for (const e of events) hook(e);
     }
+  }
+
+  /** @internal The primary's engine, with the tenant of an enclosing `tenant()` call. */
+  get engine(): NativeEngine {
+    return tenants.getStore()?.get(this.root)?.primary ?? this.base;
+  }
+
+  /** This database without its replicas: every statement goes to the primary. */
+  get primary(): Database {
+    const view = new Database(this.base, this.url, this.registry);
+    view.root = this.root;
+    return view;
   }
 
   /** @internal The transaction queries on this database run in, if any. */
   tx(): NativeTransaction | null {
     const c = current.getStore();
-    return c !== undefined && c.db === this ? c.tx : null;
+    return c !== undefined && c.db.root === this.root ? c.tx : null;
+  }
+
+  /** @internal The engine for a read: the next replica outside a transaction, else the primary. */
+  reader(): NativeEngine {
+    if (this.replicas.length === 0 || this.tx() !== null) {
+      return this.engine;
+    }
+    const replicas = tenants.getStore()?.get(this.root)?.replicas ?? this.replicas;
+    this.turn = (this.turn + 1) % replicas.length;
+    return replicas[this.turn]!;
+  }
+
+  /**
+   * Runs `fn` with a tenant: every transaction on this database in it first runs
+   * `SELECT set_config('app.tenant', <id>, true)` (`SET LOCAL`), so Postgres row-level
+   * security policies can read `current_setting('app.tenant')`. A statement outside a
+   * transaction runs in a transaction of its own. A transaction that is already open keeps
+   * its setting. Gives what `fn` gives.
+   */
+  tenant<T>(id: string | number | bigint, fn: () => Promise<T>): Promise<T> {
+    if (this.url.startsWith("sqlite://")) {
+      throw new QueryError("db.tenant() sets a Postgres setting for row-level security; sqlite has none");
+    }
+    if (!["string", "number", "bigint"].includes(typeof id)) {
+      throw new TypeError(`tenant id must be a string or a number, got ${String(id)}`);
+    }
+    const root = this.root, value = [String(id)];
+    const engines = {
+      primary: root.base.withSettings(["app.tenant"], value),
+      replicas: root.replicas.map((r) => r.withSettings(["app.tenant"], value)),
+    };
+    return tenants.run(new Map(tenants.getStore() ?? []).set(root, engines), fn);
   }
 
   /** @internal */
@@ -95,8 +166,10 @@ export class Database {
 
   /** @internal */
   runJson(json: string, params: unknown[]): Promise<unknown> {
+    [json, params] = withScope(json, params);
+    const engine = READ.test(json) ? this.reader() : this.engine;
     const allowed = allowedWrites();
-    return this.send((tx, trace) => this.engine.run(json, params, tx, allowed, trace));
+    return this.send((tx, trace) => engine.run(json, params, tx, allowed, trace));
   }
 
   /**
@@ -105,51 +178,112 @@ export class Database {
    * run in the transaction. Nested calls use savepoints. Gives what `fn` gives.
    */
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    const outer = this.tx() === null;
     const tx = await wait(() => this.engine.begin(this.tx()));
+    const mine: (() => unknown)[] = [];
+    const scoped = new Map(callbacks.getStore() ?? []).set(this.root, mine);
     let result: T;
     try {
-      result = await current.run({ db: this, tx }, fn);
+      result = await current.run({ db: this, tx }, () => callbacks.run(scoped, fn));
     } catch (e) {
       await wait(() => tx.rollback());
       throw e;
     }
     await wait(() => tx.commit());
+    await this.afterCommit(mine, outer);
     return result;
   }
 
+  /** A released savepoint hands its callbacks to the enclosing transaction. */
+  private async afterCommit(mine: readonly (() => unknown)[], outer: boolean): Promise<void> {
+    if (!outer) {
+      callbacks.getStore()!.get(this.root)!.push(...mine);
+      return;
+    }
+    for (const fn of mine) {
+      await fn();
+    }
+  }
+
   /**
-   * Takes an advisory lock on `key` until the transaction ends: a lock on a name rather
-   * than on rows ("only one worker imports this file at a time").
-   *
-   * Waits for the lock unless `nowait`, which gives `false` instead of waiting. A string
-   * key is hashed to a 64-bit one the way the Python package hashes it (the first 8 bytes
-   * of its BLAKE2b digest, signed big-endian), so both lock the same name. Must run inside
-   * `db.transaction()`.
+   * Calls `fn()` after the outermost transaction on this database commits; a rollback
+   * drops it (a rolled-back savepoint drops only the callbacks registered inside it).
+   * Outside a transaction, `fn()` runs at once. A promise result is awaited. Callbacks
+   * run in order, outside the transaction; an error in one goes to the caller of
+   * `transaction()` and the later ones do not run.
    */
-  async lock(key: bigint | number | string, options: LockOptions = {}): Promise<boolean> {
+  async onCommit(fn: () => unknown): Promise<void> {
+    const mine = callbacks.getStore()?.get(this.root);
+    if (mine !== undefined && this.tx() !== null) {
+      mine.push(fn);
+      return;
+    }
+    await fn();
+  }
+
+  /**
+   * Takes an advisory lock on `key`: a lock on a name rather than on rows ("only one
+   * worker imports this file at a time").
+   *
+   * `db.lock(key, options)` holds the lock until the transaction ends and must run inside
+   * `db.transaction()`. It waits for the lock unless `nowait`, which gives `false` instead
+   * of waiting.
+   *
+   * `db.lock(key, { session: true, timeout }, fn)` holds the lock while `fn` runs, on a
+   * connection of its own, with no transaction, and gives what `fn` gives. It waits at
+   * most `timeout` seconds (no limit when absent; not at all with `nowait`) and throws
+   * `LockNotAvailable` when another session still holds the lock.
+   *
+   * A string key is hashed to a 64-bit one the way the Python package hashes it (the
+   * first 8 bytes of its BLAKE2b digest, signed big-endian), so both lock the same name.
+   */
+  lock(key: bigint | number | string, options?: LockOptions): Promise<boolean>;
+  lock<T>(key: bigint | number | string, options: SessionLockOptions, fn: () => Promise<T>): Promise<T>;
+  async lock<T>(
+    key: bigint | number | string,
+    options: LockOptions | SessionLockOptions = {},
+    fn?: () => Promise<T>,
+  ): Promise<boolean | T> {
+    if (options.session === true) {
+      return this.sessionLock(key, options, fn!);
+    }
     if (this.url.startsWith("sqlite://")) {
       throw new QueryError("sqlite does not support advisory locks");
     }
     if (this.tx() === null) {
       throw new TransactionRequired(
-        "db.lock() outside a transaction would release the lock at once; run it inside `db.transaction(...)`",
+        "db.lock() outside a transaction would release the lock at once; run it inside `db.transaction(...)` or use `{ session: true }`",
       );
     }
-    let k: bigint;
-    let name: Buffer | null = null;
-    if (typeof key === "string") {
-      name = Buffer.from(new TextEncoder().encode(key));
-      k = 0n;
-    } else if (typeof key === "bigint" || Number.isSafeInteger(key)) {
-      k = BigInt(key);
-      if (k !== BigInt.asIntN(64, k)) {
-        throw new RangeError("lock key must fit in 64 bits");
-      }
-    } else {
-      throw new TypeError(`lock key must be an integer or a string, got ${String(key)}`);
-    }
+    const [k, name] = lockKey(key);
     const { exclusive = true, nowait = false } = options;
-    return this.send((tx, trace) => this.engine.advisoryLock(String(k), name, Boolean(exclusive), Boolean(nowait), tx!, trace));
+    return this.send((tx, trace) => this.engine.advisoryLock(k, name, Boolean(exclusive), Boolean(nowait), tx!, trace));
+  }
+
+  private async sessionLock<T>(key: bigint | number | string, options: SessionLockOptions, fn: () => Promise<T>): Promise<T> {
+    if (this.url.startsWith("sqlite://")) {
+      throw new QueryError("sqlite does not support advisory locks");
+    }
+    if (typeof fn !== "function") {
+      throw new TypeError("db.lock(key, { session: true }, fn) needs the function to run under the lock");
+    }
+    const [k, name] = lockKey(key);
+    const { exclusive = true, nowait = false, timeout } = options;
+    if (timeout !== undefined && !(timeout >= 0)) {
+      throw new RangeError("lock timeout must be a number of seconds >= 0");
+    }
+    const timeoutMs = timeout === undefined ? null : Math.ceil(timeout * 1000);
+    const engine = this.engine;
+    const held = await this.send((_, trace) => engine.sessionLock(k, name, Boolean(exclusive), Boolean(nowait), timeoutMs, trace));
+    if (held === null) {
+      const after = nowait || timeout === undefined ? "" : ` after ${timeout}s`;
+      throw new LockNotAvailable(`advisory lock ${JSON.stringify(String(key))} is held by another session${after}`);
+    }
+    try {
+      return await fn();
+    } finally {
+      await this.send((_, trace) => held.release(trace));
+    }
   }
 
   /** Runs raw SQL (one or more statements); gives the number of rows affected. */
@@ -190,8 +324,15 @@ export class Database {
     return wait(() => this.engine.dropTables());
   }
 
+  /** Closes the pools of the primary and of each replica. */
   async close(): Promise<void> {
-    await wait(() => this.engine.close());
+    if (this.root !== this) {
+      return this.root.close();
+    }
+    await wait(() => this.base.close());
+    for (const replica of this.replicas) {
+      await wait(() => replica.close());
+    }
     if (defaultDb === this) {
       defaultDb = undefined;
     }
@@ -211,6 +352,9 @@ export interface ConnectOptions {
   /** Switch database capabilities off (`"ilike"`, `"update_from_values"`, ...) to test
    * the SQL other databases get. */
   readonly disable?: readonly string[];
+  /** URLs of read replicas: reads outside a transaction go to one of them, in turn;
+   * writes and every statement in a transaction go to the primary. */
+  readonly replicas?: readonly string[];
 }
 
 /**
@@ -220,10 +364,14 @@ export interface ConnectOptions {
 export async function connect(url: string, options: ConnectOptions = {}): Promise<Database> {
   const reg = options.registry ?? defaultRegistry;
   const schema = reg.native();
-  const engine = await wait(() =>
-    call(() => native().connect(url, schema, options.maxConnections ?? 10, [...(options.disable ?? [])])),
-  );
-  const db = new Database(engine, url, reg);
+  const open = (u: string) =>
+    wait(() => call(() => native().connect(u, schema, options.maxConnections ?? 10, [...(options.disable ?? [])])));
+  const engine = await open(url);
+  const readers: NativeEngine[] = [];
+  for (const replica of options.replicas ?? []) {
+    readers.push(await open(replica));
+  }
+  const db = new Database(engine, url, reg, readers);
   if (options.default ?? true) {
     defaultDb = db;
   }
@@ -236,6 +384,44 @@ export function getDatabase(): Database {
     throw new NotConnected("no default database; call `await connect(url)` first");
   }
   return defaultDb;
+}
+
+/**
+ * Runs `fn` with the values that `scope.<name>` reads in default filters
+ * (`@@query.filter("shop_id == scope.shop")`). A query on a model whose default filter
+ * reads a value that no enclosing `scope()` sets throws `QueryError`. Inner values
+ * replace outer ones. Gives what `fn` gives.
+ */
+export function scope<T>(values: Readonly<Record<string, unknown>>, fn: () => Promise<T>): Promise<T> {
+  return scopeValues.run({ ...scopeValues.getStore(), ...values }, fn);
+}
+
+/** @internal `json` (a statement's IR, or with `key` a list wrapped under it) with the
+ * scope's parameter indexes, and `params` with the scope's values appended. */
+export function withScope(json: string, params: unknown[], key?: string): [string, unknown[]] {
+  const values = scopeValues.getStore();
+  if (values === undefined || Object.keys(values).length === 0) {
+    return [json, params];
+  }
+  const names = Object.keys(values);
+  const index = JSON.stringify(Object.fromEntries(names.map((n, i) => [n, params.length + i])));
+  const op = key === undefined ? `${json.slice(0, -1)},"scope":${index}}` : `{"${key}":${json},"scope":${index}}`;
+  return [op, [...params, ...names.map((n) => values[n])]];
+}
+
+/** A validated lock key: a decimal 64-bit integer, or the UTF-8 name the engine hashes. */
+function lockKey(key: bigint | number | string): [string, Buffer | null] {
+  if (typeof key === "string") {
+    return ["0", Buffer.from(new TextEncoder().encode(key))];
+  }
+  if (typeof key === "bigint" || Number.isSafeInteger(key)) {
+    const k = BigInt(key);
+    if (k !== BigInt.asIntN(64, k)) {
+      throw new RangeError("lock key must fit in 64 bits");
+    }
+    return [String(k), null];
+  }
+  throw new TypeError(`lock key must be an integer or a string, got ${String(key)}`);
 }
 
 /** `db`, or the default database. */

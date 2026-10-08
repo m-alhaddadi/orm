@@ -55,7 +55,7 @@ pub fn prepare(models: &mut [Model], defaults: &[QueryDefaults]) -> Result<(), S
 fn validate_filter(model: &Model, filter: &Expr) -> Result<(), String> {
     match filter {
         Expr::Col { path, name } if path.is_empty() => { model.field(name)?; }
-        Expr::Const { .. } | Expr::Int { .. } | Expr::Text { .. } => {}
+        Expr::Const { .. } | Expr::Int { .. } | Expr::Text { .. } | Expr::Scope { .. } => {}
         Expr::Cmp { l, r, .. } => { validate_filter(model, l)?; validate_filter(model, r)?; }
         Expr::And { items } | Expr::Or { items } => for item in items { validate_filter(model, item)?; },
         Expr::Not { item } | Expr::IsNull { item, .. } => validate_filter(model, item)?,

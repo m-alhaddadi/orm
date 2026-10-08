@@ -99,9 +99,9 @@ fn update_many_plan<'py>(
         .into_iter()
         .map(|r| r.into_iter().map(|v| v.expect("no DEFAULT in update_many")).collect())
         .collect();
-    let filters: Vec<ir::Expr> =
-        serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
-    exec::plan_update_many(schema, target, model, fields, values, &filters, &PyParams(params), returning, batch_size, without_defaults)
+    let (filters, scope) = orm_engine::params::scoped_filters(filters_json).map_err(engine_err)?;
+    let params = orm_engine::params::Scoped { params: &PyParams(params), scope: &scope };
+    exec::plan_update_many(schema, target, model, fields, values, &filters, &params, returning, batch_size, without_defaults)
         .map_err(engine_err)
 }
 
@@ -119,7 +119,7 @@ impl PySchema {
     #[pyo3(signature = (schema_json, classes = None))]
     fn new(py: Python<'_>, schema_json: &str, classes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut ir: ir::SchemaIr =
-            serde_json::from_str(schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+            ir::SchemaIr::from_json(schema_json).map_err(schema_err)?;
         orm_core::behavior::prepare(&mut ir, Some("python")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         db::require_dialect(inner.dialect).map_err(db_err)?;
@@ -131,7 +131,9 @@ impl PySchema {
     }
 
     /// Converts and plans a single-row insert without SQL or I/O (`orm.hooks.prepare_insert`).
-    fn validate_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>) -> PyResult<()> {
+    /// `allowed`: the write protection check runs here too, before a caller's own I/O.
+    fn validate_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>, allowed: Vec<String>) -> PyResult<()> {
+        protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
         let values = convert_rows(&self.inner, model, &fields, rows, true)?;
         exec::plan_insert(&self.inner, Target::new(self.inner.dialect), model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
         Ok(())
@@ -139,8 +141,11 @@ impl PySchema {
 
     /// Plans an update without SQL or I/O; true when its filters pin one row by a
     /// non-null primary key or unique field (`orm.hooks.prepare_update`).
-    fn unique_row_update(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<bool> {
+    fn unique_row_update(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>, allowed: Vec<String>) -> PyResult<bool> {
         let op = parse_op(op_json).map_err(engine_err)?;
+        if let Operation::Update(ir::Update { model, .. }) = &op {
+            protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
+        }
         plan::unique_row_update(&self.inner, Target::new(self.inner.dialect), &op, &PyParams(&params)).map_err(engine_err)
     }
 
@@ -262,6 +267,25 @@ impl Trace {
                 (e.sql, start, e.duration.as_secs_f64(), e.rows, e.error)
             })
             .collect()
+    }
+}
+
+/// A held session advisory lock (`db.lock(..., session=True)`).
+#[pyclass(frozen, module = "orm._native")]
+struct SessionLock {
+    inner: Arc<dyn db::SessionLock>,
+    unlock: String,
+}
+
+#[pymethods]
+impl SessionLock {
+    #[pyo3(signature = (trace = None))]
+    fn release<'py>(&self, py: Python<'py>, trace: Option<&Bound<'py, Trace>>) -> PyResult<Bound<'py, PyAny>> {
+        let lock = self.inner.clone();
+        let (sql, trace) = (self.unlock.clone(), trace.map(|t| t.get().0.clone()));
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            orm_engine::trace::timed(trace.as_ref(), sql, lock.release(), |_| 1).await.map_err(db_err)
+        })
     }
 }
 
@@ -463,6 +487,32 @@ impl Engine {
         })
     }
 
+    /// This engine on the same pool, with `set_config(name, value, true)` for each
+    /// setting at the start of every transaction (statements outside one get their own).
+    fn with_settings(&self, names: Vec<String>, values: Vec<String>) -> Engine {
+        let driver: Arc<dyn Driver> = Arc::new(db::WithSettings::new(self.driver.clone(), names.into_iter().zip(values).collect()));
+        Engine { driver, target: self.target, schema: self.schema.clone(), classes: self.classes.clone() }
+    }
+
+    /// Session advisory lock on a pinned connection; `None` when it is not taken.
+    #[pyo3(signature = (key, name, exclusive, nowait, timeout_ms = None, trace = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn session_lock<'py>(
+        &self, py: Python<'py>, key: i64, name: Option<&[u8]>,
+        exclusive: bool, nowait: bool, timeout_ms: Option<u64>, trace: Option<&Bound<'py, Trace>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = name.map(orm_engine::advisory::key).unwrap_or(key);
+        let driver = self.driver.clone();
+        let trace = trace.map(|t| t.get().0.clone());
+        let sql = orm_engine::advisory::session_sql(key, exclusive, nowait);
+        let unlock = orm_engine::advisory::unlock_sql(key, exclusive);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let taken = driver.session_lock(key, exclusive, nowait, timeout_ms);
+            let lock = orm_engine::trace::timed(trace.as_ref(), sql, taken, |l| l.is_some() as u64).await.map_err(db_err)?;
+            Ok(lock.map(|inner| SessionLock { inner, unlock }))
+        })
+    }
+
     /// Raw SQL escape hatch (one or more statements); returns rows affected.
     #[pyo3(signature = (sql, tx = None, trace = None))]
     fn execute<'py>(
@@ -657,7 +707,7 @@ fn outcome_to_py(
 #[pyfunction]
 #[pyo3(signature = (schema_json, context_json = None))]
 fn prepare_schema(schema_json: &str, context_json: Option<&str>) -> PyResult<String> {
-    let mut ir: ir::SchemaIr = serde_json::from_str(schema_json).map_err(|e| schema_err(e.to_string()))?;
+    let mut ir = ir::SchemaIr::from_json(schema_json).map_err(schema_err)?;
     if let Some(context) = context_json {
         let context = serde_json::from_str(context).map_err(|e| schema_err(format!("invalid definition context: {e}")))?;
         ir = orm_core::behavior::merge_definition(context, ir).map_err(schema_err)?;
@@ -769,6 +819,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
     m.add_class::<Transaction>()?;
     m.add_class::<Trace>()?;
+    m.add_class::<SessionLock>()?;
     m.add("DEFAULT", Py::new(py, DefaultMarker)?)?;
     errors::add_defaults(py)?;
     m.add("DatabaseError", py.get_type::<errors::DatabaseError>())?;

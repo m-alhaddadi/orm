@@ -100,6 +100,8 @@ export class ModelMeta implements Source {
   defaultFilter: unknown;
   /** The schema default order, one key per column; set once by `define()`. */
   defaultOrder: readonly { field: string; desc?: boolean; nulls?: "first" | "last" }[] = [];
+  /** IR names of fields that a proxy declares non-null over a nullable stored column. */
+  narrowed: ReadonlySet<string> = new Set();
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
   readonly fieldList: FieldMeta[] = [];
@@ -673,6 +675,8 @@ export function define(
     const policy = ((ir.behavior as { query_defaults?: { model: string; filter?: unknown; order?: ModelMeta["defaultOrder"] }[] } | undefined)?.query_defaults ?? []).find((d) => d.model === m.name);
     meta.defaultFilter = policy?.filter;
     meta.defaultOrder = policy?.order ?? [];
+    const proxy = ((ir.behavior as { proxy_models?: { model: string; fields?: { field: string; non_null?: boolean }[] }[] } | undefined)?.proxy_models ?? []).find((p) => p.model === m.name);
+    meta.narrowed = new Set((proxy?.fields ?? []).filter((f) => f.non_null).map((f) => f.field));
     const computed = new Set(((ir.behavior as { result_fields?: { model: string; field: string }[] } | undefined)?.result_fields ?? []).filter((f) => f.model === m.name).map((f) => f.field));
     if (computed.size) {
       meta.inputFieldList = meta.fieldList.filter((f) => !computed.has(f.ir));

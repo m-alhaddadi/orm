@@ -93,3 +93,21 @@ async def test_python_callable_defaults_fill_the_same_omitted_values():
     finally:
         await db.drop_tables()
         await db.close()
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+async def test_a_json_null_client_default_writes_json_null(dialect):
+    source = 'model Doc {\n  id Int @id\n  a Json @client_default("null")\n  @@map("client_default_docs")\n}'
+    if dialect == "sqlite":
+        source = 'datasource db { provider = "sqlite" }\n' + source
+    registry = orm.Registry()
+    Doc = orm.loads(source, registry=registry)["Doc"]
+    db = await orm.connect("sqlite://:memory:" if dialect == "sqlite" else URL, registry=registry, default=False)
+    await db.create_tables()
+    try:
+        # The column is NOT NULL, so an SQL NULL fails the insert.
+        doc = await Doc.objects.using(db).insert(id=1)
+        assert doc.a is None
+    finally:
+        await db.drop_tables()
+        await db.close()

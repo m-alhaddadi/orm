@@ -4,7 +4,7 @@
  */
 
 import { Builder } from "./build.js";
-import { resolve, type Database } from "./db.js";
+import { resolve, withScope, type Database } from "./db.js";
 import {
   asCondition,
   Column,
@@ -41,7 +41,7 @@ import { call, type NativeReturned, type NativeSelect, type NativeTrace, type Na
 import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
 import { after, decodeCursor, encodeCursor, fingerprint, keyset, type Page, type PageOptions } from "./pagination.js";
 import { allowedWrites } from "./protection.js";
-import { active as debugging, relationLoad } from "./debug.js";
+import { active as debugging, internalLoop, relationLoad } from "./debug.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
 import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./select.js";
 
@@ -598,8 +598,15 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return this.clone({ lock: { exclusive, nowait, skip_locked: skipLocked } }) as never;
   }
 
-  /** Run on `db` instead of the default database. */
-  using(db: Database | undefined): this {
+  /** Run on `db` instead of the default database. `"primary"` sends reads of this query
+   * set to the primary of its database (the default one, resolved now), not to a replica. */
+  using(db: Database | "primary" | undefined): this {
+    if (typeof db === "string") {
+      if (db !== "primary") {
+        throw new TypeError(`using() takes a Database or "primary", got ${JSON.stringify(db)}`);
+      }
+      return this.clone({ db: resolve(this.state.db).primary });
+    }
     return this.clone({ db });
   }
 
@@ -686,9 +693,10 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     }
     const pk = this.meta.column(this.meta.pk);
     let last: unknown = undefined;
+    const seen = new Set<string>();
     for (;;) {
       const page = last === undefined ? this : this.clone({ filters: [...this.state.filters, pk.gt(last as never)] });
-      const objs = (await page.clone({ order: [pk.asc()], limit: size }).fetch()) as R[];
+      const objs = (await internalLoop(seen, () => page.clone({ order: [pk.asc()], limit: size }).fetch())) as R[];
       if (objs.length) {
         yield objs;
       }
@@ -852,10 +860,11 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     if (analyze && this.state.lock) {
       throw new QueryError("explain({ analyze: true }) would run the query and take its row locks; drop lock() to explain it");
     }
-    const params: unknown[] = [];
-    const json = JSON.stringify(this.selectIr("select", params));
+    const bound: unknown[] = [];
+    const [json, params] = withScope(JSON.stringify(this.selectIr("select", bound)), bound);
     const db = this.db();
-    return db.send((tx, trace) => db.engine.explain(json, params, analyze, tx, trace));
+    const engine = db.reader();
+    return db.send((tx, trace) => engine.explain(json, params, analyze, tx, trace));
   }
 
   // -- execution ------------------------------------------------------------------------------
@@ -902,8 +911,8 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     yield* await this.fromCache();
   }
 
-  /** The order of this read: `orderBy()`, else the schema default order, else the pk. */
-  private defaultOrder(): readonly Ordering<string, unknown>[] {
+  /** @internal The order of this read: `orderBy()`, else the schema default order, else the pk. */
+  defaultOrder(): readonly Ordering<string, unknown>[] {
     if (this.state.order.length) return this.state.order;
     const keys = this.meta.defaultOrder;
     if (keys.length && !this.state.withoutDefaults && !this.state.from) {
@@ -925,7 +934,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     void check;
     const forward = options.first !== undefined;
     if (forward === (options.last !== undefined)) throw new TypeError("paginate() takes first or last");
-    if ((forward && options.before !== undefined) || (!forward && options.after !== undefined)) {
+    if ((forward && options.before != null) || (!forward && options.after != null)) {
       throw new TypeError("paginate() takes first with after, or last with before");
     }
     const size = forward ? options.first : options.last;
@@ -939,7 +948,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     const helpers = [...(this.state.modelHelpers ?? [])];
     for (const [f] of keys) if (!helpers.includes(f.ir)) helpers.push(f.ir);
     const cursor = (forward ? options.after : options.before) ?? null;
-    const filters = cursor === null ? this.state.filters : [...this.state.filters, after(order, decodeCursor(cursor, fp, keys))];
+    const filters = cursor === null ? this.state.filters : [...this.state.filters, after(this.meta, order, decodeCursor(this.meta, cursor, fp, keys))];
     const fetched = (await this.clone({ modelHelpers: helpers, filters, order, limit: size! + 1, offset: undefined }).fetch()) as R[];
     const more = fetched.length > size!;
     const items = forward ? fetched.slice(0, size!) : fetched.slice(0, size!).reverse();
@@ -1022,8 +1031,9 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       return out;
     }
     const keys = [...new Set(ids)];
+    const seen = new Set<string>();
     for (let i = 0; i < keys.length; i += IN_BULK_CHUNK) {
-      add(await this.clone({ modelHelpers: [...(this.state.modelHelpers ?? []), col.field.ir], filters: [...this.state.filters, col.in(keys.slice(i, i + IN_BULK_CHUNK) as never)] }).fetch());
+      add(await internalLoop(seen, () => this.clone({ modelHelpers: [...(this.state.modelHelpers ?? []), col.field.ir], filters: [...this.state.filters, col.in(keys.slice(i, i + IN_BULK_CHUNK) as never)] }).fetch()));
     }
     return out;
   }
@@ -1059,7 +1069,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     this.db();
     const params: unknown[] = [];
     const ir = this.mutationIr("update", params, values);
-    const unique = call(() => this.meta.registry.native().uniqueRowUpdate(JSON.stringify(ir), params));
+    const unique = call(() => this.meta.registry.native().uniqueRowUpdate(JSON.stringify(ir), params, allowedWrites()));
     return { unique, execute: (data = values, options = {}) => this.updateValues(data, options.returning ?? false) };
   }
 
@@ -1111,8 +1121,9 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       throw new QueryError("updateMany() filters can't read CTEs");
     }
     const db = this.db();
+    const [filters, scoped] = withScope(JSON.stringify(ir["filters"]), params, "filters");
     const res = await db_wait(db, (tx, allowed, trace) =>
-      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx, this.state.withoutDefaults, allowed, trace),
+      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, filters, scoped, returning, batchSize ?? null, tx, this.state.withoutDefaults, allowed, trace),
     );
     return returning ? (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][]) : (res as number);
   }
@@ -1152,7 +1163,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   prepareInsert(values: M["insert"]): PreparedInsert<M> {
     this.db();
     const prepared = prepareRows(this.meta, [values]);
-    call(() => this.meta.registry.native().validateInsert(this.meta.name, prepared.fields, prepared.rows));
+    call(() => this.meta.registry.native().validateInsert(this.meta.name, prepared.fields, prepared.rows, allowedWrites()));
     return { execute: async (data = values) => (await this.insertRows([data], undefined))[0]! };
   }
 
@@ -1322,8 +1333,7 @@ export class Prepared<M extends ModelSpec, R, P> {
       if (kind === "get") {
         qs = qs.limit(2) as never;
       } else if (kind === "first") {
-        const order = qs.state.order.length ? qs.state.order : [qs.meta.column(qs.meta.pk).asc()];
-        qs = (qs as never as { clone(c: Partial<QueryState>): typeof qs }).clone({ order });
+        qs = (qs as never as { clone(c: Partial<QueryState>): typeof qs }).clone({ order: qs.defaultOrder() });
         qs = (qs.state.limit instanceof ParamRef ? qs.limit(1) : qs.slice(0, 1)) as never;
       } else if (kind === "count" || kind === "exists") {
         op = kind;
@@ -1450,6 +1460,10 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     const pristine = s.filters.length === 1 && !s.order.length && s.limit === undefined && s.offset === undefined && !s.prefetch.length && !s.related.length;
     if (rows !== undefined && pristine) {
       return [...rows] as M["row"][];
+    }
+    if (debugging() && pristine) {
+      const owner = (this.instance.constructor as unknown as { meta: { name: string } }).meta.name;
+      return relationLoad(owner, this.relation.name, "prefetchRelated", () => super.fetch());
     }
     return super.fetch();
   }

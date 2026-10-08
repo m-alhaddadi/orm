@@ -585,17 +585,17 @@ fn client_defaults_stay_out_of_the_database_schema() {
                status Status @default(OLD) @client_default(ACTIVE)\n  tags Status[] @client_default([ACTIVE, OLD])\n  \
                at DateTime @client_default(now())\n  day DateTime @db.Date @client_default(now())\n  \
                meta Json @client_default(\"{\\\"a\\\": [1]}\")\n  n Int @client_default(3)\n  ok Boolean @client_default(true)\n  \
-               prisma String @default(uuid())\n  prisma7 String @default(uuid(7))\n}";
+               prisma String @default(uuid())\n  prisma7 String @default(uuid(7))\n  prisma4 String @default(uuid(4))\n}";
     let ir = ok(src);
     let defaults: Vec<_> = ir.models[0].fields.iter().map(|f| serde_json::to_value(&f.client_default).unwrap()).collect();
     assert_eq!(defaults, [json!({"call": "uuid7"}), json!({"call": "uuid"}), json!({"value": "active"}), json!({"value": ["active", "old"]}),
         json!({"call": "now"}), json!({"call": "now"}), json!({"value": {"a": [1]}}), json!({"value": 3}), json!({"value": true}),
-        json!({"call": "uuid"}), json!({"call": "uuid7"})]);
+        json!({"call": "uuid"}), json!({"call": "uuid7"}), json!({"call": "uuid"})]);
     assert_eq!(ir.models[0].fields[2].default, Some(json!("old")));
     assert!(ir.models[0].fields[9].default.is_none() && ir.models[0].fields[9].default_sql.is_none());
     let (_, with) = check(ir).unwrap();
-    // Drop each client default attribute, up to its matching parenthesis.
-    let mut plain = src.replace(" @default(uuid(7))", "").replace(" @default(uuid())", "");
+    // Compare the DDL without the client default attributes, up to each matching parenthesis.
+    let mut plain = src.replace(" @default(uuid(7))", "").replace(" @default(uuid(4))", "").replace(" @default(uuid())", "");
     while let Some(start) = plain.find(" @client_default(") {
         let mut depth = 0;
         let end = plain[start..].char_indices().find_map(|(i, c)| {
@@ -607,7 +607,19 @@ fn client_defaults_stay_out_of_the_database_schema() {
     let (_, without) = check(ok(&plain)).unwrap();
     assert_eq!(crate::migrate::create_all(&with).unwrap(), crate::migrate::create_all(&without).unwrap());
     assert!(crate::migrate::plan(&with, &crate::migrate::snapshot(&without).unwrap()).unwrap().up.is_empty());
-    assert_eq!(with.models[0].client_defaults.len(), 11);
+    assert_eq!(with.models[0].client_defaults.len(), 12);
+    let field = |f: &str| compile(&format!("enum Status {{\n  ACTIVE @map(\"active\")\n}}\nmodel A {{\n  id Int @id\n  {f}\n}}"), None);
+    for (f, message) in [
+        ("t String @client_default(\"a\") @client_default(\"b\")", "A.t: a field takes one client default"),
+        ("t String @default(uuid()) @client_default(\"x\")", "A.t: a field takes one client default"),
+        ("t String @client_default(\"x\") @default(uuid())", "A.t: a field takes one client default"),
+        ("s Status @client_default(\"active\")", "A.s: @client_default on an enum field names a member, such as ACTIVE, not a string"),
+    ] {
+        let error = field(f).unwrap_err();
+        assert!(error.contains(message), "{f}: {error}");
+    }
+    let ir = field("d Decimal @client_default(1.5)").unwrap();
+    assert_eq!(serde_json::to_value(&ir.models[0].fields[1].client_default).unwrap(), json!({"value": 1.5}));
 }
 
 #[test]
@@ -669,6 +681,21 @@ fn the_generic_pass_owns_generic_and_reverse_fields() {
     let members = |items: &[syntax::Item], i: usize| match &items[i] { syntax::Item::Model(m) => m.members.iter().map(|f| (f.name.clone(), f.ty.name.clone(), f.ty.optional)).collect::<Vec<_>>(), _ => unreachable!() };
     assert_eq!(members(&items, 0)[1], ("target".to_string(), "Int".to_string(), true));
     assert_eq!(members(&items, 1).len(), 1);
+    // The pass builds these members, so an ordinary attribute on one has nowhere to go.
+    for (from, to, message) in [
+        ("@generic.relation(targets: [\"Post\"])", "@generic.relation(targets: [\"Post\"]) @unique", "Tag.target: @unique is not allowed on a Generic field"),
+        ("@generic.relation(targets: [\"Post\"])", "@map(\"zz\") @generic.relation(targets: [\"Post\"])", "Tag.target: @map is not allowed on a Generic field"),
+        ("@generic.reverse", "@generic.reverse @map(\"zz\")", "Post.tags: @map is not allowed on a @generic.reverse field"),
+        ("@generic.reverse", "@generic.reverse @relation(\"x\")", "Post.tags: @relation is not allowed on a @generic.reverse field"),
+    ] {
+        let mut items = syntax::parse(&source.replace(from, to)).unwrap();
+        let error = super::lower::behavior_declarations(&mut items, "t.prisma", std::slice::from_ref(&manifest)).unwrap_err().msg;
+        assert!(error.contains(message) && error.contains("use the explicit @@generic.relation form"), "{error}");
+    }
+    // A Generic field without @generic.relation is not the pass's member.
+    let mut items = syntax::parse("model Tag {\n id Int @id\n x Generic\n}").unwrap();
+    super::lower::behavior_declarations(&mut items, "t.prisma", std::slice::from_ref(&manifest)).unwrap();
+    assert_eq!(members(&items, 0)[1].1, "Generic");
     // Without a compiled generic.relation, Generic stays an unknown type.
     let mut items = syntax::parse(source).unwrap();
     super::lower::behavior_declarations(&mut items, "t.prisma", &[]).unwrap();
