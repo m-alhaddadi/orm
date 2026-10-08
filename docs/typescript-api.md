@@ -278,6 +278,11 @@ Writes run when they are called and return a `Promise`:
   transaction.
 * On an instance: `post.update({...})` (refreshed from `RETURNING`), `post.delete()` and
   `post.refresh()`.
+* With the column-role extensions (`schema-extensions.md`): `@timestamps.updated_at` and
+  `@locking.version` are set on each update; on a `@soft_delete.deleted_at` model,
+  `delete()` soft-deletes, and `hardDelete()`, `undelete()`, `allWithDeleted()` and
+  `deletedOnly()` exist (instances: the `SoftDeletable` type). A stale versioned
+  instance write throws `VersionConflict`.
 
 Values in `update()` can be expressions over the same model (`Post.views.add(1)`).
 `excluded(col)` reads the proposed row in an upsert. A related row can stand in for its
@@ -428,7 +433,7 @@ A package that changes writes and reads from outside the ORM (for example
 Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,
 `IntegrityError`, `LockNotAvailable`, `QueryError`, `SchemaError`, `NotConnected`,
 `NotLoaded`, `TransactionRequired`, `DoesNotExist`, `MultipleObjectsReturned`,
-`MigrationError` and `WriteProtected`. Values of the wrong type throw a `TypeError` before any SQL runs.
+`MigrationError`, `WriteProtected` and `VersionConflict`. Values of the wrong type throw a `TypeError` before any SQL runs.
 
 A `DatabaseError` (and its subclasses) has `sqlstate`, `constraint` and `detail`, each `null` when the database did not give it.
 They are the same as in Python (see `docs/python-api.md`, "Database errors"): SQLite constraint failures get the Postgres SQLSTATE, and only Postgres gives `constraint` and `detail`.

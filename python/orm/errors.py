@@ -17,6 +17,7 @@ __all__ = [
     "NotConnected",
     "TransactionRequired",
     "WriteProtected",
+    "VersionConflict",
 ]
 
 
@@ -47,3 +48,8 @@ class NotConnected(ORMError, RuntimeError):
 class TransactionRequired(ORMError, RuntimeError):
     """A lock was asked for outside ``db.transaction()``, where it would be released
     as soon as the statement ends."""
+
+
+class VersionConflict(ORMError):
+    """An instance ``update()`` or ``delete()`` found a newer ``@locking.version`` of
+    its row: another writer changed the row after it was loaded."""

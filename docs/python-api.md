@@ -696,6 +696,11 @@ Rails. What's left out on purpose: SQLAlchemy's session and dirty tracking, Rail
 `save` / `attr=` + `save`, and callbacks. A write happens only where the code says
 `await ...insert/update/delete`.
 
+The column-role extensions change these writes (see `schema-extensions.md`).
+`@timestamps.updated_at` and `@locking.version` fields are set on each update.
+On a `@soft_delete.deleted_at` model, `delete()` soft-deletes, and `hard_delete()`, `undelete()`, `all_with_deleted()` and `deleted_only()` exist.
+A stale versioned instance write raises `orm.VersionConflict`.
+
 ### Transactions
 
 ```python
@@ -814,7 +819,8 @@ async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction ne
   still holds the lock. The lock is released when the block ends, also on an error;
   when the unlock fails or the task is cancelled, the connection is closed, so the
   server releases the lock.
-* No optimistic locking (version columns) on purpose.
+* Optimistic locking (version columns) is not in the core.
+  Select the `orm-locking` extension and mark the field `@locking.version`; see `schema-extensions.md`.
 
 ### Read replicas
 

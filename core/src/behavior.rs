@@ -22,6 +22,9 @@ fn build_artifact() -> Artifact {
         (cfg!(feature = "proxy-models"), "proxy-models"),
         (cfg!(feature = "generic-relations"), "generic-relations"),
         (cfg!(feature = "query-defaults"), QUERY_DEFAULTS),
+        (cfg!(feature = "updated-at"), UPDATED_AT),
+        (cfg!(feature = "soft-delete"), SOFT_DELETE),
+        (cfg!(feature = "optimistic-locking"), OPTIMISTIC_LOCKING),
     ];
     for (_, capability) in compiled.into_iter().filter(|(on, _)| *on) {
         if !artifact.capabilities.iter().any(|c| c == capability) { artifact.capabilities.push(capability.into()); }

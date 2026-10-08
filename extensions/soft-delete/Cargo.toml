@@ -1,0 +1,36 @@
+[package]
+name = "orm-soft-delete"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Selected soft-delete compiler for ORM: delete triggers or ORM-only soft deletes"
+
+[dependencies]
+orm-contracts = { path = "../../contracts" }
+serde_json = "1"
+
+[dev-dependencies]
+orm-core = { path = "../../core" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[package.metadata.orm-extension]
+id = "orm.soft-delete"
+version = "0.1.0"
+host_contract = 1
+schema_contract = 1
+languages = ["python", "typescript"]
+databases = ["postgres", "sqlite"]
+capabilities = ["schema-transformations", "physical-schema", "soft-delete"]
+
+[[package.metadata.orm-extension.passes]]
+id = "orm.soft-delete.prepare"
+phase = "behavior"
+rust = "crate::prepare"
+effects = ["behavior.soft_delete", "storage.soft_delete_triggers"]
+
+# `deleted_at DateTime? @soft_delete.deleted_at(mode: "application")`.
+[[package.metadata.orm-extension.attributes]]
+name = "soft_delete.deleted_at"
+target = "field"
+[package.metadata.orm-extension.attributes.arguments.mode]
+kind = "string"

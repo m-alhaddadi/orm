@@ -72,6 +72,12 @@ export class MigrationError extends ORMError {
   override name = "MigrationError";
 }
 
+/** An instance `update()` or `delete()` found a newer `@locking.version` of its row:
+ * another writer changed the row after it was loaded. */
+export class VersionConflict extends ORMError {
+  override name = "VersionConflict";
+}
+
 /** An ORM write to a `@@protected_write` model outside `allowWrites(...)`. */
 export class WriteProtected extends ORMError {
   override name = "WriteProtected";

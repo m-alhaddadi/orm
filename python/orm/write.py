@@ -442,9 +442,12 @@ class Delete(_SetStatement[M]):
     _verb = "deleted"
 
     @classmethod
-    def build(cls, qs: QuerySet[M]) -> Delete[M]:
+    def build(cls, qs: QuerySet[M], *, hard: bool = False) -> Delete[M]:
         params: list[Any] = []
-        return cls(qs, qs._mutation_ir("delete", params), params)
+        ir = qs._mutation_ir("delete", params)
+        if hard:
+            ir["hard"] = True
+        return cls(qs, ir, params)
 
 
 class Returning(Generic[M]):

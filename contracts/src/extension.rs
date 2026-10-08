@@ -68,11 +68,18 @@ pub struct Requirements {
     pub field_adapters: Vec<FieldAdapter>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_fields: Vec<FileField>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub updated_at: Vec<crate::tracking::UpdatedAt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub soft_delete: Vec<crate::tracking::SoftDelete>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<crate::tracking::VersionField>,
 }
 impl Requirements {
     pub fn is_empty(&self) -> bool {
         self.query_defaults.is_empty() && self.proxy_models.is_empty() && self.generic_relations.is_empty() && self.generic_reverse.is_empty() && self.declarations.is_empty() && self.extensions.is_empty() && self.specializations.is_empty()
-            && self.lowered_models.is_empty() && self.completed_passes.is_empty() && self.result_fields.is_empty() && self.storage.is_none() && self.field_storage.is_empty() && self.owner_links.is_empty() && self.methods.is_empty() && self.field_adapters.is_empty() && self.file_fields.is_empty() && self.schema_contract == 0
+            && self.lowered_models.is_empty() && self.completed_passes.is_empty() && self.result_fields.is_empty() && self.storage.is_none() && self.field_storage.is_empty() && self.owner_links.is_empty() && self.methods.is_empty() && self.field_adapters.is_empty() && self.file_fields.is_empty()
+            && self.updated_at.is_empty() && self.soft_delete.is_empty() && self.versions.is_empty() && self.schema_contract == 0
     }
 }
 
@@ -579,15 +586,19 @@ pub fn capture_storage(ir: &mut SchemaIr) -> Result<(), String> {
 
 /// The capability, and Cargo feature, of compiled query defaults.
 pub const QUERY_DEFAULTS: &str = "query-defaults";
+/// Capabilities, and Cargo features, of the column roles in [`crate::tracking`].
+pub const UPDATED_AT: &str = "updated-at";
+pub const SOFT_DELETE: &str = "soft-delete";
+pub const OPTIMISTIC_LOCKING: &str = "optimistic-locking";
 
 pub const HOST_CAPABILITIES: &[&str] = &[
     "schema-transformations", "physical-schema", "native-string-values",
     "native-string-records", "native-string-results", "file-storage", QUERY_DEFAULTS,
-    "model-composition", "proxy-models", "generic-relations",
+    "model-composition", "proxy-models", "generic-relations", UPDATED_AT, SOFT_DELETE, OPTIMISTIC_LOCKING,
 ];
 
 /// Capabilities that a build selects as the host Cargo feature of the same name.
-pub const HOST_FEATURE_CAPABILITIES: &[&str] = &["file-storage", QUERY_DEFAULTS, "model-composition", "proxy-models", "generic-relations"];
+pub const HOST_FEATURE_CAPABILITIES: &[&str] = &["file-storage", QUERY_DEFAULTS, "model-composition", "proxy-models", "generic-relations", UPDATED_AT, SOFT_DELETE, OPTIMISTIC_LOCKING];
 
 /// Combine one new declaration batch with an immutable definition context. Lowered
 /// declarations retain their phase state; new declarations are the only pass inputs.
@@ -661,6 +672,9 @@ pub fn merge_definition(mut context: SchemaIr, mut incoming: SchemaIr) -> Result
     c.owner_links.extend(n.owner_links);
     c.field_adapters.extend(n.field_adapters);
     c.file_fields.extend(n.file_fields);
+    c.updated_at.extend(n.updated_at);
+    c.soft_delete.extend(n.soft_delete);
+    c.versions.extend(n.versions);
     for (id, version) in n.extensions {
         if c.extensions.get(&id).is_some_and(|v| v != &version) { return Err(format!("incompatible extension {id}; rebuild dependent schemas together")); }
         c.extensions.insert(id, version);

@@ -40,3 +40,6 @@ profile-tooling = ["postgres", "sqlite", "cli", "generate-python", "generate-typ
 generic-relations = ["orm-engine/generic-relations", "orm-core/generic-relations"]
 proxy-models = ["composition", "orm-engine/proxy-models", "orm-core/proxy-models"]
 query-defaults = ["orm-engine/query-defaults", "orm-core/query-defaults"]
+updated-at = ["orm-engine/updated-at", "orm-core/updated-at"]
+soft-delete = ["orm-engine/soft-delete", "orm-core/soft-delete"]
+optimistic-locking = ["orm-engine/optimistic-locking", "orm-core/optimistic-locking"]

@@ -15,6 +15,15 @@ pub struct Model {
     pub file_fields: Vec<crate::file_storage::PreparedFileField>,
     #[cfg(feature = "query-defaults")]
     pub query_defaults: crate::selection::PreparedDefaults,
+    /// `@timestamps.updated_at` field positions; ORM updates set them.
+    #[cfg(feature = "updated-at")]
+    pub updated_at: Vec<usize>,
+    /// The `@soft_delete.deleted_at` field position; ORM deletes set it.
+    #[cfg(feature = "soft-delete")]
+    pub soft_delete: Option<usize>,
+    /// The `@locking.version` field position; ORM updates increment it.
+    #[cfg(feature = "optimistic-locking")]
+    pub version: Option<usize>,
     #[cfg(feature = "composition")]
     pub native: crate::behavior::NativeModel,
     #[cfg(feature = "composition")]
@@ -52,6 +61,9 @@ impl Model {
             #[cfg(feature = "file-storage")] file_fields: vec![],
             ir, pk: 0, field_index, relation_index: HashMap::new(), client_defaults: vec![],
             #[cfg(feature = "query-defaults")] query_defaults: Default::default(),
+            #[cfg(feature = "updated-at")] updated_at: vec![],
+            #[cfg(feature = "soft-delete")] soft_delete: None,
+            #[cfg(feature = "optimistic-locking")] version: None,
             #[cfg(feature = "composition")] native: crate::behavior::NativeModel::None,
             #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
             #[cfg(feature = "composition")] resolved_fields: vec![] })
@@ -209,6 +221,9 @@ impl Schema {
                 #[cfg(feature = "file-storage")] file_fields: file_fields.next().expect("prepared file model"),
                 ir: m, pk, field_index, relation_index, client_defaults,
                 #[cfg(feature = "query-defaults")] query_defaults: Default::default(),
+                #[cfg(feature = "updated-at")] updated_at: vec![],
+                #[cfg(feature = "soft-delete")] soft_delete: None,
+                #[cfg(feature = "optimistic-locking")] version: None,
                 #[cfg(feature = "composition")] native: native.next().expect("prepared model"),
                 #[cfg(feature = "composition")] owner: crate::behavior::OwnerId(0),
             #[cfg(feature = "composition")] resolved_fields: vec![] });
@@ -233,6 +248,7 @@ impl Schema {
         if !ir.behavior.query_defaults.is_empty() { return Err("query defaults require an enabled query-defaults artifact; rebuild".into()); }
         #[cfg(feature = "query-defaults")]
         crate::selection::prepare(&mut models, &ir.behavior.query_defaults)?;
+        crate::tracking::prepare(&mut models, &model_index, &ir.behavior)?;
         #[cfg(feature = "composition")]
         let owner_links = crate::ownership::resolve(&mut models, storage.as_deref(), &ir.behavior.field_storage, &ir.behavior.owner_links)?;
         #[cfg(feature = "proxy-models")]

@@ -121,6 +121,9 @@ pub fn steps(from: &DbSchema, to: &DbSchema, renames: &Renames) -> Result<Vec<St
             sql.push(format!("UPDATE sqlite_sequence SET seq = MAX(seq, COALESCE((SELECT seq FROM __orm_sequence WHERE name = {}), 0)) WHERE name = {}", super::model::quote_literal(old_name), super::model::quote_literal(&t.name)));
         }
         sql.extend(t.indexes.iter().map(|ix| index(&t.name, ix, false)));
+    }
+    // SQLite resolves the tables of a trigger body when it creates the trigger.
+    for t in &to.tables {
         sql.extend(t.triggers.iter().map(|tr| trigger(&t.name, tr, false)));
     }
     if sequence { sql.push("DROP TABLE __orm_sequence".into()); }

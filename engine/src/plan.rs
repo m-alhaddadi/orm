@@ -548,6 +548,14 @@ impl<'s> Planner<'s> {
                 }
                 let virt = derive_ctes(schema, target, &q.with, params)?;
                 let mut p = Planner::new(schema, &virt, target, &q.model, None, params, vec![], 0)?;
+                #[cfg(feature = "soft-delete")]
+                if let Some(position) = p.model(p.root).soft_delete.filter(|_| !q.hard) {
+                    let (mut stmt, types) = p.soft_delete(q, position)?;
+                    if let Some(w) = p.with_clause(&q.with)? {
+                        stmt.with_cte(w);
+                    }
+                    return Ok(Plan::Update(stmt, types.map(|(types, shape)| (p.root, types, shape))));
+                }
                 let (mut stmt, types) = p.delete(q)?;
                 if let Some(w) = p.with_clause(&q.with)? {
                     stmt.with_cte(w);
@@ -2202,6 +2210,10 @@ impl<'s> Planner<'s> {
             let v = self.value(&a.value, Hint { ty: Some(f.value_type()), field: Some(f) })?;
             stmt.value(Alias::new(&f.column), v);
         }
+        #[cfg(any(feature = "updated-at", feature = "optimistic-locking"))]
+        for (column, v) in maintained(root, |name| q.set.iter().any(|a| a.field == name)) {
+            stmt.value(Alias::new(column), v);
+        }
         for w in self.apply_filters(&q.filters, q.without_defaults)? {
             stmt.and_where(w);
         }
@@ -2209,6 +2221,39 @@ impl<'s> Planner<'s> {
             return Ok((stmt, None));
         }
         self.require(self.caps.returning, "update().returning()")?;
+        let shape = self.return_shape(q.model_fields.as_deref(), q.without_defaults)?;
+        let positions = shape_positions(root, shape.as_ref());
+        stmt.returning(Query::returning().exprs(positions.iter().map(|pos| {
+            let f = &root.fields()[pos];
+            #[cfg(feature = "composition")]
+            if root.native.computed().contains(&pos) { return SExpr::cust("NULL"); }
+            returning_col(f)
+        })));
+        Ok((stmt, Some((positions.iter().map(|pos| root.fields()[pos].value_type()).collect(), shape))))
+    }
+
+    /// A delete of a soft-delete model: `UPDATE ... SET <field> = <now> WHERE ... AND <field> IS NULL`.
+    #[cfg(feature = "soft-delete")]
+    fn soft_delete(&mut self, q: &Delete, position: usize) -> Result<(UpdateStatement, Option<ReturnColumns>)> {
+        let root = self.model(self.root);
+        #[cfg(feature = "composition")]
+        crate::ownership::require_local_write(root)?;
+        let field = &root.fields()[position];
+        let mut stmt = Query::update();
+        stmt.table(Alias::new(root.table()));
+        stmt.value(Alias::new(&field.column), bind(crate::client_default::now(field.ty), Some(field)));
+        #[cfg(any(feature = "updated-at", feature = "optimistic-locking"))]
+        for (column, v) in maintained(root, |_| false) {
+            stmt.value(Alias::new(column), v);
+        }
+        for w in self.apply_filters(&q.filters, q.without_defaults)? {
+            stmt.and_where(w);
+        }
+        stmt.and_where(col(root.table(), &field.column).is_null());
+        if !q.returning {
+            return Ok((stmt, None));
+        }
+        self.require(self.caps.returning, "delete().returning()")?;
         let shape = self.return_shape(q.model_fields.as_deref(), q.without_defaults)?;
         let positions = shape_positions(root, shape.as_ref());
         stmt.returning(Query::returning().exprs(positions.iter().map(|pos| {
@@ -2661,6 +2706,10 @@ pub fn plan_update_many(
             }
             stmt.and_where(pk_col.clone().is_in(chunk.iter().map(|r| bind(r[0].clone(), Some(cols[0])))));
         }
+        #[cfg(any(feature = "updated-at", feature = "optimistic-locking"))]
+        for (column, v) in maintained(m, |name| fields.iter().skip(1).any(|f| f == name)) {
+            stmt.value(Alias::new(column), v);
+        }
         for w in &where_ {
             stmt.and_where(w.clone());
         }
@@ -2673,6 +2722,24 @@ pub fn plan_update_many(
         stmts.push(stmt);
     }
     Ok((stmts, returning.then(|| m.fields().iter().map(|f| f.value_type()).collect())))
+}
+
+/// Assignments the ORM adds to each update of `m` unless `is_set(field)`: the current time
+/// for `updated_at` fields and `version + 1` for the version field.
+#[cfg(any(feature = "updated-at", feature = "optimistic-locking"))]
+pub(crate) fn maintained<'m>(m: &'m Model, is_set: impl Fn(&str) -> bool) -> Vec<(&'m str, SExpr)> {
+    let mut out = vec![];
+    #[cfg(feature = "updated-at")]
+    for &p in &m.updated_at {
+        let f = &m.fields()[p];
+        if !is_set(&f.name) { out.push((f.column.as_str(), bind(crate::client_default::now(f.ty), Some(f)))); }
+    }
+    #[cfg(feature = "optimistic-locking")]
+    if let Some(p) = m.version {
+        let f = &m.fields()[p];
+        if !is_set(&f.name) { out.push((f.column.as_str(), col(m.table(), &f.column).add(1))); }
+    }
+    out
 }
 
 /// An expression assigned to field `f`: through its `write_sql` template, if any.

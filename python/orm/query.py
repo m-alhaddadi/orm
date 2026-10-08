@@ -808,8 +808,37 @@ class QuerySet(Generic[M]):
 
     def delete(self) -> Delete[M]:
         """``DELETE`` every matching row. ``await`` gives the number of rows deleted;
-        ``await qs.delete().returning()`` gives the deleted rows instead."""
+        ``await qs.delete().returning()`` gives the deleted rows instead. A model with
+        ``@soft_delete.deleted_at`` sets that field on its live rows instead."""
         return Delete.build(self)
+
+    def hard_delete(self) -> Delete[M]:
+        """``DELETE`` every matching row also for a model with
+        ``@soft_delete.deleted_at``. In database mode, the trigger soft-deletes a live
+        row, so this deletes only rows that are already soft-deleted."""
+        return Delete.build(self, hard=True)
+
+    def undelete(self) -> Update[M]:
+        """Clear the soft-delete field of the matching soft-deleted rows. ``await``
+        gives the number of rows restored; ``.returning()`` gives the rows."""
+        field = self._soft_delete_ref()
+        return self.filter(field.is_not_null()).update(**{field._field.name: None})
+
+    def all_with_deleted(self) -> Self:
+        """The rows with the soft-deleted ones: the query set without the schema
+        defaults (the ``@@query.filter`` that hides deleted rows)."""
+        self._soft_delete_ref()
+        return self.without_defaults()
+
+    def deleted_only(self) -> Self:
+        """Only the soft-deleted rows (without the schema defaults)."""
+        return self.without_defaults().filter(self._soft_delete_ref().is_not_null())
+
+    def _soft_delete_ref(self) -> ColumnRef[Any]:
+        meta = self._model._meta
+        if meta.soft_delete is None:
+            raise TypeError(f"{meta.name} has no @soft_delete.deleted_at field")
+        return ColumnRef(self._model, (), meta.fields[meta.soft_delete])
 
     def insert(self, **values: Any) -> InsertOne[M]:
         """``INSERT`` one row; ``await`` gives the new instance with database defaults

@@ -911,6 +911,9 @@ pub struct Delete {
     /// Return the deleted rows (every column) instead of a row count.
     #[serde(default)]
     pub returning: bool,
+    /// Send `DELETE` to a soft-delete model instead of setting its soft-delete field.
+    #[serde(default)]
+    pub hard: bool,
 }
 
 #[derive(Deserialize, Debug)]

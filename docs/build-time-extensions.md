@@ -63,7 +63,8 @@ Cargo resolves Rust package versions;
 the frontend checks extension dependency constraints against that resolved selection.
 
 A manifest capability in `HOST_FEATURE_CAPABILITIES` (`file-storage`, `query-defaults`, `model-composition`,
-`proxy-models`, `generic-relations`) also turns on the host Cargo feature of the same name in both bindings.
+`proxy-models`, `generic-relations`, `updated-at`, `soft-delete`, `optimistic-locking`) also turns on the host Cargo feature of the same name in both bindings.
+The last three are column roles; see `schema-extensions.md`.
 Do not add those features by hand; select the extension crate.
 `scripts/feature-check.sh` builds one artifact per such extension, and one with all of them, and runs every suite on each.
 
