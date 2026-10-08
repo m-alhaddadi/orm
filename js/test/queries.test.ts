@@ -414,6 +414,46 @@ test("row locks", async () => {
   }
 });
 
+test("refresh with a row lock", async () => {
+  const { alice, bob } = await seed();
+  const db = getDatabase();
+  const other = await otherDatabase();
+  try {
+    await assert.rejects(alice.refresh({ nowait: true } as never), /lock: true/);
+    await assert.rejects(alice.refresh({ lock: false, exclusive: false } as never), /lock: true/);
+    await assert.rejects(alice.refresh({ lock: true }), TransactionRequired);
+    await assert.rejects(alice.refresh({ lock: true, nowait: true, skipLocked: true } as never), TypeError);
+    assert.equal(await alice.refresh(), true);
+    await db.transaction(async () => {
+      assert.equal(await alice.refresh(User.name, { lock: true }), true);
+      // a partial refresh locks the whole row
+      await assert.rejects(other.transaction(() => User.objects.using(other).lock({ nowait: true }).get(User.id.eq(alice.id))), LockNotAvailable);
+    });
+    await db.transaction(async () => {
+      assert.equal(await bob.refresh({ lock: true, exclusive: false }), true);
+      await other.transaction(() => User.objects.using(other).lock({ exclusive: false, nowait: true }).get(User.id.eq(bob.id)));
+    });
+    const copy = await User.objects.using(other).get(User.id.eq(alice.id));
+    await db.transaction(async () => {
+      await User.objects.lock().get(User.id.eq(alice.id));
+      await User.objects.filter(User.id.eq(alice.id)).update({ name: "Al" });
+      await assert.rejects(other.transaction(() => copy.refresh({ lock: true, nowait: true })), LockNotAvailable);
+      assert.equal(await other.transaction(() => copy.refresh({ lock: true, skipLocked: true })), false);
+      assert.equal(copy.name, "Alice"); // unchanged
+    });
+    assert.equal(await other.transaction(() => copy.refresh({ lock: true, skipLocked: true })), true);
+    assert.equal(copy.name, "Al");
+    await User.objects.filter(User.id.eq(bob.id)).delete();
+    await db.transaction(async () => {
+      assert.equal(await bob.refresh({ lock: true, skipLocked: true }), false);
+      await assert.rejects(bob.refresh({ lock: true }), User.DoesNotExist);
+    });
+    await assert.rejects(bob.refresh(), User.DoesNotExist);
+  } finally {
+    await other.close();
+  }
+});
+
 test("advisory locks", async () => {
   const db = getDatabase();
   const other = await otherDatabase();

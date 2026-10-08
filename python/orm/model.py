@@ -577,10 +577,38 @@ class Model:
             raise TypeError(f"{type(self).__name__} has no @soft_delete.deleted_at field")
         return name
 
-    async def refresh(self, *fields: ColumnRef[Any]) -> None:
-        """Reload column values from the database."""
+    async def refresh(
+        self,
+        *fields: ColumnRef[Any],
+        lock: bool = False,
+        exclusive: bool | None = None,
+        nowait: bool | None = None,
+        skip_locked: bool | None = None,
+    ) -> bool:
+        """Reload column values from the database; ``True`` when it loaded the row.
+
+        ``lock=True`` also locks the row until the transaction ends, with the options of
+        :meth:`QuerySet.lock` (``exclusive`` defaults to ``True``). A refresh of some
+        fields still locks the whole row. With ``skip_locked``, a row locked by another
+        transaction (or deleted) gives ``False`` and leaves the instance unchanged; else
+        a missing row raises ``DoesNotExist``.
+        """
+        if not lock and (exclusive is not None or nowait is not None or skip_locked is not None):
+            raise TypeError("refresh() takes exclusive, nowait and skip_locked only with lock=True")
         requested = self._row_query().only(*fields)._model_fields or () if fields else ()
-        self._replace_from(await self._loaded_query(*requested).get())
+        query = self._loaded_query(*requested)
+        if lock:
+            query = query.lock(
+                exclusive is not False, nowait=bool(nowait), skip_locked=bool(skip_locked)
+            )
+        try:
+            fresh = await query.get()
+        except self.DoesNotExist:
+            if skip_locked:
+                return False
+            raise
+        self._replace_from(fresh)
+        return True
 
     # -- dunder --------------------------------------------------------------------------
 

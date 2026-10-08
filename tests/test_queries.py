@@ -736,6 +736,53 @@ async def test_row_locks(clean):
             )
 
 
+async def test_refresh_lock(clean):
+    alice, bob, _, _ = await seed()
+    db = orm.get_database()
+    with pytest.raises(TypeError, match="lock=True"):
+        await alice.refresh(nowait=True)
+    with pytest.raises(TypeError, match="lock=True"):
+        await alice.refresh(exclusive=False)
+    with pytest.raises(orm.TransactionRequired):
+        await alice.refresh(lock=True)
+    with pytest.raises(ValueError):
+        await alice.refresh(lock=True, nowait=True, skip_locked=True)
+    assert await alice.refresh() is True
+
+    async with db.transaction():
+        assert await alice.refresh(User.name, lock=True) is True
+        # A partial refresh locks the whole row.
+        with pytest.raises(orm.LockNotAvailable):
+            await _in_new_tx(lambda: User.objects.lock(nowait=True).get(User.id == alice.id))
+    await User.objects.filter(User.id == alice.id).update(name="Alicia")
+    await alice.refresh()
+    assert alice.name == "Alicia"
+
+    async with db.transaction():
+        assert await bob.refresh(lock=True, exclusive=False) is True
+        assert await _in_new_tx(lambda: User.objects.lock(False, nowait=True).get(User.id == bob.id)) == bob
+
+    other = await User.objects.get(User.id == alice.id)
+    async with db.transaction():
+        await User.objects.lock().get(User.id == alice.id)
+        await User.objects.filter(User.id == alice.id).update(name="Al")
+        with pytest.raises(orm.LockNotAvailable):
+            await _in_new_tx(lambda: other.refresh(lock=True, nowait=True))
+        assert await _in_new_tx(lambda: other.refresh(lock=True, skip_locked=True)) is False
+        assert other.name == "Alicia"  # unchanged
+    async with db.transaction():
+        assert await other.refresh(lock=True, skip_locked=True) is True
+    assert other.name == "Al"
+
+    await User.objects.filter(User.id == bob.id).delete()
+    async with db.transaction():
+        assert await bob.refresh(lock=True, skip_locked=True) is False
+        with pytest.raises(User.DoesNotExist):
+            await bob.refresh(lock=True)
+    with pytest.raises(User.DoesNotExist):
+        await bob.refresh()
+
+
 async def test_advisory_locks(clean):
     db = orm.get_database()
     with pytest.raises(orm.TransactionRequired):

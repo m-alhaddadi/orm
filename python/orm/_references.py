@@ -105,12 +105,14 @@ def install(model: Any) -> None:
     baseline_refresh = model.refresh
     if getattr(baseline_refresh, "_reference_adapter", False):
         baseline_refresh = baseline_refresh._reference_base
-    async def refresh(self: Any, *fields: Any) -> None:
+    async def refresh(self: Any, *fields: Any, **options: Any) -> bool:
         before = {source: peek_key(self, source) for source in sources}
-        await baseline_refresh(self, *fields)
+        if not await baseline_refresh(self, *fields, **options):
+            return False
         for name, source in dependencies:
             if name in reverse_names or before[source] != peek_key(self, source):
                 invalidate_reference(self, name)
+        return True
     refresh._reference_adapter = True  # type: ignore[attr-defined]
     refresh._reference_base = baseline_refresh  # type: ignore[attr-defined]
     setattr(model, "refresh", refresh)

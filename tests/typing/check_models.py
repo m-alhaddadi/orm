@@ -110,6 +110,7 @@ async def check() -> None:
     assert_type(Post.objects.lock(exclusive=False, skip_locked=True), PostQuerySet)
     assert_type(await Post.objects.lock().get(Post.id == 1), Post)
     assert_type(await orm_db().lock("key", nowait=True), bool)
+    assert_type(await post.refresh(Post.title, lock=True, skip_locked=True), bool)
     await post.update(title="new", views=Post.views + 1)
     await alice.posts.insert(title="t", body="b")
     await post.delete()

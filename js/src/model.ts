@@ -12,7 +12,7 @@ import { Column, PATH, RelationPath, type PathState, type Source } from "./expr.
 import { camel, type ColType, type FieldMeta, type ModelSpec, type RelationKind, type RelationMeta } from "./meta.js";
 import { call, native, type NativeShape, type NativeSchema } from "./native.js";
 import { resolve, type Database } from "./db.js";
-import type { ManyRelatedSet, QuerySet, RelatedSet } from "./query.js";
+import type { LockOptions, ManyRelatedSet, QuerySet, RelatedSet } from "./query.js";
 
 /** Where an instance keeps its loaded relations. */
 export const RELATED: unique symbol = Symbol("orm.related");
@@ -92,9 +92,21 @@ export interface Instance<M extends ModelSpec> {
    * when the row has a newer version.
    */
   delete(): Promise<void>;
-  /** Reload column values from the database. */
-  refresh(...fields: readonly Column<unknown, string>[]): Promise<void>;
+  /**
+   * Reload column values from the database; `true` when it loaded the row. A trailing
+   * `{ lock: true }` also locks the row until the transaction ends, with the options of
+   * `QuerySet.lock()`; a refresh of some fields still locks the whole row. With
+   * `skipLocked`, a row locked by another transaction (or deleted) gives `false` and
+   * leaves the instance unchanged; else a missing row throws `DoesNotExist`.
+   */
+  refresh(...fields: readonly Column<unknown, string>[]): Promise<boolean>;
+  refresh(...args: [...fields: Column<unknown, string>[], options: RefreshOptions]): Promise<boolean>;
 }
+
+/** The options of `instance.refresh()`: lock options only with `lock: true`. */
+export type RefreshOptions =
+  | { readonly lock?: false; readonly exclusive?: never; readonly nowait?: never; readonly skipLocked?: never }
+  | ({ readonly lock: true } & LockOptions & ({ readonly nowait?: false } | { readonly skipLocked?: false }));
 
 /** The instance methods of a model with `@soft_delete.deleted_at`. */
 export interface SoftDeletable {
@@ -524,9 +536,28 @@ async function instanceUndelete(this: Row): Promise<void> {
   await instanceUpdate.call(this, { [metaOf(this).softDelete!.name]: null });
 }
 
-async function instanceRefresh(this: Row, ...fields: readonly Column<unknown, string>[]): Promise<void> {
+async function instanceRefresh(this: Row, ...args: unknown[]): Promise<boolean> {
+  const last = args.at(-1);
+  const options = (last !== undefined && !(last instanceof Column) ? args.pop() : {}) as {
+    lock?: boolean; exclusive?: boolean; nowait?: boolean; skipLocked?: boolean;
+  };
+  const fields = args as Column<unknown, string>[];
+  const { lock = false, exclusive, nowait, skipLocked } = options;
+  if (!lock && (exclusive !== undefined || nowait !== undefined || skipLocked !== undefined)) {
+    throw new TypeError("refresh() takes exclusive, nowait and skipLocked only with lock: true");
+  }
   const requested = fields.length ? rowQuery(this).only(...fields).state.modelFields ?? [] : [];
-  replaceFrom(this, (await loadedQuery(this, requested).get()) as Row);
+  let query = loadedQuery(this, requested);
+  if (lock) query = query.lock({ exclusive: exclusive ?? true, nowait: nowait ?? false, skipLocked: skipLocked ?? false } as never);
+  let fresh: Row;
+  try {
+    fresh = (await query.get()) as Row;
+  } catch (e) {
+    if (skipLocked && e instanceof DoesNotExist) return false;
+    throw e;
+  }
+  replaceFrom(this, fresh);
+  return true;
 }
 
 // -- registry -------------------------------------------------------------------------------------

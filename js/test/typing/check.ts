@@ -116,6 +116,12 @@ export async function filters() {
   Post.objects.filter(Post.objects.select({ n: func.count() }).cte("t").c.n.gt(1));
   // @ts-expect-error nowait and skipLocked exclude each other
   Post.objects.lock({ nowait: true, skipLocked: true });
+  same<Awaited<ReturnType<typeof post.refresh>>, boolean>();
+  void post.refresh(Post.title, { lock: true, exclusive: false, skipLocked: true });
+  // @ts-expect-error lock options need lock: true
+  void post.refresh({ nowait: true });
+  // @ts-expect-error nowait and skipLocked exclude each other
+  void post.refresh({ lock: true, nowait: true, skipLocked: true });
 }
 
 export async function loading() {
