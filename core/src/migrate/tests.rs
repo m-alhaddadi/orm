@@ -209,6 +209,43 @@ fn sqlite_rebuild_copies_from_the_current_name_when_the_hint_is_kept() {
     assert!(undo.contains("INSERT INTO \"__orm_new_users\" (\"id\", \"email\") SELECT \"id\", \"mail\" FROM \"members\""), "{undo}");
 }
 
+/// `kept_rename_hints`, then a new column and a new table hinted from names that still exist.
+#[test]
+fn a_hint_whose_name_still_exists_copies_nothing() {
+    for dialect in ["postgres", "sqlite"] {
+        let (p2, _) = kept_rename_hints(dialect);
+        let mut ir = blog(vec![json!({"name": "title2", "column": "title2", "type": "text", "nullable": true, "renamed_from": "title"})], json!({}));
+        ir["dialect"] = json!(dialect);
+        ir["models"][0]["table"] = json!("members");
+        ir["models"][0]["renamed_from"] = json!("users");
+        ir["models"][0]["fields"][1]["column"] = json!("mail");
+        ir["models"][0]["fields"][1]["renamed_from"] = json!("email");
+        ir["models"].as_array_mut().unwrap().push(json!({"name": "Archive", "table": "archive", "renamed_from": "members", "fields": [id()]}));
+        let v3 = schema(ir);
+        let p3 = super::plan(&v3, &p2.snapshot).unwrap();
+        let up = sql(&p3.up).join("\n");
+        if dialect == "postgres" {
+            assert!(!up.contains("RENAME"), "{up}");
+        } else {
+            assert!(up.contains("INSERT INTO \"__orm_new_posts\" (\"id\", \"author_id\", \"title\", \"title2\") SELECT \"id\", \"author_id\", \"title\", NULL FROM \"posts\""), "{up}");
+            assert!(!up.contains("INSERT INTO \"__orm_new_archive\""), "{up}");
+        }
+    }
+}
+
+#[test]
+fn two_hints_for_one_old_name_are_an_error() {
+    let mut ir = blog(vec![json!({"name": "t2", "column": "t2", "type": "string", "nullable": true, "renamed_from": "title"})], json!({}));
+    ir["models"][1]["fields"][1]["renamed_from"] = json!("title");
+    ir["models"][1]["fields"][1]["column"] = json!("t1");
+    let error = super::plan(&schema(ir), &DbSchema::default()).unwrap_err();
+    assert!(error.contains("posts: columns \"t1\" and \"t2\" both have the rename hint \"title\"") || error.contains("posts: columns \"t2\" and \"t1\""), "{error}");
+    let mut ir = blog(vec![], json!({}));
+    ir["models"][0]["renamed_from"] = json!("old");
+    ir["models"][1]["renamed_from"] = json!("old");
+    assert!(super::plan(&schema(ir), &DbSchema::default()).unwrap_err().contains("both have the rename hint \"old\""));
+}
+
 #[test]
 fn foreign_key_cycles_are_added_after_both_tables() {
     let s = schema(json!({"models": [

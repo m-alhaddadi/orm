@@ -577,7 +577,8 @@ not a live database, so it works offline and gives the same files everywhere.
 
 * **Tables and columns** are matched by name first, then by `@renamed_from` /
   `@@renamed_from`. A hint applies only when the current name is not in the snapshot
-  and the hinted name is, on Postgres and on SQLite. The snapshot stores only the new
+  and the hinted name is, on Postgres and on SQLite. Two hints that name the same old
+  table, or the same old column of one table, are an error. The snapshot stores only the new
   name, so the hint is safe to remove after the migration is generated; a kept hint
   does nothing in later migrations. New tables are created
   in foreign-key order with their keys and constraints inline; a foreign-key cycle is
