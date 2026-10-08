@@ -9,7 +9,11 @@ fn schema(dialect: &str) -> Schema {
         json!({"name":"title","column":"title","type":"text"}),
         json!({"name":"views","column":"views","type":"int"}),
     ];
-    if dialect == "postgres" { fields.push(json!({"name":"links","column":"links","type":"text","array":true})); }
+    if dialect == "postgres" {
+        fields.push(json!({"name":"links","column":"links","type":"text","array":true}));
+        fields.push(json!({"name":"code","column":"code","type":"string","db_type":"char(4)"}));
+        fields.push(json!({"name":"codes","column":"codes","type":"string","array":true,"db_type":"char(4)"}));
+    }
     Schema::from_ir(serde_json::from_value(json!({"dialect": dialect, "models":[{"name":"Note","table":"notes","fields":fields}]})).unwrap()).unwrap()
 }
 
@@ -69,7 +73,21 @@ fn unnest_is_not_planned_inside_an_aggregate_coalesce_or_window() {
         let error = plan(Dialect::Postgres, vec![e], vec![]).unwrap_err();
         assert!(error.contains("only be a select() column"), "{error}");
     }
-    assert_eq!(plan(Dialect::Postgres, vec![func("lower", vec![unnest])], vec![]).unwrap(), r#"SELECT LOWER(UNNEST("notes"."links")) FROM "notes""#);
+    assert_eq!(plan(Dialect::Postgres, vec![func("lower", vec![unnest.clone()])], vec![]).unwrap(), r#"SELECT LOWER(UNNEST("notes"."links")) FROM "notes""#);
+    // The ban ends with the aggregate, `COALESCE` or window: a later argument may unnest.
+    let lag = json!({"t":"window","func":func("lag",vec![col("title")])});
+    for first in [func("coalesce", vec![col("title"), text("z")]), lag] {
+        assert!(plan(Dialect::Postgres, vec![func("concat", vec![first, unnest.clone()])], vec![]).is_ok());
+    }
+}
+
+#[test]
+fn a_char_n_parameter_compares_as_bpchar() {
+    let eq = |name: &str| json!({"t":"cmp","op":"eq","l":col(name),"r":text("ab")});
+    let sql = plan(Dialect::Postgres, vec![col("id")], vec![eq("code")]).unwrap();
+    assert!(sql.ends_with(r#"WHERE "notes"."code" = (CAST($1 AS bpchar))"#), "{sql}");
+    let sql = plan(Dialect::Postgres, vec![col("id")], vec![eq("codes")]).unwrap();
+    assert!(!sql.contains("bpchar"), "{sql}");
 }
 
 #[test]

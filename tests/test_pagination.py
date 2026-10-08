@@ -260,6 +260,28 @@ async def test_a_char_order_column(postgres):
         assert await walk(qs.order_by(Padded.k), size) == [5, 1, 2, 4, 3]
 
 
+async def test_a_char_column_from_ir_without_write_sql():
+    """A generated module embeds compiled IR; its `char(n)` column has no `write_sql`."""
+    source = orm.Registry()
+    orm.loads('datasource db {\n  provider = "postgresql"\n}\nmodel Padded {\n  id Int @id\n  k String @db.Char(4)\n  @@map("page07_padded_ir")\n}', registry=source)
+    ir = source.ir()
+    for f in ir["models"][0]["fields"]:
+        f.pop("write_sql", None)
+    registry = orm.Registry()
+    Padded = orm.define(ir, registry=registry)["Padded"]
+    db = await orm.connect(os.environ.get("ORM_TEST_DATABASE_URL", "postgres://postgres:postgres@localhost/orm_test"), registry=registry, default=False)
+    try:
+        await db.drop_tables()
+        await db.create_tables()
+        qs = Padded.objects.using(db)
+        await qs.insert_many([{"id": i, "k": k} for i, k in enumerate(["ab", "ab", "ac"], 1)])
+        assert len(await qs.filter(Padded.k == (await qs.get(Padded.id == 1)).k)) == 2
+        assert len(await qs.filter(Padded.k.in_(["ab"]))) == 2
+    finally:
+        await db.drop_tables()
+        await db.close()
+
+
 async def test_non_finite_float_order_values(postgres):
     models, db = await postgres('model Measure {\n  id Int @id\n  f Float\n  d Decimal\n  @@map("page07_measures")\n}')
     Measure = models["Measure"]

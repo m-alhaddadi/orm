@@ -172,10 +172,20 @@ pub(crate) fn returning_col(f: &FieldIr) -> SExpr {
 
 /// A bound value for a field: through the field's `write_sql` template, if any.
 pub(crate) fn bind(v: sea_query::Value, f: Option<&FieldIr>) -> SExpr {
-    match f.and_then(|f| f.write_sql.as_ref()) {
+    match f.and_then(param_template) {
         Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), SExpr::val(v)),
         None => SExpr::val(v),
     }
+}
+
+/// The template of a parameter for field `f`. A text parameter compares as text, where the
+/// padded `char(n)` value of a row differs from the same value read back; bpchar ignores the padding.
+fn param_template(f: &FieldIr) -> Option<&str> {
+    if let Some(t) = &f.write_sql {
+        return Some(t);
+    }
+    let char_n = f.db_type.as_deref().is_some_and(|t| t == "char" || t.starts_with("char("));
+    (char_n && !f.array).then_some("CAST({} AS bpchar)")
 }
 
 /// Internal expression templates use numbered slots. SQLite's builder consumes
@@ -1169,10 +1179,7 @@ impl<'s> Planner<'s> {
             }
             Expr::Window { func, base, partition_by, order_by, frame } => {
                 // Postgres rejects a set-returning function in a window.
-                let unnest = std::mem::replace(&mut self.allow_unnest, false);
-                let e = self.window(func, base.as_deref(), partition_by, order_by, frame);
-                self.allow_unnest = unnest;
-                e?
+                self.with_unnest(false, |p| p.window(func, base.as_deref(), partition_by, order_by, frame))?
             }
             Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
             Expr::Arith { op, l, r } => {
@@ -1374,6 +1381,14 @@ impl<'s> Planner<'s> {
         ))
     }
 
+    /// `f` with `unnest()` allowed or not, and the outer setting restored after it.
+    fn with_unnest<T>(&mut self, allowed: bool, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let outer = std::mem::replace(&mut self.allow_unnest, allowed);
+        let out = f(self);
+        self.allow_unnest = outer;
+        out
+    }
+
     /// The SQL call itself, arguments planned in the current scope.
     fn call(&mut self, name: &str, args: &[Expr], distinct: bool) -> Result<SExpr> {
         let (e, cast) = self.call_parts(name, args, distinct)?;
@@ -1399,11 +1414,8 @@ impl<'s> Planner<'s> {
         let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
         let hint = Hint { ty: if TEXT_FUNCS.contains(&name) { Some(ValueType::scalar(ColType::Text)) } else { hint.ty }, field: None };
         // Postgres rejects a set-returning function inside an aggregate or `COALESCE`.
-        let unnest = self.allow_unnest;
-        self.allow_unnest &= !(is_aggregate(name) || name == "coalesce");
-        let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>();
-        self.allow_unnest = unnest;
-        let planned = planned?;
+        let allowed = self.allow_unnest && !(is_aggregate(name) || name == "coalesce");
+        let planned = self.with_unnest(allowed, |p| args.iter().map(|a| p.value(a, hint)).collect::<Result<Vec<_>>>())?;
         let d = if distinct { "DISTINCT " } else { "" };
         let n = planned.len();
         let dialect = self.target.dialect;
