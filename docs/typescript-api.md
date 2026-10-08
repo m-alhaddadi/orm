@@ -368,6 +368,7 @@ await debug.nPlusOne(async () => {
 
 * The scope counts the queries of `fn` by statement shape: the query without its values.
   Work that `fn` starts counts too, and so do the queries of an inner scope.
+  An inner scope cannot raise the threshold of an outer scope; the outer scope also counts the inner queries.
   The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `inBulk()`) count as one query.
 * When `fn` resolves, a shape that ran more than `threshold` times (default 5) throws `debug.NPlusOne` with `fail: true`, or emits an `NPlusOneWarning` process warning.
   `error.report` has each shape, its SQL, its count, the call site of its first query and the fix.

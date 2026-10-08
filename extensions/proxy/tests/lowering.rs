@@ -246,7 +246,7 @@ fn a_proxy_cannot_protect_writes_and_a_client_default_stays_in_the_subset() {
     client_default(&mut ir, "Active", "status", json!("active"));
     redeclare(&mut ir, "Named", "status", |f| f.enum_subset = Some(names(&["OLD"])));
     let error = lower_specs(&mut ir, &[spec("Named", "Active"), spec("Active", "User")]).unwrap_err();
-    assert!(error.contains("Named.status: client default is outside the enum subset Status(OLD)"), "{error}");
+    assert!(error.contains("Named.status: inherited client default is outside the enum subset Status(OLD); redeclare @client_default on Named"), "{error}");
 }
 
 #[test]

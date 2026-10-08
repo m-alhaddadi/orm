@@ -44,10 +44,13 @@ fn field_form(ir: &mut SchemaIr, d: &Declaration, targets: &[String]) -> Result<
         Some("Generic?") => true,
         _ => return Err(error(d, "must be on a field of type Generic or Generic?")),
     };
-    // Proxy and composition passes ran first and copied the placeholder into their models.
-    if ir.behavior.proxy_models.iter().any(|p| p.parent == d.model || p.storage_owner == d.model)
-        || ir.behavior.owner_links.iter().any(|l| l.parent == d.model) {
-        return Err(error(d, format!("{} has a proxy or a composed child, which cannot copy a Generic field; use @@generic.relation with explicit type and key fields", d.model)));
+    // Proxy and composition passes ran first; a model they made with this field holds the placeholder.
+    let keeps = |model: &str| ir.models.iter().any(|m| m.name == model && m.fields.iter().any(|f| f.name == name));
+    let copy = ir.behavior.proxy_models.iter().filter(|p| p.storage_owner == d.model).map(|p| &p.model)
+        .chain(ir.behavior.owner_links.iter().filter(|l| l.parent == d.model).map(|l| &l.child))
+        .find(|m| keeps(m));
+    if let Some(copy) = copy {
+        return Err(error(d, format!("{}.{name}: {copy} keeps the Generic field; exclude it there or use @@generic.relation with explicit type and key fields", d.model)));
     }
     let mut created = vec![];
     for (argument, suffix) in [("type", "type"), ("key", "id")] {
@@ -366,21 +369,35 @@ mod tests {
             pk.client_default = Some(orm_contracts::ir::ClientDefaultIr::Call(orm_contracts::ir::ClientCall::Uuid7));
             pk.hints.insert("python".into(), "int".into());
             pk.max_length = Some(9);
+            (pk.db_type, pk.write_sql, pk.requires) = (Some("citext".into()), Some("lower(?)".into()), vec!["citext".into()]);
         }
         prepare(&mut ir).unwrap();
         let key = &ir.models[2].fields[2];
         assert_eq!(key.name, "target_id");
         assert!(!key.auto_increment && key.default_sql.is_none() && key.client_default.is_none() && key.hints.is_empty());
         assert_eq!((key.ty, key.max_length, key.nullable), (ColType::Int, Some(9), true));
+        assert_eq!((key.db_type.as_deref(), key.write_sql.as_deref(), key.requires.as_slice()), (Some("citext"), Some("lower(?)"), ["citext".to_string()].as_slice()));
     }
     #[test]
-    fn a_generic_field_on_a_proxy_or_composition_parent_names_the_explicit_form() {
-        let mut ir = field_schema(serde_json::json!({}), serde_json::json!({}));
-        ir.behavior.proxy_models.push(orm_contracts::extension::ProxyModel { model: "NotedTag".into(), parent: "Tag".into(), storage_owner: "Tag".into(), ..Default::default() });
-        assert!(prepare(&mut ir).unwrap_err().contains("Tag has a proxy or a composed child, which cannot copy a Generic field; use @@generic.relation"));
-        let mut ir = field_schema(serde_json::json!({}), serde_json::json!({}));
-        ir.behavior.owner_links.push(orm_contracts::extension::OwnerLink { child: "Child".into(), parent: "Tag".into(), child_key: "id".into(), parent_key: "id".into() });
-        assert!(prepare(&mut ir).unwrap_err().contains("use @@generic.relation"));
+    fn a_generic_field_kept_by_a_proxy_or_composed_child_names_the_explicit_form() {
+        // `copy` is the model that the proxy or composition pass made from Tag; `keep` says whether it kept `target`.
+        let with = |copy: &str, keep: bool, link: fn(&mut SchemaIr, &str)| {
+            let mut ir = field_schema(serde_json::json!({}), serde_json::json!({}));
+            let mut model: orm_contracts::ir::ModelIr = serde_json::from_value(serde_json::to_value(&ir.models[2]).unwrap()).unwrap();
+            model.name = copy.into();
+            model.fields.retain(|f| keep || f.name != "target");
+            ir.models.push(model);
+            link(&mut ir, copy);
+            prepare(&mut ir)
+        };
+        let proxy: fn(&mut SchemaIr, &str) = |ir, m| ir.behavior.proxy_models.push(orm_contracts::extension::ProxyModel { model: m.into(), parent: "Tag".into(), storage_owner: "Tag".into(), ..Default::default() });
+        let child: fn(&mut SchemaIr, &str) = |ir, m| ir.behavior.owner_links.push(orm_contracts::extension::OwnerLink { child: m.into(), parent: "Tag".into(), child_key: "id".into(), parent_key: "id".into() });
+        for (copy, link) in [("NotedTag", proxy), ("Child", child)] {
+            let error = with(copy, true, link).unwrap_err();
+            assert!(error.contains(&format!("Tag.target: {copy} keeps the Generic field; exclude it there or use @@generic.relation")), "{error}");
+        }
+        // A proxy that does not select the field copies no placeholder.
+        with("NotedTag", false, proxy).unwrap();
     }
     #[test]
     fn an_existing_pair_index_is_not_repeated() {

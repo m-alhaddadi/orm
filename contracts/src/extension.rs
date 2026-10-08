@@ -780,11 +780,15 @@ mod tests {
         manifest.attributes.push(serde_json::from_value(serde_json::json!({"name": "app.trim", "target": "model", "arguments": {"all": {"kind": "boolean", "required": true}}})).unwrap());
         let mut ir = schema(crate::dialect::Dialect::Sqlite);
         assert!(validate_declarations(&ir, std::slice::from_ref(&manifest), None).is_ok());
-        ir.behavior.declarations[0].field = None;
+        let field = ir.behavior.declarations[0].field.take();
         assert!(validate_declarations(&ir, std::slice::from_ref(&manifest), None).unwrap_err().contains("missing argument all"));
         manifest.attributes.pop();
         let error = validate_declarations(&ir, std::slice::from_ref(&manifest), None).unwrap_err();
         assert!(error.contains("invalid declaration target: it is a field attribute; write @app.trim on a field"), "{error}");
+        manifest.attributes[0].target = AttributeTarget::Model;
+        ir.behavior.declarations[0].field = field;
+        let error = validate_declarations(&ir, std::slice::from_ref(&manifest), None).unwrap_err();
+        assert!(error.contains("invalid declaration target: it is a model attribute; write @@app.trim in the model block"), "{error}");
     }
 
     #[test]

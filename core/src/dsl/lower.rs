@@ -159,6 +159,11 @@ fn literal(pos: Pos, v: &Value, f: &FieldIr, enum_ir: Option<&EnumIr>, what: &st
         Value::Str(s) if f.ty == ColType::Json && !f.array => serde_json::from_str(s)
             .map_err(|e| super::syntax::Error { pos, msg: format!("{what}: @client_default on a Json field is JSON text: {e}") }),
         Value::Path(p, _) => err(pos, format!("{what}: @client_default takes a literal, uuid(), uuid7() or now(), not {}", p.join("."))),
+        // A JSON number is an f64; a Decimal keeps every digit as text.
+        Value::Num(n) if f.ty == ColType::Decimal => Ok(serde_json::Value::String(n.clone())),
+        Value::List(items) if f.ty == ColType::Decimal => {
+            Ok(serde_json::Value::Array(items.iter().map(|(p, v)| literal(*p, v, f, enum_ir, what)).collect::<Result<_>>()?))
+        }
         v => json_of(pos, v),
     }
 }
@@ -1413,8 +1418,9 @@ pub(super) fn behavior_declarations(items: &mut [Item], file: &str, manifests: &
                 let generic = member.ty.name == "Generic" && has("generic.relation") && declared(manifests, "generic.relation", true).is_some();
                 collect(&mut member.attrs, &m.name, Some((&member.name, ty)))?;
                 if let Some(a) = member.attrs.iter().find(|_| reverse || generic) {
-                    let kind = if reverse { "@generic.reverse" } else { "Generic" };
-                    return err(a.pos, format!("{}.{}: @{} is not allowed on a {kind} field; use the explicit @@generic.relation form for @map, @unique, @db.* and defaults", m.name, member.name, a.name));
+                    // A reverse field has no explicit form; a Generic field has @@generic.relation.
+                    let (kind, cure) = if reverse { ("@generic.reverse", "remove it") } else { ("Generic", "use the explicit @@generic.relation form for @map, @unique, @db.* and defaults") };
+                    return err(a.pos, format!("{}.{}: @{} is not allowed on a {kind} field; {cure}", m.name, member.name, a.name));
                 }
                 if reverse { continue; }
                 if generic { member.ty.name = "Int".into(); }

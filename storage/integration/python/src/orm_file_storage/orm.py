@@ -4,7 +4,7 @@ It uses only the public ``orm.hooks`` and ``QuerySet`` interfaces of the ORM."""
 from __future__ import annotations
 from collections.abc import Generator, Mapping, Iterable
 from typing import Any
-from orm import QuerySet
+from orm import QuerySet, allow_writes
 from orm.hooks import prepare_insert, prepare_update
 from orm_storage import Reference
 from . import FileFieldError, Upload
@@ -32,22 +32,29 @@ def install_queries(model: type[Any], adapter: ModelAdapter) -> None:
 
         def __init__(self, qs: Any, values: Mapping[str, Any]) -> None:
             values = normalized(values, allow_upload=True)
-            # Validate every ordinary value and the statement before the first upload.
-            self.prepared = prepare_insert(qs, placeholders(values))
+            self.qs, self.checked = qs, placeholders(values)
+            # Validate every ordinary value and the statement now; protection waits for the await, like any lazy write.
+            with allow_writes(qs.model):
+                prepare_insert(qs, self.checked)
             self.operation = adapter.prepare_write(values, shape="insert")
 
         def on_conflict(self, *columns: Any) -> Any:
             raise FileFieldError("Upload is unsupported in conflict writes")
 
+        async def run(self) -> Any:
+            prepared = prepare_insert(self.qs, self.checked)
+            return await self.operation.execute(prepared.execute)
+
         def __await__(self) -> Generator[Any, None, Any]:
-            return self.operation.execute(self.prepared.execute).__await__()
+            return self.run().__await__()
 
     class FileUpdate:
         def __init__(self, qs: Any, values: Mapping[str, Any]) -> None:
             values = normalized(values, allow_upload=True)
-            self.prepared = prepare_update(qs, placeholders(values))
-            if not self.prepared.unique:
-                raise FileFieldError("Upload update must target one unique row")
+            self.qs, self.checked = qs, placeholders(values)
+            with allow_writes(qs.model):
+                if not prepare_update(qs, self.checked).unique:
+                    raise FileFieldError("Upload update must target one unique row")
             self.operation = adapter.prepare_write(values, shape="unique_update")
             self.return_rows = False
 
@@ -55,8 +62,12 @@ def install_queries(model: type[Any], adapter: ModelAdapter) -> None:
             self.return_rows = True
             return self
 
+        async def run(self) -> Any:
+            prepared = prepare_update(self.qs, self.checked)
+            return await self.operation.execute(lambda data: prepared.execute(data, returning=self.return_rows))
+
         def __await__(self) -> Generator[Any, None, Any]:
-            return self.operation.execute(lambda data: self.prepared.execute(data, returning=self.return_rows)).__await__()
+            return self.run().__await__()
 
     class FileQuerySet(QuerySet[Any]):
         __slots__ = ()
