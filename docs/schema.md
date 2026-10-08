@@ -564,14 +564,15 @@ python -m orm drift                          # exit 1 if the database differs fr
 There is one command line, written in Rust (`cli/`): `python -m orm`, `npx orm` and the
 standalone `orm` binary (`cargo install --path cli`) all run it, through the Python
 extension, the Node addon or on their own, so they take the same arguments, write the
-same files and apply migrations the same way. The bindings only change the defaults:
+same files and apply migrations the same way. A migration with a data step is the
+exception: only the host of its language applies it (see "Data migrations"). The bindings only change the defaults:
 the name in `--help`, the configuration file read first, and the language `generate`
 writes (the binary needs `python` / `typescript`, or an `-o` path that tells).
 
 Settings come from flags (`--schema`, `--dir`, `--url`), else `[tool.orm]` in
 `pyproject.toml` or the `"orm"` key of `package.json` (`schema`, `migrations`), and the
 URL from `ORM_DATABASE_URL`. Exit codes: 0 success, 1 failure (including
-`makemigrations --check` finding changes), 2 bad usage. This
+`makemigrations --check` finding changes and `drift` finding differences), 2 bad usage. This
 repository's `pyproject.toml` points at the blog example; its first migration is
 [`examples/blog/migrations/0001_initial`](../examples/blog/migrations/0001_initial/up.sql).
 
@@ -633,22 +634,37 @@ async def run(db):
 
 The step runs after `up.sql`, in the same transaction and under the same advisory lock,
 before the migration's `orm_migrations` row. Queries on `db` inside it, and ORM queries
-on that database, go into that transaction, so they see the new columns. An error rolls
-back the SQL, the data changes and the row. `makemigrations --empty name` gives a folder
-for a step without schema changes.
+on that database, go into that transaction, so they see the new columns. A
+`db.transaction()` block in the step is a savepoint, and `db.on_commit()` callbacks run
+after the migration commits. An error rolls back the SQL, the data changes and the row,
+and drops the callbacks. `makemigrations --empty name` gives a folder for a step without
+schema changes.
+
+The models are the current ones, not the models at the time of the migration. A later
+migration can change them, and then the step fails on a new database. Use `db.execute`
+and `db.fetch` in a data step; use model queries only in a step that you delete later.
 
 * Python applies `data.py`: `Migrator.upgrade()`, or `python -m orm migrate`, which then
-  runs through `Migrator` instead of the Rust runner. It imports the data modules
-  before it connects, so the models they import are in the default registry.
-* TypeScript applies `data.ts` the same way: `Migrator.upgrade()` or `npx orm migrate`
-  (Node strips the types of a `.ts` file, by default in current versions; Bun runs it).
+  runs through `Migrator` instead of the Rust runner. It imports the data modules of the
+  pending migrations before it connects, so the models they import are in the default
+  registry. Without a schema file, it connects with no models.
+* TypeScript applies `data.ts` the same way: `Migrator.upgrade()` or `npx orm migrate`.
+  Node 22.18 and later strip the types of a `.ts` file; Bun runs it.
 * Each tool refuses the other's file, and the standalone `orm` binary refuses both,
   before it applies anything.
-* `rollback` runs `down.sql` only; a data step has no down step.
+* A data module is a single file: it cannot import a sibling file with a relative import.
+  Put shared code in your package.
+* Await every query in `run`. A query that runs after `run` returns fails, because the
+  transaction is closed.
+* `rollback` runs `down.sql` only; a data step has no down step. A later `migrate` runs
+  the step again, so write steps that you can run two times.
 * The checksum covers `up.sql` only, so a change to a data step after it ran is not
   detected.
+* SQLite runs a migration with foreign keys off (`PRAGMA foreign_keys` has no effect in
+  a transaction), so `ON DELETE CASCADE` does not fire in a data step. A second migrator
+  waits 5 seconds for the database lock, then fails with `database is locked`.
 
-### Adopting a live database: pull, baseline, drift
+### Pull, baseline and drift: a live database under migrations
 
 `orm pull` reads the database the URL names and writes the schema file (`--schema`, or
 `-o FILE`; `--force` overwrites one). Postgres is read from `pg_catalog` for the current
@@ -673,27 +689,44 @@ out, printed, and listed at the end of the file as `// gap:` lines:
   reports `drop default` and `make ... an identity column` for it;
 * a primary key not named `<table>_pkey`; `GENERATED ALWAYS` identities (read as
   `BY DEFAULT`); constraint triggers and triggers that call a function of another schema;
-* on SQLite: triggers, and column types other than the storage class (`INTEGER`,
-  `REAL`, `TEXT`).
+* row-level security, `UNLOGGED` tables, table storage options, `INCLUDE` columns of a
+  unique constraint, triggers with `REFERENCING` transition tables, foreign keys to a
+  table of another schema;
+* on SQLite: triggers. A declared type becomes the type of its storage class
+  (`INTEGER`, `REAL`, `TEXT`), except `BOOL...` (Boolean), `DATE...` and `TIME...`
+  (DateTime), and `DECIMAL` / `NUMERIC` (Float). Drift reports the declared type as a
+  difference.
 
-`orm baseline` writes the first migration from the schema when the directory has none,
-and records it in `orm_migrations` without running it, so the next `makemigrations`
-holds only new changes. It fails if the database already has an applied migration, and
-warns when the database differs from the migration.
+If the shadow check cannot run (no right to create a schema, or too few locks for a
+large schema), `pull` writes the file anyway and lists the failed check as a gap.
 
-`orm drift` compares the database with the snapshot of the newest migration and exits 1
-when they differ, printing the steps that would bring the database back to the
-snapshot. Rules, views and the other gaps above are listed as not compared.
+The pulled schema starts a new migrations directory. Its text is the database's
+(`(views >= 0)`), so `makemigrations --check` against migrations that a schema file made
+reports changes.
+
+`orm baseline` writes the first migration from the schema when the directory has none.
+It records that migration in `orm_migrations` and does not run it. The next
+`makemigrations` then holds only new changes. Baseline fails if the database already has
+an applied migration. It warns when the database differs from the migration, or when it
+cannot compare them.
+
+Do not roll back the baselined migration: its `down.sql` drops the tables that were in
+the database before, with their rows.
+
+`orm drift` compares the database with the snapshot of the newest migration. It exits 1
+when they differ and prints the steps that bring the database to the snapshot. A
+pending migration is part of the newest snapshot, so it shows as drift until it is
+applied. Rules, views and the other gaps above are listed as not compared.
 
 Postgres prints expressions in its own form (`CHECK ((views >= 0))`,
 `'x'::character varying`, `role = ANY (ARRAY[...])`), so the snapshot is never compared
-as text. Drift and `pull` run the snapshot's DDL in a shadow (Postgres: a schema
-`orm_shadow` in a transaction that is rolled back; SQLite: an in-memory database), read
-the shadow back the same way as the database, and compare the two. The live schema is
-re-created in a second shadow too, and an object both shadows agree on counts as equal,
-because Postgres does not always print a parsed expression back the same way. So drift
-needs the right to create a schema, and the extensions the snapshot uses must be
-installed.
+as text. Drift and `pull` run the snapshot's DDL in a shadow and read the shadow back
+the same way as the database. On Postgres the shadow is a schema `orm_shadow_<backend
+id>` in a transaction that is rolled back; on SQLite it is an in-memory database. The
+live schema is re-created in a second shadow too. An object that both shadows agree on
+counts as equal, because Postgres does not always print a parsed expression back the
+same way. So drift needs the right to create a schema, and the extensions that the
+snapshot uses must be installed.
 
 ### Why not SeaORM's or Refinery's tooling
 
@@ -702,7 +735,7 @@ has no down migrations and doesn't use sqlx. SeaORM's entity schema sync only ad
 missing tables and columns. None has triggers, exclusion constraints, extensions,
 renames or snapshot diffs, and using them would tie the migration IR to one engine. If
 the runner moves into Rust so every binding shares it, `sqlx::migrate` (already a
-dependency) is the natural base. `sea-schema` introspection fits drift detection.
+dependency) is the natural base.
 
 ## Not done yet
 

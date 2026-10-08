@@ -709,23 +709,23 @@ impl Engine {
         })
     }
 
-    /// The live database as a schema file: `(schema, gaps, [(summary, sql)])`, the steps
+    /// The live database as a schema file: `(schema, gaps, [(summary, sql, warning)])`, the steps
     /// being what a migration from the schema would still change (see `orm_engine::introspect`).
     fn pull_schema<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let driver = self.driver.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let p = orm_engine::introspect::pull(&*driver).await.map_err(engine_err)?;
-            Ok((p.schema, p.gaps, p.steps.into_iter().map(|s| (s.summary, s.sql)).collect::<Vec<_>>()))
+            Ok((p.schema, p.gaps, p.steps.into_iter().map(|s| (s.summary, s.sql, s.warning)).collect::<Vec<_>>()))
         })
     }
 
     /// The live database against the newest snapshot of `dir`:
-    /// `(migration, [(summary, sql)], gaps)`.
+    /// `(migration, [(summary, sql, warning)], gaps)`.
     fn migration_drift<'py>(&self, py: Python<'py>, dir: PathBuf) -> PyResult<Bound<'py, PyAny>> {
         let driver = self.driver.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let d = orm_engine::introspect::drift(&*driver, &dir).await.map_err(engine_err)?;
-            Ok((d.migration, d.steps.into_iter().map(|s| (s.summary, s.sql)).collect::<Vec<_>>(), d.gaps))
+            Ok((d.migration, d.steps.into_iter().map(|s| (s.summary, s.sql, s.warning)).collect::<Vec<_>>(), d.gaps))
         })
     }
 

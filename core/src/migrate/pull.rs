@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::model::{object_name, DbSchema, ForeignKey, Index, IndexKey, Table};
+use super::model::{object_name, DbSchema, ForeignKey, Function, Index, IndexKey, Table, Unique};
 use crate::dialect::Dialect;
 use crate::ir::{Deferrable, ForEach, Nulls, OnDelete, TriggerEvent, TriggerTiming};
 
@@ -48,11 +48,22 @@ fn quoted(s: &str) -> String {
     out
 }
 
-/// A name usable in the schema: `s` when it is an identifier, else `s` cleaned up.
+/// Python keywords: a field or member with such a name would not compile in models.py.
+const KEYWORDS: [&str; 35] = [
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif",
+    "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or",
+    "pass", "raise", "return", "try", "while", "with", "yield",
+];
+
+/// A name usable in the schema and the generated models: `s` when it is an identifier
+/// and not a keyword, else `s` cleaned up.
 fn identifier(s: &str) -> String {
     let mut out: String = s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     if !out.starts_with(|c: char| c == '_' || c.is_ascii_alphabetic()) {
         out.insert(0, '_');
+    }
+    if KEYWORDS.contains(&out.as_str()) {
+        out.push('_');
     }
     out
 }
@@ -91,10 +102,15 @@ fn field_type(ty: &str, dialect: Dialect, enums: &HashMap<String, String>) -> Op
         None => (ty.trim(), false),
     };
     if dialect == Dialect::Sqlite {
+        // the storage class, with the declared names other tools use for booleans and dates
         let upper = base.to_ascii_uppercase();
         let t = if upper.contains("INT") {
             "BigInt"
-        } else if upper.contains("REAL") || upper.contains("FLOA") || upper.contains("DOUB") {
+        } else if upper.starts_with("BOOL") {
+            "Boolean"
+        } else if upper.starts_with("DATE") || upper.starts_with("TIME") {
+            "DateTime"
+        } else if upper.contains("REAL") || upper.contains("FLOA") || upper.contains("DOUB") || upper.starts_with("DEC") || upper.starts_with("NUMERIC") {
             "Float"
         } else {
             "String"
@@ -176,8 +192,9 @@ fn sql_string(s: &str) -> Option<(String, &str)> {
     None
 }
 
+/// A number the schema writes back with the same text (`0.00` would become `0.0`).
 fn is_number(s: &str) -> bool {
-    !s.is_empty() && s.parse::<f64>().is_ok() && !s.contains(['e', 'E', 'i', 'n', 'N'])
+    !s.contains(['e', 'E', 'i', 'n', 'N']) && s.parse::<f64>().is_ok_and(|v| v.to_string() == s.trim_start_matches('+'))
 }
 
 struct FieldKind<'a> {
@@ -358,12 +375,7 @@ pub fn pull(db: &DbSchema, gaps: &[String]) -> Pulled {
         let single_uniques: BTreeSet<&str> = t
             .uniques
             .iter()
-            .filter(|u| {
-                u.columns.len() == 1
-                    && u.name == object_name(&[&t.name, &u.columns[0], "key"])
-                    && !u.nulls_not_distinct
-                    && u.deferrable.is_none()
-            })
+            .filter(|u| shorthand_unique(t, u))
             .map(|u| u.columns[0].as_str())
             .collect();
         for c in &t.columns {
@@ -407,7 +419,7 @@ pub fn pull(db: &DbSchema, gaps: &[String]) -> Pulled {
         let keep = |cols: &[String], m: &ModelOut<'_>| cols.iter().all(|c| m.fields.contains_key(c));
 
         for u in &t.uniques {
-            if u.columns.len() == 1 && single_uniques.contains(u.columns[0].as_str()) {
+            if shorthand_unique(t, u) {
                 continue;
             }
             if !keep(&u.columns, m) {
@@ -422,7 +434,7 @@ pub fn pull(db: &DbSchema, gaps: &[String]) -> Pulled {
             m.attrs.push(format!("@@unique({})", args.join(", ")));
         }
         for ix in &t.indexes {
-            if let Some(line) = index_attr(m, ix) {
+            if let Some(line) = index_attr(m, ix, &single_uniques) {
                 m.attrs.push(line);
             } else {
                 gaps.push(format!("index {} uses a column that is left out", ix.name));
@@ -510,7 +522,7 @@ pub fn pull(db: &DbSchema, gaps: &[String]) -> Pulled {
     }
 
     // -- triggers --------------------------------------------------------------------------
-    let functions: BTreeSet<&str> = db.functions.iter().map(|f| f.name.as_str()).collect();
+    let functions: BTreeSet<&str> = db.functions.iter().filter(|f| writable(f)).map(|f| f.name.as_str()).collect();
     for m in &mut models {
         for tr in &m.table.triggers {
             if dialect == Dialect::Postgres && !functions.contains(tr.function.as_str()) {
@@ -577,7 +589,7 @@ pub fn pull(db: &DbSchema, gaps: &[String]) -> Pulled {
     }
     out.push_str("}\n");
     for f in &db.functions {
-        if !is_ident(&f.name) || f.body.contains("\"\"\"") {
+        if !writable(f) {
             gaps.push(format!("function {}({}) can't be written as a function block; it is left out", f.name, f.args));
             continue;
         }
@@ -625,8 +637,19 @@ pub fn pull(db: &DbSchema, gaps: &[String]) -> Pulled {
     Pulled { schema: out, gaps }
 }
 
+/// Whether a function can be written as a function block.
+fn writable(f: &Function) -> bool {
+    is_ident(&f.name) && !f.body.contains("\"\"\"")
+}
+
+/// Whether `u` is written as `@unique` on its field: the one the schema would make.
+fn shorthand_unique(t: &Table, u: &Unique) -> bool {
+    u.columns.len() == 1 && u.name == object_name(&[&t.name, &u.columns[0], "key"]) && !u.nulls_not_distinct && u.deferrable.is_none()
+}
+
 /// `@@index(...)` for an index, or `None` when it uses a column that is left out.
-fn index_attr(m: &ModelOut<'_>, ix: &Index) -> Option<String> {
+/// `unique` are the `@unique` columns: the schema drops a plain index on one of them.
+fn index_attr(m: &ModelOut<'_>, ix: &Index, unique: &BTreeSet<&str>) -> Option<String> {
     if ix.keys.iter().any(|k| k.column.as_ref().is_some_and(|c| !m.fields.contains_key(c))) || ix.include.iter().any(|c| !m.fields.contains_key(c)) {
         return None;
     }
@@ -637,7 +660,7 @@ fn index_attr(m: &ModelOut<'_>, ix: &Index) -> Option<String> {
         && ix.include.is_empty()
         && ix.where_.is_none()
         && ix.with.is_empty()
-        && ix.keys[0].column.as_ref().is_some_and(|c| ix.name == object_name(&[&m.table.name, c, "idx"]))
+        && ix.keys[0].column.as_ref().is_some_and(|c| ix.name == object_name(&[&m.table.name, c, "idx"]) && !unique.contains(c.as_str()))
         && ix.keys[0] == IndexKey { column: ix.keys[0].column.clone(), expr: None, collation: None, opclass: None, desc: false, nulls: None };
     if plain {
         return Some(format!("@@index([{}])", keys.join(", ")));

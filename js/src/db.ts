@@ -57,9 +57,15 @@ export interface SessionLockOptions {
 /** Statements a replica may answer (the IR starts with its `op`). */
 const READ = /^\{"op":"(select|count|exists)"/;
 
-/** @internal Runs `fn` with `tx` as the current transaction of `db`; does not end it. */
-export function inTransaction<T>(db: Database, tx: NativeTransaction, fn: () => Promise<T>): Promise<T> {
-  return current.run({ db, tx }, fn);
+/**
+ * @internal Runs `fn` with `tx` as the current transaction of `db`; does not end it.
+ * Gives the `onCommit` callbacks registered in `fn`, for the caller to run after it commits.
+ */
+export async function inTransaction(db: Database, tx: NativeTransaction, fn: () => Promise<unknown>): Promise<(() => unknown)[]> {
+  const mine: (() => unknown)[] = [];
+  const scoped = new Map(callbacks.getStore() ?? []).set(db.root, mine);
+  await current.run({ db, tx }, () => callbacks.run(scoped, fn));
+  return mine;
 }
 
 /** A connection pool. Created by {@link connect}. */

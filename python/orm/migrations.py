@@ -13,10 +13,11 @@ the newest ``snapshot.json``, so it needs no database. The SQL is plain DDL and 
 edited before it is applied. Applying and reverting (``engine/src/migrate.rs``) records
 each migration with a checksum in the ``orm_migrations`` table and refuses to continue
 if an applied file changed. Both are the same Rust code the ``orm`` command line and the
-TypeScript package run, so every tool writes and applies the same files.
+TypeScript package run, so every tool writes and applies the same files. A migration
+may also hold a data step (``data.py`` or ``data.ts``), which only its own host runs.
 
-Adopting a live database: :func:`pull` writes its schema file, :meth:`Migrator.baseline`
-marks the first migration as applied without running it, and :meth:`Migrator.drift`
+A live database under migrations: :func:`pull` writes its schema file, :meth:`Migrator.baseline`
+marks the first migration as applied (it does not run it), and :meth:`Migrator.drift`
 compares the database with the newest migration's snapshot.
 
 From the command line: ``python -m orm makemigrations / migrate / rollback /
@@ -31,13 +32,14 @@ import importlib.util
 import inspect
 import json
 import os
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import _native
-from .db import Database, _current_tx
+from .db import Database, _callbacks, _current_tx
 from .db import connect as orm_connect
 from ._native import MigrationError
 from .model import Registry
@@ -161,7 +163,7 @@ async def pull(db: Database) -> Pulled:
     file, and checks the result by creating it again in a shadow schema that is rolled
     back (SQLite: an in-memory database)."""
     schema, gaps, steps = await db._engine.pull_schema()
-    return Pulled(schema, gaps, [Step(summary, sql) for summary, sql in steps])
+    return Pulled(schema, gaps, [Step(*step) for step in steps])
 
 
 @dataclass(frozen=True)
@@ -184,11 +186,18 @@ def _data_step(m: Migration) -> Callable[[Database], Awaitable[Any]] | None:
     file = m.path / "data.py"
     if not file.is_file():
         return None
-    spec = importlib.util.spec_from_file_location(f"orm_migration_{m.name}", file)
+    # unique per file, so two directories with the same folder names do not share it
+    name = f"orm_migration_{hashlib.sha256(os.fsencode(file.resolve())).hexdigest()[:12]}_{m.name}"
+    spec = importlib.util.spec_from_file_location(name, file)
     if spec is None or spec.loader is None:
         raise MigrationError(f"{file}: can't be loaded")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # dataclasses and pickle look the module up in sys.modules while it runs
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules[name]
     run = getattr(module, "run", None)
     if not inspect.iscoroutinefunction(run):
         raise MigrationError(f"{file}: needs `async def run(db)`")
@@ -200,20 +209,28 @@ def has_data_steps(directory: str | os.PathLike[str]) -> bool:
     return any((Path(path) / "data.py").is_file() for _, path in _native.list_migrations(os.fspath(directory)))
 
 
-async def migrate_command(schema: str, directory: str, url: str, target: str | None) -> int:
+async def migrate_command(schema: str | os.PathLike[str], directory: str | os.PathLike[str], url: str, target: str | None) -> int:
     """``python -m orm migrate`` for a directory with data steps: applies with
-    :meth:`Migrator.upgrade`. The data modules are imported first, so the models they
-    import are in the default registry when the database connects."""
+    :meth:`Migrator.upgrade`. The data modules of the pending migrations are imported
+    first, so the models they import are in the default registry when the database
+    connects."""
     from .model import registry, load
 
-    for _, path in _native.list_migrations(directory):
-        m = Migration(Path(path).name, Path(path))
-        _data_step(m)
-    if not registry._models:
-        load(schema)
-    db = await orm_connect(url, max_connections=2)
+    dialect = "sqlite" if url.startswith("sqlite:") else None
+    probe = await orm_connect(url, max_connections=1, default=False, registry=Registry(dialect=dialect))
     try:
-        done = await Migrator(db, Migrations(directory, schema)).upgrade(target)
+        pending = await Migrator(probe, Migrations(directory, schema))._load_pending(target)
+    finally:
+        await probe.close()
+    if not any(registry) and Path(schema).is_file():
+        load(schema)
+    if any(registry):
+        db = await orm_connect(url, max_connections=2)
+    else:
+        # data steps that use db.execute only, and no schema file (e.g. a deploy image)
+        db = await orm_connect(url, max_connections=2, registry=Registry(dialect=dialect))
+    try:
+        done = await Migrator(db, Migrations(directory, schema))._upgrade(target, pending)
     finally:
         await db.close()
     for m in done:
@@ -259,26 +276,38 @@ class Migrator:
         is recorded; queries on ``db`` inside it go into that transaction. An error rolls
         back the SQL, the data changes and the record.
         """
-        done = []
-        for name, path in await self.db._engine.migration_pending(self._dir, target):
-            m = Migration(name, Path(path))
+        return await self._upgrade(target, await self._load_pending(target))
+
+    async def _load_pending(self, target: str | None) -> list[tuple[Migration, Callable[[Database], Awaitable[Any]] | None]]:
+        """The pending migrations with their loaded data steps; refuses before anything runs."""
+        todo = [Migration(name, Path(path)) for name, path in await self.db._engine.migration_pending(self._dir, target)]
+        for m in todo:
             if (m.path / "data.ts").is_file():
                 raise MigrationError(f"{m.name} has a data step (data.ts); apply it with npx orm migrate")
-            run = _data_step(m)
-            tx = await self.db._engine.migration_begin(name, str(path))
+        return [(m, _data_step(m)) for m in todo]
+
+    async def _upgrade(
+        self, target: str | None, pending: list[tuple[Migration, Callable[[Database], Awaitable[Any]] | None]]
+    ) -> list[Migration]:
+        done = []
+        for m, run in pending:
+            tx = await self.db._engine.migration_begin(m.name, str(m.path))
             if tx is None:
                 continue
             token = _current_tx.set((self.db, tx))
+            callbacks, cb_token = self.db._collect_callbacks()
             try:
                 if run is not None:
                     await run(self.db)
             except BaseException:
-                _current_tx.reset(token)
                 with contextlib.suppress(Exception):
                     await tx.rollback()
                 raise
-            _current_tx.reset(token)
-            await self.db._engine.migration_finish(tx, name, str(path))
+            finally:
+                _callbacks.reset(cb_token)
+                _current_tx.reset(token)
+            await self.db._engine.migration_finish(tx, m.name, str(m.path))
+            await self.db._after_commit(callbacks, True)
             done.append(m)
         return done
 
@@ -287,10 +316,10 @@ class Migrator:
         created in a shadow (a Postgres schema in a transaction that is rolled back, or an
         in-memory SQLite database) and read back, so both sides use the database's text."""
         migration, steps, gaps = await self.db._engine.migration_drift(self._dir)
-        return Drift(migration, [Step(summary, sql) for summary, sql in steps], gaps)
+        return Drift(migration, [Step(*step) for step in steps], gaps)
 
     async def baseline(self) -> Migration:
-        """Marks the first migration as applied without running it, for a database that
+        """Marks the first migration as applied and does not run it, for a database that
         already has the schema (after :func:`pull`). Writes the first migration from the
         schema when the directory has none. Fails once any migration is applied."""
         if not self.migrations.all():

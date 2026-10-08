@@ -37,12 +37,13 @@ def main(argv: list[str] | None = None) -> int:
         schema, directory, url, target = found
         from .migrations import has_data_steps, migrate_command
 
-        if url and has_data_steps(directory):
-            # data.py runs in Python, so this migrator applies the directory
+        if url:
             import asyncio
 
             try:
-                return asyncio.run(migrate_command(schema, directory, url, target))
+                # data.py runs in Python, so this migrator applies the directory
+                if has_data_steps(directory):
+                    return asyncio.run(migrate_command(schema, directory, url, target))
             except Exception as e:  # the CLI reports errors, not tracebacks
                 print(f"error: {e}", file=sys.stderr)
                 return 1

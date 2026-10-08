@@ -27,7 +27,7 @@
 //!
 //! Output goes to the process's stdout and stderr. Exit codes: 0 success, 1 failure
 //! (an invalid schema, a migration error, a database error, `makemigrations --check`
-//! finding changes), 2 bad usage.
+//! finding changes, `drift` finding differences), 2 bad usage.
 
 use std::path::{Path, PathBuf};
 
@@ -80,7 +80,7 @@ const COMMANDS: &str = "  identities [--rename Old=New] [--restore Model]\n     
   showmigrations                           list migrations and whether they are applied
   pull [-o FILE] [--force]                 write the schema file from the live database
   baseline                                 make the first migration if there is none and mark
-                                           it applied without running it (after pull)
+                                           it applied; it does not run (after pull)
   drift                                    compare the database with the last migration's
                                            snapshot; exit 1 if they differ
 
@@ -591,10 +591,14 @@ async fn database(command: &str, args: &Args, dir: &Path, schema: &Path) -> Resu
                 }
                 let m = migrate::baseline(&*driver, dir).await?;
                 println!("Marked {} as applied", m.name);
-                let found = introspect::drift(&*driver, dir).await?;
-                if !found.steps.is_empty() {
-                    println!("warning: the database differs from {}; a migration to it would:", m.name);
-                    print_steps(&found.steps);
+                // the mark is done: a failed check is a warning, not a failed baseline
+                match introspect::drift(&*driver, dir).await {
+                    Ok(found) if !found.steps.is_empty() => {
+                        println!("warning: the database differs from {}; a migration to it would:", m.name);
+                        print_steps(&found.steps);
+                    }
+                    Ok(_) => {}
+                    Err(e) => println!("warning: the database was not compared with {}: {e}", m.name),
                 }
             }
             "drift" => {

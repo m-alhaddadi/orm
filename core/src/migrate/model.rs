@@ -394,6 +394,7 @@ struct Builder<'a> {
     /// extension -> first object that needs it
     required: BTreeMap<String, String>,
     names: BTreeSet<String>,
+    local_names: BTreeSet<(String, String)>,
     trigger_functions: Vec<Function>,
 }
 
@@ -410,15 +411,24 @@ impl Builder<'_> {
         }
     }
 
-    /// Indexes and constraints share one namespace per database schema.
+    /// Indexes and the constraints that own one share one namespace per database schema.
     fn claim(&mut self, name: String, model: &Model) -> Result<String> {
         if !self.names.insert(name.clone()) {
-            return Err(format!(
-                "model {}: duplicate index or constraint name {name:?}; give one of them an explicit name=",
-                model.ir.name
-            ));
+            return Err(Self::duplicate(&name, model));
+        }
+        self.claim_local(name, model)
+    }
+
+    /// Check and foreign-key names are unique per table only.
+    fn claim_local(&mut self, name: String, model: &Model) -> Result<String> {
+        if !self.local_names.insert((model.table().to_owned(), name.clone())) {
+            return Err(Self::duplicate(&name, model));
         }
         Ok(name)
+    }
+
+    fn duplicate(name: &str, model: &Model) -> String {
+        format!("model {}: duplicate index or constraint name {name:?}; give one of them an explicit name=", model.ir.name)
     }
 
     fn column_of(&self, m: &Model, field: &str) -> Result<String> {
@@ -539,12 +549,12 @@ impl Builder<'_> {
                 } else {
                     format!("{c} IN ({values})")
                 };
-                table.checks.push(Check { name: self.claim(object_name(&[&t, &f.column, "enum", "check"]), m)?, expr });
+                table.checks.push(Check { name: self.claim_local(object_name(&[&t, &f.column, "enum", "check"]), m)?, expr });
             }
             if let Some(expr) = &f.check {
                 self.require_expr(expr, &format!("check on {t}.{}", f.column));
                 table.checks.push(Check {
-                    name: self.claim(object_name(&[&t, &f.column, "check"]), m)?,
+                    name: self.claim_local(object_name(&[&t, &f.column, "check"]), m)?,
                     expr: normalize_ws(expr),
                 });
             }
@@ -554,7 +564,7 @@ impl Builder<'_> {
             let target = schema.model(schema.model_idx(&r.target)?);
             let column = m.field(&r.from)?.column.clone();
             table.foreign_keys.push(ForeignKey {
-                name: self.claim(r.fk_name.clone().unwrap_or_else(|| object_name(&[&t, &column, "fkey"])), m)?,
+                name: self.claim_local(r.fk_name.clone().unwrap_or_else(|| object_name(&[&t, &column, "fkey"])), m)?,
                 columns: vec![column],
                 ref_table: target.table().to_owned(),
                 ref_columns: vec![target.field(&r.to)?.column.clone()],
@@ -619,7 +629,7 @@ impl Builder<'_> {
                 ConstraintIr::Check { name, expr } => {
                     self.require_expr(expr, "check constraint");
                     let name = name.clone().unwrap_or_else(|| object_name(&[&t, &expr_tag(expr), "check"]));
-                    table.checks.push(Check { name: self.claim(name, m)?, expr: normalize_ws(expr) });
+                    table.checks.push(Check { name: self.claim_local(name, m)?, expr: normalize_ws(expr) });
                 }
                 ConstraintIr::Exclude { name, method, elements, where_, deferrable, requires } => {
                     let mut els = vec![];
@@ -704,6 +714,7 @@ pub fn build(schema: &Schema) -> Result<(DbSchema, Renames)> {
         catalog: Catalog::new(&[schema.catalog.as_slice(), schema.extensions.as_slice()].concat()),
         required: BTreeMap::new(),
         names: BTreeSet::new(),
+        local_names: BTreeSet::new(),
         trigger_functions: vec![],
     };
     let mut db = DbSchema { identities: schema.identities.clone(), dialect: schema.dialect, version: if schema.identities.is_some() { SNAPSHOT_VERSION } else if schema.dialect.is_postgres() { 1 } else { 2 }, ..Default::default() };

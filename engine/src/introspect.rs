@@ -72,6 +72,10 @@ struct PgTable {
     kind: String,
     partition: bool,
     comment: Option<String>,
+    rls: bool,
+    force_rls: bool,
+    unlogged: bool,
+    options: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +154,7 @@ struct PgTrigger {
     def: String,
     constraint: bool,
     enabled: String,
+    transition: bool,
 }
 
 #[derive(Deserialize)]
@@ -189,7 +194,8 @@ const IN_SCHEMA: &str = "n.nspname = current_schema()";
 fn tables_sql() -> String {
     format!(
         "SELECT coalesce(json_agg(json_build_object('oid', c.oid::int8, 'name', c.relname, 'kind', c.relkind, \
-         'partition', c.relispartition, 'comment', obj_description(c.oid, 'pg_class')) ORDER BY c.relname), '[]') \
+         'partition', c.relispartition, 'comment', obj_description(c.oid, 'pg_class'), 'rls', c.relrowsecurity, \
+         'force_rls', c.relforcerowsecurity, 'unlogged', c.relpersistence = 'u', 'options', c.reloptions) ORDER BY c.relname), '[]') \
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE {IN_SCHEMA} AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND c.relname <> '{MIGRATIONS_TABLE}' AND {}",
         not_extension("c.oid")
@@ -197,11 +203,13 @@ fn tables_sql() -> String {
 }
 
 const COLUMNS_SQL: &str = "SELECT coalesce(json_agg(json_build_object('table', a.attrelid::int8, 'name', a.attname, \
-     'type', format_type(a.atttypid, a.atttypmod), 'notnull', a.attnotnull, 'default', pg_get_expr(d.adbin, d.adrelid), \
+     'type', CASE WHEN t.typtype = 'e' THEN chr(34) || replace(t.typname, chr(34), chr(34) || chr(34)) || chr(34) \
+                  WHEN et.typtype = 'e' THEN chr(34) || replace(et.typname, chr(34), chr(34) || chr(34)) || chr(34) || '[]' \
+                  ELSE format_type(a.atttypid, a.atttypmod) END, 'notnull', a.attnotnull, 'default', pg_get_expr(d.adbin, d.adrelid), \
      'identity', a.attidentity::text, 'generated', a.attgenerated::text, 'comment', col_description(a.attrelid, a.attnum), \
      'collation', CASE WHEN a.attcollation <> t.typcollation THEN co.collname END) ORDER BY a.attrelid, a.attnum), '[]') \
      FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
-     JOIN pg_type t ON t.oid = a.atttypid \
+     JOIN pg_type t ON t.oid = a.atttypid LEFT JOIN pg_type et ON et.oid = t.typelem AND t.typcategory = 'A' \
      LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
      LEFT JOIN pg_collation co ON co.oid = a.attcollation \
      WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped";
@@ -248,7 +256,8 @@ const TRIGGERS_SQL: &str = "SELECT coalesce(json_agg(json_build_object('table', 
      'columns', (SELECT json_agg(a.attname ORDER BY k.i) FROM unnest(t.tgattr::int2[]) WITH ORDINALITY k(n, i) \
                  JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = k.n), \
      'function', p.proname, 'function_schema', pn.nspname, 'args', encode(t.tgargs, 'hex'), \
-     'def', pg_get_triggerdef(t.oid, true), 'constraint', t.tgconstraint <> 0, 'enabled', t.tgenabled::text) ORDER BY t.tgname), '[]') \
+     'def', pg_get_triggerdef(t.oid, true), 'constraint', t.tgconstraint <> 0, 'enabled', t.tgenabled::text, \
+     'transition', t.tgoldtable IS NOT NULL OR t.tgnewtable IS NOT NULL) ORDER BY t.tgname), '[]') \
      FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
      JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace \
      WHERE n.nspname = current_schema() AND NOT t.tgisinternal";
@@ -381,6 +390,8 @@ async fn postgres(conn: &dyn Executor) -> Result<Introspection> {
     let enums: Vec<PgEnum> = json(conn, &enums_sql()).await?;
     let others: Vec<PgOther> = json(conn, &others_sql()).await?;
     let extensions: Vec<PgExtension> = json(conn, EXTENSIONS_SQL).await?;
+    let current = conn.query_text("SELECT current_schema()".into()).await?;
+    let current = current.into_iter().next().and_then(|r| r.into_iter().next().flatten()).unwrap_or_default();
 
     let mut out = Introspection::default();
     let gaps = &mut out.gaps;
@@ -389,7 +400,7 @@ async fn postgres(conn: &dyn Executor) -> Result<Introspection> {
     db.version = 1;
     db.extensions = extensions
         .into_iter()
-        .map(|e| Extension { name: e.name, schema: (e.schema != "public").then_some(e.schema), version: None })
+        .map(|e| Extension { name: e.name, schema: (e.schema != current).then_some(e.schema), version: None })
         .collect();
     db.enums = enums.into_iter().map(|e| EnumType { name: e.name, values: e.values, comment: e.comment }).collect();
 
@@ -400,6 +411,16 @@ async fn postgres(conn: &dyn Executor) -> Result<Introspection> {
         match t.kind.as_str() {
             "r" if t.partition => gaps.push(format!("table {} is a partition; partitions are not supported", t.name)),
             "r" => {
+                if t.rls || t.force_rls {
+                    let force = if t.force_rls { " (forced)" } else { "" };
+                    gaps.push(format!("table {} has row-level security{force}; it is not reproduced", t.name));
+                }
+                if t.unlogged {
+                    gaps.push(format!("table {} is UNLOGGED; it is read as logged", t.name));
+                }
+                if let Some(options) = t.options.filter(|o| !o.is_empty()) {
+                    gaps.push(format!("table {} has storage options ({}); they are not reproduced", t.name, options.join(", ")));
+                }
                 by_oid.insert(t.oid, Table { name: t.name, comment: t.comment, ..Default::default() });
             }
             "p" => gaps.push(format!("table {} is partitioned; partitioning is not supported", t.name)),
@@ -438,6 +459,15 @@ async fn postgres(conn: &dyn Executor) -> Result<Introspection> {
         }
         match c.kind.as_str() {
             "p" => t.primary_key = Some(PrimaryKey { name: c.name, columns }),
+            "u" if index_keys.get(&c.index).is_some_and(|ix| ix.include.as_ref().is_some_and(|i| !i.is_empty())) => {
+                gaps.push(format!("unique constraint {}.{} has INCLUDE columns; it is read without them", t.name, c.name));
+                t.uniques.push(Unique {
+                    name: c.name,
+                    columns,
+                    nulls_not_distinct: c.nulls_not_distinct.unwrap_or(false),
+                    deferrable: deferrable(c.deferrable, c.deferred),
+                });
+            }
             "u" => t.uniques.push(Unique {
                 name: c.name,
                 columns,
@@ -452,6 +482,11 @@ async fn postgres(conn: &dyn Executor) -> Result<Introspection> {
                 }
                 t.checks.push(Check { name: c.name, expr: strip_parens(expr.trim_end_matches(" NO INHERIT")).to_owned() });
             }
+            "f" if !c.ref_local => {
+                // matched by table name, it would point at a local table of the same name
+                let ref_table = c.ref_table.unwrap_or_default();
+                gaps.push(format!("foreign key {}.{} references {}.{ref_table}, outside the schema; it is left out", t.name, c.name, c.ref_schema.unwrap_or_default()));
+            }
             "f" => {
                 t.foreign_keys.push(ForeignKey {
                     name: c.name,
@@ -462,10 +497,6 @@ async fn postgres(conn: &dyn Executor) -> Result<Introspection> {
                     on_update: on_action(&c.on_update),
                     deferrable: deferrable(c.deferrable, c.deferred),
                 });
-                if !c.ref_local {
-                    let fk = t.foreign_keys.last().unwrap();
-                    gaps.push(format!("foreign key {}.{} references {}.{}, outside the schema", t.name, fk.name, c.ref_schema.unwrap_or_default(), fk.ref_table));
-                }
             }
             _ => {
                 let Some(ix) = index_keys.get(&c.index) else { continue };
@@ -507,6 +538,10 @@ async fn postgres(conn: &dyn Executor) -> Result<Introspection> {
         let Some(t) = by_oid.get_mut(&tr.table) else { continue };
         if tr.constraint {
             gaps.push(format!("constraint trigger {}.{}: constraint triggers are not supported", t.name, tr.name));
+            continue;
+        }
+        if tr.transition {
+            gaps.push(format!("trigger {}.{} has REFERENCING transition tables; it is left out", t.name, tr.name));
             continue;
         }
         if tr.enabled == "D" {
@@ -736,6 +771,70 @@ fn lite_constraints(sql: &str) -> Vec<(String, String, String)> {
     out
 }
 
+/// The byte offset of each top-level keyword `kw` (outside quotes and parentheses) in `text`.
+fn top_keyword(text: &str, kw: &str) -> Vec<usize> {
+    let upper = text.to_ascii_uppercase();
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    let (mut out, mut depth, mut quote) = (vec![], 0i32, None::<char>);
+    for (i, ch) in text.char_indices() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"' | '`') => quote = Some(ch),
+            (None, '[') => quote = Some(']'),
+            (None, '(') => depth += 1,
+            (None, ')') => depth -= 1,
+            _ if depth == 0
+                && upper[i..].starts_with(kw)
+                && !word(text[..i].chars().next_back())
+                && !word(text[i + kw.len()..].chars().next()) =>
+            {
+                out.push(i)
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A check written in a column definition or as an unnamed table constraint: its column
+/// (none for a table check), its name if it has one, and its expression.
+type LiteCheck = (Option<String>, Option<String>, String);
+
+/// The clauses of a `CREATE TABLE` that are not named table constraints: unnamed table
+/// checks, column checks, and inline `REFERENCES ... DEFERRABLE` of each column.
+fn lite_inline(sql: &str) -> (Vec<LiteCheck>, BTreeMap<String, Deferrable>) {
+    let Some((body, _)) = parens_body(sql) else { return (vec![], BTreeMap::new()) };
+    let (mut checks, mut deferrable) = (vec![], BTreeMap::new());
+    for item in split_top(body) {
+        let upper = item.to_ascii_uppercase();
+        let table_check = upper.starts_with("CHECK");
+        if !table_check && ["CONSTRAINT", "PRIMARY", "UNIQUE", "FOREIGN"].iter().any(|k| upper.starts_with(k)) {
+            continue;
+        }
+        let column = (!table_check).then(|| first_word(&item).0);
+        for at in top_keyword(&item, "CHECK") {
+            let Some((expr, _)) = parens_body(&item[at..]) else { continue };
+            // `CONSTRAINT name CHECK (...)` on a column
+            let before: Vec<&str> = item[..at].split_whitespace().collect();
+            let name = match before.as_slice() {
+                [.., c, n] if c.eq_ignore_ascii_case("CONSTRAINT") => Some(unquote(n)),
+                _ => None,
+            };
+            checks.push((column.clone(), name, expr.trim().to_owned()));
+        }
+        if let (Some(c), Some(&at)) = (&column, top_keyword(&item, "REFERENCES").first()) {
+            let tail = &upper[at..];
+            if tail.contains("INITIALLY DEFERRED") {
+                deferrable.insert(c.clone(), Deferrable::Deferred);
+            } else if tail.contains("DEFERRABLE") && !tail.contains("NOT DEFERRABLE") {
+                deferrable.insert(c.clone(), Deferrable::Immediate);
+            }
+        }
+    }
+    (checks, deferrable)
+}
+
 /// The columns of `CREATE TABLE` declared `PRIMARY KEY AUTOINCREMENT`.
 fn lite_autoincrement(sql: &str) -> Vec<String> {
     let Some((body, _)) = parens_body(sql) else { return vec![] };
@@ -793,6 +892,7 @@ fn lite_index(sql: &str, columns: &[LiteIndexColumn]) -> (Vec<IndexKey>, Option<
 async fn sqlite(conn: &dyn Executor) -> Result<Introspection> {
     let tables: Vec<LiteTable> = json(conn, LITE_TABLES).await?;
     let columns: Vec<LiteColumn> = json(conn, LITE_COLUMNS).await?;
+    let all_columns = &columns;
     let fks: Vec<LiteForeignKey> = json(conn, LITE_FOREIGN_KEYS).await?;
     let indexes: Vec<LiteIndex> = json(conn, LITE_INDEXES).await?;
     #[derive(Deserialize)]
@@ -845,6 +945,24 @@ async fn sqlite(conn: &dyn Executor) -> Result<Introspection> {
                 }
             }
         }
+        let (inline_checks, inline_deferrable) = lite_inline(&sql);
+        for (column, name, expr) in inline_checks {
+            // Postgres' names for unnamed checks, with a number when one is taken
+            let base = match &column {
+                Some(c) => orm_core::migrate::model::object_name(&[&t.name, c, "check"]),
+                None => orm_core::migrate::model::object_name(&[&t.name, "check"]),
+            };
+            let name = name.unwrap_or_else(|| {
+                let mut n = base.clone();
+                let mut i = 1;
+                while t.checks.iter().any(|c| c.name == n) {
+                    n = format!("{base}{i}");
+                    i += 1;
+                }
+                n
+            });
+            t.checks.push(Check { name, expr });
+        }
         let mut ids: Vec<i64> = fks.iter().filter(|f| f.table == lt.name).map(|f| f.id).collect();
         ids.dedup();
         for id in ids {
@@ -854,13 +972,21 @@ async fn sqlite(conn: &dyn Executor) -> Result<Introspection> {
                 k == "FOREIGN" && parens_body(body).is_some_and(|(cols, _)| names_in(cols) == columns)
             });
             let body = declared.map(|(_, _, b)| b.to_ascii_uppercase()).unwrap_or_default();
+            let inline = (declared.is_none() && columns.len() == 1).then(|| inline_deferrable.get(&columns[0]).copied()).flatten();
+            // `REFERENCES parent` without columns means the parent's primary key
+            let parent_pk = |i: usize| {
+                let mut pk: Vec<(i64, &str)> =
+                    all_columns.iter().filter(|c| c.table == parts[0].ref_table && c.pk > 0).map(|c| (c.pk, c.name.as_str())).collect();
+                pk.sort();
+                pk.get(i).map(|(_, n)| (*n).to_owned()).unwrap_or_default()
+            };
             let mut parts_name = vec![t.name.as_str()];
             parts_name.extend(columns.iter().map(String::as_str));
             parts_name.push("fkey");
             t.foreign_keys.push(ForeignKey {
                 name: declared.map(|(_, n, _)| n.clone()).unwrap_or_else(|| orm_core::migrate::model::object_name(&parts_name)),
                 ref_table: parts[0].ref_table.clone(),
-                ref_columns: parts.iter().map(|f| f.to.clone().unwrap_or_default()).collect(),
+                ref_columns: parts.iter().enumerate().map(|(i, f)| f.to.clone().unwrap_or_else(|| parent_pk(i))).collect(),
                 columns,
                 on_delete: lite_action(&parts[0].on_delete),
                 on_update: lite_action(&parts[0].on_update),
@@ -869,7 +995,7 @@ async fn sqlite(conn: &dyn Executor) -> Result<Introspection> {
                 } else if body.contains("DEFERRABLE") {
                     Some(Deferrable::Immediate)
                 } else {
-                    None
+                    inline
                 },
             });
         }
@@ -921,7 +1047,8 @@ async fn sqlite(conn: &dyn Executor) -> Result<Introspection> {
 // Drift
 // ---------------------------------------------------------------------------------------
 
-const SHADOW: &str = "orm_shadow";
+/// The shadow schema's name; the backend id makes it unique per session.
+const SHADOW: &str = "orm_shadow_";
 
 /// `db` read back from a database: its DDL is run in a shadow (a Postgres schema
 /// in a transaction that is rolled back, or a new in-memory SQLite database) and the
@@ -933,8 +1060,14 @@ pub async fn materialize(conn: &dyn Executor, db: &DbSchema) -> Result<Introspec
             let path = path.into_iter().next().and_then(|r| r.into_iter().next().flatten()).unwrap_or_default();
             let tx = conn.begin().await?;
             let run = async {
-                tx.batch(format!("CREATE SCHEMA {SHADOW}; SET LOCAL search_path TO {SHADOW}, {path}; SET LOCAL check_function_bodies = off"))
-                    .await?;
+                let pid = tx.query_text("SELECT pg_backend_pid()".into()).await?;
+                let pid = pid.into_iter().next().and_then(|r| r.into_iter().next().flatten()).unwrap_or_default();
+                // live text (comments, defaults) runs as DDL here: a backslash must not end a literal
+                tx.batch(format!(
+                    "SET LOCAL standard_conforming_strings = on; CREATE SCHEMA {SHADOW}{pid}; \
+                     SET LOCAL search_path TO {SHADOW}{pid}, {path}; SET LOCAL check_function_bodies = off"
+                ))
+                .await?;
                 for sql in orm_core::migrate::create_statements(db) {
                     tx.batch(sql).await.map_err(|e| Error::Migration(format!("the snapshot's DDL fails in a shadow schema: {e}")))?;
                 }
@@ -966,10 +1099,21 @@ pub fn differences(live: &DbSchema, target: &DbSchema) -> Vec<Step> {
     let mut b = target.clone();
     a.extensions.clear();
     b.extensions.clear();
-    let mut steps: Vec<Step> = diff::diff(&a, &b, &Default::default())
-        .iter()
-        .map(|op| Step { summary: orm_core::migrate::pg::summary(op), sql: orm_core::migrate::pg::render(op, false), warning: None })
-        .collect();
+    let ops = diff::diff(&a, &b, &Default::default());
+    let mut steps: Vec<Step> = if live.dialect == Dialect::Sqlite && !ops.is_empty() {
+        // SQLite rebuilds tables: one step with SQLite's SQL that names every change
+        let sql = orm_core::migrate::sqlite::steps(&a, &b, &Default::default()).unwrap_or_default();
+        let warnings: Vec<String> = ops.iter().filter_map(|op| op.warning()).collect();
+        vec![Step {
+            summary: ops.iter().map(orm_core::migrate::pg::summary).collect::<Vec<_>>().join("; "),
+            sql: sql.into_iter().map(|s| s.sql).collect::<Vec<_>>().join("\n"),
+            warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+        }]
+    } else {
+        ops.iter()
+            .map(|op| Step { summary: orm_core::migrate::pg::summary(op), sql: orm_core::migrate::pg::render(op, false), warning: op.warning() })
+            .collect()
+    };
     for e in &target.extensions {
         if !live.extensions.iter().any(|x| x.name == e.name) {
             let op = Op::CreateExtension(e.clone());
@@ -1042,8 +1186,16 @@ pub async fn pull(conn: &dyn Executor) -> Result<Pull> {
         .and_then(orm_core::dsl::check)
         .map_err(|e| Error::Migration(format!("the pulled schema doesn't compile (a bug in pull): {e}")))?;
     let snapshot = orm_core::migrate::snapshot(&compiled).map_err(Error::Migration)?;
-    let (steps, _) = compare(conn, &snapshot).await?;
-    Ok(Pull { schema: pulled.schema, gaps: pulled.gaps, steps })
+    let (mut gaps, schema) = (pulled.gaps, pulled.schema);
+    // the check needs CREATE and enough locks; the schema file does not
+    let steps = match compare(conn, &snapshot).await {
+        Ok((steps, _)) => steps,
+        Err(e) => {
+            gaps.push(format!("the schema was not checked against the database: {e}"));
+            vec![]
+        }
+    };
+    Ok(Pull { schema, gaps, steps })
 }
 
 /// What [`drift`] found.
