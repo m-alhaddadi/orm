@@ -22,6 +22,7 @@ from .errors import (
     QueryError,
     SchemaError,
     TransactionRequired,
+    VersionConflict,
     WriteProtected,
 )
 from .pagination import Page
@@ -109,6 +110,7 @@ __all__ = [
     "DoesNotExist",
     "MultipleObjectsReturned",
     "NotLoaded",
+    "VersionConflict",
     "NotConnected",
     "TransactionRequired",
     "WriteProtected",

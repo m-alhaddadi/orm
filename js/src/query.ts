@@ -1047,7 +1047,8 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
 
   /**
    * `DELETE` every matching row. Gives the number of rows deleted, or with
-   * `{ returning: true }` the deleted rows.
+   * `{ returning: true }` the deleted rows. A model with `@soft_delete.deleted_at` sets
+   * that field on its live rows instead.
    */
   delete(): Promise<number>;
   delete(options: { readonly returning: true }): Promise<M["row"][]>;
@@ -1055,6 +1056,43 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   async delete(options: { readonly returning?: boolean } = {}): Promise<number | M["row"][]> {
     const params: unknown[] = [];
     return this.write(this.mutationIr("delete", params), params, options.returning ?? false);
+  }
+
+  /**
+   * `DELETE` every matching row also for a model with `@soft_delete.deleted_at`. In
+   * database mode, the trigger soft-deletes a live row, so this deletes only rows that are
+   * already soft-deleted.
+   */
+  hardDelete(): Promise<number>;
+  hardDelete(options: { readonly returning: true }): Promise<M["row"][]>;
+  async hardDelete(options: { readonly returning?: boolean } = {}): Promise<number | M["row"][]> {
+    const params: unknown[] = [];
+    return this.write({ ...this.mutationIr("delete", params), hard: true }, params, options.returning ?? false);
+  }
+
+  /** Clear the soft-delete field of the matching soft-deleted rows. */
+  undelete(): Promise<number>;
+  undelete(options: { readonly returning: true }): Promise<M["row"][]>;
+  async undelete(options: { readonly returning?: boolean } = {}): Promise<number | M["row"][]> {
+    const field = this.softDeleteField();
+    return this.filter(this.meta.column(field).isNotNull() as never).updateValues({ [field.name]: null } as never, options.returning ?? false);
+  }
+
+  /** The rows with the soft-deleted ones: the query set without the schema defaults
+   * (the `@@query.filter` that hides deleted rows). */
+  allWithDeleted(): this {
+    this.softDeleteField();
+    return this.withoutDefaults();
+  }
+
+  /** Only the soft-deleted rows (without the schema defaults). */
+  deletedOnly(): this {
+    return this.withoutDefaults().filter(this.meta.column(this.softDeleteField()).isNotNull() as never) as this;
+  }
+
+  private softDeleteField(): ModelMeta["pk"] {
+    if (!this.meta.softDelete) throw new TypeError(`${this.meta.name} has no @soft_delete.deleted_at field`);
+    return this.meta.softDelete;
   }
 
   private async write(ir: IR, params: unknown[], returning: boolean): Promise<number | M["row"][]> {

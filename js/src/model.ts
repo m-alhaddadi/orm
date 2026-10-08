@@ -7,7 +7,7 @@
  * the same at runtime without a generated file (untyped).
  */
 
-import { DoesNotExist, MultipleObjectsReturned, NotLoaded } from "./errors.js";
+import { DoesNotExist, MultipleObjectsReturned, NotLoaded, VersionConflict } from "./errors.js";
 import { Column, PATH, RelationPath, type PathState, type Source } from "./expr.js";
 import { camel, type ColType, type FieldMeta, type ModelSpec, type RelationKind, type RelationMeta } from "./meta.js";
 import { call, native, type NativeShape, type NativeSchema } from "./native.js";
@@ -82,13 +82,26 @@ export interface Instance<M extends ModelSpec> {
   /**
    * `UPDATE ... SET <values> WHERE pk = ... RETURNING *`. Values may be expressions
    * (`{ views: Post.views.add(1) }`); the instance is refreshed from the returned row, so
-   * it shows what the database stored.
+   * it shows what the database stored. With `@locking.version`, throws `VersionConflict`
+   * when the row has a newer version.
    */
   update(values: M["update"]): Promise<void>;
-  /** `DELETE ... WHERE pk = ...`. The instance keeps its last values. */
+  /**
+   * `DELETE ... WHERE pk = ...`; with `@soft_delete.deleted_at`, a soft delete. The
+   * instance keeps its last values. With `@locking.version`, throws `VersionConflict`
+   * when the row has a newer version.
+   */
   delete(): Promise<void>;
   /** Reload column values from the database. */
   refresh(...fields: readonly Column<unknown, string>[]): Promise<void>;
+}
+
+/** The instance methods of a model with `@soft_delete.deleted_at`. */
+export interface SoftDeletable {
+  /** `DELETE ... WHERE pk = ...`; in database mode, the trigger soft-deletes a live row. */
+  hardDelete(): Promise<void>;
+  /** Clear the soft-delete field of this row and refresh it. */
+  undelete(): Promise<void>;
 }
 
 export type Row = Record<PropertyKey, unknown> & { [RELATED]?: Record<string, unknown>; [DB]?: Database | undefined };
@@ -100,6 +113,10 @@ export class ModelMeta implements Source {
   defaultFilter: unknown;
   /** The schema default order, one key per column; set once by `define()`. */
   defaultOrder: readonly { field: string; desc?: boolean; nulls?: "first" | "last" }[] = [];
+  /** The `@soft_delete.deleted_at` field: `delete()` sets it; set once by `define()`. */
+  softDelete: FieldMeta | undefined;
+  /** The `@locking.version` field: instance writes check it; set once by `define()`. */
+  versionField: FieldMeta | undefined;
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
   readonly fieldList: FieldMeta[] = [];
@@ -458,20 +475,51 @@ function replaceFrom(o: Row, fresh: Row): void {
   if (fresh[INTERNAL]) o[INTERNAL] = fresh[INTERNAL]; else delete o[INTERNAL];
 }
 
+/** The loaded `@locking.version` value; a versioned write needs it. */
+function loadedVersion(o: Row, version: FieldMeta): unknown {
+  const value = Object.hasOwn(o, version.name) ? o[version.name] : (o[INTERNAL] as Record<string, unknown> | undefined)?.[version.name];
+  if (value === undefined) throw new NotLoaded(`${metaOf(o).name}.${version.name} was not loaded`);
+  return value;
+}
+
+/** With `@locking.version`, match only the loaded version of the row. */
+function versionFilter(o: Row, query: QuerySet<ModelSpec>): QuerySet<ModelSpec> {
+  const meta = metaOf(o);
+  return meta.versionField ? query.filter(meta.column(meta.versionField).eq(loadedVersion(o, meta.versionField) as never) as never) as never : query;
+}
+
+/** No row matched a versioned write: throw when the row has another version. */
+async function throwIfChanged(o: Row): Promise<void> {
+  const meta = metaOf(o);
+  if (!meta.versionField) return;
+  const changed = rowQuery(o).filter(meta.column(meta.versionField).ne(loadedVersion(o, meta.versionField) as never) as never);
+  if (await changed.exists()) throw new VersionConflict(`${meta.name} ${show(o["pk"])} was changed since it was loaded`);
+}
+
 async function instanceUpdate(this: Row, values: object): Promise<void> {
   if (!Object.keys(values).length) {
     return;
   }
-  const rows = (await loadedQuery(this).update(values as never, { returning: true })) as Row[];
+  const meta = metaOf(this);
+  const query = versionFilter(this, loadedQuery(this, meta.versionField ? [meta.versionField.ir] : []));
+  const rows = (await query.update(values as never, { returning: true })) as Row[];
   if (!rows.length) {
-    const meta = metaOf(this);
+    await throwIfChanged(this);
     throw new (meta.model.DoesNotExist)(`${meta.name} ${show(this["pk"])} no longer exists`);
   }
   replaceFrom(this, rows[0]!);
 }
 
 async function instanceDelete(this: Row): Promise<void> {
-  await rowQuery(this).delete();
+  if (!(await versionFilter(this, rowQuery(this)).delete())) await throwIfChanged(this);
+}
+
+async function instanceHardDelete(this: Row): Promise<void> {
+  await rowQuery(this).hardDelete();
+}
+
+async function instanceUndelete(this: Row): Promise<void> {
+  await instanceUpdate.call(this, { [metaOf(this).softDelete!.name]: null });
 }
 
 async function instanceRefresh(this: Row, ...fields: readonly Column<unknown, string>[]): Promise<void> {
@@ -673,6 +721,16 @@ export function define(
     const policy = ((ir.behavior as { query_defaults?: { model: string; filter?: unknown; order?: ModelMeta["defaultOrder"] }[] } | undefined)?.query_defaults ?? []).find((d) => d.model === m.name);
     meta.defaultFilter = policy?.filter;
     meta.defaultOrder = policy?.order ?? [];
+    const role = (key: string) => ((ir.behavior as Record<string, { model: string; field: string }[] | undefined> | undefined)?.[key] ?? []).find((d) => d.model === m.name)?.field;
+    meta.versionField = meta.fieldByIr.get(role("versions") ?? "");
+    meta.softDelete = meta.fieldByIr.get(role("soft_delete") ?? "");
+    if (meta.softDelete) {
+      for (const name of ["hardDelete", "undelete"]) checkName(m.name, name, meta.fields);
+      Object.defineProperties(meta.Row.prototype, {
+        hardDelete: { value: instanceHardDelete, writable: true },
+        undelete: { value: instanceUndelete, writable: true },
+      });
+    }
     const computed = new Set(((ir.behavior as { result_fields?: { model: string; field: string }[] } | undefined)?.result_fields ?? []).filter((f) => f.model === m.name).map((f) => f.field));
     if (computed.size) {
       meta.inputFieldList = meta.fieldList.filter((f) => !computed.has(f.ir));

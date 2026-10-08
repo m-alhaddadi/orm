@@ -1,0 +1,36 @@
+[package]
+name = "orm-timestamps"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Selected @updated_at compiler for ORM: a row trigger or ORM-only updates"
+
+[dependencies]
+orm-contracts = { path = "../../contracts" }
+serde_json = "1"
+
+[dev-dependencies]
+orm-core = { path = "../../core" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[package.metadata.orm-extension]
+id = "orm.timestamps"
+version = "0.1.0"
+host_contract = 1
+schema_contract = 1
+languages = ["python", "typescript"]
+databases = ["postgres", "sqlite"]
+capabilities = ["schema-transformations", "physical-schema", "updated-at"]
+
+[[package.metadata.orm-extension.passes]]
+id = "orm.timestamps.prepare"
+phase = "behavior"
+rust = "crate::prepare"
+effects = ["behavior.updated_at", "storage.updated_at_triggers"]
+
+# `updated_at DateTime @timestamps.updated_at(mode: "application")`.
+[[package.metadata.orm-extension.attributes]]
+name = "timestamps.updated_at"
+target = "field"
+[package.metadata.orm-extension.attributes.arguments.mode]
+kind = "string"

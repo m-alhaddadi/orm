@@ -10,7 +10,7 @@ from os import PathLike
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from . import _native
-from .errors import DoesNotExist, MultipleObjectsReturned, NotLoaded
+from .errors import DoesNotExist, MultipleObjectsReturned, NotLoaded, VersionConflict
 from .expr import ColumnRef
 from .fields import BY_TYPE, Array, BelongsTo, Enum, Field, HasMany, HasOne, ManyToMany, Relation, String
 
@@ -80,6 +80,10 @@ class ModelMeta:
         self.default_filter: dict[str, Any] | None = None
         # The schema default order: `{"field", "desc"?, "nulls"?}` per column.
         self.default_order: list[dict[str, Any]] = []
+        # The `@soft_delete.deleted_at` field name: `delete()` sets it.
+        self.soft_delete: str | None = None
+        # The `@locking.version` field name: instance writes check it.
+        self.version_field: str | None = None
 
     def pk_ref(self) -> ColumnRef[Any]:
         return ColumnRef(self.model, (), self.pk)
@@ -250,6 +254,9 @@ class Registry:
             policy: dict[str, Any] = next((d for d in prepared.get("behavior", {}).get("query_defaults", ()) if d["model"] == meta.name), {})
             meta.default_filter = policy.get("filter")
             meta.default_order = policy.get("order", [])
+            behavior = prepared.get("behavior", {})
+            meta.soft_delete = next((d["field"] for d in behavior.get("soft_delete", ()) if d["model"] == meta.name), None)
+            meta.version_field = next((d["field"] for d in behavior.get("versions", ()) if d["model"] == meta.name), None)
             meta.field_names = tuple(fields)
             pk_ir = next(f for f in ir["fields"] if f.get("primary_key"))
             meta.attach_fields = (
@@ -285,7 +292,7 @@ class Registry:
         return self._native
 
 
-_RESERVED = {"pk", "objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "update", "delete", "refresh", "to_dict", "_field_value", "_orm_internal"}
+_RESERVED = {"pk", "objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "update", "delete", "hard_delete", "undelete", "refresh", "to_dict", "_field_value", "_orm_internal"}
 
 registry = Registry()
 
@@ -510,22 +517,61 @@ class Model:
         else:
             self.__dict__.pop("_orm_internal", None)
 
+    def _version_filter(self, query: QuerySet[Self]) -> QuerySet[Self]:
+        """With ``@locking.version``, match only the loaded version of the row."""
+        name = self._meta.version_field
+        if name is None:
+            return query
+        return query.filter(ColumnRef(type(self), (), self._meta.fields[name]) == getattr(self, name))
+
+    async def _raise_if_changed(self) -> None:
+        """No row matched a versioned write: raise when the row has another version."""
+        name = self._meta.version_field
+        if name is not None:
+            changed = self._row_query().filter(ColumnRef(type(self), (), self._meta.fields[name]) != getattr(self, name))
+            if await changed.exists():
+                raise VersionConflict(f"{type(self).__name__} {self.pk!r} was changed since it was loaded")
+
     async def update(self, **values: Any) -> None:
         """``UPDATE ... SET <values> WHERE pk = ... RETURNING`` the loaded fields.
 
         Values may be expressions (``views=Post.views + 1``); the instance is refreshed
-        from the returned row, so it shows what the database stored.
+        from the returned row, so it shows what the database stored. With
+        ``@locking.version``, raises :class:`orm.VersionConflict` when the row has a
+        newer version.
         """
         if not values:
             return
-        rows = await self._loaded_query().update(**values).returning()
+        version = self._meta.version_field
+        query = self._version_filter(self._loaded_query(*(() if version is None else (version,))))
+        rows = await query.update(**values).returning()
         if not rows:
+            await self._raise_if_changed()
             raise self.DoesNotExist(f"{type(self).__name__} {self.pk!r} no longer exists")
         self._replace_from(rows[0])
 
     async def delete(self) -> None:
-        """``DELETE ... WHERE pk = ...``. The instance keeps its last values."""
-        await self._row_query().delete()
+        """``DELETE ... WHERE pk = ...``; with ``@soft_delete.deleted_at``, a soft delete.
+        The instance keeps its last values. With ``@locking.version``, raises
+        :class:`orm.VersionConflict` when the row has a newer version."""
+        if not await self._version_filter(self._row_query()).delete():
+            await self._raise_if_changed()
+
+    async def hard_delete(self) -> None:
+        """``DELETE ... WHERE pk = ...`` also for a soft-delete model. In database mode,
+        the trigger soft-deletes a live row; a soft-deleted row is deleted."""
+        await self._row_query().hard_delete()
+
+    async def undelete(self) -> None:
+        """Clear the soft-delete field of this row and refresh it."""
+        name = self._soft_delete_field()
+        await self.update(**{name: None})
+
+    def _soft_delete_field(self) -> str:
+        name = self._meta.soft_delete
+        if name is None:
+            raise TypeError(f"{type(self).__name__} has no @soft_delete.deleted_at field")
+        return name
 
     async def refresh(self, *fields: ColumnRef[Any]) -> None:
         """Reload column values from the database."""

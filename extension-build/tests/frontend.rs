@@ -104,6 +104,9 @@ fn manifest_capability_selects_the_host_feature() {
         ("model-composition", "composition", "orm-model-composition", "model-composition"),
         ("proxy-models", "proxy", "orm-proxy", "extensions/proxy"),
         ("generic-relations", "generic", "orm-generic", "extensions/generic"),
+        ("updated-at", "timestamps", "orm-timestamps", "extensions/timestamps"),
+        ("soft-delete", "soft_delete", "orm-soft-delete", "extensions/soft-delete"),
+        ("optimistic-locking", "locking", "orm-locking", "extensions/locking"),
     ] {
         let output = root.join(feature);
         let config = root.join(format!("{feature}.json"));

@@ -35,6 +35,9 @@ fn call(call: ClientCall, ty: ColType) -> Value {
     }
 }
 
+/// The current time as a value of a `DateTime` or `Date` field.
+pub fn now(ty: ColType) -> Value { call(ClientCall::Now, ty) }
+
 /// Explicit SQL NULL is Some(typed null); None is an omitted value. Client defaults
 /// fill omission before native transforms/validation or SQL planning.
 pub fn fill<'a>(model: &Model, fields: &'a [String], mut rows: Rows) -> Result<(std::borrow::Cow<'a, [String]>, Rows)> {
