@@ -362,6 +362,38 @@ impl Engine {
         })
     }
 
+    /// Loads the prefetches of a select IR onto `parents`, instances the caller has, with
+    /// only the prefetch queries: `keys` names the root fields they read, `rows` holds
+    /// those values per parent. Related instances get `db` as `_db`.
+    #[pyo3(signature = (op_json, params, keys, rows, parents, tx = None, db = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn prefetch<'py>(
+        &self,
+        py: Python<'py>,
+        op_json: &str,
+        params: Vec<Bound<'py, PyAny>>,
+        keys: Vec<String>,
+        rows: Vec<Vec<Bound<'py, PyAny>>>,
+        parents: Vec<Bound<'py, PyAny>>,
+        tx: Option<&Bound<'py, Transaction>>,
+        db: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let Operation::Select(q) = parse_op(op_json).map_err(engine_err)? else {
+            return Err(query_err("prefetch() takes a select".into()));
+        };
+        let target = self.target;
+        let plans = plan::plan_prefetch_only(&self.schema, target, &q, &PyParams(&params)).map_err(engine_err)?;
+        let values = key_rows(&self.schema, &q.model, &keys, rows.len(), |r, i, ty| py_to_value(&rows[r][i], Some(ty)))?;
+        let parents: Vec<Py<PyAny>> = parents.into_iter().map(Bound::unbind).collect();
+        let conn = self.conn(tx);
+        let classes = self.classes.clone();
+        let db = db.map(Bound::unbind);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let out = exec::prefetch(conn.as_ref(), target, Box::new(exec::ValueRows(values)), plans).await.map_err(engine_err)?;
+            Python::attach(|py| prefetched_to_py(py, out, &classes, db, parents))
+        })
+    }
+
     /// `INSERT ... RETURNING` every column; returns the inserted rows as instances.
     ///
     /// With `conflict` (unique field names) rows hitting that constraint update the
@@ -787,7 +819,43 @@ fn outcome_to_py(
         Outcome::Exists(v) => v.into_py_any(py),
         Outcome::Affected(n) => n.into_py_any(py),
         Outcome::Rows { model, rows, types, shape } => b.model_rows(model, shape.as_ref(), rows.as_ref(), &types)?.into_py_any(py),
+        Outcome::Prefetched { .. } => Err(query_err("prefetched rows need their parents".into())),
     }
+}
+
+/// Parent rows of `model` for [`exec::prefetch`]: `keys` from `value(row, key, type)`,
+/// every other field `NULL`.
+fn key_rows(
+    schema: &schema::Schema,
+    model: &str,
+    keys: &[String],
+    n: usize,
+    value: impl Fn(usize, usize, orm_core::ir::ValueType) -> PyResult<sea_query::Value>,
+) -> PyResult<Vec<Vec<Option<sea_query::Value>>>> {
+    let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+    let positions = keys.iter().map(|k| m.field_pos(k).map_err(query_err)).collect::<PyResult<Vec<_>>>()?;
+    (0..n).map(|r| {
+        let mut row = vec![None; m.fields().len()];
+        for (i, &pos) in positions.iter().enumerate() {
+            row[pos] = Some(value(r, i, m.fields()[pos].value_type())?);
+        }
+        Ok(row)
+    }).collect()
+}
+
+/// Attaches the rows of a [`Outcome::Prefetched`] to `parents`.
+fn prefetched_to_py(py: Python<'_>, out: Outcome, classes: &Classes, db: Option<Py<PyAny>>, parents: Vec<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    #[cfg(feature = "composition")]
+    let out = orm_engine::behavior::results(&classes.native, out).map_err(db_err)?;
+    #[cfg(feature = "proxy-models")]
+    orm_engine::proxy::emit(&orm_engine::proxy::diagnostics(&classes.proxies, &out).map_err(db_err)?);
+    let Outcome::Prefetched { parents: rows, prefetched } = out else {
+        return Err(query_err("prefetch gave no prefetched rows".into()));
+    };
+    let db = db.map(|d| d.into_bound(py));
+    let parents: Vec<_> = parents.into_iter().map(|p| p.into_bound(py)).collect();
+    Builder::new(py, classes, db.as_ref()).prefetched(&parents, rows.as_ref(), &prefetched)?;
+    Ok(py.None())
 }
 
 /// Normalize behavioral declarations before building language classes.

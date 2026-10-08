@@ -23,6 +23,7 @@ import {
   and,
   exists,
   not,
+  or,
   outer,
   type CteLike,
   type ExistsQuery,
@@ -37,7 +38,7 @@ import {
 import { NotLoaded, QueryError, TransactionRequired } from "./errors.js";
 import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
 import { DB, fieldValue, RELATED, registerQueries, type Instance, type ModelClass, type ModelMeta } from "./model.js";
-import { call, type NativeReturned, type NativeSelect, type NativeTrace, type NativeTransaction } from "./native.js";
+import { call, wait, type NativeReturned, type NativeSelect, type NativeTrace, type NativeTransaction } from "./native.js";
 import { assignments, lookupValues, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
 import { after, decodeCursor, encodeCursor, fingerprint, keyset, type Page, type PageOptions } from "./pagination.js";
 import { allowedWrites } from "./protection.js";
@@ -146,15 +147,16 @@ export type LoadOf<
   H extends readonly Hop[],
   Last = H extends readonly [...unknown[], infer L extends Hop] ? L["spec"]["row"] : never,
   Attr extends string | undefined = undefined,
+  One extends boolean = false,
 > = H extends readonly [infer F extends Hop, ...infer Rest extends readonly Hop[]]
   ? Rest extends readonly []
-    ? { readonly [K in Attr extends string ? Attr : F["name"]]: Wrap<F["kind"], Last, Attr extends string ? true : false> }
-    : { readonly [K in F["name"]]: Wrap<F["kind"], F["spec"]["row"] & LoadOf<Rest, Last, Attr>, false> }
+    ? { readonly [K in Attr extends string ? Attr : F["name"]]: One extends true ? Last | null : Wrap<F["kind"], Last, Attr extends string ? true : false> }
+    : { readonly [K in F["name"]]: Wrap<F["kind"], F["spec"]["row"] & LoadOf<Rest, Last, Attr, One>, false> }
   : {};
 
 type PathLoad<I> =
-  I extends Prefetch<infer H, infer Row, infer A, string, unknown>
-    ? LoadOf<H, Row, A>
+  I extends Prefetch<infer H, infer Row, infer A, string, unknown, infer O>
+    ? LoadOf<H, Row, A, O>
     : I extends RelationPath<ModelSpec, string, infer H>
       ? LoadOf<H>
       : never;
@@ -248,18 +250,21 @@ export class Prefetch<
   const A extends string | undefined = undefined,
   S extends string = string,
   P = {},
+  const O extends boolean = false,
 > {
   /** @internal */
-  declare readonly "~prefetch"?: [H, Row, A, S, P];
+  declare readonly "~prefetch"?: [H, Row, A, S, P, O];
   readonly toAttr: string | undefined;
+  /** Store the first row or `null` instead of an array (`{ toAttr, one: true }`). */
+  readonly one: boolean;
 
   constructor(path: RelationPath<ModelSpec, S, H>);
-  constructor(path: RelationPath<ModelSpec, S, H>, options: { readonly toAttr: A });
-  constructor(path: RelationPath<ModelSpec, S, H>, queryset: QuerySet<Last<H>["spec"], Row, string, P, never>, options?: { readonly toAttr: A });
+  constructor(path: RelationPath<ModelSpec, S, H>, options: { readonly toAttr: A; readonly one?: O });
+  constructor(path: RelationPath<ModelSpec, S, H>, queryset: QuerySet<Last<H>["spec"], Row, string, P, never>, options?: { readonly toAttr: A; readonly one?: O });
   constructor(
     readonly path: RelationPath<ModelSpec, S, H>,
-    queryset?: QuerySet<ModelSpec, unknown, string, unknown, never> | { readonly toAttr: string },
-    options?: { readonly toAttr: string },
+    queryset?: QuerySet<ModelSpec, unknown, string, unknown, never> | { readonly toAttr: string; readonly one?: boolean },
+    options?: { readonly toAttr: string; readonly one?: boolean },
   ) {
     if (!(path instanceof RelationPath) || !path[PATH].path.length) {
       throw new TypeError(`Prefetch() takes a relation such as User.posts, got ${String(path)}`);
@@ -277,8 +282,14 @@ export class Prefetch<
     if (toAttr !== undefined && (!/^[A-Za-z$][\w$]*$/.test(toAttr))) {
       throw new TypeError(`toAttr ${JSON.stringify(toAttr)} must be an identifier not starting with '_'`);
     }
+    const one = options?.one ?? false;
+    if (one && toAttr === undefined) throw new TypeError("Prefetch { one: true } needs toAttr");
+    if (one && qs && (qs.state.limit !== undefined || qs.state.offset !== undefined)) {
+      throw new TypeError("Prefetch { one: true } takes the first row by the query set's order; drop the slice");
+    }
     this.queryset = qs;
     this.toAttr = toAttr;
+    this.one = one;
   }
 
   /** @internal */
@@ -289,14 +300,15 @@ interface PrefetchNode {
   relation: string;
   attr: string;
   qs: QuerySet<ModelSpec, unknown, string, unknown, never> | undefined;
-  children: [string[], Prefetch<readonly Hop[], unknown, string | undefined, string, unknown>][];
+  one: boolean;
+  children: [string[], Prefetch<readonly Hop[], unknown, string | undefined, string, unknown, boolean>][];
 }
 
 /** Nodes by attribute: paths sharing a prefix share its node, so `User.posts.comments`
  * nests under `User.posts`. Hops are IR relation names. */
 function prefetchTree(
   meta: ModelMeta,
-  items: Iterable<[string[], Prefetch<readonly Hop[], unknown, string | undefined, string, unknown>]>,
+  items: Iterable<[string[], Prefetch<readonly Hop[], unknown, string | undefined, string, unknown, boolean>]>,
 ): Map<string, PrefetchNode> {
   const nodes = new Map<string, PrefetchNode>();
   for (const [hops, p] of items) {
@@ -311,12 +323,13 @@ function prefetchTree(
     const attr = hops.length === 1 ? (p.toAttr ?? hop) : hop;
     let node = nodes.get(attr);
     if (!node) {
-      node = { relation: hop, attr, qs: undefined, children: [] };
+      node = { relation: hop, attr, qs: undefined, one: false, children: [] };
       nodes.set(attr, node);
     } else if (node.relation !== hop) {
       throw new QueryError(`prefetchRelated stores ${meta.name}.${node.relation} and .${hop} both in ${JSON.stringify(attr)}`);
     }
     if (hops.length === 1) {
+      node.one ||= p.one;
       if (p.queryset) {
         if (node.qs && node.qs !== p.queryset) {
           throw new QueryError(`${String(p.path)} is prefetched twice with different query sets; use toAttr`);
@@ -332,7 +345,7 @@ function prefetchTree(
 
 function prefetchIr(
   meta: ModelMeta,
-  items: Iterable<[string[], Prefetch<readonly Hop[], unknown, string | undefined, string, unknown>]>,
+  items: Iterable<[string[], Prefetch<readonly Hop[], unknown, string | undefined, string, unknown, boolean>]>,
   params: unknown[],
 ): IR[] {
   const out: IR[] = [];
@@ -342,7 +355,7 @@ function prefetchIr(
     if (qs.state.lock) {
       throw new QueryError("a prefetch query set can't lock rows");
     }
-    const children: [string[], Prefetch<readonly Hop[], unknown, string | undefined, string, unknown>][] = [
+    const children: [string[], Prefetch<readonly Hop[], unknown, string | undefined, string, unknown, boolean>][] = [
       ...qs.state.prefetch.map((p) => [[...p.path[PATH].path], p] as [string[], typeof p]),
       ...node.children,
     ];
@@ -356,6 +369,7 @@ function prefetchIr(
     if (node.attr !== node.relation) {
       ir["attr"] = node.attr;
     }
+    if (node.one) ir["one"] = true;
     out.push(ir);
   }
   return out;
@@ -363,19 +377,28 @@ function prefetchIr(
 
 // -- query sets -----------------------------------------------------------------------------------
 
+/** The methods a model's query-set class (`useQuerySet`) adds, from `M["queries"]`. */
+export type QueriesOf<M extends ModelSpec> = M extends { readonly queries: infer Q } ? Omit<Q, keyof QuerySet<ModelSpec>> : {};
+
+/** A query set of `M` with the methods of its query-set class: what builder methods give. */
+export type QuerySetOf<M extends ModelSpec, R = M["row"], S extends string = M["name"], P = {}, X extends string = never> =
+  QuerySet<M, R, S, P, X> & QueriesOf<M>;
+
 /** @internal The state of a query set; copied, never changed. */
 export interface QueryState {
   readonly modelHelpers?: readonly string[];
   readonly withoutDefaults: boolean;
   readonly withoutRelated: boolean;
   readonly modelFields: readonly string[] | undefined;
+  /** `only()` through to-one paths: the fields of each joined model, IR names. */
+  readonly relatedFields?: readonly { readonly path: readonly string[]; readonly fields: readonly string[] }[];
   readonly filters: readonly Node[];
   readonly order: readonly Ordering<string, unknown>[];
   readonly limit: number | ParamRef<string> | undefined;
   readonly offset: number | ParamRef<string> | undefined;
   /** `selectRelated` paths, IR relation names, prefixes first. */
   readonly related: readonly (readonly string[])[];
-  readonly prefetch: readonly Prefetch<readonly Hop[], unknown, string | undefined, string, unknown>[];
+  readonly prefetch: readonly Prefetch<readonly Hop[], unknown, string | undefined, string, unknown, boolean>[];
   readonly lock: { exclusive: boolean; nowait: boolean; skip_locked: boolean } | undefined;
   readonly db: Database | undefined;
   readonly from: Cte<string, unknown, ModelSpec | null> | undefined;
@@ -468,34 +491,90 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   withoutDefaults(): this { return this.clone({ withoutDefaults: true }); }
 
   /** Clear default and explicitly requested eager reference loading. */
-  withoutRelated(): this { return this.clone({ withoutRelated: true, related: [] }); }
+  withoutRelated(): this { return this.clone({ withoutRelated: true, related: [], relatedFields: [] }); }
 
-  /** Partial model instances; no arguments restores all public fields. */
-  only(): QuerySet<M, M["row"], S, P, X>;
-  only(...fields: readonly Column<unknown, string>[]): QuerySet<M, Partial<M["row"]> & Instance<M>, S, P, X>;
-  only(...fields: readonly Column<unknown, string>[]): QuerySet<M, Partial<M["row"]> & Instance<M>, S, P, X> {
-    const names = fields.map((f) => {
-      if (!(f instanceof Column) || f.root !== this.meta || f.path.length) throw new TypeError("only() takes root model columns");
-      return f.field.ir;
-    });
-    if (new Set(names).size !== names.length) throw new TypeError("duplicate model field");
-    return this.clone({ modelFields: fields.length ? names : this.meta.fieldList.map((f) => f.ir) }) as never;
+  /**
+   * Partial model instances; no arguments restores all public fields. A column through
+   * to-one relations (`only(BundleItem.bundle.type)`) loads the relation with
+   * `selectRelated` and trims the joined instance to the given fields; without a column of
+   * the model itself, its instances keep only their primary key and relation keys, hidden.
+   */
+  only(): QuerySetOf<M, M["row"], S, P, X>;
+  only(...fields: readonly Column<unknown, string>[]): QuerySetOf<M, Partial<M["row"]> & Instance<M>, S, P, X>;
+  only(...fields: readonly Column<unknown, string>[]): QuerySetOf<M, Partial<M["row"]> & Instance<M>, S, P, X> {
+    if (!fields.length) return this.clone({ modelFields: this.meta.fieldList.map((f) => f.ir), relatedFields: [] }) as never;
+    const names: string[] = [];
+    const related = new Map<string, { path: string[]; fields: string[] }>();
+    for (const f of fields) {
+      if (!(f instanceof Column) || f.root !== this.meta) throw new TypeError(`only() takes columns of ${this.meta.name} or of its to-one relations`);
+      if (!f.path.length) {
+        names.push(f.field.ir);
+        continue;
+      }
+      let meta = this.meta;
+      for (const hop of f.path) {
+        const rel = meta.relationByIr.get(hop)!;
+        if (rel.kind === "hasMany" || rel.kind === "manyToMany") throw new TypeError(`only() can't go through the to-many relation ${meta.name}.${rel.name}`);
+        meta = meta.registry.get(rel.target);
+      }
+      const key = f.path.join(".");
+      const entry = related.get(key) ?? { path: [...f.path], fields: [] };
+      entry.fields.push(f.field.ir);
+      related.set(key, entry);
+    }
+    if (new Set(names).size !== names.length || [...related.values()].some((r) => new Set(r.fields).size !== r.fields.length)) throw new TypeError("duplicate model field");
+    // a hop only() joins for a deeper column keeps only its keys, as the root does
+    for (const { path } of [...related.values()]) {
+      for (let i = 1; i < path.length; i++) {
+        const prefix = path.slice(0, i);
+        if (!this.state.related.some((p) => p.join(".") === prefix.join(".")) && !related.has(prefix.join("."))) related.set(prefix.join("."), { path: prefix, fields: [] });
+      }
+    }
+    const joined = [...this.state.related];
+    for (const { path } of related.values()) {
+      for (let i = 1; i <= path.length; i++) {
+        if (!joined.some((p) => p.join(".") === path.slice(0, i).join("."))) joined.push(path.slice(0, i));
+      }
+    }
+    return this.clone({ modelFields: names, relatedFields: [...related.values()], related: joined }) as never;
   }
 
   /** Keep rows matching all `conditions`. */
   filter<const C extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: C
-  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
+  ): QuerySetOf<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
     if (!conditions.length) {
       return this as never;
     }
     return this.clone({ filters: [...this.state.filters, and(...conditions)] }) as never;
   }
 
+  /**
+   * The rows of this query set or of `other`: one query set whose filter is `(filters of
+   * this) OR (filters of other)`; the rest (order, loading, `using`) comes from this one.
+   * `other` sets nothing but filters, neither is sliced, and each has at most one
+   * `filter()`/`exclude()` call: conditions of one call through a to-many relation hold
+   * for one related row, so two calls can't be joined.
+   */
+  or<P2, X2 extends string>(other: QuerySet<M, unknown, S, P2, X2>): QuerySetOf<M, R, S, P & P2, X | X2> {
+    if (!(other instanceof QuerySet) || other.meta !== this.meta) throw new TypeError(`or() combines query sets of ${this.meta.name}`);
+    for (const qs of [this.state, other.state]) {
+      if (qs.limit !== undefined || qs.offset !== undefined) throw new QueryError("or() can't combine a sliced query set");
+      if (qs.filters.length > 1) throw new QueryError("or() needs one filter() call per side; put the conditions in one call");
+    }
+    for (const [key, value] of Object.entries(other.state) as [keyof QueryState, unknown][]) {
+      const base = EMPTY[key];
+      const empty = Array.isArray(value) && !value.length && (base === undefined || Array.isArray(base));
+      if (key !== "filters" && value !== base && !empty) throw new QueryError(`or() takes filters only from the other query set, which also sets ${key}`);
+    }
+    if (!this.state.filters.length || !other.state.filters.length) return this.clone({ filters: [] }) as never;
+    return this.clone({ filters: [or(this.state.filters[0] as never, other.state.filters[0] as never) as unknown as Node] }) as never;
+  }
+
   /** Drop rows matching all `conditions`. */
   exclude<const C extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: C
-  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
+  ): QuerySetOf<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
     if (!conditions.length) {
       return this as never;
     }
@@ -507,7 +586,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    * relations are joined. */
   orderBy<const C extends readonly (Expression<unknown, AllowedOne<S>, unknown> | Ordering<AllowedOne<S>, unknown> | FieldOrder<M>)[]>(
     ...items: C
-  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
+  ): QuerySetOf<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
     const named = items.map((i) => {
       if (typeof i !== "string") return i;
       const column = this.meta.column(this.meta.field(i.startsWith("-") ? i.slice(1) : i));
@@ -517,15 +596,15 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   }
 
   /** At most `n` rows; `n` may be a `param()` in a prepared query. */
-  limit<N extends string>(n: ParamRef<N>): QuerySet<M, R, S, P & ParamValues<N, number | bigint>, X>;
-  limit(n: number | null): QuerySet<M, R, S, P, X>;
+  limit<N extends string>(n: ParamRef<N>): QuerySetOf<M, R, S, P & ParamValues<N, number | bigint>, X>;
+  limit(n: number | null): QuerySetOf<M, R, S, P, X>;
   limit(n: number | null | ParamRef<string>): unknown {
     return this.clone({ limit: count(n, "limit") });
   }
 
   /** Skip `n` rows; `n` may be a `param()` in a prepared query. */
-  offset<N extends string>(n: ParamRef<N>): QuerySet<M, R, S, P & ParamValues<N, number | bigint>, X>;
-  offset(n: number | null): QuerySet<M, R, S, P, X>;
+  offset<N extends string>(n: ParamRef<N>): QuerySetOf<M, R, S, P & ParamValues<N, number | bigint>, X>;
+  offset(n: number | null): QuerySetOf<M, R, S, P, X>;
   offset(n: number | null | ParamRef<string>): unknown {
     const v = count(n, "offset");
     return this.clone({ offset: v === 0 ? undefined : v });
@@ -533,7 +612,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
 
   /** Rows `start` (inclusive) to `end` (exclusive) of the current ordering, like
    * `Array.slice`: `slice(10, 20)` is `offset(10).limit(10)`. Non-negative only. */
-  slice(start: number, end?: number): QuerySet<M, R, S, P, X> {
+  slice(start: number, end?: number): QuerySetOf<M, R, S, P, X> {
     const { limit, offset } = this.state;
     if (limit instanceof ParamRef || offset instanceof ParamRef) {
       throw new QueryError("a query set limited by param() can't be sliced; use limit() and offset()");
@@ -559,7 +638,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    */
   selectRelated<const C extends readonly RelationPath<ModelSpec, M["name"], readonly Hop[]>[]>(
     ...paths: C
-  ): QuerySet<M, R & LoadAll<C>, S, P, X> {
+  ): QuerySetOf<M, R & LoadAll<C>, S, P, X> {
     const related = [...this.state.related];
     for (const p of paths) {
       this.checkPath(p);
@@ -589,9 +668,9 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     const C extends readonly (
       | RelationPath<ModelSpec, M["name"] | Many, readonly Hop[]>
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- `any`, not a contextual type the toAttr literal would widen to
-      | Prefetch<any, any, any, M["name"] | Many, any>
+      | Prefetch<any, any, any, M["name"] | Many, any, boolean>
     )[],
-  >(...relations: C): QuerySet<M, R & LoadAll<C>, S, P & PrefetchParams<C>, X> {
+  >(...relations: C): QuerySetOf<M, R & LoadAll<C>, S, P & PrefetchParams<C>, X> {
     const prefetch = [...this.state.prefetch];
     for (const item of relations) {
       const p = item instanceof Prefetch ? item : new Prefetch(item);
@@ -607,7 +686,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    * `FOR SHARE` with `exclusive: false`. Only this model's rows are locked, not rows joined
    * by `selectRelated`. Must run inside `db.transaction()`.
    */
-  lock(options: LockOptions & ({ readonly nowait?: false } | { readonly skipLocked?: false }) = {}): QuerySet<M, R, S, P, X> {
+  lock(options: LockOptions & ({ readonly nowait?: false } | { readonly skipLocked?: false }) = {}): QuerySetOf<M, R, S, P, X> {
     const { exclusive = true, nowait = false, skipLocked = false } = options as LockOptions;
     if (nowait && skipLocked) {
       throw new TypeError("lock() takes nowait or skipLocked, not both");
@@ -649,7 +728,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     cte: Cte<N, C, ModelSpec | null>,
     on: On,
     options: { readonly outer?: boolean } = {},
-  ): QuerySet<M, R, S | N, P & ParamsOfAll<[On]>, X | OuterRefs<ScopesOf<[On]>, S | N>> {
+  ): QuerySetOf<M, R, S | N, P & ParamsOfAll<[On]>, X | OuterRefs<ScopesOf<[On]>, S | N>> {
     if (!isCte(cte)) {
       throw new TypeError(`join() takes a CTE, got ${String(cte)}`);
     }
@@ -663,7 +742,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    * Reads the rows from `cte` instead of the model's table (a subquery in `FROM`). The
    * CTE must have the model's columns; its other columns are `cte.c.<name>`.
    */
-  from<N extends string>(cte: Cte<N, unknown, M>): QuerySet<M, R, S | N, P, X> {
+  from<N extends string>(cte: Cte<N, unknown, M>): QuerySetOf<M, R, S | N, P, X> {
     if (!isCte(cte)) {
       throw new TypeError(`from() takes a CTE, got ${String(cte)}`);
     }
@@ -762,6 +841,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     if (s.withoutDefaults) ir["without_defaults"] = true;
     if (s.withoutRelated) ir["without_related"] = true;
     if (s.modelFields !== undefined) ir["model_fields"] = s.modelFields;
+    if (s.relatedFields?.length && op === "select" && outer === undefined && ctes === undefined) ir["related_fields"] = s.relatedFields;
     if (s.modelHelpers?.length) ir["model_helpers"] = s.modelHelpers;
     if (s.from) {
       ir["from"] = s.from.name;
@@ -1132,7 +1212,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
 
   /** Only the soft-deleted rows (without the schema defaults). */
   deletedOnly(): this {
-    return this.withoutDefaults().filter(this.meta.column(this.softDeleteField()).isNotNull() as never) as this;
+    return this.withoutDefaults().filter(this.meta.column(this.softDeleteField()).isNotNull() as never) as unknown as this;
   }
 
   private softDeleteField(): ModelMeta["pk"] {
@@ -1765,13 +1845,120 @@ for (const cls of [RelatedSet, ManyRelatedSet]) {
   });
 }
 
+/**
+ * Loads relations onto instances you already have, as `prefetchRelated` does for the
+ * rows of a query: one query per relation level, and no query for the instances
+ * themselves. The instances are of one model; they are read from the database each came
+ * from, unless a last `{ using }` argument names another.
+ *
+ * ```ts
+ * await prefetch([bundle], Bundle.items.product, new Prefetch(Bundle.versions, ...));
+ * ```
+ */
+export async function prefetch(
+  instances: readonly object[],
+  ...relations: readonly (RelationPath<ModelSpec, string, readonly Hop[]> | Prefetch<readonly Hop[], unknown, string | undefined, string, unknown, boolean> | { readonly using: Database })[]
+): Promise<void> {
+  const last = relations[relations.length - 1];
+  const using = last !== undefined && !(last instanceof RelationPath) && !(last instanceof Prefetch) ? (last as { using: Database }).using : undefined;
+  const paths = using === undefined ? relations : relations.slice(0, -1);
+  const objs = [...instances] as Record<PropertyKey, unknown>[];
+  if (!objs.length || !paths.length) return;
+  const meta = (objs[0]!.constructor as { meta?: ModelMeta }).meta;
+  if (meta === undefined || objs.some((o) => (o.constructor as { meta?: ModelMeta }).meta !== meta)) {
+    throw new TypeError("prefetch() takes instances of one model");
+  }
+  const qs = (meta.objects.prefetchRelated as (...r: unknown[]) => QuerySet<ModelSpec>)(...paths).using(using);
+  const params: unknown[] = [];
+  const ir = qs.selectIr("select", params);
+  const keys: string[] = [];
+  for (const node of prefetchTree(meta, qs.state.prefetch.map((p) => [[...p.path[PATH].path], p] as [string[], typeof p])).values()) {
+    const rel = meta.relationByIr.get(node.relation)!;
+    if (!keys.includes(rel.from)) keys.push(rel.from);
+  }
+  const names = keys.map((k) => meta.fieldByIr.get(k)!.name);
+  const rows = objs.map((o) => names.map((n) => fieldValue(o, n)));
+  const db = resolve(using ?? (objs[0]![DB] as Database | undefined));
+  const res = await wait(() => db.engine.prefetch(JSON.stringify(ir), params, keys, rows, db.tx()));
+  new Builder(db.registry, using ?? (objs[0]![DB] as Database | undefined)).prefetched(meta, objs, res);
+}
+
+type QuerySetClass = new (meta: ModelMeta, state?: QueryState) => QuerySet<ModelSpec>;
+/** On a relation-set class mixed with a query-set class: the relation-set base. */
+const MIXED: unique symbol = Symbol("orm.mixed");
+
+/**
+ * Makes `querySet` (a `QuerySet` subclass, or an arrow function that gives it) the class of
+ * `model.objects`, of the query sets built from it and of the model's relation sets
+ * (`user.posts`). A function is called on the first use of `model.objects`, so the
+ * class's module can import the models module. Generated `models.ts` modules call this
+ * for `--query-set Model=specifier#Export`.
+ */
+export function useQuerySet<M extends ModelSpec>(
+  model: ModelClass<M>,
+  querySet: (new (...args: never[]) => QuerySet<M>) | (() => new (...args: never[]) => QuerySet<M>),
+): void {
+  const meta = model._meta;
+  // an arrow function (no prototype) gives the class later; anything else must be one
+  if ((querySet as { prototype?: unknown }).prototype !== undefined) checkQuerySet(meta, querySet);
+  meta.resetQuerySet(querySet);
+}
+
+function isQuerySetClass(x: unknown): boolean {
+  return x === QuerySet || (typeof x === "function" && (x as { prototype?: unknown }).prototype instanceof QuerySet);
+}
+
+function checkQuerySet(meta: ModelMeta, cls: unknown): QuerySetClass {
+  if (!isQuerySetClass(cls) || (cls as { prototype: unknown }).prototype instanceof RelatedSet || (cls as { prototype: unknown }).prototype instanceof ManyRelatedSet) {
+    throw new TypeError(`${meta.name}: a query set class extends QuerySet, got ${String(cls)}`);
+  }
+  return cls as QuerySetClass;
+}
+
+function querySetClass(meta: ModelMeta): QuerySetClass {
+  const cls = meta.querySet;
+  if (cls === undefined) return QuerySet as unknown as QuerySetClass;
+  if (isQuerySetClass(cls)) return cls as QuerySetClass;
+  const found = checkQuerySet(meta, (cls as () => unknown)());
+  meta.querySet = found;
+  return found;
+}
+
+/** `base` with the methods of the model's query-set class, built once per model. */
+function relationSetClass<B extends typeof RelatedSet | typeof ManyRelatedSet>(base: B, meta: ModelMeta): B {
+  const custom = querySetClass(meta);
+  if (custom === (QuerySet as unknown)) return base;
+  let cls = meta.relatedSets.get(base) as B | undefined;
+  if (!cls) {
+    const mixed = class extends custom {};
+    for (const key of Reflect.ownKeys(base.prototype)) {
+      if (key !== "constructor") Object.defineProperty(mixed.prototype, key, Object.getOwnPropertyDescriptor(base.prototype, key)!);
+    }
+    Object.defineProperty(mixed.prototype, MIXED, { value: base });
+    Object.defineProperty(mixed, "name", { value: `${meta.name}${base.name}` });
+    cls = mixed as unknown as B;
+    meta.relatedSets.set(base, cls);
+  }
+  return cls;
+}
+
+/** `instanceof RelatedSet` also holds for a relation set mixed with a query-set class. */
+for (const cls of [RelatedSet, ManyRelatedSet]) {
+  Object.defineProperty(cls, Symbol.hasInstance, {
+    value(this: unknown, o: unknown): boolean {
+      return Function.prototype[Symbol.hasInstance].call(this as never, o)
+        || (o !== null && typeof o === "object" && (o as { [MIXED]?: unknown })[MIXED] === this);
+    },
+  });
+}
+
 function makeRelatedSet(rel: RelationMeta, instance: object): RelatedSet<ModelSpec, never> {
   const inst = instance as Record<PropertyKey, unknown>;
   const owner = (inst.constructor as unknown as { meta: ModelMeta }).meta;
   const target = owner.registry.get(rel.target);
   const via = target.column(target.fieldByIr.get(rel.to)!);
   const key = fieldValue(inst, owner.fieldByIr.get(rel.from)!.name);
-  const qs = new RelatedSet<ModelSpec>(target, { ...EMPTY, filters: [asCondition(via.eq(key as never))] });
+  const qs = new (relationSetClass(RelatedSet, target))<ModelSpec>(target, { ...EMPTY, filters: [asCondition(via.eq(key as never))] });
   Object.assign(qs, { relation: rel, instance: inst });
   return qs as never;
 }
@@ -1786,12 +1973,12 @@ function makeManyRelatedSet(rel: RelationMeta, instance: object): ManyRelatedSet
   const to = target.column(target.fieldByIr.get(rel.to)!);
   const key = fieldValue(inst, owner.fieldByIr.get(rel.from)!.name);
   const cond = exists(join.objects.filter(source.eq(key as never) as never, tcol.eq(outer(to) as never) as never) as never);
-  const qs = new ManyRelatedSet<ModelSpec>(target, { ...EMPTY, filters: [cond] });
+  const qs = new (relationSetClass(ManyRelatedSet, target))<ModelSpec>(target, { ...EMPTY, filters: [cond] });
   Object.assign(qs, { relation: rel, instance: inst });
   return qs;
 }
 
-registerQueries((meta) => new QuerySet(meta), makeRelatedSet, makeManyRelatedSet);
+registerQueries((meta) => new (querySetClass(meta))(meta), makeRelatedSet, makeManyRelatedSet);
 
 // -- CTE / select hooks (cte.ts and select.ts register themselves) ---------------------------------
 

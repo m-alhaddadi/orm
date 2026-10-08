@@ -67,6 +67,49 @@ The descriptors behave differently on the class and on an instance:
 | one-to-one `User.profile` | `_ProfilePath` | `Profile` or `None`, if loaded, else `NotLoaded` |
 | many-to-many `Post.tags` | `_TagPath` | `ManyRelatedSet[Tag]`: the post's tags, with `add()` / `remove()` |
 
+## Custom query-set methods
+
+Named filters (Django's custom managers) go in a subclass of the model's query set, in your own module:
+
+```python
+# blog/queries.py
+from typing import Self
+from blog.models import Post, PostQuerySet
+
+class PostQueries(PostQuerySet):
+    def published(self) -> Self:
+        return self.filter(Post.published)
+
+    def popular(self, views: int = 100) -> Self:
+        return self.filter(Post.views >= views)
+```
+
+Generate the models with the class, as `module:Class`:
+
+```bash
+python -m orm generate --query-set Post=blog.queries:PostQueries
+```
+
+or in `pyproject.toml`:
+
+```toml
+[tool.orm.query_sets]
+Post = "blog.queries:PostQueries"
+```
+
+Then `Post.objects` is a `PostQueries`, and the methods chain with every builder method in both orders:
+`await Post.objects.published().filter(Post.author_id == 1).popular()`.
+`models.pyi` types `Post.objects` as the class, so mypy and pyright check the calls.
+
+* `models.py` calls `orm.use_query_set(Post, "blog.queries:PostQueries")`.
+  The module is imported on the first use of `Post.objects`, so it can import `blog.models` without an import cycle.
+  `use_query_set(Model, cls)` also takes the class itself, for models from `orm.load()`.
+* Relation sets have the methods too: `await user.posts.published()`, `post.tags.<method>()`.
+  The stub does not type them on a relation set yet; `Post.objects.published().filter(Post.author_id == user.id)` is typed.
+* `Prefetch(User.posts, Post.objects.published())` uses them for related rows.
+* The class must subclass `QuerySet` and must not declare `__slots__` (it mixes with the relation-set classes); `use_query_set` raises `TypeError` otherwise.
+  Keep state in the query, not in attributes: builder methods copy the instance `__dict__`, but nothing else.
+
 ## Queries
 
 Builders return a new immutable `QuerySet`. Awaiting it runs the query. Awaiting the
@@ -168,6 +211,16 @@ SQL text client-side, so the limit doesn't apply to it.)
 * A **slice applies per parent**: `[:3]` above is each user's three most viewed posts,
   planned as `ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY views DESC, id)` in a
   subquery and `WHERE _rn <= 3` around it (Django 4.2 does the same).
+
+**Instances you already have.** `await orm.prefetch(instances, *paths)` loads relations onto them, as `prefetch_related` does for the rows of a query (Django's `prefetch_related_objects`):
+
+```python
+bundle = await Bundle.objects.get(Bundle.id == 1)
+await orm.prefetch([bundle], Bundle.items.product, Prefetch(Bundle.versions, Version.objects.order_by(-Version.id)[:1], to_attr="latest"))
+```
+
+It takes the same paths and `Prefetch` objects. Only the prefetch queries run: the keys come from the instances, so their own rows are not read again.
+The instances are of one model, and the queries run on the database each came from (`using=db` names another).
 
 ### One-to-one and many-to-many
 
@@ -281,6 +334,21 @@ func.to_tsquery("english", "cat & !dog") / func.plainto_tsquery("english", text)
   `@@index([sql("to_tsvector('english', body)")], type: Gin)`.
 * `ts_rank` is a `float`. A tsvector or tsquery itself can't be a `select()` column.
 * PostgreSQL only: on SQLite these are a `QueryError`.
+
+### Partial rows, OR of query sets, column paths
+
+* `only(...)` gives partial instances (see [`selection-and-defaults.md`](selection-and-defaults.md)).
+  A column through to-one relations trims the joined instance: `Comment.objects.only(Comment.body, Comment.post.title)` loads `comment.post` with `select_related`, with only `title` public.
+  Without a column of the model itself (`only(Comment.post.title)`), the model's instances keep only their primary key and relation keys, hidden, as Django's `only("post__title")`.
+  A to-many path raises `TypeError`.
+* `qs1 | qs2` is one query set with the filter `(filters of qs1) OR (filters of qs2)`; order, loading and `using` come from `qs1`.
+  `qs2` must set nothing but filters, neither may be sliced, and each side has at most one `filter()`/`exclude()` call, else `QueryError`:
+  conditions of one call through a to-many relation must hold for one related row, so two calls can't be joined into one.
+* `Prefetch(User.posts, Post.objects.order_by(-Post.views), to_attr="best", one=True)` stores the first related row, or `None`, in `user.best` instead of a list.
+  It needs `to_attr` and a to-many relation, and takes no slice (it is a limit of one per parent).
+* `orm.column(Bundle, "items.product.title")` is the column a dotted path names, the same as `Bundle.items.product.title`.
+  Each name before the last is a relation, the last a field; an unknown name raises `LookupError`.
+  It is for adapters that map request names to columns (search and ordering filters). It is a function, not `Model.column`, so it can't collide with a field named `column`.
 
 ### Big tables: batches
 
@@ -956,6 +1024,39 @@ A package that changes writes and reads from outside the ORM (for example
   runs it.
 * `decode_field(Model, name, decode)` reads the loaded value of a field as
   `decode(value)`. The instance keeps the stored value for writes and filters.
+
+## Model metadata and test factories
+
+The ORM has no factory library. It gives the two things a factory library needs:
+
+* `orm.describe(Model)`: plain data about the model.
+  `fields` gives per field the name, column, schema type, `python_type` (an enum field gives its enum class), `nullable`, `array` (with `element_type`), `max_length`, `primary_key`, `unique`, `default` (`"database"`, `"client"` or `None`) and `insert` (whether `insert()` takes it).
+  `relations` gives the kind (`belongs_to`, `has_one`, `has_many`, `many_to_many`), the target class, the `from`/`to` fields, the `through` model and `nullable`.
+  `unique` lists the unique keys, the primary key first.
+* The insert path: `await Model.objects.insert(**values)`, which also takes a related instance for a to-one key (`author=user`).
+
+Instances come only from the database, so a factory builds the insert values, not an instance.
+With factory_boy, `_build` gives the values and `_create` gives the insert, to await:
+
+```python
+class PostFactory(factory.Factory):
+    class Meta:
+        model = Post
+
+    title = factory.Sequence(lambda n: f"post {n}")
+    body = "..."
+    author = factory.SubFactory(UserFactory)  # a User instance, awaited by the caller first
+
+    @classmethod
+    def _build(cls, model_class, *args, **kwargs):
+        return kwargs
+
+    @classmethod
+    def _create(cls, model_class, *args, **kwargs):
+        return model_class.objects.insert(**kwargs)  # a coroutine: `await PostFactory.create()`
+```
+
+factory_boy has no async support, so a `SubFactory` with `create` gives a coroutine; build related rows first, or use a small async factory over `describe()` (see `tests/test_query_api.py`).
 
 ## The FFI boundary
 

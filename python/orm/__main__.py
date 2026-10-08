@@ -2,7 +2,7 @@
 ``orm`` binary and ``npx orm`` (``cli/``). See ``python -m orm --help``.
 
     python -m orm check
-    python -m orm generate [-o models.py]           # models.py + models.pyi from the schema
+    python -m orm generate [-o models.py] [--query-set Model=module:Class]  # models.py + .pyi
     python -m orm makemigrations [name] [--empty] [--check]
     python -m orm sqlmigrate <migration> [--down]
     python -m orm migrate [target]                  # runs data.py steps through Migrator

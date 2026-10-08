@@ -12,7 +12,7 @@ import { Column, PATH, RelationPath, type PathState, type Source } from "./expr.
 import { camel, type ColType, type FieldMeta, type ModelSpec, type RelationKind, type RelationMeta } from "./meta.js";
 import { call, native, type NativeShape, type NativeSchema } from "./native.js";
 import { resolve, type Database } from "./db.js";
-import type { ManyRelatedSet, QuerySet, RelatedSet } from "./query.js";
+import type { ManyRelatedSet, QuerySet, QuerySetOf, RelatedSet } from "./query.js";
 
 /** Where an instance keeps its loaded relations. */
 export const RELATED: unique symbol = Symbol("orm.related");
@@ -63,8 +63,8 @@ export type SchemaIR = { models: IRModel[]; enums?: IREnum[]; [key: string]: unk
 /** A model, as the types see it: the generated `UserModel` adds its columns and
  * relation paths. */
 export interface ModelClass<M extends ModelSpec> {
-  /** The root query set of the model. */
-  readonly objects: QuerySet<M>;
+  /** The root query set of the model, of its `useQuerySet` class if it has one. */
+  readonly objects: QuerySetOf<M>;
   /** Schema information about the model. */
   readonly _meta: ModelMeta;
   /** `get()` found no row; `instanceof User.DoesNotExist`. */
@@ -133,8 +133,12 @@ export class ModelMeta implements Source {
   /** The prototype of paths that reach this model (`User.posts` for `Post`). */
   readonly pathProto: object;
   readonly model: ModelClass<ModelSpec> & Record<string, unknown>;
-  /** @internal */
-  objects!: QuerySet<ModelSpec>;
+  /** @internal The class of `objects` and of the relation sets (`useQuerySet`), or a
+   * function that gives it on first use. */
+  querySet: unknown;
+  /** @internal Relation-set classes with the `querySet` methods, by base class. */
+  readonly relatedSets = new Map<unknown, unknown>();
+  private rootQuerySet: QuerySet<ModelSpec> | undefined;
   private decodeRow: ((row: Row) => void) | undefined;
 
   constructor(
@@ -197,6 +201,23 @@ export class ModelMeta implements Source {
     Object.defineProperty(model, "objects", { get: () => this.objects, enumerable: true });
     Object.defineProperty(model, Symbol.toStringTag, { value: name });
     this.model = model as never;
+  }
+
+  /** @internal The root query set, built on first use. */
+  get objects(): QuerySet<ModelSpec> {
+    return (this.rootQuerySet ??= makeQuerySet(this));
+  }
+
+  /** @internal A package replaces the root query set (file storage wraps it). */
+  set objects(qs: QuerySet<ModelSpec>) {
+    this.rootQuerySet = qs;
+  }
+
+  /** @internal Forget the root query set and relation-set classes (`useQuerySet`). */
+  resetQuerySet(querySet: unknown): void {
+    this.querySet = querySet;
+    this.rootQuerySet = undefined;
+    this.relatedSets.clear();
   }
 
   get name(): string {
@@ -750,7 +771,6 @@ export function define(
         Object.defineProperty(meta.model, name, { value: (value: string) => call(() => fn(value)), enumerable: true });
       }
     }
-    meta.objects = makeQuerySet(meta);
     Object.defineProperty(meta.Row, "meta", { value: meta });
     reg.add(meta);
     out[m.name] = meta.model;
@@ -786,4 +806,111 @@ export function fieldValue(o: object, name: string): unknown {
   const internal = row[INTERNAL] as Record<string, unknown> | undefined;
   if (internal && Object.hasOwn(internal, name)) return internal[name];
   return row[name]; // prototype throws NotLoaded
+}
+
+/** A field of {@link describe}: names are the TypeScript (camelCase) ones. */
+export interface FieldInfo {
+  readonly name: string;
+  readonly column: string;
+  readonly type: ColType;
+  readonly nullable: boolean;
+  readonly array: boolean;
+  /** The schema enum's name; its values are `registry.getEnum(name)`. */
+  readonly enum: string | null;
+  readonly maxLength: number | null;
+  readonly primaryKey: boolean;
+  readonly unique: boolean;
+  /** Who fills an omitted insert value: the database, the ORM (`@client_default`), or nobody. */
+  readonly default: "database" | "client" | null;
+  /** Whether `insert()` takes it (computed fields are left out). */
+  readonly insert: boolean;
+}
+
+/** A relation of {@link describe}. `from` and `to` are field names of this model and the target. */
+export interface RelationInfo {
+  readonly name: string;
+  readonly kind: "belongsTo" | "hasOne" | "hasMany" | "manyToMany";
+  readonly target: ModelClass<ModelSpec>;
+  readonly from: string;
+  readonly to: string;
+  readonly through: ModelClass<ModelSpec> | null;
+  /** The relation can be absent: a nullable key, or any relation but a to-one by key. */
+  readonly nullable: boolean;
+}
+
+/** What {@link describe} gives. `unique` lists the unique keys, the primary key first. */
+export interface ModelInfo {
+  readonly name: string;
+  readonly table: string;
+  readonly primaryKey: string;
+  readonly fields: readonly FieldInfo[];
+  readonly relations: readonly RelationInfo[];
+  readonly unique: readonly (readonly string[])[];
+}
+
+/**
+ * Plain data about `model` for code that builds rows from it, such as a test factory:
+ * its fields (type, nullability, enum, length, unique, who gives a default, whether
+ * `insert()` takes it), its relations and its unique keys.
+ */
+export function describe(model: ModelClass<ModelSpec>): ModelInfo {
+  const meta = model._meta;
+  const registry = meta.registry;
+  const fields: FieldInfo[] = meta.ir.fields.map((f) => {
+    const fm = meta.fieldByIr.get(f.name)!;
+    return {
+      name: fm.name,
+      column: f.column,
+      type: f.type,
+      nullable: fm.nullable,
+      array: fm.array,
+      enum: fm.enumName ?? null,
+      maxLength: typeof f["max_length"] === "number" ? f["max_length"] : null,
+      primaryKey: fm.primaryKey,
+      unique: fm.unique || fm.primaryKey,
+      default: fm.hasServerValue ? "database" : f.client_default !== undefined ? "client" : null,
+      insert: meta.inputFields.has(fm.name),
+    };
+  });
+  const relations: RelationInfo[] = [...meta.relations.values()].map((r) => {
+    const target = registry.get(r.target);
+    return {
+      name: r.name,
+      kind: r.kind,
+      target: target.model,
+      from: meta.fieldByIr.get(r.from)!.name,
+      to: target.fieldByIr.get(r.to)!.name,
+      through: r.through ? registry.get(r.through.model).model : null,
+      nullable: r.kind !== "belongsTo" || meta.fieldByIr.get(r.from)!.nullable,
+    };
+  });
+  const name = (ir: string) => meta.fieldByIr.get(ir)!.name;
+  const constraints = (meta.ir["constraints"] as { kind: string; fields?: string[] }[] | undefined) ?? [];
+  const unique = [
+    [meta.pk.name],
+    ...meta.ir.fields.filter((f) => f.unique && !f.primary_key).map((f) => [name(f.name)]),
+    ...constraints.filter((c) => c.kind === "unique" && c.fields).map((c) => c.fields!.map(name)),
+  ];
+  return { name: meta.name, table: meta.table, primaryKey: meta.pk.name, fields, relations, unique };
+}
+
+/**
+ * The column a dotted path names: `column(Bundle, "items.product.title")` is
+ * `Bundle.items.product.title`. Each name before the last is a relation (to-one or
+ * to-many), the last a field; the names are the TypeScript (camelCase) ones. For adapters
+ * that take names from a request, such as a search or ordering filter.
+ */
+export function column(model: ModelClass<ModelSpec>, path: string): Column<unknown, string> {
+  let meta = model._meta;
+  let target: unknown = model;
+  const names = path.split(".");
+  for (const [i, name] of names.entries()) {
+    const rel = meta.relations.get(name);
+    if (i < names.length - 1 ? !rel : !meta.fields.has(name)) {
+      throw new TypeError(`${meta.name} has no ${i < names.length - 1 ? "relation" : "field"} ${JSON.stringify(name)} (in ${JSON.stringify(path)})`);
+    }
+    target = (target as Record<string, unknown>)[name];
+    if (rel) meta = meta.registry.get(rel.target);
+  }
+  return target as Column<unknown, string>;
 }

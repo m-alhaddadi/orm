@@ -76,6 +76,46 @@ The reserved names are `objects`, `_meta`, `DoesNotExist`, `MultipleObjectsRetur
 Without code generation, `define(schemaIR)` or `loads(schemaText)` builds the same models
 at runtime, but untyped.
 
+## Custom query-set methods
+
+Named filters (Django's custom managers) go in a subclass of `QuerySet`, in your own module:
+
+```ts
+// queries.ts
+import { QuerySet } from "orm";
+import { Post, type PostSpec } from "./models.js";
+
+export class PostQueries extends QuerySet<PostSpec> {
+  published(): this {
+    return this.filter(Post.published.eq(true)) as this;
+  }
+
+  popular(views = 100): this {
+    return this.filter(Post.views.gte(views)) as this;
+  }
+}
+```
+
+Generate the models with the class, as `specifier#Export` (the specifier is relative to `models.ts`):
+
+```bash
+npx orm generate --query-set Post=./queries.js#PostQueries
+```
+
+or in `package.json`: `"orm": { "querySets": { "Post": "./queries.js#PostQueries" } }`.
+
+Then `Post.objects` is a `PostQueries`, and the methods chain with every builder method in both orders:
+`await Post.objects.published().filter(Post.authorId.eq(1n)).popular()`.
+`PostSpec` gets `queries: PostQueries`, and builder methods return `QuerySetOf<PostSpec, ...>`, a query set with those methods.
+
+* `models.ts` imports the module as a namespace and calls `useQuerySet(Post, () => _q0.PostQueries)`.
+  The class is read on the first use of `Post.objects`, so `queries.ts` can import `models.ts` without an error from the import cycle.
+  `useQuerySet(Model, cls)` also takes the class itself, for models from `define()` or `loads()`.
+* Relation sets have the methods too: `user.posts.published()`, `post.tags.<method>()`, typed in the generated row type.
+* `new Prefetch(User.posts, Post.objects.published())` uses them for related rows.
+* A method returns `this` with a cast. TypeScript can not change the type arguments of `this`, so a custom method gives the class's own row type:
+  call custom methods before `selectRelated()`, `prefetchRelated()` or `only()`, whose row types they would drop.
+
 ## Queries
 
 Query sets are lazy and immutable: building one never touches the database. Awaiting
@@ -130,6 +170,14 @@ The types check the following:
   not in `orderBy()` or as a plain `select()` column, because those would repeat rows.
   Aggregates over it are fine.
 
+### Partial rows, OR of query sets, column paths
+
+* `only(Comment.body, Comment.post.title)`: a column through to-one relations loads the relation with `selectRelated` and trims the joined instance to the given fields.
+  Without a column of the model itself, its instances keep only their hidden keys. A to-many path throws. The row type does not show the joined relation; cast it.
+* `qs1.or(qs2)`: one query set with the filter `(filters of qs1) OR (filters of qs2)`. `qs2` sets nothing but filters, neither is sliced, and each side has at most one `filter()`/`exclude()` call.
+* `new Prefetch(User.posts, Post.objects.orderBy("-views"), { toAttr: "best", one: true })` stores the first related row, or `null`, in `user.best` (typed `Post | null`). It needs `toAttr` and takes no slice.
+* `column(Bundle, "items.product.title")` is the column a dotted path of TypeScript names gives, for adapters that map request names to columns.
+
 ### Cursor pagination
 
 ```ts
@@ -161,6 +209,10 @@ separate calls are independent. `exclude()` is `NOT EXISTS`.
 * `new Prefetch(User.posts, Post.objects.filter(...).orderBy(...).limit(2), { toAttr: "top" })`
   sets a custom query (filtered, nested, or sliced per parent) and a typed target
   attribute (`u.top: Post[]`).
+
+* `await prefetch(instances, ...paths)` loads relations onto instances you already have, with the same paths and `Prefetch` objects.
+  Only the prefetch queries run: the keys come from the instances. A last `{ using: db }` argument names the database.
+  The row type does not change; read the relations as `cached` or cast.
 
 Related sets: `await user.posts`, `.filter()`, `.count()`, and `.insert({...})`, where the
 key is filled in. Many-to-many sets also have `post.tags.add(tag, ...)`, `.remove()`,
@@ -427,6 +479,25 @@ A package that changes writes and reads from outside the ORM (for example
   key or unique field. `prepared.execute(values?, { returning })` runs it.
 * `Model._meta.addRowDecoder(decode)` runs `decode(row)` on each instance that a query
   or write returns. A partial instance has only its loaded fields as own properties.
+
+## Model metadata and test factories
+
+The ORM has no factory library. It gives the two things a factory library needs:
+
+* `describe(Model)`: plain data about the model, with TypeScript (camelCase) names.
+  `fields` gives per field the name, column, schema type, `nullable`, `array`, `enum` (the enum's name), `maxLength`, `primaryKey`, `unique`, `default` (`"database"`, `"client"` or `null`) and `insert` (whether `insert()` takes it).
+  `relations` gives the kind, the target model, the `from`/`to` fields, the `through` model and `nullable`. `unique` lists the unique keys, the primary key first.
+* The insert path: `await Model.objects.insert(values)`, typed by the generated `PostInsert`.
+
+With fishery, the factory builds `PostInsert` values and `onCreate` inserts them:
+
+```ts
+const postFactory = Factory.define<PostInsert, {}, Post>(({ sequence, onCreate }) => {
+  onCreate((values) => Post.objects.insert(values));
+  return { title: `post ${sequence}`, body: "...", authorId: 1n };
+});
+const post = await postFactory.create();
+```
 
 ## Errors
 

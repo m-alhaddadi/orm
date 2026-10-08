@@ -238,6 +238,23 @@ impl<'a, 'py> Builder<'a, 'py> {
         PyList::new(self.py, self.instances(model, shape, &[], rows, types)?.into_iter().map(|i| i.obj))
     }
 
+    /// Puts the related objects of `prefetched` on `parents`, existing instances whose key
+    /// values `parent_rows` holds, in order.
+    pub fn prefetched(&self, parents: &[Bound<'py, PyAny>], parent_rows: &dyn RowSet, prefetched: &[Fetched]) -> PyResult<()> {
+        let parents = parents.iter().map(|obj| {
+            // SAFETY: as in `blank`.
+            let dict = unsafe {
+                Bound::from_owned_ptr_or_err(self.py, ffi::PyObject_GenericGetDict(obj.as_ptr(), std::ptr::null_mut()))?
+                    .cast_into_unchecked::<PyDict>()
+            };
+            Ok(Instance { obj: obj.clone(), dict })
+        }).collect::<PyResult<Vec<_>>>()?;
+        for f in prefetched {
+            self.attach(&parents, parent_rows, f)?;
+        }
+        Ok(())
+    }
+
     /// Puts the related objects of `f` on `parents` (built from `parent_rows`, in order).
     fn attach(&self, parents: &[Instance<'py>], parent_rows: &dyn RowSet, f: &Fetched) -> PyResult<()> {
         let py = self.py;

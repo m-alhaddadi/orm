@@ -67,6 +67,7 @@ pub fn diagnostics(proxies: &[PreparedProxy], out: &crate::exec::Outcome) -> DbR
             fetched(proxies, &selected.prefetched, &mut warnings)?;
         }
         Outcome::Rows { model, rows, .. } => inspect(&proxies[*model], None, 0, None, rows.as_ref(), &mut warnings)?,
+        Outcome::Prefetched { prefetched, .. } => fetched(proxies, prefetched, &mut warnings)?,
         _ => {}
     }
     Ok(warnings.finish())
