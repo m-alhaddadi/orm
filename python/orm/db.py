@@ -21,16 +21,21 @@ __all__ = ["Database", "connect", "get_database", "scope"]
 _READS = frozenset({"select", "count", "exists"})
 
 _default: Database | None = None
-# The innermost open transaction of the current task, with the database it belongs to.
-_current_tx: ContextVar[tuple[Database, _native.Transaction] | None] = ContextVar(
-    "orm_current_tx", default=None
-)
+# For each database (its root) with an open transaction in the current task: the innermost one.
+_current_tx: ContextVar[dict[Database, _native.Transaction]] = ContextVar("orm_current_tx", default={})
 # For each database in a `tenant()` block: its primary and replica engines with the tenant set.
 _tenants: ContextVar[dict[Database, tuple[_native.Engine, list[_native.Engine]]]] = ContextVar("orm_tenants", default={})
 # The `scope.<name>` values of default filters.
 _scope: ContextVar[dict[str, Any]] = ContextVar("orm_scope", default={})
 # For each database with an open transaction: the on_commit callbacks of the innermost one.
-_callbacks: ContextVar[dict[Database, list[Callable[[], Any]]]] = ContextVar("orm_on_commit", default={})
+_callbacks: ContextVar[dict[Database, _Callbacks]] = ContextVar("orm_on_commit", default={})
+
+
+class _Callbacks(list[Callable[[], Any]]):
+    """The on_commit callbacks of one transaction. ``ended`` is set when it commits or rolls
+    back: a task that it started can still see it after that."""
+
+    ended = False
 
 
 class Database:
@@ -61,8 +66,7 @@ class Database:
         return self._base if tenant is None else tenant[0]
 
     def _tx(self) -> _native.Transaction | None:
-        cur = _current_tx.get()
-        return cur[1] if cur is not None and cur[0]._root is self._root else None
+        return _current_tx.get().get(self._root)
 
     def _reader(self) -> _native.Engine:
         """The engine for a read: the next replica outside a transaction, else the primary."""
@@ -149,23 +153,22 @@ class Database:
         """
         outer = self._tx() is None
         tx = await self._engine.begin(self._tx())
-        token = _current_tx.set((self, tx))
-        callbacks, cb_token = self._collect_callbacks()
+        token = _current_tx.set({**_current_tx.get(), self._root: tx})
+        callbacks = _Callbacks()
+        cb_token = _callbacks.set({**_callbacks.get(), self._root: callbacks})
         try:
             yield
         except BaseException:
+            callbacks.ended = True
             _callbacks.reset(cb_token)
             _current_tx.reset(token)
             await tx.rollback()
             raise
+        callbacks.ended = True
         _callbacks.reset(cb_token)
         _current_tx.reset(token)
         await tx.commit()
         await self._after_commit(callbacks, outer)
-
-    def _collect_callbacks(self) -> tuple[list[Callable[[], Any]], Any]:
-        callbacks: list[Callable[[], Any]] = []
-        return callbacks, _callbacks.set({**_callbacks.get(), self._root: callbacks})
 
     async def _after_commit(self, callbacks: list[Callable[[], Any]], outer: bool) -> None:
         """A released savepoint hands its callbacks to the enclosing transaction."""
@@ -182,9 +185,13 @@ class Database:
         rollback drops it (a rolled-back savepoint drops only the callbacks registered
         inside it). Outside a transaction, ``fn()`` runs at once. An awaitable result is
         awaited. Callbacks run in order, outside the transaction; an error in one goes to
-        the caller of ``transaction()`` and the later ones do not run."""
+        the caller of ``transaction()`` and the later ones do not run. A task that the
+        transaction started and that calls this after the transaction ended raises
+        ``TransactionRequired``."""
         callbacks = _callbacks.get().get(self._root)
-        if callbacks is not None and self._tx() is not None:
+        if callbacks is not None and callbacks.ended:
+            raise TransactionRequired("on_commit(): the transaction of this task has ended")
+        if callbacks is not None:
             callbacks.append(fn)
             return
         result = fn()

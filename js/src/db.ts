@@ -11,14 +11,17 @@ import { active as debugging, record } from "./debug.js";
 
 let defaultDb: Database | undefined;
 
-/** The innermost open transaction of the current async context, and its database. */
-const current = new AsyncLocalStorage<{ readonly db: Database; readonly tx: NativeTransaction }>();
+/** For each database (its root) with an open transaction in the current async context: the innermost one. */
+const current = new AsyncLocalStorage<ReadonlyMap<Database, NativeTransaction>>();
 /** For each database in a `tenant()` call: its primary and replica engines with the tenant set. */
 const tenants = new AsyncLocalStorage<ReadonlyMap<Database, { readonly primary: NativeEngine; readonly replicas: readonly NativeEngine[] }>>();
 /** The `scope.<name>` values of default filters. */
 const scopeValues = new AsyncLocalStorage<Readonly<Record<string, unknown>>>();
 /** For each database with an open transaction: the onCommit callbacks of the innermost one. */
 const callbacks = new AsyncLocalStorage<ReadonlyMap<Database, (() => unknown)[]>>();
+/** The callback lists of transactions that committed or rolled back: a call started in the
+ * transaction can still see its list after that. */
+const ended = new WeakSet<(() => unknown)[]>();
 
 export interface LockOptions {
   /** A shared lock (any number of shared holders, but no exclusive one). */
@@ -71,8 +74,7 @@ export class Database {
 
   /** @internal The transaction queries on this database run in, if any. */
   tx(): NativeTransaction | null {
-    const c = current.getStore();
-    return c !== undefined && c.db.root === this.root ? c.tx : null;
+    return current.getStore()?.get(this.root) ?? null;
   }
 
   /** @internal The engine for a read: the next replica outside a transaction, else the primary. */
@@ -131,12 +133,15 @@ export class Database {
     const mine: (() => unknown)[] = [];
     const scoped = new Map(callbacks.getStore() ?? []).set(this.root, mine);
     let result: T;
+    const txs = new Map(current.getStore() ?? []).set(this.root, tx);
     try {
-      result = await current.run({ db: this, tx }, () => callbacks.run(scoped, fn));
+      result = await current.run(txs, () => callbacks.run(scoped, fn));
     } catch (e) {
+      ended.add(mine);
       await wait(() => tx.rollback());
       throw e;
     }
+    ended.add(mine);
     await wait(() => tx.commit());
     await this.afterCommit(mine, outer);
     return result;
@@ -158,11 +163,15 @@ export class Database {
    * drops it (a rolled-back savepoint drops only the callbacks registered inside it).
    * Outside a transaction, `fn()` runs at once. A promise result is awaited. Callbacks
    * run in order, outside the transaction; an error in one goes to the caller of
-   * `transaction()` and the later ones do not run.
+   * `transaction()` and the later ones do not run. A call that the transaction started and
+   * that runs this after the transaction ended throws `TransactionRequired`.
    */
   async onCommit(fn: () => unknown): Promise<void> {
     const mine = callbacks.getStore()?.get(this.root);
-    if (mine !== undefined && this.tx() !== null) {
+    if (mine !== undefined && ended.has(mine)) {
+      throw new TransactionRequired("onCommit(): the transaction of this call has ended");
+    }
+    if (mine !== undefined) {
       mine.push(fn);
       return;
     }

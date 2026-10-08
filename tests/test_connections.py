@@ -61,6 +61,65 @@ async def test_on_commit_is_dropped_on_rollback_and_runs_at_once_outside(clean):
         await other.close()
 
 
+async def two_sqlite_files(tmp_path):
+    registry = orm.Registry()
+    Item = orm.loads(SQLITE, registry=registry)["Item"]
+    dbs = [await orm.connect(f"sqlite://{tmp_path / name}", registry=registry, default=False) for name in ("a.db", "b.db")]
+    for db in dbs:
+        await db.create_tables()
+    return Item, dbs
+
+
+async def test_transactions_and_on_commit_are_kept_per_database(tmp_path):
+    Item, (a, b) = await two_sqlite_files(tmp_path)
+    seen = []
+    try:
+        with pytest.raises(ZeroDivisionError):
+            async with a.transaction():
+                async with b.transaction():
+                    # A's transaction is still open inside B's.
+                    assert a._tx() is not None
+                    await Item.objects.using(a).insert()
+                    await a.on_commit(lambda: seen.append("a"))
+                1 / 0
+        assert seen == [] and await Item.objects.using(a).count() == 0
+        async with a.transaction():
+            async with b.transaction():
+                await a.on_commit(lambda: seen.append("a"))
+                await b.on_commit(lambda: seen.append("b"))
+            assert seen == ["b"]
+        assert seen == ["b", "a"]
+        # After a rolled-back savepoint, the outer transaction collects callbacks again.
+        async with a.transaction():
+            with pytest.raises(ZeroDivisionError):
+                async with a.transaction():
+                    1 / 0
+            await a.on_commit(lambda: seen.append("after"))
+        assert seen == ["b", "a", "after"]
+    finally:
+        await a.close()
+        await b.close()
+
+
+async def test_on_commit_after_the_transaction_ended_raises(tmp_path):
+    Item, (a, b) = await two_sqlite_files(tmp_path)
+    ended = asyncio.Event()
+
+    async def late():
+        await ended.wait()
+        await a.on_commit(lambda: None)
+
+    try:
+        async with a.transaction():
+            task = asyncio.create_task(late())
+        ended.set()
+        with pytest.raises(orm.TransactionRequired, match="has ended"):
+            await task
+    finally:
+        await a.close()
+        await b.close()
+
+
 async def test_on_commit_errors_reach_the_caller_after_the_commit(clean):
     db = clean
     with pytest.raises(RuntimeError, match="boom"):

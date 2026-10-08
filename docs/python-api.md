@@ -609,6 +609,9 @@ A rollback drops the callback. A rolled-back savepoint drops only the callbacks 
 Outside a transaction, `fn()` runs at once.
 Callbacks run in registration order, outside the transaction.
 An error in a callback goes to the caller of `transaction()`, and the later callbacks do not run; the transaction is already committed.
+`on_commit` is a coroutine: without `await`, the callback is not registered (Python warns "coroutine was never awaited").
+Transactions and callbacks are kept for each database: a callback on `a` inside a transaction on `b` inside a transaction on `a` waits for `a`'s commit.
+A task that the transaction started and that calls `on_commit` after the transaction ended raises `TransactionRequired`.
 
 ### Protected writes
 

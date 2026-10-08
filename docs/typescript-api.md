@@ -262,6 +262,8 @@ A rollback drops the callback. A rolled-back savepoint drops only the callbacks 
 Outside a transaction, `fn()` runs at once.
 Callbacks run in registration order, outside the transaction.
 An error in a callback rejects the `transaction()` promise, and the later callbacks do not run; the transaction is already committed.
+Transactions and callbacks are kept for each database: a callback on `a` inside a transaction on `b` inside a transaction on `a` waits for `a`'s commit.
+A call that the transaction started and that calls `onCommit` after the transaction ended throws `TransactionRequired`.
 
 ### Protected writes
 

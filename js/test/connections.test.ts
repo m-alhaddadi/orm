@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { connect, define, getDatabase, loads, param, Registry, scope } from '../src/index.js';
 import { native } from '../src/native.js';
@@ -32,6 +35,61 @@ test('onCommit runs after the outer commit, and a rolled-back savepoint drops it
     assert.deepEqual(seen, [1, 'released']);
   } finally {
     await other.close();
+  }
+});
+
+async function twoSqliteFiles() {
+  const registry = new Registry();
+  const { Item } = loads(SQLITE, { registry }) as any;
+  const dir = mkdtempSync(join(tmpdir(), 'orm-s6-'));
+  const dbs = [await connect(`sqlite://${join(dir, 'a.db')}`, { registry, default: false }), await connect(`sqlite://${join(dir, 'b.db')}`, { registry, default: false })];
+  for (const db of dbs) await db.createTables();
+  return { Item, a: dbs[0]!, b: dbs[1]! };
+}
+
+test('transactions and onCommit are kept per database', async () => {
+  const { Item, a, b } = await twoSqliteFiles();
+  const seen: string[] = [];
+  try {
+    await assert.rejects(a.transaction(async () => {
+      await b.transaction(async () => {
+        // A's transaction is still open inside B's.
+        assert.notEqual(a.tx(), null);
+        await Item.objects.using(a).insert({});
+        await a.onCommit(() => seen.push('a'));
+      });
+      throw new Error('undo');
+    }), /undo/);
+    assert.equal(seen.length, 0);
+    assert.equal(await Item.objects.using(a).count(), 0);
+    await a.transaction(async () => {
+      await b.transaction(async () => {
+        await a.onCommit(() => seen.push('a'));
+        await b.onCommit(() => seen.push('b'));
+      });
+      assert.deepEqual(seen, ['b']);
+    });
+    assert.deepEqual(seen, ['b', 'a']);
+  } finally {
+    await a.close();
+    await b.close();
+  }
+});
+
+test('onCommit after the transaction ended throws', async () => {
+  const { a, b } = await twoSqliteFiles();
+  let end!: () => void;
+  const ended = new Promise<void>((resolve) => { end = resolve; });
+  let late!: Promise<void>;
+  try {
+    await a.transaction(async () => {
+      late = (async () => { await ended; await a.onCommit(() => undefined); })();
+    });
+    end();
+    await assert.rejects(late, /has ended/);
+  } finally {
+    await a.close();
+    await b.close();
   }
 });
 
