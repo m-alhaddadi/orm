@@ -148,7 +148,11 @@ async def check() -> None:
     assert_type(func.unnest(Profile.links), Func[str])
     assert_type(func.concat(Post.title, " ", Post.views), Func[str])
     assert_type(Post.title.concat("!"), Expression[str])
+    assert_type(Profile.links[1].concat("!"), Expression[str | None])
+    assert_type(Post.title.concat(Profile.links[1]), Expression[str | None])
     assert_type(func.strpos(Post.title, "x"), Func[int])
+    assert_type(func.strpos(Post.title, Profile.links[1]), Func[int])
+    assert_type(func.replace(Post.title, Profile.links[1], Profile.links[1]), Func[str])
     Post.views.concat("!")  # E: concatenation takes strings
     assert_type(alice.profile, Profile | None)
     assert_type(post.tags, ManyRelatedSet[Tag])
