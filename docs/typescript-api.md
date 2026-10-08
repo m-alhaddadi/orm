@@ -374,6 +374,25 @@ A package that changes writes and reads from outside the ORM (for example
 * `Model._meta.addRowDecoder(decode)` runs `decode(row)` on each instance that a query
   or write returns. A partial instance has only its loaded fields as own properties.
 
+## Model metadata and test factories
+
+The ORM has no factory library. It gives the two things a factory library needs:
+
+* `describe(Model)`: plain data about the model, with TypeScript (camelCase) names.
+  `fields` gives per field the name, column, schema type, `nullable`, `array`, `enum` (the enum's name), `maxLength`, `primaryKey`, `unique`, `default` (`"database"`, `"client"` or `null`) and `insert` (whether `insert()` takes it).
+  `relations` gives the kind, the target model, the `from`/`to` fields, the `through` model and `nullable`. `unique` lists the unique keys, the primary key first.
+* The insert path: `await Model.objects.insert(values)`, typed by the generated `PostInsert`.
+
+With fishery, the factory builds `PostInsert` values and `onCreate` inserts them:
+
+```ts
+const postFactory = Factory.define<PostInsert, {}, Post>(({ sequence, onCreate }) => {
+  onCreate((values) => Post.objects.insert(values));
+  return { title: `post ${sequence}`, body: "...", authorId: 1n };
+});
+const post = await postFactory.create();
+```
+
 ## Errors
 
 Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,

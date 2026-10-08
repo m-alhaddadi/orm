@@ -45,7 +45,7 @@ from .expr import (
     param,
     window,
 )
-from .model import Model, Registry, column, define, load, loads, registry
+from .model import Model, Registry, column, define, describe, load, loads, registry
 from .protection import allow_writes
 from .query import ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet, prefetch, use_query_set
 from .cte import Cte, CteColumn
@@ -58,6 +58,7 @@ __all__ = [
     "Registry",
     "column",
     "define",
+    "describe",
     "load",
     "loads",
     "Database",

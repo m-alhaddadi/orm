@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ManyRelatedSet, NotLoaded, Prefetch, QueryError, QuerySet, RelatedSet, column, prefetch, useQuerySet } from "../src/index.js";
-import { Comment, Post, Tag, User, type PostSpec, type TagSpec } from "./blog/models.js";
+import { ManyRelatedSet, NotLoaded, Prefetch, QueryError, QuerySet, RelatedSet, column, describe, prefetch, useQuerySet, type ModelClass, type ModelSpec } from "../src/index.js";
+import { Comment, Post, PostTag, Profile, Tag, User, type PostSpec, type TagSpec } from "./blog/models.js";
 import { useDatabase } from "./helpers.js";
 
 useDatabase();
@@ -124,6 +124,60 @@ test("prefetch checks its input", async () => {
   await prefetch([], User.posts);
   await assert.rejects(prefetch([alice, rows[0]!], User.posts), /one model/);
   await assert.rejects(prefetch([alice], Post.author as never), /does not start at User|User has no relation/);
+});
+
+// -- model metadata for factories -------------------------------------------------------------
+
+test("describe gives fields, relations and unique keys", () => {
+  const post = describe(Post);
+  assert.equal(post.name, "Post");
+  assert.equal(post.primaryKey, "id");
+  const fields = new Map(post.fields.map((f) => [f.name, f]));
+  assert.deepEqual(fields.get("title"), {
+    name: "title", column: "title", type: "string", nullable: false, array: false, enum: null, maxLength: 200,
+    primaryKey: false, unique: false, default: null, insert: true,
+  });
+  assert.equal(fields.get("authorId")!.column, "author_id");
+  assert.equal(fields.get("id")!.default, "database");
+  const relations = new Map(post.relations.map((r) => [r.name, r]));
+  assert.equal(relations.get("author")!.kind, "belongsTo");
+  assert.equal(relations.get("author")!.target, User);
+  assert.equal(relations.get("author")!.from, "authorId");
+  assert.equal(relations.get("tags")!.through, PostTag);
+  assert.deepEqual(describe(PostTag).unique, [["id"], ["postId", "tagId"]]);
+  assert.deepEqual(describe(User).unique, [["id"], ["email"]]);
+  const profile = new Map(describe(Profile).fields.map((f) => [f.name, f]));
+  assert.equal(profile.get("role")!.enum, "Role");
+  assert.ok(profile.get("links")!.array);
+});
+
+let made = 0;
+/** A factory built only on describe() and objects.insert(). */
+async function make(model: ModelClass<ModelSpec>, values: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  const info = describe(model);
+  made += 1;
+  for (const rel of info.relations) {
+    if (rel.kind === "belongsTo" && !rel.nullable && !(rel.name in values) && !(rel.from in values)) {
+      values[rel.name] = await make(rel.target);
+    }
+  }
+  const linked = new Set(info.relations.filter((r) => r.name in values).map((r) => r.from));
+  for (const f of info.fields) {
+    if (f.insert && f.default === null && !f.nullable && !(f.name in values) && !linked.has(f.name)) {
+      values[f.name] = f.type === "string" || f.type === "text" ? `${f.name}-${made}` : f.type === "bool" ? false : made;
+    }
+  }
+  return (await model.objects.insert(values as never)) as Record<string, unknown>;
+}
+
+test("a factory needs only describe and insert", async () => {
+  const post = await make(Post);
+  assert.match(post["title"] as string, /^title-/);
+  assert.equal(post["views"], 0);
+  const author = await User.objects.get(User.id.eq(post["authorId"] as bigint));
+  assert.match(author.email, /^email-/);
+  const link = await make(PostTag, { post });
+  assert.equal(link["postId"], post["id"]);
 });
 
 // -- only() through to-one paths --------------------------------------------------------------

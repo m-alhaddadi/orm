@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import copy
+import datetime
+import decimal
 import enum
 import json
 import types
+import uuid
 from os import PathLike
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -30,7 +33,7 @@ if "reference-loading" in _CAPABILITIES:
     from . import _references
     _reference_adapter = _references
 
-__all__ = ["Model", "ModelMeta", "Registry", "registry", "column", "define", "load", "loads"]
+__all__ = ["Model", "ModelMeta", "Registry", "registry", "column", "define", "describe", "load", "loads"]
 
 
 _ABSENT = object()
@@ -556,6 +559,15 @@ class Model:
 
 
 
+_PYTHON_TYPES: dict[str, type] = {
+    "big_int": int, "int": int, "float": float, "bool": bool, "string": str, "text": str,
+    "date_time": datetime.datetime, "date": datetime.date, "uuid": uuid.UUID, "json": object, "decimal": decimal.Decimal,
+}
+_RELATION_KINDS: tuple[tuple[type, str], ...] = (
+    (ManyToMany, "many_to_many"), (HasMany, "has_many"), (HasOne, "has_one"), (BelongsTo, "belongs_to"),
+)
+
+
 def column(model: type[Model], path: str) -> ColumnRef[Any]:
     """The column a dotted path names: ``column(Bundle, "items.product.title")`` is
     ``Bundle.items.product.title``. Each name before the last is a relation (to-one or
@@ -572,6 +584,53 @@ def column(model: type[Model], path: str) -> ColumnRef[Any]:
     if field is None:
         raise LookupError(f"{target.__name__} has no field {name!r} (in {path!r})")
     return ColumnRef(model, tuple(hops), field)
+
+
+def describe(model: type[Model]) -> dict[str, Any]:
+    """Plain data about ``model`` for code that builds rows from it, such as a test
+    factory: its fields (schema and Python type, nullability, enum, length, unique,
+    who gives a default, whether ``insert()`` takes it), its relations and its unique
+    keys. Each entry is a new object; changing it changes nothing."""
+    meta = model._meta
+    ir = meta.ir()
+    registry = meta.registry
+    fields = []
+    for f in ir["fields"]:
+        enum_cls = registry.get_enum(f["enum"]) if "enum" in f else None
+        python_type: type = enum_cls or _PYTHON_TYPES[f["type"]]
+        database = bool(f.get("auto_increment") or "default" in f or f.get("default_now") or "default_sql" in f)
+        fields.append({
+            "name": f["name"],
+            "column": f["column"],
+            "type": f["type"],
+            "python_type": list if f.get("array") else python_type,
+            "element_type": python_type if f.get("array") else None,
+            "nullable": bool(f.get("nullable")),
+            "array": bool(f.get("array")),
+            "enum": enum_cls,
+            "max_length": f.get("max_length"),
+            "primary_key": bool(f.get("primary_key")),
+            "unique": bool(f.get("unique") or f.get("primary_key")),
+            "default": "database" if database else "client" if "client_default" in f else None,
+            "insert": f["name"] in meta.input_fields,
+        })
+    relations = []
+    for name, rel in meta.relations.items():
+        kind = next(k for cls, k in _RELATION_KINDS if isinstance(rel, cls))
+        r = next(r for r in ir.get("relations", ()) if r["name"] == name)
+        relations.append({
+            "name": name,
+            "kind": kind,
+            "target": rel.target,
+            "from": r["from"],
+            "to": r["to"],
+            "through": registry.get(r["through"]["model"]) if "through" in r else None,
+            "nullable": kind != "belongs_to" or bool(meta.fields[r["from"]].nullable),
+        })
+    unique: list[tuple[str, ...]] = [(meta.pk.name,)]
+    unique += [(f["name"],) for f in ir["fields"] if f.get("unique") and not f.get("primary_key")]
+    unique += [tuple(c["fields"]) for c in ir.get("constraints", ()) if c.get("kind") == "unique"]
+    return {"name": meta.name, "table": meta.table, "primary_key": meta.pk.name, "fields": fields, "relations": relations, "unique": unique}
 
 
 def loads(

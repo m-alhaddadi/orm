@@ -744,6 +744,39 @@ A package that changes writes and reads from outside the ORM (for example
 * `decode_field(Model, name, decode)` reads the loaded value of a field as
   `decode(value)`. The instance keeps the stored value for writes and filters.
 
+## Model metadata and test factories
+
+The ORM has no factory library. It gives the two things a factory library needs:
+
+* `orm.describe(Model)`: plain data about the model.
+  `fields` gives per field the name, column, schema type, `python_type` (an enum field gives its enum class), `nullable`, `array` (with `element_type`), `max_length`, `primary_key`, `unique`, `default` (`"database"`, `"client"` or `None`) and `insert` (whether `insert()` takes it).
+  `relations` gives the kind (`belongs_to`, `has_one`, `has_many`, `many_to_many`), the target class, the `from`/`to` fields, the `through` model and `nullable`.
+  `unique` lists the unique keys, the primary key first.
+* The insert path: `await Model.objects.insert(**values)`, which also takes a related instance for a to-one key (`author=user`).
+
+Instances come only from the database, so a factory builds the insert values, not an instance.
+With factory_boy, `_build` gives the values and `_create` gives the insert, to await:
+
+```python
+class PostFactory(factory.Factory):
+    class Meta:
+        model = Post
+
+    title = factory.Sequence(lambda n: f"post {n}")
+    body = "..."
+    author = factory.SubFactory(UserFactory)  # a User instance, awaited by the caller first
+
+    @classmethod
+    def _build(cls, model_class, *args, **kwargs):
+        return kwargs
+
+    @classmethod
+    def _create(cls, model_class, *args, **kwargs):
+        return model_class.objects.insert(**kwargs)  # a coroutine: `await PostFactory.create()`
+```
+
+factory_boy has no async support, so a `SubFactory` with `create` gives a coroutine; build related rows first, or use a small async factory over `describe()` (see `tests/test_query_api.py`).
+
 ## The FFI boundary
 
 ```
