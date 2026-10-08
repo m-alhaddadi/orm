@@ -17,7 +17,7 @@ rng = random.Random(84130)
 title = 'handwritten versus extension' if args.native_profile else 'old versus current'
 baseline, candidate = ('Handwritten', 'Extension') if args.native_profile else ('Old', 'Current')
 lines = [f'# Build-time extension refactor: {title}', '',
-    f'| Runtime / backend / workload | {baseline} µs | {candidate} µs | Change | Paired 95% interval | Run changes |',
+    f'| Runtime / backend / workload | {baseline} µs | {candidate} µs | Paired median change | Paired 95% interval | Run changes |',
     '|---|---:|---:|---:|---:|---|']
 regressions, inconclusive, within_margin = [], [], []
 margin = args.max_cost_percent
@@ -32,6 +32,8 @@ for runtime in ['python', 'node']:
             pairs = [[100 * (a / b - 1) for b, a in zip(c['baseline'], c['candidate'], strict=True)] for c in cases]
             estimates = sorted(statistics.median(statistics.median(rng.choices(p, k=len(p))) for p in pairs) for _ in range(5000))
             lo, hi = estimates[125], estimates[4874]
+            # The point estimate is the statistic the interval bootstraps, so it lies inside it.
+            point = statistics.median(statistics.median(p) for p in pairs)
             b, a = statistics.median(before), statistics.median(after)
             changes = ', '.join(f'{100*(x/y-1):+.1f}%' for y, x in zip(before, after, strict=True))
             label = f'{runtime}/{backend}/{name}'
@@ -39,7 +41,7 @@ for runtime in ['python', 'node']:
                 if lo >= margin: regressions.append({'case': label, 'interval': [lo, hi]})
                 if lo < margin <= hi: inconclusive.append(label)
                 if hi < margin: within_margin.append(label)
-            lines.append(f'| {label} | {b:.2f} | {a:.2f} | {100*(a/b-1):+.1f}% | [{lo:+.1f}%, {hi:+.1f}%] | {changes} |')
+            lines.append(f'| {label} | {b:.2f} | {a:.2f} | {point:+.1f}% | [{lo:+.1f}%, {hi:+.1f}%] | {changes} |')
 lines += ['', 'Positive changes mean slower execution. Definition is setup cost and includes preparation to the same ready-to-query state in both versions.', '',
     f'Warm regressions above accepted cost (lower bound ≥ {margin:g}%): {len(regressions)}.',
     *[f"- {r['case']}: [{r['interval'][0]:+.1f}%, {r['interval'][1]:+.1f}%]" for r in regressions], '',

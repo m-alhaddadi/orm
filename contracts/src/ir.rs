@@ -124,6 +124,23 @@ pub struct SchemaIr {
     pub behavior: crate::extension::Requirements,
 }
 
+impl SchemaIr {
+    /// Parse the IR that generated models embed; an older ORM can write fields this one rejects.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        serde_json::from_str(json).map_err(|e| format!("invalid schema IR: {e}; if another ORM version generated the models, regenerate them"))
+    }
+}
+
+#[cfg(test)]
+mod schema_json {
+    #[test]
+    fn an_ir_from_an_older_version_names_the_cure() {
+        let old = r#"{"models":[],"behavior":{"proxy_models":[{"model":"A","parent":"U","defaults":{}}]}}"#;
+        let error = super::SchemaIr::from_json(old).unwrap_err();
+        assert!(error.contains("unknown field `defaults`") && error.contains("regenerate them"), "{error}");
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 pub struct ModelIr {
     pub name: String,

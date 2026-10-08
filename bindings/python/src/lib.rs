@@ -119,7 +119,7 @@ impl PySchema {
     #[pyo3(signature = (schema_json, classes = None))]
     fn new(py: Python<'_>, schema_json: &str, classes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut ir: ir::SchemaIr =
-            serde_json::from_str(schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+            ir::SchemaIr::from_json(schema_json).map_err(schema_err)?;
         orm_core::behavior::prepare(&mut ir, Some("python")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         db::require_dialect(inner.dialect).map_err(db_err)?;
@@ -131,7 +131,9 @@ impl PySchema {
     }
 
     /// Converts and plans a single-row insert without SQL or I/O (`orm.hooks.prepare_insert`).
-    fn validate_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>) -> PyResult<()> {
+    /// `allowed`: the write protection check runs here too, before a caller's own I/O.
+    fn validate_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>, allowed: Vec<String>) -> PyResult<()> {
+        protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
         let values = convert_rows(&self.inner, model, &fields, rows, true)?;
         exec::plan_insert(&self.inner, Target::new(self.inner.dialect), model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
         Ok(())
@@ -139,8 +141,11 @@ impl PySchema {
 
     /// Plans an update without SQL or I/O; true when its filters pin one row by a
     /// non-null primary key or unique field (`orm.hooks.prepare_update`).
-    fn unique_row_update(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<bool> {
+    fn unique_row_update(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>, allowed: Vec<String>) -> PyResult<bool> {
         let op = parse_op(op_json).map_err(engine_err)?;
+        if let Operation::Update(ir::Update { model, .. }) = &op {
+            protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
+        }
         plan::unique_row_update(&self.inner, Target::new(self.inner.dialect), &op, &PyParams(&params)).map_err(engine_err)
     }
 
@@ -569,7 +574,7 @@ fn outcome_to_py(
 #[pyfunction]
 #[pyo3(signature = (schema_json, context_json = None))]
 fn prepare_schema(schema_json: &str, context_json: Option<&str>) -> PyResult<String> {
-    let mut ir: ir::SchemaIr = serde_json::from_str(schema_json).map_err(|e| schema_err(e.to_string()))?;
+    let mut ir = ir::SchemaIr::from_json(schema_json).map_err(schema_err)?;
     if let Some(context) = context_json {
         let context = serde_json::from_str(context).map_err(|e| schema_err(format!("invalid definition context: {e}")))?;
         ir = orm_core::behavior::merge_definition(context, ir).map_err(schema_err)?;

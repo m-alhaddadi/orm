@@ -10,6 +10,7 @@ import json
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+from .protection import allowed_writes
 from .write import Update, prepare_rows
 
 if TYPE_CHECKING:
@@ -65,7 +66,7 @@ def prepare_insert(qs: QuerySet[M], values: Mapping[str, Any]) -> PreparedInsert
 
     resolve(qs._db)
     fields, rows, _ = prepare_rows(qs.model, [values])
-    qs.model._meta.registry.native().validate_insert(qs.model._meta.name, fields, rows)
+    qs.model._meta.registry.native().validate_insert(qs.model._meta.name, fields, rows, list(allowed_writes()))
     return PreparedInsert(qs, values)
 
 
@@ -76,7 +77,7 @@ def prepare_update(qs: QuerySet[M], values: Mapping[str, Any]) -> PreparedUpdate
     resolve(qs._db)
     params: list[Any] = []
     ir = qs._mutation_ir("update", params, values)
-    unique: bool = qs.model._meta.registry.native().unique_row_update(json.dumps(ir), params)
+    unique: bool = qs.model._meta.registry.native().unique_row_update(json.dumps(ir), params, list(allowed_writes()))
     return PreparedUpdate(qs, values, unique)
 
 

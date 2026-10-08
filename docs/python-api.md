@@ -612,6 +612,10 @@ Every ORM write to a `@@protected_write` model fails outside `orm.allow_writes(.
 The check is on the table that the SQL writes, so `post.tags.add()` needs `allow_writes(PostTag)` when `PostTag` is protected.
 The scope is a `ContextVar`, like the transaction: tasks started inside it get it.
 A nested scope adds its models to the outer ones. `allow_writes` starts no transaction.
+A query set is lazy, so the scope applies where the write is awaited, not where it is built:
+`u = qs.update(...)` inside the scope and `await u` outside it raises `WriteProtected`.
+Do not `yield` inside `allow_writes` in an async generator: when the consumer stops early, the scope stays open in the consumer task.
+`orm.hooks.prepare_insert` and `prepare_update` also check protection, so a file field uploads nothing for a rejected write.
 See `docs/schema.md`, "Protected writes".
 
 ### Locks
@@ -652,10 +656,12 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
 ```
 
 * The scope counts its queries by statement shape: the query without its values.
-  Tasks started in the scope count too.
+  Tasks started in the scope count too, and so do the queries of an inner scope.
+  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `in_bulk()`) count as one query.
+* The call site is the line that awaits the query (`await qs`, `await p.customers.all()`).
 * When the block ends, a shape that ran more than `threshold` times (default 5) raises `orm.debug.NPlusOne` with `fail=True`, or gives an `orm.debug.NPlusOneWarning`.
   The exception and the `with ... as report` value carry the report: each shape, its SQL, its count, the call site of its first query and the fix.
-* The fix is `select_related(...)` for a repeated `load_x()`, and `prefetch_related(...)` for a repeated to-many query (`await post.comments`).
+* The fix is `select_related(...)` for a repeated `load_x()`, and `prefetch_related(...)` for a repeated unchanged to-many or many-to-many query (`await post.comments`, `await post.tags`).
 * The call site and the SQL text are captured only inside the scope.
   Outside it, each query pays one `ContextVar` read (about 15 ns, measured).
 * In a test suite, add `pytest_plugins = ["orm.testing"]` to `conftest.py`.

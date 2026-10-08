@@ -296,9 +296,11 @@ pub struct JsSchema {
 
 #[napi]
 impl JsSchema {
-    /// Converts and plans a single-row insert without SQL or I/O (`prepareInsert`).
+    /// Converts and plans a single-row insert without SQL or I/O (`prepareInsert`); the
+    /// write protection check runs here too, before a caller's own I/O.
     #[napi]
-    pub fn validate_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>) -> napi::Result<()> {
+    pub fn validate_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>, allowed: Vec<String>) -> napi::Result<()> {
+        protect::ensure_writable(&self.inner, &model, &allowed).map_err(engine_err)?;
         let values = convert_rows(env, &self.inner, &model, &fields, rows, true)?;
         exec::plan_insert(&self.inner, Target::new(self.inner.dialect), &model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
         Ok(())
@@ -307,8 +309,11 @@ impl JsSchema {
     /// Plans an update without SQL or I/O; true when its filters pin one row by a
     /// non-null primary key or unique field (`prepareUpdate`).
     #[napi]
-    pub fn unique_row_update(&self, env: &Env, op_json: String, params_: Unknown<'_>) -> napi::Result<bool> {
+    pub fn unique_row_update(&self, env: &Env, op_json: String, params_: Unknown<'_>, allowed: Vec<String>) -> napi::Result<bool> {
         let op = parse_op(&op_json).map_err(engine_err)?;
+        if let ir::Operation::Update(ir::Update { model, .. }) = &op {
+            protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
+        }
         let p = params(env, params_)?;
         plan::unique_row_update(&self.inner, Target::new(self.inner.dialect), &op, &p).map_err(engine_err)
     }
@@ -316,7 +321,7 @@ impl JsSchema {
     #[napi(constructor)]
     pub fn new(schema_json: String) -> napi::Result<Self> {
         let mut ir: ir::SchemaIr =
-            serde_json::from_str(&schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+            ir::SchemaIr::from_json(&schema_json).map_err(schema_err)?;
         orm_core::behavior::prepare(&mut ir, Some("typescript")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         db::require_dialect(inner.dialect).map_err(|e| schema_err(e.to_string()))?;
@@ -738,7 +743,7 @@ impl Engine {
 /// from, for error messages and `import` resolution.
 #[napi]
 pub fn prepare_schema(schema_json: String, context_json: Option<String>) -> napi::Result<String> {
-    let mut ir: ir::SchemaIr = serde_json::from_str(&schema_json).map_err(|e| schema_err(e.to_string()))?;
+    let mut ir = ir::SchemaIr::from_json(&schema_json).map_err(schema_err)?;
     if let Some(context) = context_json {
         let context = serde_json::from_str(&context).map_err(|e| schema_err(format!("invalid definition context: {e}")))?;
         ir = orm_core::behavior::merge_definition(context, ir).map_err(schema_err)?;

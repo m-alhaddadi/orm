@@ -230,3 +230,64 @@ fn proxy_fields_declarations_reject_include_and_exclude_together() {
     let ir = declare(json!({"exclude": ["note"]})).unwrap();
     assert!(!has_field(&ir, "Active", "note"));
 }
+
+#[test]
+fn a_proxy_cannot_protect_writes_and_a_client_default_stays_in_the_subset() {
+    let mut ir = schema();
+    ir.models[1].protected_write = true;
+    let error = lower_specs(&mut ir, &[spec("Active", "User")]).unwrap_err();
+    assert!(error.contains("Active: a proxy cannot declare @@protected_write; protect the root model User"), "{error}");
+    let mut ir = schema();
+    redeclare(&mut ir, "Active", "status", |f| { f.enum_subset = Some(names(&["ACTIVE"])); f.client_default = Some(ClientDefaultIr::Value(json!("old"))); });
+    let error = lower_specs(&mut ir, &[spec("Active", "User")]).unwrap_err();
+    assert!(error.contains("Active.status: client default is outside the enum subset Status(ACTIVE)"), "{error}");
+    // A child subset applies to the client default it inherits.
+    let mut ir = schema();
+    client_default(&mut ir, "Active", "status", json!("active"));
+    redeclare(&mut ir, "Named", "status", |f| f.enum_subset = Some(names(&["OLD"])));
+    let error = lower_specs(&mut ir, &[spec("Named", "Active"), spec("Active", "User")]).unwrap_err();
+    assert!(error.contains("Named.status: client default is outside the enum subset Status(OLD)"), "{error}");
+}
+
+#[test]
+fn redeclared_fields_keep_inherited_shape_and_defaults() {
+    // A child may leave out a field its parent proxy redeclared.
+    let mut ir = schema();
+    redeclare(&mut ir, "Active", "name", |f| f.nullable = false);
+    lower_specs(&mut ir, &[select("Named", "Active", ProxySelection::Exclude(names(&["name"]))), spec("Active", "User")]).unwrap();
+    assert!(ir.behavior.proxy_models[1].fields.iter().all(|c| c.field != "name"));
+    // An enum primary key cannot take a subset.
+    let mut ir = schema();
+    (ir.models[0].fields[0].primary_key, ir.models[0].fields[2].primary_key) = (false, true);
+    redeclare(&mut ir, "Active", "status", |f| f.enum_subset = Some(names(&["ACTIVE"])));
+    assert!(lower_specs(&mut ir, &[spec("Active", "User")]).unwrap_err().contains("proxy cannot change primary key shape"));
+    // A redeclaration without @client_default keeps the inherited one.
+    let mut ir = schema();
+    client_default(&mut ir, "Active", "name", json!("x"));
+    redeclare(&mut ir, "Named", "name", |f| f.nullable = false);
+    lower_specs(&mut ir, &[spec("Named", "Active"), spec("Active", "User")]).unwrap();
+    assert_eq!(field(&ir, "Named", "name").client_default, Some(ClientDefaultIr::Value(json!("x"))));
+    // Leaving out @default keeps the database default.
+    let mut ir = schema();
+    redeclare(&mut ir, "Active", "status", |f| { f.default = None; f.enum_subset = Some(names(&["OLD"])); });
+    lower_specs(&mut ir, &[spec("Active", "User")]).unwrap();
+    assert_eq!(field(&ir, "Active", "status").default, Some(json!("old")));
+}
+
+#[test]
+fn any_database_default_lets_a_not_null_field_be_omitted() {
+    let edits: [fn(&mut FieldIr); 3] = [|f| f.default_now = true, |f| f.default_sql = Some("'c'".into()), |f| f.auto_increment = true];
+    for edit in edits {
+        let mut ir = schema();
+        edit(&mut ir.models[0].fields[4]);
+        lower_specs(&mut ir, &[select("Active", "User", ProxySelection::Exclude(names(&["code"])))]).unwrap();
+        assert!(!has_field(&ir, "Active", "code"));
+    }
+    let mut ir = schema();
+    ir.behavior.declarations = serde_json::from_value(json!([
+        {"attribute":"proxy.of","model":"Active","field":null,"arguments":{},"positional":["User"],"location":{"file":"s.prisma","line":1,"column":1}},
+        {"attribute":"proxy.fields","model":"Active","field":null,"arguments":{"exclude":["note"]},"positional":[],"location":{"file":"s.prisma","line":2,"column":3}},
+        {"attribute":"proxy.fields","model":"Active","field":null,"arguments":{"exclude":["name"]},"positional":[],"location":{"file":"s.prisma","line":3,"column":3}}
+    ])).unwrap();
+    assert_eq!(orm_proxy::lower(&mut ir).unwrap_err(), "s.prisma:3:3: @@proxy.fields: duplicate @@proxy.fields");
+}

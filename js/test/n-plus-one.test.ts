@@ -65,6 +65,32 @@ test("a related query in a loop names prefetchRelated and warns without fail", a
   } finally { process.off("warning", listener); await db.close(); }
 });
 
+test("a many-to-many query in a loop names prefetchRelated", async () => {
+  const registry = new Registry();
+  const models = loads(source.replace("  customers Customer[]", "  customers Customer[]\n  tags      Tag[]      @relation(through: PersonTag)") + `model Tag {
+  id Int @id
+}
+model PersonTag {
+  id        Int    @id
+  person_id Int
+  tag_id    Int
+  person    Person @relation(fields: [person_id], references: [id])
+  tag       Tag    @relation(fields: [tag_id], references: [id])
+}
+`, { registry }) as Record<string, Any>;
+  const db = await connect("sqlite://:memory:", { registry, default: false });
+  try {
+    await db.createTables();
+    const { Person } = models;
+    await Person.objects.using(db).insertMany([...Array(6).keys()].map((i) => ({ id: i, name: `p${i}` })));
+    const people = await Person.objects.using(db).orderBy(Person.id).all();
+    const error = await debug.nPlusOne(async () => { for (const p of people) await p.tags.using(db).all(); }, { threshold: 3, fail: true })
+      .then(() => null, (e: unknown) => e);
+    assert.ok(error instanceof debug.NPlusOne);
+    assert.equal(error.report.repeated[0]!.fix, "prefetchRelated(Person.tags)");
+  } finally { await db.close(); }
+});
+
 test("counts by shape, inside the scope only, with started work and inserts", async () => {
   const { Person, db } = await shop();
   try {
@@ -95,5 +121,42 @@ test("expectNoNPlusOne is the test helper", async () => {
     await assert.rejects(debug.expectNoNPlusOne(async () => {
       for (let i = 0; i < 3; i++) await Person.objects.using(db).get(Person.id.eq(i));
     }, { threshold: 2 }), debug.NPlusOne);
+  } finally { await db.close(); }
+});
+
+test("the pages of one ORM loop count once, and long SQL is cut", async () => {
+  const { Person, Customer, db } = await shop();
+  try {
+    await debug.nPlusOne(async () => {
+      let n = 0;
+      for await (const p of Person.objects.using(db).iterate(1)) n += p ? 1 : 0;
+      assert.equal(n, 8);
+      assert.equal((await Person.objects.using(db).inBulk([...Array(25_000).keys()])).size, 8);
+    }, { threshold: 1, fail: true });
+    // A loop in user code still counts every query, also inside a batch loop.
+    await assert.rejects(debug.nPlusOne(async () => {
+      for await (const p of Person.objects.using(db).iterate(2)) await Customer.objects.using(db).filter(Customer.personId.eq(p.id)).exists();
+    }, { threshold: 3, fail: true }), debug.NPlusOne);
+    const report = new debug.Report(1);
+    report.shapes.set("k", { key: "k", sql: "SELECT " + "?, ".repeat(10_000), count: 2, site: "x", fix: null });
+    assert.ok(report.message().length < 600 && report.message().includes(" ..."));
+  } finally { await db.close(); }
+});
+
+test("nested scopes count in the outer scope; updateMany counts; a changed related set names no fix", async () => {
+  const { Person, Customer, db } = await shop();
+  try {
+    const people = await Person.objects.using(db).orderBy(Person.id).all();
+    const counted: debug.Report[] = [];
+    await debug.nPlusOne(async () => {
+      await debug.nPlusOne(async () => {
+        for (const p of people.slice(0, 3)) await Person.objects.using(db).filter(Person.id.eq(p.id)).exists();
+      }, { threshold: 2, fail: true }).catch((e: debug.NPlusOne) => { counted.push(e.report); });
+      for (const p of people.slice(0, 3)) await Person.objects.using(db).updateMany([{ id: p.id, name: "x" }]);
+      for (const p of people.slice(0, 3)) await p.customers.using(db).filter(Customer.id.gte(0)).all();
+    }, { threshold: 2, fail: true }).catch((e: debug.NPlusOne) => { counted.push(e.report); });
+    const [innerReport, outerReport] = counted;
+    assert.deepEqual([...innerReport!.shapes.values()].map((s) => s.count), [3]);
+    assert.deepEqual(outerReport!.repeated.map((s) => [s.count, s.fix]), [[3, null], [3, null], [3, null]]);
   } finally { await db.close(); }
 });

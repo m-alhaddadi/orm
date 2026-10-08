@@ -11,6 +11,7 @@ pub fn column(schema: &Schema, model: &Model, alias: &str, field: &FieldIr) -> R
 
 /// `column` for the field at `position` of `model`.
 pub fn column_at(schema: &Schema, model: &Model, alias: &str, position: usize) -> Result<SimpleExpr> {
+    debug_assert!(position < model.resolved_fields.len(), "column_at takes a position of model.fields()");
     let resolved = &model.resolved_fields[position];
     let owners = &schema.physical().models;
     if resolved.storage.owner == model.owner {

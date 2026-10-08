@@ -272,6 +272,9 @@ Every ORM write to a `@@protected_write` model fails outside `allowWrites(models
 The check is on the table that the SQL writes, so `post.tags.add()` needs `allowWrites([PostTag], ...)` when `PostTag` is protected.
 The scope follows the async call chain through `AsyncLocalStorage`, like the transaction: work started inside `fn` gets it.
 A nested call adds its models to the outer ones. `allowWrites` starts no transaction and gives what `fn` gives.
+A write reads the scope when it is called, not when it is awaited (Python reads it at the `await`).
+`prepareInsert` and `prepareUpdate` also check protection, so a file field uploads nothing for a rejected write.
+Wrong arguments give a rejected promise with a `TypeError`.
 See `docs/schema.md`, "Protected writes".
 
 ### Locks
@@ -300,10 +303,11 @@ await debug.nPlusOne(async () => {
 ```
 
 * The scope counts the queries of `fn` by statement shape: the query without its values.
-  Work that `fn` starts counts too.
+  Work that `fn` starts counts too, and so do the queries of an inner scope.
+  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `inBulk()`) count as one query.
 * When `fn` resolves, a shape that ran more than `threshold` times (default 5) throws `debug.NPlusOne` with `fail: true`, or emits an `NPlusOneWarning` process warning.
   `error.report` has each shape, its SQL, its count, the call site of its first query and the fix.
-* The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated to-many query (`post.comments.all()`).
+* The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated unchanged to-many or many-to-many query (`post.comments.all()`, `post.tags.all()`).
 * The call site and the SQL text are captured only inside the scope.
   Outside it, each query pays one `AsyncLocalStorage` read (about 2 ns, measured).
 * In tests, `await debug.expectNoNPlusOne(fn, { threshold })` throws `NPlusOne` when `fn` sends an N+1.

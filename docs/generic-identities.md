@@ -60,17 +60,22 @@ model Post {
 
 `target` creates two fields at its position: `target_type ContentType?` and `target_id`.
 `target_id` has the type of the targets' shared primary key; targets with different key types fail.
-`?` sets the nullability of both fields.
+`?` sets the nullability of both fields; a field that `type:` or `key:` names must have the same nullability.
+`target_id` takes only the storage encoding of the target key (`@db.*`, length); never its key, default or `@client_default`.
 The pass also adds `@@index([target_type, target_id])`; `index: false` disables it.
-`type:` and `key:` name existing fields instead of created ones,
-so a schema in the explicit form moves to the field form with no migration.
+An equal `@@index` replaces the added index.
+`type:` and `key:` name existing fields instead of created ones.
+A schema in the explicit form moves to the field form with no migration when it keeps its pair `@@index`, or when it uses `index: false` and has no pair index.
 A created name that collides with a member fails; name an existing field with `type:` or `key:` then.
 `Generic` is only a type on a field with `@generic.relation`; elsewhere it is an unknown type.
+A `Generic` or `@generic.reverse` field takes no other attribute, such as `@map`, `@unique` or `@db.*`; use the explicit form for those.
+A model with a proxy or a composed child cannot have a `Generic` field, because those passes copy fields before the generic pass runs; use the explicit form there.
 
 `tags Tag[] @generic.reverse` is the reverse side: the field name is the relation name, and `Tag[]` is the source.
 It is no ordinary relation, because no foreign key exists.
 `relation: "target"` names the source relation; it is necessary only when the source has more than one generic relation with this model in its targets.
 A reverse field fails when the source has no generic relation with this model in its targets.
+The model-level form `@@generic.reverse("tags", source: "Tag", relation: "target")` is removed; write `tags Tag[] @generic.reverse(relation: "target")` instead.
 
 The explicit form stays available, because it allows `@map`, `@db.*` and comments on the pair fields:
 
