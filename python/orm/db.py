@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+import math
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, Literal, overload
 
 from . import _native, debug
-from .errors import NotConnected, QueryError, TransactionRequired
+from .errors import LockNotAvailable, NotConnected, QueryError, TransactionRequired
 from .protection import allowed_writes
 from .model import Registry, registry
 
@@ -131,33 +132,90 @@ class Database:
         if inspect.isawaitable(result):
             await result
 
-    async def lock(self, key: int | str, exclusive: bool = True, *, nowait: bool = False) -> bool:
-        """Take an advisory lock on ``key`` until the transaction ends: a lock on a
-        name rather than on rows, e.g. "only one worker imports this file at a time".
+    @overload
+    def lock(
+        self, key: int | str, exclusive: bool = True, *, session: Literal[False] = False, nowait: bool = False
+    ) -> Coroutine[Any, Any, bool]: ...
+    @overload
+    def lock(
+        self,
+        key: int | str,
+        exclusive: bool = True,
+        *,
+        session: Literal[True],
+        nowait: bool = False,
+        timeout: float | None = None,
+    ) -> AbstractAsyncContextManager[None]: ...
+    def lock(
+        self,
+        key: int | str,
+        exclusive: bool = True,
+        *,
+        session: bool = False,
+        nowait: bool = False,
+        timeout: float | None = None,
+    ) -> Coroutine[Any, Any, bool] | AbstractAsyncContextManager[None]:
+        """Take an advisory lock on ``key``: a lock on a name rather than on rows, e.g.
+        "only one worker imports this file at a time".
+
+        ``await db.lock(key)`` holds the lock until the transaction ends and must run
+        inside ``db.transaction()``. It waits for the lock unless ``nowait``, in which
+        case it returns ``False`` instead of waiting.
+
+        ``async with db.lock(key, session=True, timeout=5):`` holds the lock for the
+        block, on a connection of its own, with no transaction. It waits at most
+        ``timeout`` seconds (forever when ``None``; not at all with ``nowait``) and
+        raises ``LockNotAvailable`` when the lock is still held by another session.
 
         ``exclusive=False`` takes a shared lock (any number of shared holders, but no
-        exclusive one). Waits for the lock unless ``nowait``, in which case it returns
-        ``False`` instead of waiting. A ``str`` key is hashed to a 64-bit one (the first
-        8 bytes of its BLAKE2b digest, signed big-endian). Must run inside
-        ``db.transaction()``.
+        exclusive one). A ``str`` key is hashed to a 64-bit one (the first 8 bytes of its
+        BLAKE2b digest, signed big-endian).
         """
+        if session:
+            return self._session_lock(key, exclusive, nowait, timeout)
+        return self._xact_lock(key, exclusive, nowait)
+
+    def _lock_key(self, key: int | str) -> tuple[int, bytes | None]:
+        if isinstance(key, bool) or not isinstance(key, (int, str)):
+            raise TypeError(f"lock key must be an int or a str, got {key!r}")
+        if isinstance(key, str):
+            return 0, key.encode()
+        if not -(2**63) <= key < 2**63:
+            raise ValueError("lock key must fit in 64 bits")
+        return int(key), None
+
+    async def _xact_lock(self, key: int | str, exclusive: bool, nowait: bool) -> bool:
         if self.url.startswith("sqlite://"):
             raise QueryError("sqlite does not support advisory locks")
         tx = self._tx()
         if tx is None:
             raise TransactionRequired(
                 "db.lock() outside a transaction would release the lock at once; "
-                "run it inside `async with db.transaction():`"
+                "run it inside `async with db.transaction():` or use `session=True`"
             )
-        if isinstance(key, bool) or not isinstance(key, (int, str)):
-            raise TypeError(f"lock key must be an int or a str, got {key!r}")
-        name = None
-        if isinstance(key, str):
-            name = key.encode()
-            key = 0
-        if not -(2**63) <= key < 2**63:
-            raise ValueError("lock key must fit in 64 bits")
-        return await self._engine.advisory_lock(int(key), name, bool(exclusive), bool(nowait), tx)
+        k, name = self._lock_key(key)
+        return await self._engine.advisory_lock(k, name, bool(exclusive), bool(nowait), tx)
+
+    @asynccontextmanager
+    async def _session_lock(
+        self, key: int | str, exclusive: bool, nowait: bool, timeout: float | None
+    ) -> AsyncIterator[None]:
+        if self.url.startswith("sqlite://"):
+            raise QueryError("sqlite does not support advisory locks")
+        k, name = self._lock_key(key)
+        if timeout is not None and not timeout >= 0:
+            raise ValueError("lock timeout must be a number of seconds >= 0")
+        timeout_ms = None if timeout is None else math.ceil(timeout * 1000)
+        held = await self._engine.session_lock(k, name, bool(exclusive), bool(nowait), timeout_ms)
+        if held is None:
+            raise LockNotAvailable(
+                f"advisory lock {key!r} is held by another session"
+                + ("" if nowait or timeout is None else f" after {timeout}s")
+            )
+        try:
+            yield
+        finally:
+            await held.release()
 
     async def execute(self, sql: str) -> int:
         """Run raw SQL (one or more statements); returns the number of rows affected."""

@@ -123,6 +123,20 @@ pub trait Transaction: Executor {
 
 pub trait Driver: Executor {
     fn close(&self) -> BoxFuture<'_, ()>;
+    /// A session advisory lock on a pinned pool connection, outside any transaction.
+    /// `None` when it is not taken: held with `nowait`, or still held after `timeout_ms`.
+    fn session_lock(
+        &self, _key: i64, _exclusive: bool, _nowait: bool, _timeout_ms: Option<u64>,
+    ) -> BoxFuture<'_, DbResult<Option<Arc<dyn SessionLock>>>> {
+        Box::pin(async { Err(DbError::other(format!("{} does not support advisory locks", self.dialect().name()))) })
+    }
+}
+
+/// A held session advisory lock. Dropped without `release`, it closes its connection,
+/// so the server releases the lock.
+pub trait SessionLock: Send + Sync {
+    /// Unlocks, and gives the connection back to the pool.
+    fn release(&self) -> BoxFuture<'_, DbResult<()>>;
 }
 
 /// Opens the selected driver for `postgres://`, `postgresql://` or `sqlite://`.

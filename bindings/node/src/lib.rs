@@ -428,6 +428,21 @@ impl Transaction {
     }
 }
 
+/// A held session advisory lock (`db.lock(key, { session: true }, fn)`).
+#[napi]
+pub struct SessionLock {
+    inner: Arc<dyn db::SessionLock>,
+}
+
+#[napi]
+impl SessionLock {
+    #[napi]
+    pub fn release<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
+        let lock = self.inner.clone();
+        env.spawn_future(async move { lock.release().await.map_err(|e| tagged(db_kind(&e), e)) })
+    }
+}
+
 // -- engine ---------------------------------------------------------------------------------------
 
 #[napi]
@@ -584,6 +599,24 @@ impl Engine {
         let conn = self.conn(Some(tx));
         env.spawn_future(async move {
             conn.advisory_lock(key, exclusive, nowait).await.map_err(|e| tagged(db_kind(&e), e))
+        })
+    }
+
+    /// Session advisory lock on a pinned connection; `null` when it is not taken.
+    #[napi]
+    pub fn session_lock<'env>(
+        &self, env: &'env Env, key: String, name: Option<napi::bindgen_prelude::Buffer>,
+        exclusive: bool, nowait: bool, timeout_ms: Option<u32>,
+    ) -> napi::Result<PromiseRaw<'env, Option<SessionLock>>> {
+        let key = match name {
+            Some(name) => orm_engine::advisory::key(&name),
+            None => key.parse::<i64>().map_err(|_| tagged("TypeError", "lock key must fit in 64 bits"))?,
+        };
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let lock = driver.session_lock(key, exclusive, nowait, timeout_ms.map(u64::from)).await
+                .map_err(|e| tagged(db_kind(&e), e))?;
+            Ok(lock.map(|inner| SessionLock { inner }))
         })
     }
 

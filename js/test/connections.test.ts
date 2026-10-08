@@ -74,3 +74,48 @@ test('onCommit on SQLite', async () => {
     await db.close();
   }
 });
+
+test('a session lock holds outside a transaction and times out', async () => {
+  const db = getDatabase(), other = await otherDatabase();
+  try {
+    const got = await db.lock('import', { session: true, timeout: 5 }, async () => {
+      assert.equal(db.tx(), null);
+      const started = Date.now();
+      await assert.rejects(other.lock('import', { session: true, timeout: 0.2 }, async () => assert.fail('held')),
+        { name: 'LockNotAvailable', message: /after 0.2s/ });
+      const waited = Date.now() - started;
+      assert.ok(waited > 150 && waited < 3000, `waited ${waited} ms`);
+      await assert.rejects(other.lock('import', { session: true, nowait: true }, async () => {}), { name: 'LockNotAvailable' });
+      await other.transaction(async () => assert.equal(await other.lock('import', { nowait: true }), false));
+      return 42;
+    });
+    assert.equal(got, 42);
+    await other.lock('import', { session: true, nowait: true }, async () => {});
+  } finally {
+    await other.close();
+  }
+});
+
+test('a session lock is released on error, and shared locks share', async () => {
+  const db = getDatabase(), other = await otherDatabase();
+  try {
+    await assert.rejects(db.lock(7, { session: true }, async () => { throw new Error('undo'); }), /undo/);
+    await other.lock(7, { session: true, nowait: true }, async () => {});
+    await db.lock(8n, { session: true, exclusive: false }, async () => {
+      await other.lock(8, { session: true, exclusive: false, nowait: true }, async () => {
+        await assert.rejects(other.lock(8, { session: true, timeout: 0 }, async () => {}), { name: 'LockNotAvailable' });
+      });
+    });
+  } finally {
+    await other.close();
+  }
+});
+
+test('a session lock needs Postgres', async () => {
+  const db = await sqliteDb();
+  try {
+    await assert.rejects(db.lock(1, { session: true }, async () => {}), { name: 'QueryError', message: 'sqlite does not support advisory locks' });
+  } finally {
+    await db.close();
+  }
+});

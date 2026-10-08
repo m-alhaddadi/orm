@@ -288,7 +288,14 @@ See `docs/schema.md`, "Protected writes".
   keys hash the way Python's do (BLAKE2b with an 8-byte digest), so both languages lock
   the same name.
 
-Both throw `TransactionRequired` when called outside a transaction.
+* `db.lock(key, { session: true, timeout: 5 }, async () => {...})` is a session advisory
+  lock: it holds the lock while the function runs, with no transaction, on a pool
+  connection of its own, and gives what the function gives. It waits at most `timeout`
+  seconds (no limit when absent, not at all with `nowait`) and throws `LockNotAvailable`
+  when another session still holds the lock. The lock is released when the function
+  settles; when the unlock fails, the connection is closed, so the server releases it.
+
+The transaction-scoped forms throw `TransactionRequired` when called outside a transaction.
 
 ### Finding N+1 queries: `debug`
 

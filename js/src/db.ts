@@ -2,7 +2,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import { NotConnected, QueryError, TransactionRequired } from "./errors.js";
+import { LockNotAvailable, NotConnected, QueryError, TransactionRequired } from "./errors.js";
 import type { IR } from "./expr.js";
 import { registry as defaultRegistry, type Registry } from "./model.js";
 import { call, native, wait, type NativeEngine, type NativeTransaction } from "./native.js";
@@ -21,6 +21,19 @@ export interface LockOptions {
   readonly exclusive?: boolean;
   /** Give `false` instead of waiting when the lock is held. */
   readonly nowait?: boolean;
+  readonly session?: false;
+}
+
+export interface SessionLockOptions {
+  /** Hold the lock while the function runs, on a connection of its own, outside any
+   * transaction. */
+  readonly session: true;
+  /** A shared lock (any number of shared holders, but no exclusive one). */
+  readonly exclusive?: boolean;
+  /** Throw `LockNotAvailable` at once when the lock is held. */
+  readonly nowait?: boolean;
+  /** Seconds to wait before `LockNotAvailable` (no limit when absent). */
+  readonly timeout?: number;
 }
 
 /** A connection pool. Created by {@link connect}. */
@@ -99,38 +112,67 @@ export class Database {
   }
 
   /**
-   * Takes an advisory lock on `key` until the transaction ends: a lock on a name rather
-   * than on rows ("only one worker imports this file at a time").
+   * Takes an advisory lock on `key`: a lock on a name rather than on rows ("only one
+   * worker imports this file at a time").
    *
-   * Waits for the lock unless `nowait`, which gives `false` instead of waiting. A string
-   * key is hashed to a 64-bit one the way the Python package hashes it (the first 8 bytes
-   * of its BLAKE2b digest, signed big-endian), so both lock the same name. Must run inside
-   * `db.transaction()`.
+   * `db.lock(key, options)` holds the lock until the transaction ends and must run inside
+   * `db.transaction()`. It waits for the lock unless `nowait`, which gives `false` instead
+   * of waiting.
+   *
+   * `db.lock(key, { session: true, timeout }, fn)` holds the lock while `fn` runs, on a
+   * connection of its own, with no transaction, and gives what `fn` gives. It waits at
+   * most `timeout` seconds (no limit when absent; not at all with `nowait`) and throws
+   * `LockNotAvailable` when another session still holds the lock.
+   *
+   * A string key is hashed to a 64-bit one the way the Python package hashes it (the
+   * first 8 bytes of its BLAKE2b digest, signed big-endian), so both lock the same name.
    */
-  async lock(key: bigint | number | string, options: LockOptions = {}): Promise<boolean> {
+  lock(key: bigint | number | string, options?: LockOptions): Promise<boolean>;
+  lock<T>(key: bigint | number | string, options: SessionLockOptions, fn: () => Promise<T>): Promise<T>;
+  async lock<T>(
+    key: bigint | number | string,
+    options: LockOptions | SessionLockOptions = {},
+    fn?: () => Promise<T>,
+  ): Promise<boolean | T> {
+    if (options.session === true) {
+      return this.sessionLock(key, options, fn!);
+    }
     if (this.url.startsWith("sqlite://")) {
       throw new QueryError("sqlite does not support advisory locks");
     }
     if (this.tx() === null) {
       throw new TransactionRequired(
-        "db.lock() outside a transaction would release the lock at once; run it inside `db.transaction(...)`",
+        "db.lock() outside a transaction would release the lock at once; run it inside `db.transaction(...)` or use `{ session: true }`",
       );
     }
-    let k: bigint;
-    let name: Buffer | null = null;
-    if (typeof key === "string") {
-      name = Buffer.from(new TextEncoder().encode(key));
-      k = 0n;
-    } else if (typeof key === "bigint" || Number.isSafeInteger(key)) {
-      k = BigInt(key);
-      if (k !== BigInt.asIntN(64, k)) {
-        throw new RangeError("lock key must fit in 64 bits");
-      }
-    } else {
-      throw new TypeError(`lock key must be an integer or a string, got ${String(key)}`);
-    }
+    const [k, name] = lockKey(key);
     const { exclusive = true, nowait = false } = options;
-    return wait(() => this.engine.advisoryLock(String(k), name, Boolean(exclusive), Boolean(nowait), this.tx()!));
+    return wait(() => this.engine.advisoryLock(k, name, Boolean(exclusive), Boolean(nowait), this.tx()!));
+  }
+
+  private async sessionLock<T>(key: bigint | number | string, options: SessionLockOptions, fn: () => Promise<T>): Promise<T> {
+    if (this.url.startsWith("sqlite://")) {
+      throw new QueryError("sqlite does not support advisory locks");
+    }
+    if (typeof fn !== "function") {
+      throw new TypeError("db.lock(key, { session: true }, fn) needs the function to run under the lock");
+    }
+    const [k, name] = lockKey(key);
+    const { exclusive = true, nowait = false, timeout } = options;
+    if (timeout !== undefined && !(timeout >= 0)) {
+      throw new RangeError("lock timeout must be a number of seconds >= 0");
+    }
+    const timeoutMs = timeout === undefined ? null : Math.ceil(timeout * 1000);
+    const held = await wait(() => this.engine.sessionLock(k, name, Boolean(exclusive), Boolean(nowait), timeoutMs));
+    if (held === null) {
+      const after = nowait || timeout === undefined ? "" : ` after ${timeout}s`;
+      throw new LockNotAvailable(`advisory lock ${JSON.stringify(String(key))} is held by another session${after}`);
+    }
+    try {
+      return await fn();
+    } finally {
+      await wait(() => held.release());
+    }
   }
 
   /** Runs raw SQL (one or more statements); gives the number of rows affected. */
@@ -204,6 +246,21 @@ export function getDatabase(): Database {
     throw new NotConnected("no default database; call `await connect(url)` first");
   }
   return defaultDb;
+}
+
+/** A validated lock key: a decimal 64-bit integer, or the UTF-8 name the engine hashes. */
+function lockKey(key: bigint | number | string): [string, Buffer | null] {
+  if (typeof key === "string") {
+    return ["0", Buffer.from(new TextEncoder().encode(key))];
+  }
+  if (typeof key === "bigint" || Number.isSafeInteger(key)) {
+    const k = BigInt(key);
+    if (k !== BigInt.asIntN(64, k)) {
+      throw new RangeError("lock key must fit in 64 bits");
+    }
+    return [String(k), null];
+  }
+  throw new TypeError(`lock key must be an integer or a string, got ${String(key)}`);
 }
 
 /** `db`, or the default database. */

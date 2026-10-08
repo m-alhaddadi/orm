@@ -636,6 +636,9 @@ async with db.transaction():
     await Post.objects.lock(nowait=True).get(...)       # raises orm.LockNotAvailable if locked
     await db.lock("import:42")                          # advisory lock on a name, not a row
     got = await db.lock(42, exclusive=False, nowait=True)   # False instead of waiting
+
+async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction needed
+    await call_shopify(...)
 ```
 
 * `lock(exclusive=True, *, nowait=False, skip_locked=False)`: `exclusive` is
@@ -648,6 +651,14 @@ async with db.transaction():
 * `db.lock(key)` is a transaction-scoped Postgres advisory lock. Postgres keys are
   64-bit integers; a `str` key is hashed to one in Python (first 8 bytes of BLAKE2b,
   signed big-endian).
+* `async with db.lock(key, session=True, timeout=5):` is a session advisory lock: it
+  holds the lock for the block, with no transaction, so the block can make slow calls
+  (HTTP) without an open transaction. The lock pins one pool connection; queries in the
+  block use other connections. It waits at most `timeout` seconds (forever when `None`,
+  not at all with `nowait=True`) and raises `orm.LockNotAvailable` when another session
+  still holds the lock. The lock is released when the block ends, also on an error;
+  when the unlock fails or the task is cancelled, the connection is closed, so the
+  server releases the lock.
 * No optimistic locking (version columns) on purpose.
 
 ### Finding N+1 queries: `orm.debug`
