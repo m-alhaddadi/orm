@@ -489,7 +489,8 @@ impl Engine {
     /// `conflict` (unique field names) rows hitting that constraint update the `update`
     /// fields from the new row and apply the `set` assignments (JSON list of
     /// `{"field", "value"}` IR, parameters in `params`), or are skipped if `update` is
-    /// null.
+    /// null. Rows beyond the parameter limit, or beyond `batchSize`, go to further
+    /// statements in one transaction (inside `tx` when given).
     #[napi(ts_return_type = "Promise<unknown>")]
     #[allow(clippy::too_many_arguments)]
     pub fn insert<'env>(
@@ -504,6 +505,7 @@ impl Engine {
         params_: Unknown<'_>,
         tx: Option<&Transaction>,
         allowed: Option<Vec<String>>,
+        batch_size: Option<u32>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
         protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
@@ -516,13 +518,14 @@ impl Engine {
         });
         let values = convert_rows(env, &self.schema, &model, &fields, rows, true)?;
         let p = params(env, params_)?;
-        let plan =
-            exec::plan_insert(&self.schema, self.target, &model, &fields, values, conflict, &p).map_err(engine_err)?;
+        let plans = exec::plan_inserts(&self.schema, self.target, &model, &fields, values, conflict, &p, batch_size.map(|n| n as usize))
+            .map_err(engine_err)?;
         let target = self.target;
         let conn = self.conn(tx);
+        let own_tx = tx.is_none();
         let schema = self.schema.clone();
         env.spawn_future_with_callback(
-            async move { exec::run(conn.as_ref(), target, plan).await.map_err(engine_err) },
+            async move { exec::run_inserts(conn.as_ref(), target, plans, own_tx).await.map_err(engine_err) },
             move |env, out| outcome_js(env, &schema, out),
         )
     }

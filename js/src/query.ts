@@ -209,6 +209,14 @@ export interface DoUpdate<M extends ModelSpec> extends ConflictOptions<M> {
 
 type InsertOptions<M extends ModelSpec> = DoNothing<M> | DoUpdate<M>;
 
+/** `insertMany`: rows per statement. By default as many as fit in the parameter limit;
+ * the statements run in one transaction. */
+export interface BatchOptions {
+  readonly batchSize?: number;
+}
+
+type InsertManyOptions<M extends ModelSpec> = (InsertOptions<M> & BatchOptions) | BatchOptions;
+
 // -- prefetch -------------------------------------------------------------------------------------
 
 /**
@@ -1122,9 +1130,10 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][])[0]!;
   }
 
-  /** `INSERT` many rows with one statement; gives the new instances in input order (rows
-   * skipped by `doNothing` are left out). */
-  insertMany(rows: readonly M["insert"][], options?: InsertOptions<M>): Promise<M["row"][]> {
+  /** `INSERT` many rows; gives the new instances in input order (rows skipped by
+   * `doNothing` are left out). Rows beyond the parameter limit, or beyond `batchSize`,
+   * go to further statements in one transaction. */
+  insertMany(rows: readonly M["insert"][], options?: InsertManyOptions<M>): Promise<M["row"][]> {
     return this.insertRows(rows, options);
   }
 
@@ -1140,13 +1149,17 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   }
 
   /** @internal */
-  protected async insertRows(rows: readonly object[], options: InsertOptions<M> | undefined): Promise<M["row"][]> {
+  protected async insertRows(rows: readonly object[], options: InsertManyOptions<M> | undefined): Promise<M["row"][]> {
     const prepared = prepareRows(this.meta, rows);
     let conflict: string[] | null = null;
     let update: string[] | null = null;
     let set: string | null = null;
     const params: unknown[] = [];
-    if (options) {
+    const batchSize = options?.batchSize ?? null;
+    if (batchSize !== null && !(Number.isInteger(batchSize) && batchSize >= 1)) {
+      throw new TypeError("batchSize must be an integer of at least 1");
+    }
+    if (options && "onConflict" in options) {
       conflict = ownFields(this.meta, toArray(options.onConflict), "onConflict");
       if (!conflict.length) {
         throw new TypeError("onConflict needs the column(s) of a unique constraint");
@@ -1180,7 +1193,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     const db = this.db();
     if (debugging()) record(`insert:${this.meta.name}:${prepared.fields}:${conflict}`, () => `INSERT INTO ${this.meta.name} (${prepared.fields.join(", ")}) ...`);
     const res = await db_wait(db, (tx) =>
-      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowedWrites()),
+      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowedWrites(), batchSize),
     );
     return new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][];
   }
@@ -1406,7 +1419,7 @@ export class RelatedSet<M extends ModelSpec, L extends string = never> extends Q
   }
 
   /** Inserts related rows pointing at this instance. */
-  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: InsertOptions<M>): Promise<M["row"][]> {
+  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: InsertManyOptions<M>): Promise<M["row"][]> {
     const link = this.link();
     return this.insertRows(rows.map((r) => ({ ...r, ...link })), options);
   }

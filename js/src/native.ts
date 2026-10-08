@@ -97,6 +97,7 @@ export interface NativeEngine {
     params: unknown[],
     tx: NativeTransaction | null,
     allowed?: readonly string[],
+    batchSize?: number | null,
   ): Promise<unknown>;
   attach(model: string, parentId: unknown, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<unknown>;
   updateMany(

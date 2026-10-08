@@ -312,7 +312,9 @@ impl Engine {
     /// `update` fields from the new row and apply the `set` assignments (JSON list of
     /// `{"field", "value"}` IR, parameters in `params`), or are skipped if `update` is
     /// None.
-    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![]))]
+    /// Rows beyond the parameter limit, or beyond `batch_size`, go to further statements
+    /// in one transaction (inside `tx` when given).
+    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![], batch_size = None))]
     #[allow(clippy::too_many_arguments)]
     fn insert<'py>(
         &self,
@@ -327,6 +329,7 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
         db: Option<Bound<'py, PyAny>>,
         allowed: Vec<String>,
+        batch_size: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
@@ -338,14 +341,16 @@ impl Engine {
             None => Conflict::Nothing { target },
         });
         let values = convert_rows(&self.schema, model, &fields, rows, true)?;
-        let plan = exec::plan_insert(&self.schema, self.target, model, &fields, values, conflict, &PyParams(&params))
-            .map_err(engine_err)?;
+        let plans =
+            exec::plan_inserts(&self.schema, self.target, model, &fields, values, conflict, &PyParams(&params), batch_size)
+                .map_err(engine_err)?;
         let target = self.target;
         let conn = self.conn(tx);
+        let own_tx = tx.is_none();
         let classes = self.classes.clone();
         let db = db.map(Bound::unbind);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let out = exec::run(conn.as_ref(), target, plan).await.map_err(engine_err)?;
+            let out = exec::run_inserts(conn.as_ref(), target, plans, own_tx).await.map_err(engine_err)?;
             Python::attach(|py| outcome_to_py(py, out, &classes, db, None))
         })
     }

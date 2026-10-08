@@ -338,7 +338,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         .unwrap();
         writeln!(
             body,
-            "    def insert_many(self, rows: Iterable[{name}Insert]) -> InsertMany[{name}]: ...  # type: ignore[override]"
+            "    def insert_many(self, rows: Iterable[{name}Insert], *, batch_size: int | None = None) -> InsertMany[{name}]: ...  # type: ignore[override]"
         )
         .unwrap();
         writeln!(

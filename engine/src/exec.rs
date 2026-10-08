@@ -253,6 +253,7 @@ pub fn field_types(schema: &Schema, model: &str, fields: &[String]) -> Result<Ve
 
 /// What an insert does with rows hitting a unique constraint (field names; `set` is
 /// assignment IR whose parameters are the insert's `params`).
+#[derive(Clone)]
 pub enum Conflict {
     Nothing { target: Vec<String> },
     Update { target: Vec<String>, update: Vec<String>, set: Vec<ir::Assignment> },
@@ -282,6 +283,92 @@ pub fn plan_insert(
     let (stmt, types): (InsertStatement, _) =
         plan::plan_insert(schema, target, model, fields, rows, on_conflict, params)?;
     Ok(Plan::Insert(stmt, (model_idx, types)))
+}
+
+/// `insert_many`'s plans: [`plan_insert`] for each batch of rows. A batch holds as many
+/// rows as fit in the dialect's parameter limit (less the conflict clause's own
+/// parameters), or `batch_size` rows when that is smaller. Run them with [`run_inserts`].
+#[allow(clippy::too_many_arguments)]
+pub fn plan_inserts(
+    schema: &Schema,
+    target: Target,
+    model: &str,
+    fields: &[String],
+    rows: Vec<Vec<Option<Value>>>,
+    conflict: Option<Conflict>,
+    params: &dyn Params,
+    batch_size: Option<usize>,
+) -> Result<Vec<Plan>> {
+    if batch_size == Some(0) {
+        return Err(Error::query("batch_size must be at least 1"));
+    }
+    #[cfg(feature = "model-composition")]
+    if crate::composed::is_composed(schema, model)? {
+        return Ok(vec![plan_insert(schema, target, model, fields, rows, conflict, params)?]);
+    }
+    let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+    // Client defaults can add columns, so the row width is known only after them.
+    let (fields, mut rows) = crate::client_default::fill(m, fields, rows)?;
+    let mut chunk = target.caps.max_params.saturating_sub(params.len()) / fields.len().max(1);
+    if fields.is_empty() {
+        chunk = 1; // `DEFAULT VALUES` inserts one row
+    }
+    if let Some(n) = batch_size {
+        chunk = chunk.min(n);
+    }
+    let chunk = chunk.max(1);
+    if rows.len() <= chunk {
+        return Ok(vec![plan_insert(schema, target, model, &fields, rows, conflict, params)?]);
+    }
+    let mut plans = Vec::with_capacity(rows.len().div_ceil(chunk));
+    while !rows.is_empty() {
+        let rest = rows.split_off(chunk.min(rows.len()));
+        let conflict = conflict.clone();
+        plans.push(plan_insert(schema, target, model, &fields, std::mem::replace(&mut rows, rest), conflict, params)?);
+    }
+    Ok(plans)
+}
+
+/// Runs [`plan_inserts`]' plans, in a transaction of their own when there are several
+/// and `conn` isn't one already (`own_tx`). Gives the inserted rows in input order.
+pub async fn run_inserts(conn: &dyn Executor, target: Target, mut plans: Vec<Plan>, own_tx: bool) -> Result<Outcome> {
+    if plans.len() == 1 {
+        return run(conn, target, plans.pop().expect("one plan")).await;
+    }
+    let tx = if own_tx { Some(conn.begin().await?) } else { None };
+    let exec: &dyn Executor = match &tx {
+        Some(t) => t.as_ref(),
+        None => conn,
+    };
+    let mut parts = Vec::with_capacity(plans.len());
+    let mut returned = None;
+    let mut failed = None;
+    for plan in plans {
+        match run(exec, target, plan).await {
+            Ok(Outcome::Rows { model, rows, types, .. }) => {
+                returned = Some((model, types));
+                parts.push(rows);
+            }
+            Ok(_) => unreachable!("an insert plan returns rows"),
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    if let Some(t) = tx {
+        match failed {
+            None => t.commit().await?,
+            Some(_) => {
+                let _ = t.rollback().await;
+            }
+        }
+    }
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    let (model, types) = returned.expect("several plans");
+    Ok(Outcome::Rows { model, rows: Box::new(ChainedRows::new(parts)), types, shape: None })
 }
 
 /// `update_many`'s statements, SQL built: run them with [`run_update_many`].

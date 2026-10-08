@@ -788,10 +788,12 @@ class QuerySet(Generic[M]):
 
         return await attach(self, parent_id, values)
 
-    def insert_many(self, rows: Iterable[Mapping[str, Any]]) -> InsertMany[M]:
-        """``INSERT`` many rows with one statement; ``await`` gives the new instances."""
+    def insert_many(self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None) -> InsertMany[M]:
+        """``INSERT`` many rows; ``await`` gives the new instances. One statement per
+        ``batch_size`` rows (by default as many as fit in the parameter limit), all in
+        one transaction."""
         fields, aligned, provided = prepare_rows(self._model, rows)
-        return InsertMany(self, fields, aligned, provided)
+        return InsertMany(self, fields, aligned, provided, batch_size=batch_size)
 
     def __repr__(self) -> str:
         parts = [f"filter{f!r}" for f in self._filters]
@@ -958,10 +960,10 @@ class RelatedSet(QuerySet[M]):
         """Insert a related row pointing at this instance."""
         return super().insert(**values, **self._link())
 
-    def insert_many(self, rows: Iterable[Mapping[str, Any]]) -> InsertMany[M]:
+    def insert_many(self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None) -> InsertMany[M]:
         """Insert related rows pointing at this instance."""
         link = self._link()
-        return super().insert_many({**r, **link} for r in rows)
+        return super().insert_many(({**r, **link} for r in rows), batch_size=batch_size)
 
     def _link(self) -> dict[str, Any]:
         return {self._relation.via: self._instance._field_value(self._relation.from_)}
@@ -1087,7 +1089,7 @@ class ManyRelatedSet(QuerySet[M]):
             await self.add(obj)
         return obj
 
-    def insert_many(self, rows: Iterable[Mapping[str, Any]]) -> InsertMany[M]:
+    def insert_many(self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None) -> InsertMany[M]:
         raise TypeError(
             f"{self._relation.model.__name__}.{self._relation.name}.insert_many() isn't supported; "
             f"insert the rows, then link them with add()"

@@ -511,7 +511,7 @@ constructed. Every write is a statement you await, named after its SQL:
 ```python
 # INSERT ... RETURNING: the instance comes back with id, defaults, timestamps
 alice = await User.objects.insert(email="a@x.io", name="Alice")
-posts = await Post.objects.insert_many([          # one statement for all rows
+posts = await Post.objects.insert_many([          # one statement per batch
     {"author": alice, "title": "Hi", "body": "..."},
     {"author_id": alice.id, "title": "Yo", "body": "...", "views": 3},
 ])
@@ -545,6 +545,10 @@ await post.refresh()
   required fields raise before any SQL runs. Fields left out get their
   `@client_default`, else the column's database default (`DEFAULT` in the VALUES
   list), and `RETURNING` reads them back.
+* `insert_many(rows)` splits the rows so that no statement has more parameters than
+  the database accepts (65,535 on Postgres, 32,766 on SQLite).
+  `insert_many(rows, batch_size=n)` sets a lower number of rows for each statement.
+  All the statements run in one transaction (or in the current one).
 * `do_update()` with no columns overwrites the fields you passed except the conflict
   columns, so `created_at` isn't reset to `now()`. Pass columns to choose them.
 * `do_update(*columns, **values)`: `columns` take the proposed values, `values` are

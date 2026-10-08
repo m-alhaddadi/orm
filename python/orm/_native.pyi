@@ -78,6 +78,7 @@ class Engine:
         tx: Transaction | None = None,
         db: Any = None,
         allowed: Sequence[str] = ...,
+        batch_size: int | None = None,
     ) -> Awaitable[list[Any]]: ...
     def attach(self, model: str, parent_id: Any, fields: list[str], rows: list[list[Any]], tx: Transaction | None = None, db: Any = None, allowed: Sequence[str] = ...) -> Awaitable[list[Any]]: ...
     def update_many(

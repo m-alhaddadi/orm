@@ -154,7 +154,7 @@ def _field_names(model: type[Model], columns: tuple[ColumnRef[Any], ...], what: 
 
 
 class _Insert:
-    __slots__ = ("_qs", "_fields", "_rows", "_provided", "_conflict", "_update", "_set", "_used")
+    __slots__ = ("_qs", "_fields", "_rows", "_provided", "_conflict", "_update", "_set", "_batch_size", "_used")
 
     def __init__(
         self,
@@ -165,7 +165,10 @@ class _Insert:
         conflict: list[str] | None = None,
         update: list[str] | None = None,
         set_: tuple[list[dict[str, Any]], list[Any]] | None = None,
+        batch_size: int | None = None,
     ) -> None:
+        if batch_size is not None and batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
         self._qs = qs
         self._fields = fields
         self._rows = rows
@@ -173,6 +176,7 @@ class _Insert:
         self._conflict = conflict
         self._update = update
         self._set = set_  # DO UPDATE assignments (IR) and their parameters
+        self._batch_size = batch_size
         self._used = False
 
     def _derive(
@@ -183,7 +187,7 @@ class _Insert:
         set_: tuple[list[dict[str, Any]], list[Any]] | None = None,
     ) -> Any:
         self._used = True
-        return cls(self._qs, self._fields, self._rows, self._provided, conflict, update, set_)
+        return cls(self._qs, self._fields, self._rows, self._provided, conflict, update, set_, self._batch_size)
 
     async def _execute(self) -> list[Any]:
         from .db import resolve
@@ -193,7 +197,8 @@ class _Insert:
         model = self._qs.model
         db = resolve(self._qs._db)
         objs: list[Any] = await db._insert(
-            model._meta.name, self._fields, self._rows, self._conflict, self._update, self._set, self._qs._db
+            model._meta.name, self._fields, self._rows, self._conflict, self._update, self._set, self._qs._db,
+            self._batch_size,
         )
         return objs
 
@@ -230,7 +235,8 @@ class InsertOne(_Insert, Generic[R]):
 
 class InsertMany(_Insert, Generic[M]):
     """``await`` gives the inserted instances, in input order (rows skipped by
-    ``do_nothing()`` are left out)."""
+    ``do_nothing()`` are left out). Rows beyond the parameter limit, or beyond
+    ``batch_size``, go to further statements in one transaction."""
 
     __slots__ = ()
 
