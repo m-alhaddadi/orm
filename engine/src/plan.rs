@@ -1853,6 +1853,9 @@ impl<'s> Planner<'s> {
             stmt.expr(self.read_field(self.root, &alias, position, f)?);
             types.push(f.value_type());
         }
+        if let Some(r) = q.related_fields.iter().find(|r| !q.select_related.contains(&r.path)) {
+            return Err(Error::query(format!("only() names fields of {} without select_related", r.path.join("."))));
+        }
         let mut joins: Vec<JoinShape> = vec![];
         for path in &q.select_related {
             let (alias, model) = self.ensure_join(path, "select_related")?;
@@ -1867,10 +1870,10 @@ impl<'s> Planner<'s> {
                         .ok_or_else(|| Error::query("select_related paths must list their prefixes first"))?,
                 ),
             };
+            let named = q.related_fields.iter().find(|r| r.path == *path).map(|r| r.fields.as_slice());
             #[cfg(feature = "query-defaults")]
-            let joined_shape = self.instance_shape(model, if q.without_defaults { None } else { m.query_defaults.fields.as_deref() }, &[])?;
-            #[cfg(not(feature = "query-defaults"))]
-            let joined_shape = None;
+            let named = named.or(if q.without_defaults { None } else { m.query_defaults.fields.as_deref() });
+            let joined_shape = self.instance_shape(model, named, &[])?;
             let joined_positions = shape_positions(m, joined_shape.as_ref());
             joins.push(JoinShape {
                 parent,
@@ -2141,8 +2144,17 @@ fn plan_prefetch(
     if node.query.columns.is_some() || node.query.lock.is_some() {
         return Err(Error::query("a prefetch query can't select columns or lock rows"));
     }
-    let many = rel.kind == RelKind::Many;
+    if node.one && (rel.kind != RelKind::Many || node.attr.is_none()) {
+        return Err(Error::query(format!("one=True needs a to-many relation and to_attr ({}.{})", pm.ir.name, node.relation)));
+    }
+    let many = rel.kind == RelKind::Many && !node.one;
     let mut q = node.query.clone();
+    if node.one {
+        if q.limit.is_some() || q.offset.is_some() {
+            return Err(Error::query("one=True takes the first row by the query's order; drop the slice"));
+        }
+        q.limit = Some(Count::Value(1));
+    }
     q.without_defaults |= without_defaults;
     let pk_order = Order { expr: Expr::Col { path: vec![], name: cm.pk_field().name.clone() }, desc: false, nulls: None };
     #[cfg(feature = "query-defaults")]

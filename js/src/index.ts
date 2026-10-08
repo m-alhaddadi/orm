@@ -40,7 +40,7 @@ export {
   window,
 } from "./expr.js";
 export type { Many, Compat, Operand, OrderOptions } from "./expr.js";
-export { ModelMeta, Registry, define, load, loads, registry } from "./model.js";
+export { ModelMeta, Registry, column, define, load, loads, registry } from "./model.js";
 export type { Instance, ModelClass, Row, SchemaIR } from "./model.js";
 export { ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet, prefetch, useQuerySet } from "./query.js";
 export type { Page, PageOptions } from "./pagination.js";

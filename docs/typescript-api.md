@@ -170,6 +170,14 @@ The types check the following:
   not in `orderBy()` or as a plain `select()` column, because those would repeat rows.
   Aggregates over it are fine.
 
+### Partial rows, OR of query sets, column paths
+
+* `only(Comment.body, Comment.post.title)`: a column through to-one relations loads the relation with `selectRelated` and trims the joined instance to the given fields.
+  Without a column of the model itself, its instances keep only their hidden keys. A to-many path throws. The row type does not show the joined relation; cast it.
+* `qs1.or(qs2)`: one query set with the filter `(filters of qs1) OR (filters of qs2)`. `qs2` sets nothing but filters, neither is sliced, and each side has at most one `filter()`/`exclude()` call.
+* `new Prefetch(User.posts, Post.objects.orderBy("-views"), { toAttr: "best", one: true })` stores the first related row, or `null`, in `user.best` (typed `Post | null`). It needs `toAttr` and takes no slice.
+* `column(Bundle, "items.product.title")` is the column a dotted path of TypeScript names gives, for adapters that map request names to columns.
+
 ### Cursor pagination
 
 ```ts

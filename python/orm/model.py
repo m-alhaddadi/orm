@@ -30,7 +30,7 @@ if "reference-loading" in _CAPABILITIES:
     from . import _references
     _reference_adapter = _references
 
-__all__ = ["Model", "ModelMeta", "Registry", "registry", "define", "load", "loads"]
+__all__ = ["Model", "ModelMeta", "Registry", "registry", "column", "define", "load", "loads"]
 
 
 _ABSENT = object()
@@ -554,6 +554,24 @@ class Model:
         shown = ", ".join(f"{n}={d[n]!r}" for n in self._meta.field_names if n in d)
         return f"{type(self).__name__}({shown})"
 
+
+
+def column(model: type[Model], path: str) -> ColumnRef[Any]:
+    """The column a dotted path names: ``column(Bundle, "items.product.title")`` is
+    ``Bundle.items.product.title``. Each name before the last is a relation (to-one or
+    to-many), the last a field. For adapters that take names from a request, such as a
+    search or ordering filter."""
+    *hops, name = path.split(".")
+    target: type[Model] = model
+    for hop in hops:
+        rel = target._meta.relations.get(hop)
+        if rel is None:
+            raise LookupError(f"{target.__name__} has no relation {hop!r} (in {path!r})")
+        target = rel.target
+    field = target._meta.fields.get(name)
+    if field is None:
+        raise LookupError(f"{target.__name__} has no field {name!r} (in {path!r})")
+    return ColumnRef(model, tuple(hops), field)
 
 
 def loads(

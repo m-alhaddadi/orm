@@ -288,6 +288,21 @@ await Profile.objects.select(func.unnest(Profile.links))                # one ro
   text, and an index out of range gives `None`. `func.unnest(...)` returns one row per
   element, so it is valid only as a `select()` column. SQLite has no array columns.
 
+### Partial rows, OR of query sets, column paths
+
+* `only(...)` gives partial instances (see [`selection-and-defaults.md`](selection-and-defaults.md)).
+  A column through to-one relations trims the joined instance: `Comment.objects.only(Comment.body, Comment.post.title)` loads `comment.post` with `select_related`, with only `title` public.
+  Without a column of the model itself (`only(Comment.post.title)`), the model's instances keep only their primary key and relation keys, hidden, as Django's `only("post__title")`.
+  A to-many path raises `TypeError`.
+* `qs1 | qs2` is one query set with the filter `(filters of qs1) OR (filters of qs2)`; order, loading and `using` come from `qs1`.
+  `qs2` must set nothing but filters, neither may be sliced, and each side has at most one `filter()`/`exclude()` call, else `QueryError`:
+  conditions of one call through a to-many relation must hold for one related row, so two calls can't be joined into one.
+* `Prefetch(User.posts, Post.objects.order_by(-Post.views), to_attr="best", one=True)` stores the first related row, or `None`, in `user.best` instead of a list.
+  It needs `to_attr` and a to-many relation, and takes no slice (it is a limit of one per parent).
+* `orm.column(Bundle, "items.product.title")` is the column a dotted path names, the same as `Bundle.items.product.title`.
+  Each name before the last is a relation, the last a field; an unknown name raises `LookupError`.
+  It is for adapters that map request names to columns (search and ordering filters). It is a function, not `Model.column`, so it can't collide with a field named `column`.
+
 ### Big tables: batches
 
 ```python

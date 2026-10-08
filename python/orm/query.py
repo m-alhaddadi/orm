@@ -69,34 +69,45 @@ class Prefetch(Generic[M]):
     ``select_related`` apply to them. The rows fill ``user.posts`` (so
     ``user.posts.cached`` and ``await user.posts`` give only them), or the plain list
     attribute ``to_attr`` (``user.top_posts``) when given.
+
+    ``one=True`` (with ``to_attr``, on a to-many relation) stores the first related row by
+    the query set's order, or ``None``, instead of a list: ``user.latest_post``.
     """
 
-    __slots__ = ("path", "queryset", "to_attr")
+    __slots__ = ("path", "queryset", "to_attr", "one")
 
-    def __init__(self, path: RelationPath[M], queryset: QuerySet[M] | None = None, *, to_attr: str | None = None) -> None:
+    def __init__(
+        self, path: RelationPath[M], queryset: QuerySet[M] | None = None, *, to_attr: str | None = None, one: bool = False
+    ) -> None:
         if not isinstance(path, RelationPath):
             raise TypeError(f"Prefetch() takes a relation such as User.posts, got {path!r}")
         if queryset is not None and queryset.model is not path._target:
             raise TypeError(f"Prefetch({path!r}) needs a query set of {path._target.__name__}")
         if to_attr is not None and (not to_attr.isidentifier() or to_attr.startswith("_")):
             raise ValueError(f"to_attr {to_attr!r} must be an identifier not starting with '_'")
+        if one and to_attr is None:
+            raise ValueError("Prefetch(one=True) needs to_attr")
+        if one and queryset is not None and (queryset._limit is not None or queryset._offset is not None):
+            raise ValueError("Prefetch(one=True) takes the first row by the query set's order; drop the slice")
         self.path = path
         self.queryset = queryset
         self.to_attr = to_attr
+        self.one = one
 
     def __repr__(self) -> str:
-        return f"Prefetch({self.path!r}, {self.queryset!r}, to_attr={self.to_attr!r})"
+        return f"Prefetch({self.path!r}, {self.queryset!r}, to_attr={self.to_attr!r}{', one=True' if self.one else ''})"
 
 
 class _Node:
     """One relation in the tree of prefetches."""
 
-    __slots__ = ("relation", "attr", "qs", "children")
+    __slots__ = ("relation", "attr", "qs", "children", "one")
 
     def __init__(self, relation: str, attr: str, qs: QuerySet[Any] | None) -> None:
         self.relation = relation
         self.attr = attr
         self.qs = qs
+        self.one = False
         self.children: list[tuple[tuple[str, ...], Prefetch[Any]]] = []
 
 
@@ -115,6 +126,7 @@ def _prefetch_tree(model: type[Model], items: Iterable[tuple[tuple[str, ...], Pr
         elif node.relation != hop:
             raise ValueError(f"prefetch_related stores {model.__name__}.{node.relation} and .{hop} both in {attr!r}")
         if len(hops) == 1:
+            node.one = node.one or p.one
             if p.queryset is not None:
                 if node.qs is not None and node.qs is not p.queryset:
                     raise ValueError(f"{p.path!r} is prefetched twice with different query sets; use to_attr")
@@ -140,6 +152,8 @@ def _prefetch_ir(model: type[Model], items: Iterable[tuple[tuple[str, ...], Pref
         ir["relation"] = node.relation
         if node.attr != node.relation:
             ir["attr"] = node.attr
+        if node.one:
+            ir["one"] = True
         out.append(ir)
     return out
 
@@ -185,13 +199,15 @@ class QuerySet(Generic[M]):
     ``exclude(User.posts.published == False)`` keeps users with no unpublished post.
     """
 
-    __slots__ = ("_model_helpers", "_without_defaults", "_without_related", "_model_fields", "_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db", "_from", "_joins", "_result")
+    __slots__ = ("_model_helpers", "_without_defaults", "_without_related", "_model_fields", "_related_fields", "_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db", "_from", "_joins", "_result")
 
     def __init__(self, model: type[M]) -> None:
         self._model_helpers: tuple[str, ...] = ()
         self._without_defaults = False
         self._without_related = False
         self._model_fields: tuple[str, ...] | None = None
+        # `only()` through to-one paths: the fields of each joined model, by path.
+        self._related_fields: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = ()
         self._model = model
         self._filters: tuple[Condition, ...] = ()
         self._order: tuple[Ordering, ...] = ()
@@ -217,6 +233,7 @@ class QuerySet(Generic[M]):
         new._without_defaults = self._without_defaults
         new._without_related = self._without_related
         new._model_fields = self._model_fields
+        new._related_fields = self._related_fields
         new._model = self._model
         new._filters = self._filters
         new._order = self._order
@@ -246,18 +263,47 @@ class QuerySet(Generic[M]):
 
     def without_related(self) -> Self:
         """Clear default and explicitly requested eager reference loading."""
-        return self._clone(_without_related=True, _related=())
+        return self._clone(_without_related=True, _related=(), _related_fields=())
 
     def only(self, *fields: ColumnRef[Any]) -> Self:
-        """Return partial model instances. No arguments restores all public fields."""
-        names = []
+        """Return partial model instances. No arguments restores all public fields.
+
+        A column through to-one relations (``only(BundleItem.bundle.type)``) loads the
+        relation with ``select_related`` and trims the joined instance to the given
+        fields. Without a column of the model itself, the model's instances keep only
+        their primary key and relation keys, hidden."""
+        names: list[str] = []
+        related: dict[tuple[str, ...], list[str]] = {}
         for field in fields:
-            if not isinstance(field, ColumnRef) or field._root is not self._model or field._path:
-                raise TypeError("only() takes root model columns")
-            names.append(field._field.name)
-        if len(set(names)) != len(names):
+            if not isinstance(field, ColumnRef) or field._root is not self._model:
+                raise TypeError(f"only() takes columns of {self._model.__name__} or of its to-one relations")
+            if field._path:
+                self._check_to_one(field._path)
+                related.setdefault(field._path, []).append(field._field.name)
+            else:
+                names.append(field._field.name)
+        if len(set(names)) != len(names) or any(len(set(v)) != len(v) for v in related.values()):
             raise TypeError("duplicate model field")
-        return self._clone(_model_fields=tuple(names) if fields else self._model._meta.field_names)
+        if not fields:
+            return self._clone(_model_fields=self._model._meta.field_names, _related_fields=())
+        # a hop only() joins for a deeper column keeps only its keys, as the root does
+        for path in list(related):
+            for i in range(1, len(path)):
+                if path[:i] not in self._related:
+                    related.setdefault(path[:i], [])
+        qs = self._clone(_model_fields=tuple(names), _related_fields=tuple((p, tuple(f)) for p, f in related.items()))
+        joined = list(qs._related)
+        for path in related:
+            joined.extend(path[:i] for i in range(1, len(path) + 1) if path[:i] not in joined)
+        return qs._clone(_related=tuple(joined))
+
+    def _check_to_one(self, path: tuple[str, ...]) -> None:
+        model: Any = self._model
+        for hop in path:
+            rel = model._meta.relations[hop]
+            if isinstance(rel, (HasMany, ManyToMany)):
+                raise TypeError(f"only() can't go through the to-many relation {model.__name__}.{hop}")
+            model = rel.target
 
     def filter(self, *conditions: ConditionLike) -> Self:
         """Keep rows matching all ``conditions``."""
@@ -534,6 +580,8 @@ class QuerySet(Generic[M]):
             ir["without_related"] = True
         if self._model_fields is not None:
             ir["model_fields"] = list(self._model_fields)
+        if self._related_fields and op == "select" and outer is None and ctes is None:
+            ir["related_fields"] = [{"path": list(p), "fields": list(f)} for p, f in self._related_fields]
         if self._model_helpers:
             ir["model_helpers"] = list(self._model_helpers)
         if self._from is not None:
@@ -792,6 +840,29 @@ class QuerySet(Generic[M]):
         """``INSERT`` many rows with one statement; ``await`` gives the new instances."""
         fields, aligned, provided = prepare_rows(self._model, rows)
         return InsertMany(self, fields, aligned, provided)
+
+    def __or__(self, other: QuerySet[M]) -> Self:
+        """``qs1 | qs2``: the rows of either, as one query set with the filter
+        ``(filters of qs1) OR (filters of qs2)``; the rest (order, loading, ``using``)
+        comes from ``qs1``. ``qs2`` sets nothing but filters, neither is sliced, and each
+        has at most one ``filter()``/``exclude()`` call: conditions of one call through a
+        to-many relation hold for one related row, so two calls can't be joined."""
+        from .expr import or_
+
+        if not isinstance(other, QuerySet) or other._model is not self._model:
+            raise TypeError(f"| combines query sets of {self._model.__name__}")
+        for qs in (self, other):
+            if qs._limit is not None or qs._offset is not None:
+                raise QueryError("| can't combine a sliced query set")
+            if len(qs._filters) > 1:
+                raise QueryError("| needs one filter() call per side; put the conditions in one call")
+        base = QuerySet(self._model)
+        for name in QuerySet.__slots__:
+            if name not in ("_filters", "_model", "_result") and getattr(other, name) != getattr(base, name):
+                raise QueryError(f"| takes filters only from the right query set, which also sets {name.lstrip('_')}")
+        if not self._filters or not other._filters:
+            return self._clone(_filters=())
+        return self._clone(_filters=(or_(self._filters[0], other._filters[0]),))
 
     def __repr__(self) -> str:
         parts = [f"filter{f!r}" for f in self._filters]

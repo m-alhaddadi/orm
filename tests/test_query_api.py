@@ -207,3 +207,81 @@ async def test_prefetch_checks_its_input(clean):
         await orm.prefetch([alice, posts[0]], User.posts)
     with pytest.raises(ValueError, match="does not start at User"):
         await orm.prefetch([alice], Post.author)
+
+
+# -- only() through to-one paths (F11) ------------------------------------------------------
+
+
+async def test_only_through_a_to_one_path(clean):
+    await seed()
+    qs = Comment.objects.only(Comment.body, Comment.post.title)
+    sql = qs.sql()
+    assert '"title"' in sql and '"views"' not in sql and '"published"' not in sql
+    comment = await Comment.objects.insert(post=(await Post.objects.get(Post.title == "hit")), body="x")
+    (c,) = await qs.filter(Comment.id == comment.id)
+    assert c.body == "x" and c.post.title == "hit" and c.post.pk is not None
+    with pytest.raises(orm.NotLoaded):
+        c.post.views
+    with pytest.raises(orm.NotLoaded):
+        c.created_at
+
+
+async def test_only_a_path_column_leaves_the_root_without_public_fields(clean):
+    # S4.4: Django's meaning of only("post__title")
+    _, _, posts = await seed()
+    await Comment.objects.insert(post=posts[0], body="x")
+    (c,) = await Comment.objects.only(Comment.post.author.name)
+    assert c.post.author.name == "Alice" and c.pk is not None
+    with pytest.raises(orm.NotLoaded):
+        c.body
+    with pytest.raises(orm.NotLoaded):
+        c.post.title
+
+
+def test_only_rejects_a_to_many_path():
+    with pytest.raises(TypeError, match="to-many relation User.posts"):
+        User.objects.only(User.posts.title)
+
+
+# -- qs1 | qs2, Prefetch(one=True), orm.column ----------------------------------------------
+
+
+async def test_or_of_query_sets(clean):
+    await seed()
+    popular = Post.objects.order_by(Post.id).filter(Post.views >= 80)
+    drafts = Post.objects.filter(~Post.published)
+    assert [p.title for p in await (popular | drafts)] == ["draft", "hit"]
+    assert len(await (popular | Post.objects)) == 4
+    with pytest.raises(orm.QueryError, match="one filter"):
+        popular.filter(Post.views < 100) | drafts
+    with pytest.raises(orm.QueryError, match="sets order"):
+        drafts | popular
+    with pytest.raises(orm.QueryError, match="sliced"):
+        popular[:1] | drafts
+
+
+async def test_prefetch_one_stores_a_row_or_none(clean):
+    await seed()
+    await User.objects.insert(email="carol@example.com", name="Carol")
+    users = await User.objects.order_by(User.id).prefetch_related(
+        orm.Prefetch(User.posts, Post.objects.order_by(-Post.views), to_attr="best", one=True)
+    )
+    assert [u.best.title if u.best else None for u in users] == ["hit", "bob", None]
+    with pytest.raises(ValueError, match="to_attr"):
+        orm.Prefetch(User.posts, one=True)
+    with pytest.raises(ValueError, match="slice"):
+        orm.Prefetch(User.posts, Post.objects[:2], to_attr="x", one=True)
+    with pytest.raises(orm.QueryError, match="to-many"):
+        await Post.objects.prefetch_related(orm.Prefetch(Post.author, to_attr="writer", one=True))
+
+
+async def test_column_from_a_dotted_path(clean):
+    await seed()
+    assert repr(orm.column(Comment, "post.author.name")) == repr(Comment.post.author.name)
+    names = await User.objects.filter(orm.column(User, "posts.title").startswith("hi")).select(User.name).scalars()
+    assert names == ["Alice"]
+    assert [p.title for p in await Post.objects.order_by(-orm.column(Post, "views"))][:1] == ["hit"]
+    with pytest.raises(LookupError, match="Post has no relation 'nope'"):
+        orm.column(Post, "nope.title")
+    with pytest.raises(LookupError, match="User has no field 'nope'"):
+        orm.column(Post, "author.nope")

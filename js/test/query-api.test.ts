@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ManyRelatedSet, Prefetch, QuerySet, RelatedSet, prefetch, useQuerySet } from "../src/index.js";
+import { ManyRelatedSet, NotLoaded, Prefetch, QueryError, QuerySet, RelatedSet, column, prefetch, useQuerySet } from "../src/index.js";
 import { Comment, Post, Tag, User, type PostSpec, type TagSpec } from "./blog/models.js";
 import { useDatabase } from "./helpers.js";
 
@@ -124,4 +124,51 @@ test("prefetch checks its input", async () => {
   await prefetch([], User.posts);
   await assert.rejects(prefetch([alice, rows[0]!], User.posts), /one model/);
   await assert.rejects(prefetch([alice], Post.author as never), /does not start at User|User has no relation/);
+});
+
+// -- only() through to-one paths --------------------------------------------------------------
+
+test("only() through a to-one path", async () => {
+  const { posts: rows } = await seed();
+  const qs = Comment.objects.only(Comment.body, Comment.post.title);
+  assert.ok(qs.sql().includes('"title"') && !qs.sql().includes('"views"'));
+  await Comment.objects.insert({ post: rows[1]!, body: "x" });
+  const [c] = (await qs) as unknown as { body: string; post: { title: string; views: number } }[];
+  assert.equal(c!.body, "x");
+  assert.equal(c!.post.title, "hit");
+  assert.throws(() => c!.post.views, NotLoaded);
+  const [d] = (await Comment.objects.only(Comment.post.author.name)) as unknown as { body: string; post: { author: { name: string } } }[];
+  assert.equal(d!.post.author.name, "Alice");
+  assert.throws(() => d!.body, NotLoaded);
+  assert.throws(() => User.objects.only(User.posts.title), /to-many relation User.posts/);
+});
+
+// -- or(), Prefetch one, column() ---------------------------------------------------------------
+
+test("or() of query sets", async () => {
+  await seed();
+  const popular = Post.objects.orderBy("id").filter(Post.views.gte(80));
+  const drafts = Post.objects.filter(Post.published.eq(false));
+  assert.deepEqual((await popular.or(drafts)).map((p) => p.title), ["draft", "hit"]);
+  assert.equal((await popular.or(Post.objects)).length, 4);
+  assert.throws(() => popular.filter(Post.views.lt(100)).or(drafts), /one filter/);
+  assert.throws(() => drafts.or(popular), /sets order/);
+  assert.throws(() => popular.slice(0, 1).or(drafts), QueryError);
+});
+
+test("Prefetch one stores a row or null", async () => {
+  await seed();
+  await User.objects.insert({ email: "carol@example.com", name: "Carol" });
+  const users = await User.objects.orderBy("id").prefetchRelated(new Prefetch(User.posts, Post.objects.orderBy("-views"), { toAttr: "best", one: true }));
+  assert.deepEqual(users.map((u) => u.best?.title ?? null), ["hit", "bob", null]);
+  assert.throws(() => new Prefetch(User.posts, Post.objects.slice(0, 2), { toAttr: "x", one: true }), /slice/);
+});
+
+test("column() from a dotted path", async () => {
+  await seed();
+  assert.equal(String(column(Comment, "post.author.name")), String(Comment.post.author.name));
+  const names = await User.objects.filter((column(User, "posts.title") as typeof User.posts.title).startsWith("hi")).select({ name: User.name }).scalars();
+  assert.deepEqual(names, ["Alice"]);
+  assert.throws(() => column(Post, "nope.title"), /Post has no relation "nope"/);
+  assert.throws(() => column(Post, "author.nope"), /User has no field "nope"/);
 });

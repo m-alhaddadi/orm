@@ -745,3 +745,24 @@ export function fieldValue(o: object, name: string): unknown {
   if (internal && Object.hasOwn(internal, name)) return internal[name];
   return row[name]; // prototype throws NotLoaded
 }
+
+/**
+ * The column a dotted path names: `column(Bundle, "items.product.title")` is
+ * `Bundle.items.product.title`. Each name before the last is a relation (to-one or
+ * to-many), the last a field; the names are the TypeScript (camelCase) ones. For adapters
+ * that take names from a request, such as a search or ordering filter.
+ */
+export function column(model: ModelClass<ModelSpec>, path: string): Column<unknown, string> {
+  let meta = model._meta;
+  let target: unknown = model;
+  const names = path.split(".");
+  for (const [i, name] of names.entries()) {
+    const rel = meta.relations.get(name);
+    if (i < names.length - 1 ? !rel : !meta.fields.has(name)) {
+      throw new TypeError(`${meta.name} has no ${i < names.length - 1 ? "relation" : "field"} ${JSON.stringify(name)} (in ${JSON.stringify(path)})`);
+    }
+    target = (target as Record<string, unknown>)[name];
+    if (rel) meta = meta.registry.get(rel.target);
+  }
+  return target as Column<unknown, string>;
+}
