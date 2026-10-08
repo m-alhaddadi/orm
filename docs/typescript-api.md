@@ -366,10 +366,11 @@ await debug.nPlusOne(async () => {
 //   at src/views.ts:42; use selectRelated(Customer.person)
 ```
 
-* The scope counts the queries of `fn` by statement shape: the query without its values.
+* The scope counts the statements of `fn` by shape: the SQL with placeholders, without values.
+  It reads the same events as `db.onQuery`, so prefetch queries and `updateMany` batches count one by one.
   Work that `fn` starts counts too, and so do the queries of an inner scope.
   An inner scope cannot raise the threshold of an outer scope; the outer scope also counts the inner queries.
-  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `inBulk()`) count as one query.
+  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `inBulk()`) count as one query when they have one shape.
 * When `fn` resolves, a shape that ran more than `threshold` times (default 5) throws `debug.NPlusOne` with `fail: true`, or emits an `NPlusOneWarning` process warning.
   `error.report` has each shape, its SQL, its count, the call site of its first query and the fix.
 * The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated unchanged to-many or many-to-many query (`post.comments.all()`, `post.tags.all()`).
@@ -377,6 +378,37 @@ await debug.nPlusOne(async () => {
   Outside it, each query pays one `AsyncLocalStorage` read (about 2 ns, measured).
 * In tests, `await debug.expectNoNPlusOne(fn, { threshold })` throws `NPlusOne` when `fn` sends an N+1.
   Without source maps (`node --enable-source-maps`), the call site is a line of the compiled JavaScript.
+
+### Raw SQL and query plans
+
+```ts
+const rows = await db.fetch("SELECT id, email FROM users WHERE created_at > $1 AND name = $2", since, "Ann");
+// [{ id: 7n, email: "ann@example.com" }]
+console.log(await Post.objects.filter(Post.authorId.eq(7n)).explain());
+console.log(await Post.objects.filter(Post.authorId.eq(7n)).explain({ analyze: true }));
+```
+
+`db.fetch(sql, ...params)` gives an array of objects by column name, and `qs.explain({ analyze })` gives the plan as text.
+They work as in Python (`docs/python-api.md`, "Raw SQL and query plans").
+A parameter's type comes from its JS value: `bigint` and integer numbers are `bigint`, strings are `text`, plain objects and arrays are JSON, and `Date` is `timestamptz`.
+`bigint` columns come back as `bigint`, and `timestamptz` and `date` as `Date`.
+
+### Query hooks and OpenTelemetry
+
+`db.onQuery(hook)` calls `hook(event)` after each statement that the database runs, and gives a function that removes the hook:
+
+```ts
+const off = db.onQuery((e: QueryEvent) => {
+  if (e.duration > 100) console.warn(`${e.duration.toFixed(0)} ms, ${e.rows} rows: ${e.sql}`);
+});
+```
+
+* `QueryEvent` has `sql` (the SQL with placeholders, never the values), `start` (Unix milliseconds), `duration` (milliseconds), `rows` and `error` (`null` on success).
+* The events, the timing and the context are the same as in Python (`docs/python-api.md`, "Query hooks and OpenTelemetry").
+  The hook runs in the async context of the caller, after the ORM call ends. An error that the hook throws rejects that call.
+
+`instrument(db, { tracer })` from `orm/otel` gives each statement a client span with the same name, attributes and status as in Python, and gives a function that stops the spans.
+Without `tracer`, it loads `@opentelemetry/api` (an optional peer dependency) and uses `trace.getTracer("orm")`.
 
 ### Hooks for packages
 
@@ -397,6 +429,35 @@ Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,
 `IntegrityError`, `LockNotAvailable`, `QueryError`, `SchemaError`, `NotConnected`,
 `NotLoaded`, `TransactionRequired`, `DoesNotExist`, `MultipleObjectsReturned`,
 `MigrationError` and `WriteProtected`. Values of the wrong type throw a `TypeError` before any SQL runs.
+
+A `DatabaseError` (and its subclasses) has `sqlstate`, `constraint` and `detail`, each `null` when the database did not give it.
+They are the same as in Python (see `docs/python-api.md`, "Database errors"): SQLite constraint failures get the Postgres SQLSTATE, and only Postgres gives `constraint` and `detail`.
+
+```ts
+try {
+  await User.objects.insert({ email, name });
+} catch (e) {
+  if (!(e instanceof IntegrityError) || e.constraint !== "users_email_key") throw e;
+  // the email is taken
+}
+```
+
+The ORM does not retry a transaction.
+Run the whole transaction again on a serialization failure (`40001`) or a deadlock (`40P01`):
+
+```ts
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await db.transaction(fn);
+    } catch (e) {
+      const retry = e instanceof DatabaseError && (e.sqlstate === "40001" || e.sqlstate === "40P01");
+      if (!retry || attempt === attempts - 1) throw e;
+      await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
+    }
+  }
+}
+```
 
 ## Migrations and the CLI
 

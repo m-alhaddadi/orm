@@ -8,6 +8,13 @@ export class ORMError extends Error {
 /** Reported by the database or the driver. */
 export class DatabaseError extends ORMError {
   override name = "DatabaseError";
+  /** The five-character SQLSTATE (`"23505"`); SQLite constraint failures get the
+   * Postgres code too. */
+  sqlstate: string | null = null;
+  /** The violated constraint's name (Postgres only). */
+  constraint: string | null = null;
+  /** The database's DETAIL line (Postgres only). */
+  detail: string | null = null;
 }
 
 /** Unique, foreign key, check, exclusion or not-null violation. */
@@ -86,14 +93,27 @@ export function fromNative(e: unknown): unknown {
   if (!(e instanceof Error)) {
     return e;
   }
-  const m = /^\[orm:(\w+)\] ([\s\S]*)$/.exec(e.message);
+  const m = /^\[orm:(\w+)(\+?)\] ([\s\S]*)$/.exec(e.message);
   const cls = m && KINDS[m[1]!];
   if (!m || !cls) {
     return e;
   }
-  const out = new cls(m[2]!);
+  // `+`: a JSON line of database error fields comes before the message.
+  let message = m[3]!;
+  let fields: { sqlstate?: string | null; constraint?: string | null; detail?: string | null } = {};
+  if (m[2]) {
+    const nl = message.indexOf("\n");
+    fields = JSON.parse(message.slice(0, nl)) as typeof fields;
+    message = message.slice(nl + 1);
+  }
+  const out = new cls(message);
+  if (out instanceof DatabaseError) {
+    out.sqlstate = fields.sqlstate ?? null;
+    out.constraint = fields.constraint ?? null;
+    out.detail = fields.detail ?? null;
+  }
   if (e.stack) {
-    out.stack = `${out.name}: ${m[2]}\n${e.stack.split("\n").slice(1).join("\n")}`;
+    out.stack = `${out.name}: ${message}\n${e.stack.split("\n").slice(1).join("\n")}`;
   }
   return out;
 }

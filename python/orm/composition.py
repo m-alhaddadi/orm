@@ -36,5 +36,6 @@ async def attach(qs: QuerySet[M], parent_id: Any, values: Mapping[str, Any]) -> 
             raise ValueError(f"{meta.name}.{name} is required")
     names = list(local)
     db = resolve(qs._db)
-    rows = await db._engine.attach(meta.name, parent_id, names, [[local[n] for n in names]], db._tx(), qs._db, allowed_writes())
+    local_rows, tx, allowed = [[local[n] for n in names]], db._tx(), allowed_writes()
+    rows = await db._call(lambda t: db._engine.attach(meta.name, parent_id, names, local_rows, tx, qs._db, allowed, t))
     return cast(M, rows[0])

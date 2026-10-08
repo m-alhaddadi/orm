@@ -26,11 +26,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
 
 use crate::build::{Builder, Classes};
-use crate::convert::{py_to_value, PyParams};
+use crate::convert::{cell_to_py, py_to_value, PyParams};
 use crate::errors::{db_err, engine_err, query_err, schema_err};
 use orm_core::dialect::Target;
 use orm_engine::db::{self, Driver, Executor};
@@ -244,17 +244,48 @@ impl Transaction {
     }
 }
 
+/// The statements of the engine calls it is passed to, drained by `take()`.
+#[pyclass(frozen, module = "orm._native")]
+struct Trace(orm_engine::trace::Trace);
+
+#[pymethods]
+impl Trace {
+    #[new]
+    fn new() -> Self {
+        Trace(orm_engine::trace::Trace::new())
+    }
+
+    /// `(sql, start, duration, rows, error)` per statement, oldest first: `start` in Unix
+    /// seconds, `duration` in seconds. The trace is empty afterwards.
+    #[allow(clippy::type_complexity)]
+    fn take(&self) -> Vec<(String, f64, f64, u64, Option<String>)> {
+        self.0
+            .take()
+            .into_iter()
+            .map(|e| {
+                let start = e.start.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+                (e.sql, start, e.duration.as_secs_f64(), e.rows, e.error)
+            })
+            .collect()
+    }
+}
+
 /// A held session advisory lock (`db.lock(..., session=True)`).
 #[pyclass(frozen, module = "orm._native")]
 struct SessionLock {
     inner: Arc<dyn db::SessionLock>,
+    unlock: String,
 }
 
 #[pymethods]
 impl SessionLock {
-    fn release<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (trace = None))]
+    fn release<'py>(&self, py: Python<'py>, trace: Option<&Bound<'py, Trace>>) -> PyResult<Bound<'py, PyAny>> {
         let lock = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { lock.release().await.map_err(db_err) })
+        let (sql, trace) = (self.unlock.clone(), trace.map(|t| t.get().0.clone()));
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            orm_engine::trace::timed(trace.as_ref(), sql, lock.release(), |_| 1).await.map_err(db_err)
+        })
     }
 }
 
@@ -272,6 +303,11 @@ impl Engine {
             Some(tx) => tx.get().inner.clone(),
             None => self.driver.clone(),
         }
+    }
+
+    /// `conn(tx)`, recording each statement into `trace` when given.
+    fn traced(&self, tx: Option<&Bound<'_, Transaction>>, trace: Option<&Bound<'_, Trace>>) -> Arc<dyn Executor> {
+        orm_engine::trace::wrap(self.conn(tx), trace.map(|t| &t.get().0))
     }
 
     /// Runs `statements` in order, in one transaction (Postgres DDL is transactional),
@@ -297,7 +333,7 @@ impl Engine {
     /// `select(...)` columns; count -> int; exists -> bool; update / delete -> rows
     /// affected (with `returning` -> instances). Instances get `db` as `_db`.
     /// `allowed` names the models the current `allow_writes` scope allows to write.
-    #[pyo3(signature = (op_json, params, tx = None, row_cls = None, db = None, allowed = vec![]))]
+    #[pyo3(signature = (op_json, params, tx = None, row_cls = None, db = None, allowed = vec![], trace = None))]
     #[allow(clippy::too_many_arguments)]
     fn run<'py>(
         &self,
@@ -308,6 +344,7 @@ impl Engine {
         row_cls: Option<Bound<'py, PyAny>>,
         db: Option<Bound<'py, PyAny>>,
         allowed: Vec<String>,
+        trace: Option<&Bound<'py, Trace>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let op = parse_op(op_json).map_err(engine_err)?;
         if let Operation::Update(ir::Update { model, .. }) | Operation::Delete(ir::Delete { model, .. }) = &op {
@@ -315,7 +352,7 @@ impl Engine {
         }
         let target = self.target;
         let plan = Planner::plan(&self.schema, target, &op, &PyParams(&params)).map_err(engine_err)?;
-        let conn = self.conn(tx);
+        let conn = self.traced(tx, trace);
         let classes = self.classes.clone();
         let row_cls = row_cls.map(Bound::unbind);
         let db = db.map(Bound::unbind);
@@ -334,7 +371,7 @@ impl Engine {
     /// partial unique index.
     /// Rows beyond the parameter limit, or beyond `batch_size`, go to further statements
     /// in one transaction (inside `tx` when given).
-    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![], batch_size = None, conflict_where = None))]
+    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![], batch_size = None, conflict_where = None, trace = None))]
     #[allow(clippy::too_many_arguments)]
     fn insert<'py>(
         &self,
@@ -351,6 +388,7 @@ impl Engine {
         allowed: Vec<String>,
         batch_size: Option<usize>,
         conflict_where: Option<&str>,
+        trace: Option<&Bound<'py, Trace>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
@@ -370,7 +408,7 @@ impl Engine {
             exec::plan_inserts(&self.schema, self.target, model, &fields, values, conflict, &PyParams(&params), batch_size)
                 .map_err(engine_err)?;
         let target = self.target;
-        let conn = self.conn(tx);
+        let conn = self.traced(tx, trace);
         let own_tx = tx.is_none();
         let classes = self.classes.clone();
         let db = db.map(Bound::unbind);
@@ -401,16 +439,16 @@ impl Engine {
 
     /// Attach local values to an existing shared-key parent.
     #[cfg(feature = "model-composition")]
-    #[pyo3(signature = (model, parent_id, fields, rows, tx = None, db = None, allowed = vec![]))]
+    #[pyo3(signature = (model, parent_id, fields, rows, tx = None, db = None, allowed = vec![], trace = None))]
     #[allow(clippy::too_many_arguments)]
-    fn attach<'py>(&self, py: Python<'py>, model: &str, parent_id: &Bound<'py, PyAny>, fields: Vec<String>, rows: &Bound<'py, PyList>, tx: Option<&Bound<'py, Transaction>>, db: Option<Bound<'py, PyAny>>, allowed: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
+    fn attach<'py>(&self, py: Python<'py>, model: &str, parent_id: &Bound<'py, PyAny>, fields: Vec<String>, rows: &Bound<'py, PyList>, tx: Option<&Bound<'py, Transaction>>, db: Option<Bound<'py, PyAny>>, allowed: Vec<String>, trace: Option<&Bound<'py, Trace>>) -> PyResult<Bound<'py, PyAny>> {
         protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let model_idx = self.schema.model_idx(model).map_err(schema_err)?;
         let identity = py_to_value(parent_id, Some(self.schema.model(model_idx).pk_field().value_type()))?;
         let values = convert_rows(&self.schema, model, &fields, rows, true)?;
         let plan = orm_engine::composed::prepare_attach(&self.schema, self.target, model, identity, &fields, values).map_err(engine_err)?;
         let target = self.target;
-        let conn = self.conn(tx);
+        let conn = self.traced(tx, trace);
         let classes = self.classes.clone();
         let db = db.map(Bound::unbind);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -423,7 +461,7 @@ impl Engine {
     /// own values, among the rows matching `filters_json` (JSON list of filter IR, values
     /// in `params`). Big inputs run as several statements in one transaction (inside `tx`
     /// when given). Returns the number of rows updated, or the rows with `returning`.
-    #[pyo3(signature = (model, fields, rows, filters_json, params, returning = false, batch_size = None, tx = None, db = None, without_defaults = false, allowed = vec![]))]
+    #[pyo3(signature = (model, fields, rows, filters_json, params, returning = false, batch_size = None, tx = None, db = None, without_defaults = false, allowed = vec![], trace = None))]
     #[allow(clippy::too_many_arguments)]
     fn update_many<'py>(
         &self,
@@ -439,6 +477,7 @@ impl Engine {
         db: Option<Bound<'py, PyAny>>,
         without_defaults: bool,
         allowed: Vec<String>,
+        trace: Option<&Bound<'py, Trace>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let classes = self.classes.clone();
@@ -446,7 +485,7 @@ impl Engine {
         let (_, um) = update_many_plan(
             &self.schema, self.target, model, &fields, rows, filters_json, &params, returning, batch_size, without_defaults,
         )?;
-        let conn = self.conn(tx);
+        let conn = self.traced(tx, trace);
         let own_tx = tx.is_none();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let out = exec::run_update_many(conn.as_ref(), um, own_tx).await.map_err(engine_err)?;
@@ -465,12 +504,14 @@ impl Engine {
     }
 
     /// Advisory lock on a validated integer key or UTF-8 name, returning a boolean.
+    #[pyo3(signature = (key, name, exclusive, nowait, tx, trace = None))]
+    #[allow(clippy::too_many_arguments)]
     fn advisory_lock<'py>(
         &self, py: Python<'py>, key: i64, name: Option<&[u8]>,
-        exclusive: bool, nowait: bool, tx: &Bound<'py, Transaction>,
+        exclusive: bool, nowait: bool, tx: &Bound<'py, Transaction>, trace: Option<&Bound<'py, Trace>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let key = name.map(orm_engine::advisory::key).unwrap_or(key);
-        let conn = self.conn(Some(tx));
+        let conn = self.traced(Some(tx), trace);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             conn.advisory_lock(key, exclusive, nowait).await.map_err(db_err)
         })
@@ -484,29 +525,86 @@ impl Engine {
     }
 
     /// Session advisory lock on a pinned connection; `None` when it is not taken.
-    #[pyo3(signature = (key, name, exclusive, nowait, timeout_ms = None))]
+    #[pyo3(signature = (key, name, exclusive, nowait, timeout_ms = None, trace = None))]
+    #[allow(clippy::too_many_arguments)]
     fn session_lock<'py>(
         &self, py: Python<'py>, key: i64, name: Option<&[u8]>,
-        exclusive: bool, nowait: bool, timeout_ms: Option<u64>,
+        exclusive: bool, nowait: bool, timeout_ms: Option<u64>, trace: Option<&Bound<'py, Trace>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let key = name.map(orm_engine::advisory::key).unwrap_or(key);
         let driver = self.driver.clone();
+        let trace = trace.map(|t| t.get().0.clone());
+        let sql = orm_engine::advisory::session_sql(key, exclusive, nowait);
+        let unlock = orm_engine::advisory::unlock_sql(key, exclusive);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let lock = driver.session_lock(key, exclusive, nowait, timeout_ms).await.map_err(db_err)?;
-            Ok(lock.map(|inner| SessionLock { inner }))
+            let taken = driver.session_lock(key, exclusive, nowait, timeout_ms);
+            let lock = orm_engine::trace::timed(trace.as_ref(), sql, taken, |l| l.is_some() as u64).await.map_err(db_err)?;
+            Ok(lock.map(|inner| SessionLock { inner, unlock }))
         })
     }
 
     /// Raw SQL escape hatch (one or more statements); returns rows affected.
-    #[pyo3(signature = (sql, tx = None))]
+    #[pyo3(signature = (sql, tx = None, trace = None))]
     fn execute<'py>(
         &self,
         py: Python<'py>,
         sql: String,
         tx: Option<&Bound<'py, Transaction>>,
+        trace: Option<&Bound<'py, Trace>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let conn = self.conn(tx);
+        let conn = self.traced(tx, trace);
         pyo3_async_runtimes::tokio::future_into_py(py, async move { conn.batch(sql).await.map_err(db_err) })
+    }
+
+    /// The query plan of a read IR document (see `exec::explain`), as text.
+    #[pyo3(signature = (op_json, params, analyze = false, tx = None, trace = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn explain<'py>(
+        &self,
+        py: Python<'py>,
+        op_json: &str,
+        params: Vec<Bound<'py, PyAny>>,
+        analyze: bool,
+        tx: Option<&Bound<'py, Transaction>>,
+        trace: Option<&Bound<'py, Trace>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let op = parse_op(op_json).map_err(engine_err)?;
+        let target = self.target;
+        let plan = Planner::plan(&self.schema, target, &op, &PyParams(&params)).map_err(engine_err)?;
+        let conn = self.traced(tx, trace);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            exec::explain(conn.as_ref(), target, &plan, analyze).await.map_err(engine_err)
+        })
+    }
+
+    /// Raw SQL with parameters (types taken from the values); a list of dicts by
+    /// column name, cells typed by the database.
+    #[pyo3(signature = (sql, params, tx = None, trace = None))]
+    fn fetch<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        params: Vec<Bound<'py, PyAny>>,
+        tx: Option<&Bound<'py, Transaction>>,
+        trace: Option<&Bound<'py, Trace>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let args = params.iter().map(|p| py_to_value(p, None)).collect::<PyResult<Vec<_>>>()?;
+        let conn = self.traced(tx, trace);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let rows = conn.fetch(sql, args).await.map_err(db_err)?;
+            Python::attach(|py| {
+                let names: Vec<Bound<'_, PyString>> = rows.columns().iter().map(|c| PyString::new(py, c)).collect();
+                let out = PyList::empty(py);
+                for r in 0..rows.len() {
+                    let row = PyDict::new(py);
+                    for (c, name) in names.iter().enumerate() {
+                        row.set_item(name, cell_to_py(py, rows.cell(r, c).map_err(db_err)?)?)?;
+                    }
+                    out.append(row)?;
+                }
+                out.into_py_any(py)
+            })
+        })
     }
 
     /// Raw query returning rows of text: every selected column is read as text.
@@ -817,8 +915,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySchema>()?;
     m.add_class::<Engine>()?;
     m.add_class::<Transaction>()?;
+    m.add_class::<Trace>()?;
     m.add_class::<SessionLock>()?;
     m.add("DEFAULT", Py::new(py, DefaultMarker)?)?;
+    errors::add_defaults(py)?;
     m.add("DatabaseError", py.get_type::<errors::DatabaseError>())?;
     m.add("IntegrityError", py.get_type::<errors::IntegrityError>())?;
     m.add("LockNotAvailable", py.get_type::<errors::LockNotAvailable>())?;

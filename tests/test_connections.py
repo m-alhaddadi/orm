@@ -327,3 +327,25 @@ async def test_scope_values_in_default_filters_are_closed_by_default(db, dialect
     finally:
         await sdb.drop_tables()
         await sdb.close()
+
+
+async def test_query_hooks_see_replica_reads_and_session_locks(clean):
+    db = clean
+    url = await replica_url(db)
+    routed = await orm.connect(db.url, replicas=[url], default=False, max_connections=2)
+    events: list[orm.QueryEvent] = []
+    remove = routed.on_query(events.append)
+    try:
+        assert [u.name for u in await User.objects.using(routed)] == ["Replica"]
+        assert await User.objects.using(routed.primary).count() == 0  # the primary view shares the hooks
+        assert [(e.sql.split(" ", 1)[0], e.rows) for e in events] == [("SELECT", 1), ("SELECT", 1)]
+        events.clear()
+        async with routed.lock(4242, session=True, timeout=5):
+            pass
+        assert [(e.sql, e.rows) for e in events] == [
+            ("SELECT pg_advisory_lock(4242)::text", 1),
+            ("SELECT pg_advisory_unlock(4242)::text", 1),
+        ]
+    finally:
+        remove()
+        await routed.close()

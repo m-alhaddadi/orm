@@ -753,9 +753,23 @@ async def test_advisory_locks(clean):
 
 
 async def test_integrity_error(clean):
-    await User.objects.insert(email="dup@example.com", name="A")
-    with pytest.raises(orm.IntegrityError):
+    a = await User.objects.insert(email="dup@example.com", name="A")
+    with pytest.raises(orm.IntegrityError) as e:
         await User.objects.insert(email="dup@example.com", name="B")
+    assert e.value.sqlstate == "23505"
+    assert e.value.constraint == "users_email_key"
+    assert e.value.detail == "Key (email)=(dup@example.com) already exists."
+    with pytest.raises(orm.IntegrityError) as e:
+        await Post.objects.insert(author_id=a.id + 1000, title="t", body="b")
+    assert (e.value.sqlstate, e.value.constraint) == ("23503", "posts_author_id_fkey")
+    with pytest.raises(orm.DatabaseError) as e:
+        await orm.get_database().execute("SELECT 1/0")
+    assert (e.value.sqlstate, e.value.constraint, e.value.detail) == ("22012", None, None)
+
+
+def test_database_error_fields_default_to_none():
+    err = orm.DatabaseError("from user code")
+    assert (err.sqlstate, err.constraint, err.detail) == (None, None, None)
 
 
 async def test_transactions(clean):

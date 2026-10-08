@@ -718,6 +718,45 @@ Outside a transaction, `fn()` runs at once.
 Callbacks run in registration order, outside the transaction.
 An error in a callback goes to the caller of `transaction()`, and the later callbacks do not run; the transaction is already committed.
 
+### Database errors
+
+An `orm.DatabaseError` (and its subclasses `IntegrityError`, `LockNotAvailable`) has three attributes:
+
+* `sqlstate`: the five-character SQLSTATE, for example `"23505"` (unique), `"23503"` (foreign key), `"23502"` (not null), `"23514"` (check).
+  SQLite constraint failures get the same Postgres codes; other SQLite errors give `None`.
+* `constraint`: the name of the violated constraint (Postgres only), for example `"users_email_key"`.
+* `detail`: the database's DETAIL line (Postgres only), for example `"Key (email)=(a@example.com) already exists."`.
+
+Each is `None` when the database did not give it.
+
+```python
+try:
+    await User.objects.insert(email=email, name=name)
+except orm.IntegrityError as e:
+    if e.constraint != "users_email_key":
+        raise
+    ...  # the email is taken
+```
+
+The ORM does not retry a transaction.
+A transaction that fails with a serialization failure (`40001`) or a deadlock (`40P01`) can run again:
+
+```python
+async def transfer(db, a, b, amount, attempts=3):
+    for attempt in range(attempts):
+        try:
+            async with db.transaction():
+                ...  # the whole transaction, reads included
+            return
+        except orm.DatabaseError as e:
+            if e.sqlstate not in ("40001", "40P01") or attempt == attempts - 1:
+                raise
+            await asyncio.sleep(0.05 * 2**attempt)
+```
+
+Retry the whole transaction, never one statement in it: Postgres aborts the transaction on these errors.
+`40001` occurs only at the `REPEATABLE READ` and `SERIALIZABLE` isolation levels; the default `READ COMMITTED` gives deadlocks only.
+
 ### Protected writes
 
 `@@protected_write` is an application-level check in the ORM. It does not protect the database.
@@ -822,10 +861,11 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
 #   at app/views.py:42; use select_related(Customer.person)
 ```
 
-* The scope counts its queries by statement shape: the query without its values.
+* The scope counts its statements by shape: the SQL with placeholders, without values.
+  It reads the same events as `db.on_query`, so prefetch queries and `update_many` batches count one by one.
   Tasks started in the scope count too, and so do the queries of an inner scope.
   An inner scope cannot raise the threshold of an outer scope; the outer scope also counts the inner queries.
-  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `in_bulk()`) count as one query.
+  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `in_bulk()`) count as one query when they have one shape.
 * The call site is the line that awaits the query (`await qs`, `await p.customers.all()`).
   A query that `asyncio.gather()` or `create_task()` runs reports the line that started the event loop.
 * When the block ends, a shape that ran more than `threshold` times (default 5) raises `orm.debug.NPlusOne` with `fail=True`, or gives an `orm.debug.NPlusOneWarning`.
@@ -835,6 +875,66 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
   Outside it, each query pays one `ContextVar` read (about 15 ns, measured).
 * In a test suite, add `pytest_plugins = ["orm.testing"]` to `conftest.py`.
   The `n_plus_one` fixture counts the whole test and fails it at teardown; set `n_plus_one.threshold` to change the threshold.
+
+### Raw SQL and query plans
+
+```python
+rows = await db.fetch("SELECT id, email FROM users WHERE created_at > $1 AND name = $2", since, "Ann")
+# [{"id": 7, "email": "ann@example.com"}]
+n = await db.execute("VACUUM ANALYZE posts")        # one or more statements, no parameters; rows affected
+
+print(await Post.objects.filter(Post.author_id == 7).explain())              # EXPLAIN
+print(await Post.objects.filter(Post.author_id == 7).explain(analyze=True))  # runs it: real times and rows
+```
+
+* `db.fetch(sql, *params)` runs one query and gives a list of dicts by column name (a repeated column name keeps the last value).
+  Placeholders are `$1, $2, ...` on Postgres and `?` on SQLite.
+* A parameter's type comes from its Python value: `int` is `bigint`, `str` is `text`, `dict` and `list` are JSON, and `datetime`, `date`, `Decimal`, `UUID` and `bool` have their own types.
+  Cast in the SQL where a column needs another type: `WHERE id = $1::uuid` for a `str`.
+* Cells come back by the column type that the database reports.
+  Postgres gives `bigint`, `integer`, `smallint`, `double precision`, `real`, `boolean`, text types and enums, `timestamptz`, `date`, `uuid`, `json`, `jsonb`, `numeric` and arrays of them.
+  Any other type (`timestamp`, `interval`, `bytea`, ...) raises `DatabaseError`; cast it in the SQL (`::text`, `::timestamptz`).
+  SQLite gives each value by its storage class (`int`, `float`, `str`, `None`); a blob raises.
+* `fetch` runs in the current transaction, and query hooks see it.
+* `qs.explain(analyze=False)` gives the plan of the query set's SELECT as text, not of its prefetch queries.
+  On Postgres, `analyze=True` runs the query with `EXPLAIN (ANALYZE, BUFFERS)`; a query set with `lock()` raises `QueryError` there, because the run would take the row locks.
+  On SQLite, it gives `EXPLAIN QUERY PLAN`, each step indented under its parent. SQLite has no `analyze`, so `analyze=True` raises `QueryError`.
+
+### Query hooks and OpenTelemetry
+
+`db.on_query(hook)` calls `hook(event)` after each statement that the database runs, and gives a function that removes the hook:
+
+```python
+def log_slow(e: orm.QueryEvent) -> None:
+    if e.duration > 0.1:
+        logger.warning("%.0f ms, %d rows: %s", e.duration * 1000, e.rows, e.sql)
+
+remove = db.on_query(log_slow)
+```
+
+* `orm.QueryEvent` has `sql` (the SQL with placeholders, never the values), `start` (Unix seconds), `duration` (seconds), `rows` and `error`.
+  `rows` is the rows returned, or the rows affected by a statement that returns no rows.
+  `error` is the database's message when the statement failed; the ORM call still raises.
+* Each statement gives one event: a prefetch query, each `update_many` batch, each `db.execute`.
+  Reads sent to a replica and the lock and unlock of `db.lock(..., session=True)` give events too.
+  `COMMIT`, `ROLLBACK` and the `set_config` statements of `db.tenant()` give no event.
+* The hooks belong to the database: `db.primary` shares them.
+* The engine times the statement in Rust, from the send to the last row, without the conversion to Python objects.
+* The hook runs after the ORM call ends, in the task that made the call.
+  So context variables, for example the current span or a request id, are those of the caller.
+  An exception in a hook propagates to that caller.
+* With no hook and no N+1 scope, a query pays one list check and one `ContextVar` read.
+  With a hook, each call creates a trace and each statement records one event.
+  A prepared `get` on SQLite took 252 µs with an empty hook and 247 µs without (measured on a loaded machine, so the difference is noise-level).
+
+`orm.otel.instrument(db)` gives each statement a client span, and gives a function that stops the spans.
+It needs `opentelemetry-api` (`pip install 'orm[otel]'`); configure the SDK and the exporter as usual.
+`instrument(db, tracer=t)` uses the tracer `t` instead of `get_tracer("orm")`.
+
+* The span starts and ends at the statement's times. Its parent is the current span of the caller.
+* The span name is the SQL operation (`SELECT`, `INSERT`, ...).
+  The attributes are `db.system.name` (`postgresql` or `sqlite`), `db.operation.name`, `db.query.text` (with placeholders) and `db.response.returned_rows`.
+* A failed statement gets the `ERROR` status and the database's message.
 
 ### Hooks for packages: `orm.hooks`
 

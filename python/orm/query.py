@@ -626,6 +626,25 @@ class QuerySet(Generic[M]):
         sql: str = self._native().sql(json.dumps(ir), params)
         return sql
 
+    async def explain(self, analyze: bool = False) -> str:
+        """The database's plan for this query's SELECT (not for its prefetch queries).
+
+        Postgres gives ``EXPLAIN`` text; ``analyze=True`` runs the query with
+        ``EXPLAIN (ANALYZE, BUFFERS)`` and adds the real times and row counts. SQLite gives
+        ``EXPLAIN QUERY PLAN``, each step indented under its parent, and has no
+        ``analyze``.
+        """
+        from .db import _with_scope, resolve
+
+        if analyze and self._lock is not None:
+            raise QueryError("explain(analyze=True) would run the query and take its row locks; drop lock() to explain it")
+        params: list[Any] = []
+        op, params = _with_scope(json.dumps(self._select_ir("select", params)), params)
+        db = resolve(self._db)
+        engine, tx = db._reader(), db._tx()
+        plan: str = await db._call(lambda t: engine.explain(op, params, analyze, tx, t))
+        return plan
+
     # -- execution -----------------------------------------------------------------------
 
     async def _run(self, ir: dict[str, Any], params: list[Any], row_cls: type | None = None) -> Any:
@@ -919,7 +938,7 @@ class Prepared(Generic[M]):
 
     def _start(self, kind: str, values: Mapping[str, Any]) -> Awaitable[Any]:
         """Starts the statement; the engine's awaitable comes back as is, without a
-        coroutine around it."""
+        coroutine around it, unless a query hook or an N+1 scope observes it."""
         from .db import _with_scope, resolve
 
         c = self._statement(kind)
@@ -928,10 +947,9 @@ class Prepared(Generic[M]):
         if qs._lock is not None:
             qs._check_lock()
         db = resolve(qs._db)
-        if debug._scope.get() is not None:
-            debug.record("run:" + c.json, lambda: str(qs._native().statement(c.json, params)))
         op, params = _with_scope(c.json, params)
-        return db._reader().run(op, params, db._tx(), None, qs._db, allowed_writes())
+        engine, tx, allowed = db._reader(), db._tx(), allowed_writes()
+        return db._call(lambda t: engine.run(op, params, tx, None, qs._db, allowed, t))
 
     def __call__(self, **values: Any) -> Awaitable[list[M]]:
         """The rows, like awaiting the query set."""

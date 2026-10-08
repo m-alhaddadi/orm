@@ -53,7 +53,7 @@ export { Select } from "./select.js";
 export { Cte, CteColumn } from "./cte.js";
 export type { CteSelf } from "./cte.js";
 export { Database, connect, getDatabase, scope } from "./db.js";
-export type { ConnectOptions, SessionLockOptions } from "./db.js";
+export type { ConnectOptions, QueryEvent, SessionLockOptions } from "./db.js";
 export {
   DatabaseError,
   DoesNotExist,

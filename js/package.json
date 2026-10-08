@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/src/index.d.ts",
       "default": "./dist/src/index.js"
+    },
+    "./otel": {
+      "types": "./dist/src/otel.d.ts",
+      "default": "./dist/src/otel.js"
     }
   },
   "bin": {
@@ -40,7 +44,8 @@
     "@orm/native-postgres": "0.1.0",
     "@orm/native-sqlite": "0.1.0",
     "@orm/native-combined": "0.1.0",
-    "@orm/native-tooling": "0.1.0"
+    "@orm/native-tooling": "0.1.0",
+    "@opentelemetry/api": "^1.0.0"
   },
   "peerDependenciesMeta": {
     "@orm/native-postgres": {
@@ -53,6 +58,9 @@
       "optional": true
     },
     "@orm/native-tooling": {
+      "optional": true
+    },
+    "@opentelemetry/api": {
       "optional": true
     }
   }

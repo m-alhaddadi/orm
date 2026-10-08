@@ -5,9 +5,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { LockNotAvailable, NotConnected, QueryError, TransactionRequired } from "./errors.js";
 import type { IR } from "./expr.js";
 import { registry as defaultRegistry, type Registry } from "./model.js";
-import { call, native, wait, type NativeEngine, type NativeTransaction } from "./native.js";
+import { call, native, wait, type NativeEngine, type NativeTrace, type NativeTransaction } from "./native.js";
 import { allowedWrites } from "./protection.js";
-import { active as debugging, record } from "./debug.js";
+import { active as debugging, capture, record } from "./debug.js";
 
 let defaultDb: Database | undefined;
 
@@ -26,6 +26,20 @@ export interface LockOptions {
   /** Give `false` instead of waiting when the lock is held. */
   readonly nowait?: boolean;
   readonly session?: false;
+}
+
+/** One statement the database ran, given to the hooks of {@link Database.onQuery}. */
+export interface QueryEvent {
+  /** The SQL with its parameter placeholders: the statement shape, without values. */
+  readonly sql: string;
+  /** When the statement started, in Unix milliseconds (`Date.now()`). */
+  readonly start: number;
+  /** How long it ran, in milliseconds. */
+  readonly duration: number;
+  /** Rows returned, or rows affected by a statement that returns no rows. */
+  readonly rows: number;
+  /** The database's error message when the statement failed. */
+  readonly error: string | null;
 }
 
 export interface SessionLockOptions {
@@ -50,6 +64,8 @@ export function inTransaction<T>(db: Database, tx: NativeTransaction, fn: () => 
 
 /** A connection pool. Created by {@link connect}. */
 export class Database {
+  /** Hooks live on the root: `primary` views share them. */
+  readonly #hooks: ((event: QueryEvent) => unknown)[] = [];
   private turn = 0;
   /** @internal The database a `primary` view belongs to: they share transactions and callbacks. */
   root: Database = this;
@@ -61,6 +77,42 @@ export class Database {
     readonly registry: Registry,
     private readonly replicas: readonly NativeEngine[] = [],
   ) {}
+
+  /**
+   * Calls `hook(event)` after each statement this database runs (prefetch queries and
+   * `updateMany` batches included), also when it fails. Gives a function that removes
+   * the hook.
+   *
+   * The hook runs in the async context that sent the query, after the ORM call ends, so
+   * `AsyncLocalStorage` values (a current span, a request id) are those of the caller.
+   * An error the hook throws rejects that call.
+   */
+  onQuery(hook: (event: QueryEvent) => unknown): () => void {
+    this.root.#hooks.push(hook);
+    return () => {
+      const i = this.root.#hooks.indexOf(hook);
+      if (i >= 0) this.root.#hooks.splice(i, 1);
+    };
+  }
+
+  /** @internal Runs an engine call in the current transaction; traced when a hook or an
+   * N+1 scope listens. */
+  send<T>(start: (tx: NativeTransaction | null, trace: NativeTrace | null) => Promise<T>): Promise<T> {
+    const tx = this.tx();
+    if (!this.root.#hooks.length && !debugging()) return wait(() => start(tx, null));
+    const trace = new (native().Trace)();
+    return this.#observe(trace, capture(), wait(() => start(tx, trace)));
+  }
+
+  async #observe<T>(trace: NativeTrace, origin: ReturnType<typeof capture>, pending: Promise<T>): Promise<T> {
+    try {
+      return await pending;
+    } finally {
+      const events: QueryEvent[] = trace.take().map((e) => ({ ...e, error: e.error ?? null }));
+      if (origin) for (const e of events) record(e.sql, origin);
+      for (const hook of [...this.root.#hooks]) for (const e of events) hook(e);
+    }
+  }
 
   /** @internal The primary's engine, with the tenant of an enclosing `tenant()` call. */
   get engine(): NativeEngine {
@@ -120,9 +172,9 @@ export class Database {
   /** @internal */
   runJson(json: string, params: unknown[]): Promise<unknown> {
     [json, params] = withScope(json, params);
-    if (debugging()) record(`run:${json}`, () => this.registry.native().statement(json, params));
     const engine = READ.test(json) ? this.reader() : this.engine;
-    return wait(() => engine.run(json, params, this.tx(), allowedWrites()));
+    const allowed = allowedWrites();
+    return this.send((tx, trace) => engine.run(json, params, tx, allowed, trace));
   }
 
   /**
@@ -210,7 +262,7 @@ export class Database {
     }
     const [k, name] = lockKey(key);
     const { exclusive = true, nowait = false } = options;
-    return wait(() => this.engine.advisoryLock(k, name, Boolean(exclusive), Boolean(nowait), this.tx()!));
+    return this.send((tx, trace) => this.engine.advisoryLock(k, name, Boolean(exclusive), Boolean(nowait), tx!, trace));
   }
 
   private async sessionLock<T>(key: bigint | number | string, options: SessionLockOptions, fn: () => Promise<T>): Promise<T> {
@@ -226,7 +278,8 @@ export class Database {
       throw new RangeError("lock timeout must be a number of seconds >= 0");
     }
     const timeoutMs = timeout === undefined ? null : Math.ceil(timeout * 1000);
-    const held = await wait(() => this.engine.sessionLock(k, name, Boolean(exclusive), Boolean(nowait), timeoutMs));
+    const engine = this.engine;
+    const held = await this.send((_, trace) => engine.sessionLock(k, name, Boolean(exclusive), Boolean(nowait), timeoutMs, trace));
     if (held === null) {
       const after = nowait || timeout === undefined ? "" : ` after ${timeout}s`;
       throw new LockNotAvailable(`advisory lock ${JSON.stringify(String(key))} is held by another session${after}`);
@@ -234,13 +287,26 @@ export class Database {
     try {
       return await fn();
     } finally {
-      await wait(() => held.release());
+      await this.send((_, trace) => held.release(trace));
     }
   }
 
   /** Runs raw SQL (one or more statements); gives the number of rows affected. */
   execute(sql: string): Promise<number> {
-    return wait(() => this.engine.execute(sql, this.tx()));
+    return this.send((tx, trace) => this.engine.execute(sql, tx, trace));
+  }
+
+  /**
+   * Runs one raw SQL query with parameters; gives its rows as objects by column name.
+   *
+   * Placeholders are `$1, $2, ...` on Postgres and `?` on SQLite. A parameter's type
+   * comes from its JS value (`bigint` and integer numbers are `bigint`, strings `text`,
+   * plain objects and arrays JSON); cast in the SQL where the column needs another type
+   * (`$1::uuid`). Cells come back by the column types the database reports. Runs in the
+   * current transaction, and query hooks see it.
+   */
+  fetch(sql: string, ...params: unknown[]): Promise<Record<string, unknown>[]> {
+    return this.send((tx, trace) => this.engine.fetch(sql, params, tx, trace));
   }
 
   /** Raw query whose columns are all read as text. For tooling (migrations). */

@@ -43,7 +43,11 @@ test("SQLite CRUD, relations, enums, JSON, bulk defaults and CASE updates", asyn
     assert.deepEqual(updated.map((b) => b.pages), [2, 9]);
     const same = await Author.objects.using(db).insert({ email: "a", name: "Updated" }, { onConflict: Author.email, doUpdate: true });
     assert.equal(same!.id, a.id);
-    await assert.rejects(Book.objects.using(db).insert({ authorId: 999n, title: "orphan" }), IntegrityError);
+    await assert.rejects(Book.objects.using(db).insert({ authorId: 999n, title: "orphan" }), (e: unknown) => {
+      assert.ok(e instanceof IntegrityError);
+      assert.deepEqual([e.sqlstate, e.constraint], ["23503", null]);
+      return true;
+    });
     await db.dropTables();
   } finally { await db.close(); }
 });

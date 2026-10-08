@@ -15,6 +15,7 @@ pub mod migrate;
 pub mod params;
 pub mod plan;
 pub mod protect;
+pub mod trace;
 
 pub use error::{Error, Result};
 pub use params::{NoParams, Params};

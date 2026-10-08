@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { connect, define, getDatabase, loads, param, Registry, scope } from '../src/index.js';
+import { connect, define, getDatabase, loads, param, Registry, scope, type QueryEvent } from '../src/index.js';
 import { native } from '../src/native.js';
 import { User } from './blog/models.js';
 import { useDatabase, otherDatabase } from './helpers.js';
@@ -269,3 +269,24 @@ for (const dialect of ['postgres', 'sqlite']) {
     }
   });
 }
+
+test('query hooks see replica reads and session locks', async () => {
+  const db = getDatabase(), url = await replicaUrl();
+  const routed = await connect(db.url, { replicas: [url], default: false, maxConnections: 2 });
+  const events: QueryEvent[] = [];
+  const off = routed.onQuery((e) => events.push(e));
+  try {
+    assert.deepEqual((await User.objects.using(routed)).map((u) => u.name), ['Replica']);
+    assert.equal(await User.objects.using(routed.primary).count(), 0); // the primary view shares the hooks
+    assert.deepEqual(events.map((e) => [e.sql.split(' ')[0], e.rows]), [['SELECT', 1], ['SELECT', 1]]);
+    events.length = 0;
+    await routed.lock(4242, { session: true, timeout: 5 }, async () => {});
+    assert.deepEqual(events.map((e) => [e.sql, e.rows]), [
+      ['SELECT pg_advisory_lock(4242)::text', 1],
+      ['SELECT pg_advisory_unlock(4242)::text', 1],
+    ]);
+  } finally {
+    off();
+    await routed.close();
+  }
+});
