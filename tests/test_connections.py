@@ -193,12 +193,49 @@ async def test_session_lock_survives_a_cancelled_waiter(db):
             waiter.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await waiter
+            # The server stops the cancelled wait: no backend stays in the lock queue.
+            await asyncio.sleep(0.3)
+            queued = "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 9 AND NOT granted"
+            assert await db._fetch_text(queued) == [("0",)]
         # The cancelled waiter's connection is closed, so it does not keep the lock.
         await asyncio.sleep(0.2)
         async with db.lock(9, session=True, nowait=True):
             pass
     finally:
         await other.close()
+
+
+async def test_session_lock_keeps_the_error_of_its_block_when_the_unlock_fails(db):
+    kill = "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND objid = 4241 AND granted"
+    with pytest.raises(KeyError, match="mine"):
+        async with db.lock(4241, session=True):
+            await db.execute(kill)
+            raise KeyError("mine")
+    async with db.lock(4241, session=True):
+        await db.execute(kill)
+    # A failed unlock on a live connection closes it, so the server drops the lock.
+    await db.execute(RLS_ROLE)
+    app = await orm.connect("postgres://orm_s6_app:app@" + db.url.split("@", 1)[1], default=False, max_connections=1)
+    try:
+        async with app.lock(4242, session=True):
+            await db.execute("REVOKE EXECUTE ON FUNCTION pg_advisory_unlock(bigint) FROM PUBLIC")
+        async with db.lock(4242, session=True, nowait=True):
+            pass
+    finally:
+        await db.execute("GRANT EXECUTE ON FUNCTION pg_advisory_unlock(bigint) TO PUBLIC")
+        await app.close()
+
+
+async def test_session_lock_timeout_bounds(db):
+    async with db.lock(5, session=True, timeout=float("inf")):
+        pass
+    for timeout in (-1, 3e6, float("nan")):
+        with pytest.raises(ValueError, match="lock timeout"):
+            async with db.lock(5, session=True, timeout=timeout):
+                pass
+    async with db.transaction():
+        with pytest.raises(TypeError, match="session=True"):
+            await db.lock(5, timeout=1)  # type: ignore[call-overload]
 
 
 async def test_session_lock_validation():
@@ -274,12 +311,15 @@ model Note {
 }
 """
 
-RLS = """
+RLS_ROLE = """
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'orm_s6_app') THEN
     CREATE ROLE orm_s6_app LOGIN PASSWORD 'app';
   END IF;
 END $$;
+"""
+
+RLS = RLS_ROLE + """
 GRANT SELECT, INSERT, UPDATE, DELETE ON s6_notes TO orm_s6_app;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO orm_s6_app;
 ALTER TABLE s6_notes ENABLE ROW LEVEL SECURITY;

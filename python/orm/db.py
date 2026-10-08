@@ -17,6 +17,9 @@ from .model import Registry, registry
 
 __all__ = ["Database", "connect", "get_database", "scope"]
 
+# Postgres `lock_timeout` takes at most 2^31 - 1 ms.
+_MAX_TIMEOUT = 2147483.647
+
 # Statements a replica may answer.
 _READS = frozenset({"select", "count", "exists"})
 
@@ -239,6 +242,8 @@ class Database:
         """
         if session:
             return self._session_lock(key, exclusive, nowait, timeout)
+        if timeout is not None:
+            raise TypeError("lock(timeout=...) needs session=True; a transaction lock waits or uses nowait")
         return self._xact_lock(key, exclusive, nowait)
 
     def _lock_key(self, key: int | str) -> tuple[int, bytes | None]:
@@ -269,9 +274,9 @@ class Database:
         if self.url.startswith("sqlite://"):
             raise QueryError("sqlite does not support advisory locks")
         k, name = self._lock_key(key)
-        if timeout is not None and not timeout >= 0:
-            raise ValueError("lock timeout must be a number of seconds >= 0")
-        timeout_ms = None if timeout is None else math.ceil(timeout * 1000)
+        if timeout is not None and not (timeout == math.inf or 0 <= timeout <= _MAX_TIMEOUT):
+            raise ValueError(f"lock timeout must be a number of seconds from 0 to {_MAX_TIMEOUT}, or inf")
+        timeout_ms = None if timeout is None or timeout == math.inf else min(math.ceil(timeout * 1000), 2**31 - 1)
         held = await self._engine.session_lock(k, name, bool(exclusive), bool(nowait), timeout_ms)
         if held is None:
             raise LockNotAvailable(

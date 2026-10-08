@@ -297,9 +297,14 @@ See `docs/schema.md`, "Protected writes".
 * `db.lock(key, { session: true, timeout: 5 }, async () => {...})` is a session advisory
   lock: it holds the lock while the function runs, with no transaction, on a pool
   connection of its own, and gives what the function gives. It waits at most `timeout`
-  seconds (no limit when absent, not at all with `nowait`) and throws `LockNotAvailable`
-  when another session still holds the lock. The lock is released when the function
-  settles; when the unlock fails, the connection is closed, so the server releases it.
+  seconds (no limit when absent or `Infinity`, not at all with `nowait`; at most
+  2147483.647, the Postgres limit) and throws `LockNotAvailable` when another session
+  still holds the lock. A lock that waits also uses its pool connection while it waits.
+  The lock is released when the function settles. When the unlock fails, the connection
+  is closed, so the server releases the lock, and the function's own result or error
+  stays. A function or a `timeout` without `session: true` throws `TypeError`.
+  Reads in the function go to a replica when the database has replicas: read in a
+  transaction or with `using("primary")` to see the last write of the previous holder.
 
 The transaction-scoped forms throw `TransactionRequired` when called outside a transaction.
 

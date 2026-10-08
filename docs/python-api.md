@@ -655,8 +655,8 @@ async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction ne
 * `lock(exclusive=True, *, nowait=False, skip_locked=False)`: `exclusive` is
   `FOR UPDATE`, otherwise `FOR SHARE`. Only the model's own rows are locked
   (`FOR ... OF <table>`), never rows joined by `select_related`.
-* Locks are held until the transaction ends, so both `lock()` and `db.lock()` raise
-  `orm.TransactionRequired` outside `db.transaction()`. `count()` / `exists()` /
+* Row locks and `db.lock(key)` without `session=True` are held until the transaction
+  ends, so they raise `orm.TransactionRequired` outside `db.transaction()`. `count()` / `exists()` /
   `update()` / `delete()` on a locked query set raise `QueryError` (writes lock the rows
   they change anyway).
 * `db.lock(key)` is a transaction-scoped Postgres advisory lock. Postgres keys are
@@ -665,11 +665,16 @@ async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction ne
 * `async with db.lock(key, session=True, timeout=5):` is a session advisory lock: it
   holds the lock for the block, with no transaction, so the block can make slow calls
   (HTTP) without an open transaction. The lock pins one pool connection; queries in the
-  block use other connections. It waits at most `timeout` seconds (forever when `None`,
-  not at all with `nowait=True`) and raises `orm.LockNotAvailable` when another session
-  still holds the lock. The lock is released when the block ends, also on an error;
-  when the unlock fails or the task is cancelled, the connection is closed, so the
-  server releases the lock.
+  block use other connections. A lock that waits also uses its pool connection while it
+  waits. It waits at most `timeout` seconds (forever when `None` or `inf`, not at all with
+  `nowait=True`; at most 2147483.647, the Postgres limit) and raises
+  `orm.LockNotAvailable` when another session still holds the lock. `timeout` without
+  `session=True` raises `TypeError`. The lock is released when the block ends, also on
+  an error. When the unlock fails, the connection is closed, so the server releases the
+  lock, and the block's own result or error stays. A task cancelled while it waits
+  cancels the wait on the server.
+  Reads in the block go to a replica when the database has replicas: read in a
+  transaction or with `.using("primary")` to see the last write of the previous holder.
 * No optimistic locking (version columns) on purpose.
 
 ### Read replicas

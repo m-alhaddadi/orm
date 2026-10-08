@@ -309,13 +309,15 @@ impl RowSet for PgRows {
 
 pub struct PgDriver {
     pool: Pool,
+    /// The connector of the pool's connections, for a cancel request.
+    tls: Option<tls::MakeRustlsConnect>,
 }
 
 impl PgDriver {
     pub async fn connect(url: &str, max_connections: usize) -> DbResult<Self> {
         let (config, tls) = tls::parse(url)?;
         let mgr_config = ManagerConfig { recycling_method: RecyclingMethod::Fast };
-        let manager = match tls {
+        let manager = match tls.clone() {
             Some(tls) => Manager::from_config(config, tls, mgr_config),
             None => Manager::from_config(config, NoTls, mgr_config),
         };
@@ -324,7 +326,7 @@ impl PgDriver {
             .build()
             .map_err(|e| DbError::other(e.to_string()))?;
         drop(get_client(&pool).await?); // fail at connect() on a bad URL or password
-        Ok(PgDriver { pool })
+        Ok(PgDriver { pool, tls })
     }
 }
 
@@ -385,7 +387,10 @@ impl Driver for PgDriver {
             // timeout does not stay on the pooled connection.
             let timeout = match timeout_ms { Some(ms) if !nowait => format!("SET LOCAL lock_timeout = {ms}; "), _ => String::new() };
             let sql = format!("BEGIN; {timeout}{}; COMMIT", crate::advisory::session_sql(key, exclusive, nowait));
-            let taken = match simple(client, &sql).await {
+            let mut cancel = CancelOnDrop { token: Some(client.cancel_token()), tls: self.tls.clone() };
+            let result = simple(client, &sql).await;
+            cancel.token = None;
+            let taken = match result {
                 Ok(messages) => !nowait || messages.iter().any(|m| matches!(m,
                     SimpleQueryMessage::Row(r) if r.get(0) == Some("true"))),
                 Err(e) => {
@@ -411,6 +416,26 @@ impl Driver for PgDriver {
     }
 }
 
+/// Cancels a lock wait on the server when the waiting future is dropped (a cancelled
+/// task): the server does not see a closed socket while its backend waits for a lock.
+struct CancelOnDrop {
+    token: Option<tokio_postgres::CancelToken>,
+    tls: Option<tls::MakeRustlsConnect>,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        let (Some(token), Ok(runtime)) = (self.token.take(), tokio::runtime::Handle::try_current()) else { return };
+        let tls = self.tls.take();
+        runtime.spawn(async move {
+            let _ = match tls {
+                Some(tls) => token.cancel_query(tls).await,
+                None => token.cancel_query(NoTls).await,
+            };
+        });
+    }
+}
+
 /// The pinned connection of a session advisory lock. Unless the unlock succeeds, the
 /// connection closes instead of going back to the pool.
 struct PgSessionLock {
@@ -424,11 +449,12 @@ impl SessionLock for PgSessionLock {
             let mut session = self.session.lock().await;
             let Some(client) = session.client.take() else { return Ok(()) };
             session.finished = true;
-            let result = client.batch_execute(&self.unlock).await.map_err(pg_err);
-            if result.is_err() {
+            // A failed unlock closes the connection, and the server then drops the lock, so
+            // the failure does not replace the caller's own result.
+            if client.batch_execute(&self.unlock).await.is_err() {
                 drop(Object::take(client));
             }
-            result
+            Ok(())
         })
     }
 }
@@ -567,7 +593,7 @@ mod tls {
     use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
-    use tokio_postgres_rustls::MakeRustlsConnect;
+    pub use tokio_postgres_rustls::MakeRustlsConnect;
 
     use super::{DbError, DbResult};
 

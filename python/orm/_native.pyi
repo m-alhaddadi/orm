@@ -59,6 +59,7 @@ class Transaction:
 class SessionLock:
     def release(self) -> Awaitable[None]: ...
 
+@final
 class Engine:
     def run(
         self,

@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { connect, define, getDatabase, loads, param, Registry, scope } from '../src/index.js';
+import { connect, define, getDatabase, loads, param, Registry, scope, type Database } from '../src/index.js';
 import { native } from '../src/native.js';
 import { User } from './blog/models.js';
 import { useDatabase, otherDatabase } from './helpers.js';
@@ -168,6 +168,25 @@ test('a session lock is released on error, and shared locks share', async () => 
   } finally {
     await other.close();
   }
+});
+
+test('a session lock keeps the error of its function when the unlock fails, and checks its options', async () => {
+  const db = getDatabase();
+  const kill = "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND objid = 4243 AND granted";
+  await assert.rejects(db.lock(4243, { session: true }, async () => { await db.execute(kill); throw new Error('mine'); }), /mine/);
+  assert.equal(await db.lock(4243, { session: true }, async () => { await db.execute(kill); return 1; }), 1);
+  assert.equal(await db.lock(5, { session: true, timeout: Infinity }, async () => 2), 2);
+  for (const timeout of [-1, 3e6, NaN]) {
+    await assert.rejects(db.lock(5, { session: true, timeout }, async () => 3), /lock timeout/);
+  }
+  await db.transaction(async () => {
+    await assert.rejects((db.lock as any)(5, {}, async () => 4), /session: true/);
+    await assert.rejects(db.lock(5, { timeout: 1 } as never), /session: true/);
+  });
+  await assert.rejects(db.lock(2 ** 53, { session: true }, async () => 5), /pass it as a bigint/);
+  // The transaction form is the last overload, so helper types see it.
+  const args: Parameters<Database['lock']> = [1, { exclusive: true }];
+  assert.equal(args.length, 2);
 });
 
 test('a session lock needs Postgres', async () => {

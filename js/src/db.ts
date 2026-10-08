@@ -39,9 +39,12 @@ export interface SessionLockOptions {
   readonly exclusive?: boolean;
   /** Throw `LockNotAvailable` at once when the lock is held. */
   readonly nowait?: boolean;
-  /** Seconds to wait before `LockNotAvailable` (no limit when absent). */
+  /** Seconds to wait before `LockNotAvailable` (no limit when absent or `Infinity`). */
   readonly timeout?: number;
 }
+
+/** Postgres `lock_timeout` takes at most 2^31 - 1 ms. */
+const MAX_TIMEOUT = 2147483.647;
 
 /** Statements a replica may answer (the IR starts with its `op`). */
 const READ = /^\{"op":"(select|count|exists)"/;
@@ -194,8 +197,9 @@ export class Database {
    * A string key is hashed to a 64-bit one the way the Python package hashes it (the
    * first 8 bytes of its BLAKE2b digest, signed big-endian), so both lock the same name.
    */
-  lock(key: bigint | number | string, options?: LockOptions): Promise<boolean>;
+  // The transaction form is last: `Parameters<Database["lock"]>` takes the last overload.
   lock<T>(key: bigint | number | string, options: SessionLockOptions, fn: () => Promise<T>): Promise<T>;
+  lock(key: bigint | number | string, options?: LockOptions): Promise<boolean>;
   async lock<T>(
     key: bigint | number | string,
     options: LockOptions | SessionLockOptions = {},
@@ -203,6 +207,9 @@ export class Database {
   ): Promise<boolean | T> {
     if (options.session === true) {
       return this.sessionLock(key, options, fn!);
+    }
+    if (fn !== undefined || (options as { timeout?: unknown }).timeout !== undefined) {
+      throw new TypeError("db.lock(key, options, fn) and a timeout need `{ session: true }`");
     }
     if (this.url.startsWith("sqlite://")) {
       throw new QueryError("sqlite does not support advisory locks");
@@ -226,10 +233,10 @@ export class Database {
     }
     const [k, name] = lockKey(key);
     const { exclusive = true, nowait = false, timeout } = options;
-    if (timeout !== undefined && !(timeout >= 0)) {
-      throw new RangeError("lock timeout must be a number of seconds >= 0");
+    if (timeout !== undefined && !(timeout === Infinity || (timeout >= 0 && timeout <= MAX_TIMEOUT))) {
+      throw new RangeError(`lock timeout must be a number of seconds from 0 to ${MAX_TIMEOUT}, or Infinity`);
     }
-    const timeoutMs = timeout === undefined ? null : Math.ceil(timeout * 1000);
+    const timeoutMs = timeout === undefined || timeout === Infinity ? null : Math.min(Math.ceil(timeout * 1000), 2 ** 31 - 1);
     const held = await wait(() => this.engine.sessionLock(k, name, Boolean(exclusive), Boolean(nowait), timeoutMs));
     if (held === null) {
       const after = nowait || timeout === undefined ? "" : ` after ${timeout}s`;
@@ -364,6 +371,9 @@ function lockKey(key: bigint | number | string): [string, Buffer | null] {
       throw new RangeError("lock key must fit in 64 bits");
     }
     return [String(k), null];
+  }
+  if (typeof key === "number" && Number.isInteger(key)) {
+    throw new TypeError(`lock key ${key} is not a safe integer: pass it as a bigint`);
   }
   throw new TypeError(`lock key must be an integer or a string, got ${String(key)}`);
 }
