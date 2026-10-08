@@ -616,9 +616,14 @@ export class Func<T, S extends string = never, P = {}> extends Expression<T, S, 
     readonly args: readonly Node[] = [],
     readonly rel: RelationPath<ModelSpec, string, readonly Hop[]> | undefined = undefined,
     readonly distinct = false,
+    filter: unknown = undefined,
   ) {
     super();
+    this.filter = filter === undefined ? undefined : asCondition(filter);
   }
+
+  /** @internal `FILTER (WHERE ...)` of an aggregate. */
+  readonly filter: Node | undefined;
 
   ir(ctx: IRContext): IR {
     const ir: IR = { t: "func", name: this.name, args: this.args.map((a) => a.ir(ctx)) };
@@ -630,6 +635,9 @@ export class Func<T, S extends string = never, P = {}> extends Expression<T, S, 
     }
     if (this.distinct) {
       ir["distinct"] = true;
+    }
+    if (this.filter) {
+      ir["filter"] = this.filter.ir(ctx);
     }
     return ir;
   }
@@ -871,6 +879,12 @@ class Int extends Expression<number, never, {}> {
 }
 
 type Num = number | bigint | Decimal;
+/** Options of an aggregate: `DISTINCT`, and `FILTER (WHERE filter)` (only the rows
+ * where `filter` holds). */
+export interface AggregateOptions<S extends string, P> {
+  readonly distinct?: boolean;
+  readonly filter?: Expression<boolean | null, S, P>;
+}
 type AnyExpr<T, S extends string, P> = Expression<T, S, P>;
 /** `SUM` of integers is a `bigint` (cast so); of floats a number; of decimals a Decimal. */
 type SumOf<T> = [NonNullable<T>] extends [number | bigint] ? (number extends NonNullable<T> ? number | bigint : bigint) : NonNullable<T>;
@@ -886,36 +900,49 @@ class Functions {
   /** `COUNT(*)` without argument, `COUNT(expr)` (non-null values), or the rows of a
    * relation: `func.count(User.posts)`. */
   count(): Func<bigint>;
-  count<S extends string, P>(
+  count<S2 extends string, P2>(options: AggregateOptions<S2, P2>): Func<bigint, Exclude<S2, Many>, P2>;
+  count<S extends string, P, S2 extends string = never, P2 = {}>(
     what: Expression<unknown, S, P> | RelationPath<ModelSpec, S, readonly Hop[]>,
-    options?: { readonly distinct?: boolean },
-  ): Func<bigint, Exclude<S, Many>, P>;
-  count(what?: unknown, options?: { readonly distinct?: boolean }): Func<bigint, string, unknown> {
-    if (what instanceof RelationPath) {
-      return new Func("count", [], what);
+    options?: AggregateOptions<S2, P2>,
+  ): Func<bigint, Exclude<S | S2, Many>, P & P2>;
+  count(what?: unknown, options?: AggregateOptions<string, unknown>): Func<bigint, string, unknown> {
+    if (what !== undefined && !(what instanceof Node) && !(what instanceof RelationPath)) {
+      return this.count(undefined as never, what as AggregateOptions<string, unknown>) as never;
     }
-    return new Func("count", what === undefined ? [] : [wrap(what)], undefined, options?.distinct ?? false) as never;
+    if (what instanceof RelationPath) {
+      return new Func("count", [], what, false, options?.filter);
+    }
+    return new Func("count", what === undefined ? [] : [wrap(what)], undefined, options?.distinct ?? false, options?.filter) as never;
   }
 
   /** `SUM`; integer sums come back as `bigint` (cast to bigint). */
-  sum<T extends Num | null, S extends string, P>(expr: AnyExpr<T, S, P>, options?: { readonly distinct?: boolean }): Func<SumOf<T> | null, Exclude<S, Many>, P> {
-    return new Func("sum", [expr], undefined, options?.distinct ?? false);
+  sum<T extends Num | null, S extends string, P, S2 extends string = never, P2 = {}>(
+    expr: AnyExpr<T, S, P>,
+    options?: AggregateOptions<S2, P2>,
+  ): Func<SumOf<T> | null, Exclude<S | S2, Many>, P & P2> {
+    return new Func("sum", [expr], undefined, options?.distinct ?? false, options?.filter);
   }
 
   /** `AVG`: a number, or a `Decimal` for decimal columns (exact). */
-  avg<T extends Num | null, S extends string, P>(
+  avg<T extends Num | null, S extends string, P, S2 extends string = never, P2 = {}>(
     expr: AnyExpr<T, S, P>,
-    options?: { readonly distinct?: boolean },
-  ): Func<([NonNullable<T>] extends [Decimal] ? Decimal : number) | null, Exclude<S, Many>, P> {
-    return new Func("avg", [expr], undefined, options?.distinct ?? false);
+    options?: AggregateOptions<S2, P2>,
+  ): Func<([NonNullable<T>] extends [Decimal] ? Decimal : number) | null, Exclude<S | S2, Many>, P & P2> {
+    return new Func("avg", [expr], undefined, options?.distinct ?? false, options?.filter);
   }
 
-  min<T, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T | null, Exclude<S, Many>, P> {
-    return new Func("min", [expr]);
+  min<T, S extends string, P, S2 extends string = never, P2 = {}>(
+    expr: AnyExpr<T, S, P>,
+    options?: { readonly filter?: Expression<boolean | null, S2, P2> },
+  ): Func<T | null, Exclude<S | S2, Many>, P & P2> {
+    return new Func("min", [expr], undefined, false, options?.filter);
   }
 
-  max<T, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T | null, Exclude<S, Many>, P> {
-    return new Func("max", [expr]);
+  max<T, S extends string, P, S2 extends string = never, P2 = {}>(
+    expr: AnyExpr<T, S, P>,
+    options?: { readonly filter?: Expression<boolean | null, S2, P2> },
+  ): Func<T | null, Exclude<S | S2, Many>, P & P2> {
+    return new Func("max", [expr], undefined, false, options?.filter);
   }
 
   lower<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {

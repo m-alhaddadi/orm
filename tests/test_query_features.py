@@ -153,6 +153,24 @@ async def test_case_expression(clean):
     assert await Post.objects.filter(Post.title == "a1").select(func.case((Post.published, 1), default=0.5)).scalar() == 0.5
 
 
+async def test_aggregate_filter(clean):
+    (alice, bob, carol), _ = await seed()
+    rows = await Post.objects.order_by(Post.author_id).select(
+        Post.author_id,
+        func.count().label("all"),
+        func.count(filter=Post.views >= 20).label("popular"),
+        func.sum(Post.views, filter=Post.views < 50).label("small"),
+        func.max(Post.title, filter=Post.views < 50).label("last_small"),
+    ).group_by(Post.author_id)
+    assert [tuple(r) for r in rows] == [(alice.id, 3, 2, 25, "a3"), (bob.id, 1, 1, None, None)]
+    users = await User.objects.order_by(User.id).select(User.name, func.count(User.posts, filter=User.posts.views > 10))
+    assert [tuple(u) for u in users] == [("Alice", 2), ("Bob", 1), ("Carol", 0)]
+    running = await Post.objects.order_by(Post.created_at).select(
+        Post.title, func.count(filter=Post.views >= 50).over(order_by=Post.created_at)
+    )
+    assert [tuple(r) for r in running] == [("b1", 1), ("a1", 1), ("a2", 2), ("a3", 2)]
+
+
 async def test_outer_through_relation_paths(clean):
     await seed()
     others = (

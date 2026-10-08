@@ -364,6 +364,22 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
   COUNT(*) FROM posts WHERE posts.author_id = users.id)`. So two aggregates over different
   relations never multiply each other, unlike Django's JOIN-based `annotate(Count(...),
   Count(...))`, and they work in `filter()` too.
+* **Filtered aggregates**: every aggregate takes `filter=cond`, which is
+  `FILTER (WHERE cond)`: the aggregate reads only the rows where `cond` holds. Several
+  conditional counts fit in one grouped query:
+
+  ```python
+  await Post.objects.select(
+      Post.author_id,
+      func.count(filter=Post.published),
+      func.sum(Post.views, filter=Post.created_at > last_week),
+  ).group_by(Post.author_id)
+  await User.objects.select(User, func.count(User.posts, filter=User.posts.published))
+  ```
+
+  Over a relation, the filter applies inside the correlated subquery; it must read the
+  same relation path as the aggregate. With `.over(...)` the filter comes before `OVER`.
+  SQLite supports `FILTER` since 3.30 (the bundled SQLite is newer).
 * **String concatenation** has two forms with different `NULL` rules:
   `func.concat(a, " ", b)` is `CONCAT(...)` and reads a `NULL` part as an empty string;
   `a.concat(b)` is `a || b` and is `NULL` when either side is `NULL`.

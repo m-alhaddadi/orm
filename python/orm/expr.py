@@ -504,15 +504,21 @@ class Labeled(Expression[T]):
 class Func(Expression[T]):
     """A SQL function call; build it with :data:`func`."""
 
-    __slots__ = ("_name", "_args", "_rel", "_distinct")
+    __slots__ = ("_name", "_args", "_rel", "_distinct", "_filter")
 
     def __init__(
-        self, name: str, args: tuple[Any, ...] = (), rel: RelationPath[Any] | None = None, distinct: bool = False
+        self,
+        name: str,
+        args: tuple[Any, ...] = (),
+        rel: RelationPath[Any] | None = None,
+        distinct: bool = False,
+        filter: ConditionLike | None = None,
     ) -> None:
         self._name = name
         self._args = tuple(_wrap(a) for a in args)
         self._rel = rel
         self._distinct = distinct
+        self._filter = None if filter is None else as_condition(filter)
 
     def _ir(self, ctx: IRContext) -> IR:
         ir: IR = {"t": "func", "name": self._name, "args": [a._ir(ctx) for a in self._args]}
@@ -523,10 +529,14 @@ class Func(Expression[T]):
             ir["rel"] = list(self._rel._path)
         if self._distinct:
             ir["distinct"] = True
+        if self._filter is not None:
+            ir["filter"] = self._filter._ir(ctx)
         return ir
 
     def __repr__(self) -> str:
         args = [repr(a) for a in self._args] + ([repr(self._rel)] if self._rel is not None else [])
+        if self._filter is not None:
+            args.append(f"filter={self._filter!r}")
         return f"func.{self._name}({', '.join(args)})"
 
     def over(
@@ -758,42 +768,55 @@ class _Functions:
     subquery: ``func.count(User.posts)`` is each user's number of posts, and
     ``func.sum(User.posts.views)`` their posts' total views. Over the model's own
     columns, aggregates summarize the rows of each ``group_by()`` group (or all rows).
+
+    Every aggregate takes ``filter=cond``: ``FILTER (WHERE cond)``, so it reads only the
+    rows where ``cond`` holds: ``func.count(filter=Post.published)``.
     """
 
     __slots__ = ()
 
-    def count(self, what: Expression[Any] | RelationPath[Any] | None = None, *, distinct: bool = False) -> Func[int]:
+    def count(
+        self,
+        what: Expression[Any] | RelationPath[Any] | None = None,
+        *,
+        distinct: bool = False,
+        filter: ConditionLike | None = None,
+    ) -> Func[int]:
         """``COUNT(*)`` without argument, ``COUNT(expr)`` (non-NULL values), or the rows
         of a relation: ``func.count(User.posts)``."""
         if isinstance(what, RelationPath):
-            return Func("count", rel=what)
-        return Func("count", () if what is None else (what,), distinct=distinct)
+            return Func("count", rel=what, filter=filter)
+        return Func("count", () if what is None else (what,), distinct=distinct, filter=filter)
 
     @overload
-    def sum(self, expr: Expression[N], *, distinct: bool = False) -> Func[N | None]: ...
+    def sum(self, expr: Expression[N], *, distinct: bool = False, filter: ConditionLike | None = None) -> Func[N | None]: ...
     @overload
-    def sum(self, expr: Expression[N | None], *, distinct: bool = False) -> Func[N | None]: ...
-    def sum(self, expr: Expression[Any], *, distinct: bool = False) -> Func[Any]:
+    def sum(self, expr: Expression[N | None], *, distinct: bool = False, filter: ConditionLike | None = None) -> Func[N | None]: ...
+    def sum(self, expr: Expression[Any], *, distinct: bool = False, filter: ConditionLike | None = None) -> Func[Any]:
         """``SUM``; integer sums come back as ``int`` (cast to bigint)."""
-        return Func("sum", (expr,), distinct=distinct)
+        return Func("sum", (expr,), distinct=distinct, filter=filter)
 
     @overload
     def avg(  # type: ignore[overload-overlap]  # pyright: ignore[reportOverlappingOverload]
-        self, expr: Expression[Decimal] | Expression[Decimal | None], *, distinct: bool = False
+        self, expr: Expression[Decimal] | Expression[Decimal | None], *, distinct: bool = False, filter: ConditionLike | None = None
     ) -> Func[Decimal | None]: ...
     @overload
     def avg(
-        self, expr: Expression[int] | Expression[int | None] | Expression[float] | Expression[float | None], *, distinct: bool = False
+        self,
+        expr: Expression[int] | Expression[int | None] | Expression[float] | Expression[float | None],
+        *,
+        distinct: bool = False,
+        filter: ConditionLike | None = None,
     ) -> Func[float | None]: ...
-    def avg(self, expr: Expression[Any], *, distinct: bool = False) -> Func[Any]:
+    def avg(self, expr: Expression[Any], *, distinct: bool = False, filter: ConditionLike | None = None) -> Func[Any]:
         """``AVG``: a ``float``, or a ``Decimal`` for decimal columns (exact)."""
-        return Func("avg", (expr,), distinct=distinct)
+        return Func("avg", (expr,), distinct=distinct, filter=filter)
 
-    def min(self, expr: Expression[T]) -> Func[T | None]:
-        return Func("min", (expr,))
+    def min(self, expr: Expression[T], *, filter: ConditionLike | None = None) -> Func[T | None]:
+        return Func("min", (expr,), filter=filter)
 
-    def max(self, expr: Expression[T]) -> Func[T | None]:
-        return Func("max", (expr,))
+    def max(self, expr: Expression[T], *, filter: ConditionLike | None = None) -> Func[T | None]:
+        return Func("max", (expr,), filter=filter)
 
     def lower(self, expr: Expression[str] | Expression[str | None]) -> Func[str]:
         return Func("lower", (expr,))

@@ -227,10 +227,10 @@ fn is_aggregate(name: &str) -> bool {
 /// window).
 fn has_local_aggregate(e: &Expr) -> bool {
     match e {
-        Expr::Func { name, args, rel, .. } => {
+        Expr::Func { name, args, rel, filter, .. } => {
             let mut paths = vec![];
             let mut has_not = false;
-            for a in args {
+            for a in args.iter().chain(filter.as_deref()) {
                 col_paths_all(a, &mut paths, &mut has_not);
             }
             (is_aggregate(name) && rel.is_none() && paths.iter().all(|p| p.is_empty()))
@@ -268,8 +268,8 @@ fn has_window(e: &Expr) -> bool {
 /// Like `col_paths`, but also inside aggregates.
 fn col_paths_all<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
     match e {
-        Expr::Func { args, .. } => {
-            for a in args {
+        Expr::Func { args, filter, .. } => {
+            for a in args.iter().chain(filter.as_deref()) {
                 col_paths_all(a, out, has_not);
             }
         }
@@ -1163,7 +1163,7 @@ impl<'s> Planner<'s> {
             Expr::Window { func, base, partition_by, order_by, frame } => {
                 self.window(func, base.as_deref(), partition_by, order_by, frame)?
             }
-            Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
+            Expr::Func { name, args, rel, distinct, filter } => self.func(name, args, rel.as_deref(), *distinct, filter.as_deref())?,
             Expr::Case { whens, default } => self.case(whens, default.as_deref(), hint)?,
             Expr::Arith { op, l, r } => {
                 let inner = self.hint_of(l).or(self.hint_of(r));
@@ -1306,7 +1306,7 @@ impl<'s> Planner<'s> {
     /// the current scope is computed per row, in a correlated subquery over those
     /// relations: `func.count(User.posts)` is `(SELECT COUNT(*) FROM posts WHERE
     /// posts.author_id = users.id)`, never a JOIN that would multiply rows.
-    fn func(&mut self, name: &str, args: &[Expr], rel: Option<&[String]>, distinct: bool) -> Result<SExpr> {
+    fn func(&mut self, name: &str, args: &[Expr], rel: Option<&[String]>, distinct: bool, filter: Option<&Expr>) -> Result<SExpr> {
         if WINDOW_FUNCS.contains(&name) {
             return Err(Error::query(format!("{name}() is a window function: add .over(...)")));
         }
@@ -1317,26 +1317,24 @@ impl<'s> Planner<'s> {
             let base = self.scope().path.clone();
             let mut paths = vec![];
             let mut has_not = false;
-            for a in args {
+            for a in args.iter().chain(filter) {
                 col_paths_all(a, &mut paths, &mut has_not);
             }
-            let below: Vec<&[String]> = match rel {
-                Some(r) => vec![r],
-                None => paths.into_iter().filter(|p| p.len() > base.len() && p.starts_with(&base)).collect(),
-            };
+            let below: Vec<&[String]> =
+                rel.into_iter().chain(paths.into_iter().filter(|p| p.len() > base.len() && p.starts_with(&base))).collect();
             if let Some(path) = below.first().map(|p| p.to_vec()) {
                 if below.iter().any(|p| *p != path.as_slice()) {
                     return Err(Error::query(format!(
                         "{name}() over relations needs all its columns on one relation path"
                     )));
                 }
-                return self.aggregate_subquery(name, args, &path, rel.is_some(), distinct);
+                return self.aggregate_subquery(name, args, &path, rel.is_some(), distinct, filter);
             }
             if rel.is_none() && args.is_empty() && name != "count" {
                 return Err(Error::query(format!("{name}() needs an argument")));
             }
         }
-        self.call(name, args, distinct)
+        self.call(name, args, distinct, filter)
     }
 
     /// `<func> OVER (PARTITION BY ... ORDER BY ... <frame>)`, over this query's rows.
@@ -1355,13 +1353,13 @@ impl<'s> Planner<'s> {
                     .into(),
             ));
         }
-        let Expr::Func { name, args, rel, distinct } = func else {
+        let Expr::Func { name, args, rel, distinct, filter } = func else {
             return Err(Error::query("over() applies to a function"));
         };
         if rel.is_some() || !(is_aggregate(name) || WINDOW_FUNCS.contains(&name.as_str())) {
             return Err(Error::query(format!("{name}() can't be used as a window function")));
         }
-        let (call, cast) = self.call_parts(name, args, *distinct)?;
+        let (call, cast) = self.call_parts(name, args, *distinct, filter.as_deref())?;
         let mut exprs = vec![call];
         let mut clauses = vec![];
         if let Some(b) = base {
@@ -1411,8 +1409,8 @@ impl<'s> Planner<'s> {
     }
 
     /// The SQL call itself, arguments planned in the current scope.
-    fn call(&mut self, name: &str, args: &[Expr], distinct: bool) -> Result<SExpr> {
-        let (e, cast) = self.call_parts(name, args, distinct)?;
+    fn call(&mut self, name: &str, args: &[Expr], distinct: bool, filter: Option<&Expr>) -> Result<SExpr> {
+        let (e, cast) = self.call_parts(name, args, distinct, filter)?;
         Ok(match cast {
             Some(ty) => template(self.target.dialect, format!("CAST($1 AS {ty})"), vec![e]),
             None => e,
@@ -1420,7 +1418,10 @@ impl<'s> Planner<'s> {
     }
 
     /// The call, and the type its result is cast to (outside a window's `OVER`).
-    fn call_parts(&mut self, name: &str, args: &[Expr], distinct: bool) -> Result<(SExpr, Option<&'static str>)> {
+    fn call_parts(&mut self, name: &str, args: &[Expr], distinct: bool, filter: Option<&Expr>) -> Result<(SExpr, Option<&'static str>)> {
+        if filter.is_some() && !is_aggregate(name) {
+            return Err(Error::query(format!("{name}() is not an aggregate: only aggregates take a filter")));
+        }
         if self.target.dialect == Dialect::Sqlite && name == "cardinality" {
             return Err(Error::query("sqlite does not support cardinality()"));
         }
@@ -1494,6 +1495,13 @@ impl<'s> Planner<'s> {
             "nth_value" if n == 2 => call("NTH_VALUE", planned)?,
             _ => return Err(Error::query(format!("wrong arguments for {name}()"))),
         };
+        let e = match filter {
+            Some(f) => {
+                let f = self.cond(f)?;
+                template(dialect, "$1 FILTER (WHERE $2)", vec![e, f])
+            }
+            None => e,
+        };
         Ok((e, cast))
     }
 
@@ -1505,6 +1513,7 @@ impl<'s> Planner<'s> {
         path: &[String],
         count_rows: bool,
         distinct: bool,
+        filter: Option<&Expr>,
     ) -> Result<SExpr> {
         let base = self.scope().path.clone();
         let hops = &path[base.len()..];
@@ -1517,7 +1526,7 @@ impl<'s> Planner<'s> {
             self.scopes.push(Scope { path: path[..base.len() + k + 1].to_vec(), model: target, alias: alias.clone() });
             outer = (alias, target);
         }
-        let agg = if count_rows && args.is_empty() { self.call("count", &[], false) } else { self.call(name, args, distinct) };
+        let agg = if count_rows && args.is_empty() { self.call("count", &[], false, filter) } else { self.call(name, args, distinct, filter) };
         self.scopes.truncate(pushed);
         sub.expr(agg?);
         Ok(SExpr::SubQuery(None, Box::new(sub.into())))

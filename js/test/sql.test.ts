@@ -291,6 +291,17 @@ test("CASE SQL", () => {
   assert.throws(() => (func.case as (...a: unknown[]) => unknown)(Post.published), /pairs/);
 });
 
+test("aggregate FILTER SQL", () => {
+  const sql = Post.objects.select({ a: Post.authorId, p: func.count({ filter: Post.published }), v: func.sum(Post.views, { filter: Post.views.gt(10) }) }).groupBy(Post.authorId).sql();
+  assert.equal(sql, 'SELECT "posts"."author_id", COUNT(*) FILTER (WHERE "posts"."published" = TRUE), CAST(SUM("posts"."views") FILTER (WHERE "posts"."views" > 10) AS BIGINT) FROM "posts" GROUP BY "posts"."author_id"');
+  assert.equal(
+    User.objects.select({ id: User.id, n: func.count(User.posts, { filter: User.posts.published }) }).sql(),
+    'SELECT "users"."id", (SELECT COUNT(*) FILTER (WHERE "a1"."published" = TRUE) FROM "posts" AS "a1" WHERE "a1"."author_id" = "users"."id") FROM "users"',
+  );
+  assert.ok(Post.objects.select({ s: func.sum(Post.views, { filter: Post.published }).over({ partitionBy: Post.authorId }) }).sql()
+    .includes('SUM("posts"."views") FILTER (WHERE "posts"."published" = TRUE) OVER (PARTITION BY "posts"."author_id")'));
+});
+
 test("string functions and concatenation SQL", () => {
   const sql = Post.objects.select({
     c: func.concat(Post.title, " by ", Post.views), p: Post.title.concat("!"), t: func.trim(Post.title), l: func.ltrim(Post.title),

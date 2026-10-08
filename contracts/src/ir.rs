@@ -580,6 +580,9 @@ pub enum Expr {
         rel: Option<Vec<String>>,
         #[serde(default)]
         distinct: bool,
+        /// Aggregates: `FILTER (WHERE <filter>)`, the rows the aggregate reads.
+        #[serde(default)]
+        filter: Option<Box<Expr>>,
     },
     /// `CASE WHEN <cond> THEN <value> ... ELSE <default> END`; `ELSE NULL` without one.
     Case {

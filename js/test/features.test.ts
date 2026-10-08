@@ -132,6 +132,17 @@ test("CASE expressions", async () => {
   assert.deepEqual(views, { a1: 1, a2: 0, a3: 20, b1: 50 });
 });
 
+test("aggregate FILTER", async () => {
+  const { alice, bob } = await seed();
+  const rows = await Post.objects.orderBy(Post.authorId).select({
+    a: Post.authorId, all: func.count(), popular: func.count({ filter: Post.views.gte(20) }),
+    small: func.sum(Post.views, { filter: Post.views.lt(50) }), last: func.max(Post.title, { filter: Post.views.lt(50) }),
+  }).groupBy(Post.authorId).all();
+  assert.deepEqual(rows, [{ a: alice.id, all: 3n, popular: 2n, small: 25n, last: "a3" }, { a: bob.id, all: 1n, popular: 1n, small: null, last: null }]);
+  const users = await User.objects.orderBy(User.id).select({ n: User.name, c: func.count(User.posts, { filter: User.posts.views.gt(10) }) }).all();
+  assert.deepEqual(users, [{ n: "Alice", c: 2n }, { n: "Bob", c: 1n }, { n: "Carol", c: 0n }]);
+});
+
 test("outer() errors", () => {
   assert.throws(() => (User.objects.filter(exists(Post.objects.filter(Post.authorId.eq(User.id as never)))) as never as { sql(): string }).sql(), /use outer\(User.id\)/);
   assert.throws(() => (User.objects.filter(User.id.eq(outer(User.id))) as never as { sql(): string }).sql(), /not a column of an enclosing query/);

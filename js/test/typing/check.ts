@@ -50,6 +50,13 @@ export async function caseExpressions() {
   func.case(Post.published);
 }
 
+export async function aggregateFilters() {
+  const rows = await Post.objects.select({ c: func.count({ filter: Post.published }), s: func.sum(Post.views, { filter: Post.views.gt(3) }), m: func.max(Post.title, { filter: Post.published }) }).all();
+  same<(typeof rows)[number], { c: bigint; s: number | bigint | null; m: string | null }>();
+  // @ts-expect-error the filter is a condition
+  func.count({ filter: Post.views });
+}
+
 export async function filters() {
   await User.objects.filter(User.email.eq("a"), User.posts.views.gt(3)).all();
   await Post.objects.filter(Post.published).all();

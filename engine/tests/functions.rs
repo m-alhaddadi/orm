@@ -79,3 +79,15 @@ fn case_expression() {
     let empty = json!({"t":"case","whens":[]});
     assert!(plan(Dialect::Postgres, vec![col("id")], vec![cmp("eq", empty, text("x"))]).unwrap_err().contains("at least one"));
 }
+
+#[test]
+fn aggregate_filter() {
+    let count = json!({"t":"func","name":"count","args":[],"filter":cmp("gt", col("views"), int(1))});
+    let sum = json!({"t":"func","name":"sum","args":[col("views")],"filter":cmp("eq", col("title"), text("x"))});
+    assert_eq!(plan(Dialect::Postgres, vec![count.clone(), sum.clone()], vec![]).unwrap(),
+        r#"SELECT COUNT(*) FILTER (WHERE "notes"."views" > (1)), CAST(SUM("notes"."views") FILTER (WHERE "notes"."title" = $1) AS BIGINT) FROM "notes""#);
+    let sqlite = plan(Dialect::Sqlite, vec![count, sum], vec![]).unwrap();
+    assert!(sqlite.contains(r#"COUNT(*) FILTER (WHERE "notes"."views" > (1))"#), "{sqlite}");
+    let lower = json!({"t":"func","name":"lower","args":[col("title")],"filter":cmp("gt", col("views"), int(1))});
+    assert!(plan(Dialect::Postgres, vec![lower], vec![]).unwrap_err().contains("only aggregates take a filter"));
+}

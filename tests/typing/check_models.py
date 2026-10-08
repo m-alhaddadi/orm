@@ -154,6 +154,8 @@ async def check() -> None:
     assert_type(func.case((Post.published, 1), default=0), Case[int])
     assert_type(func.case((Post.views > 3, Post.title)), Case[str | None])
     assert_type(await Post.objects.select(func.case((Post.published, Post.views), default=0)).scalar(), int | None)
+    assert_type(func.count(filter=Post.published), Func[int])
+    assert_type(func.sum(Post.views, filter=Post.views > 3), Func[int | None])
     assert_type(alice.profile, Profile | None)
     assert_type(post.tags, ManyRelatedSet[Tag])
     assert_type(await post.tags, list[Tag])

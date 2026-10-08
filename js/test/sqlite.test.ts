@@ -187,6 +187,23 @@ test("SQLite CASE", async () => {
   } finally { await db.close(); }
 });
 
+test("SQLite aggregate FILTER", async () => {
+  const registry = new Registry();
+  const Note = loads(`
+    datasource db { provider = "sqlite" }
+    model Note {
+      id BigInt @id @default(autoincrement())
+      n Int
+    }`, { registry })["Note"] as any;
+  const db = await connect("sqlite://:memory:", { registry, default: false });
+  try {
+    await db.createTables();
+    await Note.objects.using(db).insertMany([{ n: 1 }, { n: 5 }, { n: 10 }]);
+    const row = await Note.objects.using(db).select({ c: func.count({ filter: Note.n.gte(5) }), s: func.sum(Note.n, { filter: Note.n.lt(10) }) }).one();
+    assert.deepEqual(row, { c: 2n, s: 6n });
+  } finally { await db.close(); }
+});
+
 test("SQLite UUID, date, timestamp and inline trigger conversions", async () => {
   const registry = new Registry();
   const Event = loads(`

@@ -414,3 +414,25 @@ def test_case_expression():
         func.case(default=1)
     with pytest.raises(TypeError, match="tuples"):
         func.case(Post.published)  # type: ignore[arg-type]
+
+
+def test_aggregate_filter():
+    sql = Post.objects.select(
+        Post.author_id, func.count(filter=Post.published), func.sum(Post.views, filter=Post.views > 10)
+    ).group_by(Post.author_id).sql()
+    assert sql == (
+        'SELECT "posts"."author_id", COUNT(*) FILTER (WHERE "posts"."published" = TRUE), '
+        'CAST(SUM("posts"."views") FILTER (WHERE "posts"."views" > 10) AS BIGINT) FROM "posts" GROUP BY "posts"."author_id"'
+    )
+    # over a relation, the filter is planned inside the correlated subquery
+    assert User.objects.select(User.id, func.count(User.posts, filter=User.posts.published)).sql() == (
+        'SELECT "users"."id", (SELECT COUNT(*) FILTER (WHERE "a1"."published" = TRUE) FROM "posts" AS "a1" '
+        'WHERE "a1"."author_id" = "users"."id") FROM "users"'
+    )
+    assert 'COUNT(*) FILTER (WHERE "a1"."views" > 3) FROM "posts" AS "a1"' in User.objects.select(func.count(filter=User.posts.views > 3)).sql()
+    # before OVER in a window
+    assert 'SUM("posts"."views") FILTER (WHERE "posts"."published" = TRUE) OVER (PARTITION BY "posts"."author_id")' in (
+        Post.objects.select(func.sum(Post.views, filter=Post.published).over(partition_by=Post.author_id)).sql()
+    )
+    with pytest.raises(QueryError, match="one relation path"):
+        User.objects.select(func.count(User.posts, filter=User.comments.body == "x")).sql()

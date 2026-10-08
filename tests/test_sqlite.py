@@ -186,6 +186,20 @@ async def test_case_expression():
         await db.close()
 
 
+async def test_aggregate_filter():
+    from orm import func
+    registry, m = models('datasource db { provider = "sqlite" }\nmodel Note {\n  id BigInt @id @default(autoincrement())\n  n Int\n}')
+    Note = m["Note"]
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    try:
+        await db.create_tables()
+        await Note.objects.using(db).insert_many([{"n": 1}, {"n": 5}, {"n": 10}])
+        row = await Note.objects.using(db).select(func.count(filter=Note.n >= 5), func.sum(Note.n, filter=Note.n < 10)).one()
+        assert tuple(row) == (2, 6)
+    finally:
+        await db.close()
+
+
 async def test_file_database_and_target_mismatch(tmp_path):
     reg, _ = models()
     url = f"sqlite://{tmp_path / 'database.db'}"
