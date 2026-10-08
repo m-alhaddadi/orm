@@ -198,6 +198,12 @@ The semantics are Django's, with no duplicate rows. A to-many hop becomes a corr
 `EXISTS`. Conditions in one `filter()` call must hold for the same related row, while
 separate calls are independent. `exclude()` is `NOT EXISTS`.
 
+A `belongsTo` relation compares with an instance of its target:
+`Post.author.eq(alice)` is `Post.authorId.eq(alice.id)` (no join), `.ne(alice)` the
+opposite, and `.eq(null)` is `IS NULL`. The types allow `eq` / `ne` only on to-one
+relations and only with the target's row type. At runtime, other relation kinds, other
+objects and an instance without a key throw `TypeError`.
+
 ### Loading related objects
 
 * `selectRelated(Comment.post.author, Comment.author)` follows to-one relations with
@@ -329,7 +335,7 @@ Writes run when they are called and return a `Promise`:
   `UPDATE ... FROM (VALUES ...)`, falling back to `CASE`. All its batches run in one
   transaction.
 * On an instance: `post.update({...})` (refreshed from `RETURNING`), `post.delete()` and
-  `post.refresh()`.
+  `post.refresh(...fields)`.
 * With the column-role extensions (`schema-extensions.md`): `@timestamps.updated_at` and
   `@locking.version` are set on each update; on a `@soft_delete.deleted_at` model,
   `delete()` soft-deletes, and `hardDelete()`, `undelete()`, `allWithDeleted()` and
@@ -378,6 +384,11 @@ See `docs/schema.md`, "Protected writes".
 
 * `qs.lock({ exclusive, nowait, skipLocked })` adds `FOR UPDATE` / `FOR SHARE` on the
   model's rows. Setting both `nowait` and `skipLocked` is a type error.
+* `post.refresh(...fields, { lock: true, exclusive, nowait, skipLocked })` reloads the row
+  with the same lock and gives `true`. A refresh of some fields locks the whole row. With
+  `skipLocked`, a row locked elsewhere (or deleted) gives `false` and leaves the
+  instance unchanged; otherwise a missing row throws `DoesNotExist`. Lock options
+  without `lock: true` are a type error and throw `TypeError`.
 * `db.lock(key, { exclusive, nowait })` takes a transaction-scoped advisory lock. String
   keys hash the way Python's do (BLAKE2b with an 8-byte digest), so both languages lock
   the same name.

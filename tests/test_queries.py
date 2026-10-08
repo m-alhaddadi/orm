@@ -736,6 +736,80 @@ async def test_row_locks(clean):
             )
 
 
+async def test_refresh_lock(clean):
+    alice, bob, _, _ = await seed()
+    db = orm.get_database()
+    with pytest.raises(TypeError, match="lock=True"):
+        await alice.refresh(nowait=True)
+    with pytest.raises(TypeError, match="lock=True"):
+        await alice.refresh(exclusive=False)
+    with pytest.raises(orm.TransactionRequired):
+        await alice.refresh(lock=True)
+    with pytest.raises(ValueError):
+        await alice.refresh(lock=True, nowait=True, skip_locked=True)
+    assert await alice.refresh() is True
+
+    async with db.transaction():
+        assert await alice.refresh(User.name, lock=True) is True
+        # A partial refresh locks the whole row.
+        with pytest.raises(orm.LockNotAvailable):
+            await _in_new_tx(lambda: User.objects.lock(nowait=True).get(User.id == alice.id))
+    await User.objects.filter(User.id == alice.id).update(name="Alicia")
+    await alice.refresh()
+    assert alice.name == "Alicia"
+
+    async with db.transaction():
+        assert await bob.refresh(lock=True, exclusive=False) is True
+        assert await _in_new_tx(lambda: User.objects.lock(False, nowait=True).get(User.id == bob.id)) == bob
+
+    other = await User.objects.get(User.id == alice.id)
+    async with db.transaction():
+        await User.objects.lock().get(User.id == alice.id)
+        await User.objects.filter(User.id == alice.id).update(name="Al")
+        with pytest.raises(orm.LockNotAvailable):
+            await _in_new_tx(lambda: other.refresh(lock=True, nowait=True))
+        assert await _in_new_tx(lambda: other.refresh(lock=True, skip_locked=True)) is False
+        assert other.name == "Alicia"  # unchanged
+    async with db.transaction():
+        assert await other.refresh(lock=True, skip_locked=True) is True
+    assert other.name == "Al"
+
+    await User.objects.filter(User.id == bob.id).delete()
+    async with db.transaction():
+        assert await bob.refresh(lock=True, skip_locked=True) is False
+        with pytest.raises(User.DoesNotExist):
+            await bob.refresh(lock=True)
+    with pytest.raises(User.DoesNotExist):
+        await bob.refresh()
+
+
+async def test_relation_equals_instance(clean):
+    alice, bob, carol, (a1, a2, b1) = await seed()
+    qs = Post.objects.filter(Post.author == alice).order_by(Post.id)
+    assert qs.sql() == Post.objects.filter(Post.author_id == alice.id).order_by(Post.id).sql()
+    assert " JOIN " not in qs.sql()
+    assert [p.id for p in await qs] == [a1.id, a2.id]
+    assert [p.id for p in await Post.objects.filter(Post.author != alice)] == [b1.id]
+    assert await Post.objects.filter(Post.author == carol).count() == 0
+    assert "IS NULL" in Post.objects.filter(Post.author == None).sql()  # noqa: E711
+    assert "IS NOT NULL" in Post.objects.filter(Post.author != None).sql()  # noqa: E711
+    comment = await Comment.objects.insert(post=b1, author=alice, body="hi")
+    nested = Comment.objects.filter(Comment.post.author == bob)
+    assert '"users"' not in nested.sql()  # reaches posts, not users
+    expected = await Comment.objects.filter(Comment.post_id == b1.id).order_by(Comment.id)
+    assert comment in expected
+    assert await nested.order_by(Comment.id) == expected
+    with pytest.raises(TypeError, match="HasMany"):
+        User.posts == a1  # noqa: B015
+    with pytest.raises(TypeError, match="compares with a User"):
+        Post.author == a1  # noqa: B015
+    unsaved = User.__new__(User)
+    unsaved.__dict__["id"] = None
+    with pytest.raises(ValueError, match="id is None"):
+        Post.author == unsaved  # noqa: B015
+    assert {Post.author: 1}  # paths stay hashable
+
+
 async def test_advisory_locks(clean):
     db = orm.get_database()
     with pytest.raises(orm.TransactionRequired):

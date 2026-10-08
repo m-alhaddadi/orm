@@ -157,6 +157,7 @@ wrong thing.
 | `filter((User.email == x) \| (User.posts.views > 10))` | users without posts still match on email | `email = x OR EXISTS (…)` |
 | `filter(User.posts.comments.body.contains("hi"))` | nested hops | nested `EXISTS` |
 | `filter(Post.author.email == x)` | to-one hops | `EXISTS` on the PK (planned as a semi-join) |
+| `filter(Post.author == alice)` | the post's key is alice's key | `author_id = $1`, no join |
 
 This matches what Django returns for multi-valued relations: one `filter()` call means
 the same related row, separate calls are independent, and negation means "none". It
@@ -167,6 +168,12 @@ doesn't allow `JOIN`.
 
 `NOT` doesn't group into a subquery: `filter(User.posts.a & ~User.posts.b)` means "a
 post with a, and no post with b", as in Django.
+
+A `BelongsTo` relation compares with an instance of its target:
+`Post.author == alice` is `Post.author_id == alice.id` (the column the relation
+references), and `Post.author == None` is `IS NULL`. `Comment.post.author == bob`
+reaches `posts` but not `users`. Other relation kinds, an instance of another model
+and an instance whose key is `None` raise.
 
 ### Loading related objects
 
@@ -693,6 +700,7 @@ posts = await Post.objects.update_many(rows, batch_size=1000).returning()
 await post.update(title="New", views=Post.views + 1)   # UPDATE ... RETURNING; refreshes `post`
 await post.delete()
 await post.refresh()
+await post.refresh(Post.views)                   # some fields
 ```
 
 * `insert` validates eagerly. Unknown fields, expressions as values and missing
@@ -862,6 +870,9 @@ async with db.transaction():
     await Post.objects.filter(...).lock(exclusive=False)                     # FOR SHARE
     jobs = await Job.objects.filter(Job.state == "ready").lock(skip_locked=True).limit(10)
     await Post.objects.lock(nowait=True).get(...)       # raises orm.LockNotAvailable if locked
+    await post.refresh(lock=True)                       # reload and lock this row
+    if not await job.refresh(lock=True, skip_locked=True):  # False: another worker has it
+        ...
     await db.lock("import:42")                          # advisory lock on a name, not a row
     got = await db.lock(42, exclusive=False, nowait=True)   # False instead of waiting
 
@@ -872,6 +883,11 @@ async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction ne
 * `lock(exclusive=True, *, nowait=False, skip_locked=False)`: `exclusive` is
   `FOR UPDATE`, otherwise `FOR SHARE`. Only the model's own rows are locked
   (`FOR ... OF <table>`), never rows joined by `select_related`.
+* `instance.refresh(*fields, lock=False, exclusive=True, nowait=False, skip_locked=False)`
+  reloads the row with the query set's `lock()` options and returns `True`. A refresh of
+  some fields locks the whole row. With `skip_locked`, a row locked elsewhere (or
+  deleted) gives `False` and leaves the instance unchanged; otherwise a missing row
+  raises `DoesNotExist`. The lock options without `lock=True` raise `TypeError`.
 * Locks are held until the transaction ends, so both `lock()` and `db.lock()` raise
   `orm.TransactionRequired` outside `db.transaction()`. `count()` / `exists()` /
   `update()` / `delete()` on a locked query set raise `QueryError` (writes lock the rows

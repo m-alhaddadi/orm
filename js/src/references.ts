@@ -15,7 +15,7 @@ type Host = {
   resolve(db: Database | undefined): Database;
   related(row: object): Record<string, unknown>;
   instanceUpdate(this: Row, values: object): Promise<void>;
-  instanceRefresh(this: Row, ...fields: unknown[]): Promise<void>;
+  instanceRefresh(this: Row, ...args: unknown[]): Promise<boolean>;
 };
 const MISSING = Symbol("orm.missingReferenceKey");
 function peekKey(row: Row, name: string, internal: symbol): unknown {
@@ -142,9 +142,10 @@ export function install(meta: ModelMeta, proto: Record<string, unknown>, host: H
     await host.instanceUpdate.call(this, values);
     invalidate(this, before, false);
   }});
-  Object.defineProperty(proto, "refresh", { value: async function (this: Row, ...fields: unknown[]) {
+  Object.defineProperty(proto, "refresh", { value: async function (this: Row, ...args: unknown[]) {
     const before = keys(this);
-    await host.instanceRefresh.apply(this, fields);
+    if (!(await host.instanceRefresh.apply(this, args))) return false;
     invalidate(this, before, true);
+    return true;
   }});
 }
