@@ -167,7 +167,10 @@ fn json_of(pos: Pos, v: &Value) -> Result<serde_json::Value> {
         Value::Num(n) => serde_json::from_str(n).map_err(|e| super::syntax::Error { pos, msg: e.to_string() })?,
         Value::List(items) => serde_json::Value::Array(items.iter().map(|(p, v)| json_of(*p, v)).collect::<Result<_>>()?),
         Value::Object(_) | Value::Path(..) => return err(pos, "expected a literal"),
-        Value::Desc(_) => return err(pos, "`-field` (descending) only goes in an index key list"),
+        Value::Desc(inner) => {
+            let name = match inner.as_ref() { Value::Path(p, _) => p.join("."), _ => "field".into() };
+            return err(pos, format!("`-{name}` (descending) only goes in an index key list; elsewhere quote it: \"-{name}\""));
+        }
     })
 }
 
@@ -712,6 +715,11 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx<'_>) -> Result<FieldIr> {
                     };
                     if !(same && values.is_empty()) {
                         f.db_type = Some(if values.is_empty() { sql.to_owned() } else { format!("{sql}({})", values.join(", ")) });
+                    }
+                    // A text parameter compares as text, where the padded `char(n)` value
+                    // of a row differs from the same value read back; bpchar ignores the padding.
+                    if sql == "char" && ty == ColType::String && !*list {
+                        f.write_sql = Some("CAST({} AS bpchar)".into());
                     }
                 }
             }

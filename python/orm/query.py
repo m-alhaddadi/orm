@@ -684,7 +684,7 @@ class QuerySet(Generic[M]):
         qs = self._clone(_model_helpers=helpers)
         cursor = after if forward else before
         if cursor is not None:
-            qs = qs.filter(pagination.after(order, pagination.decode_cursor(cursor, fp, keys)))
+            qs = qs.filter(pagination.after(self._model, order, pagination.decode_cursor(self._model, cursor, fp, keys)))
         rows = await qs.order_by(*order)[: size + 1]._fetch()
         more = len(rows) > size
         rows = rows[:size] if forward else rows[:size][::-1]
