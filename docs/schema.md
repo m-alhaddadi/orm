@@ -546,7 +546,7 @@ TypeScript: see [`typescript-api.md`](typescript-api.md).
 ```bash
 python -m orm makemigrations [name]          # migrations/NNNN_name/{up.sql,down.sql,snapshot.json}
 python -m orm makemigrations --check         # exit 1 if the schema changed without a migration (CI)
-python -m orm makemigrations --empty data    # an empty migration for hand-written SQL
+python -m orm makemigrations --empty data    # an empty migration for hand-written SQL or a data step
 python -m orm sqlmigrate 2 [--down]
 python -m orm migrate [target]               # apply pending migrations
 python -m orm rollback [--steps N | --to 0002_x | --to zero]
@@ -612,6 +612,34 @@ stops if an applied `up.sql` changed, if migrations were applied out of order, i
 recorded in the database is missing from the directory, or if two migrations share a
 number. `create_tables()` / `drop_tables()` remain as development helpers (idempotent
 DDL of the whole schema; drop with `CASCADE`).
+
+### Data migrations
+
+A migration folder may hold a data step next to `up.sql`: `data.py` with
+`async def run(db)`, or `data.ts` with `export async function run(db)`.
+
+```python
+# migrations/0002_slug/data.py
+async def run(db):
+    await db.execute("UPDATE author SET slug = lower(name)")
+```
+
+The step runs after `up.sql`, in the same transaction and under the same advisory lock,
+before the migration's `orm_migrations` row. Queries on `db` inside it, and ORM queries
+on that database, go into that transaction, so they see the new columns. An error rolls
+back the SQL, the data changes and the row. `makemigrations --empty name` gives a folder
+for a step without schema changes.
+
+* Python applies `data.py`: `Migrator.upgrade()`, or `python -m orm migrate`, which then
+  runs through `Migrator` instead of the Rust runner. It imports the data modules
+  before it connects, so the models they import are in the default registry.
+* TypeScript applies `data.ts` the same way: `Migrator.upgrade()` or `npx orm migrate`
+  (Node strips the types of a `.ts` file, by default in current versions; Bun runs it).
+* Each tool refuses the other's file, and the standalone `orm` binary refuses both,
+  before it applies anything.
+* `rollback` runs `down.sql` only; a data step has no down step.
+* The checksum covers `up.sql` only, so a change to a data step after it ran is not
+  detected.
 
 ### Adopting a live database: pull, baseline, drift
 

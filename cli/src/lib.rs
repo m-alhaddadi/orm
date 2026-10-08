@@ -213,6 +213,23 @@ fn write(path: &Path, text: &str) -> Result<()> {
     std::fs::write(path, text).map_err(|e| failed(format!("{}: {e}", path.display())))
 }
 
+/// For a `migrate` command line: the schema file, the migrations directory, the database
+/// URL and the target, as [`run`] resolves them; `None` for anything else. The Python
+/// and Node hosts use it to apply migrations with a data step themselves.
+pub fn migrate_args(argv: &[String], host: Host) -> Option<(PathBuf, PathBuf, Option<String>, Option<String>)> {
+    let args = Args::parse(argv).ok()?;
+    if args.positional.first().map(String::as_str) != Some("migrate") || args.flag("-h") || args.flag("--help") {
+        return None;
+    }
+    args.allow("migrate", &[], 1).ok()?;
+    let cfg = config(host);
+    let schema = PathBuf::from(args.opt(&["--schema"]).or(cfg.schema.as_deref()).unwrap_or("schema.prisma"));
+    let dir = PathBuf::from(args.opt(&["--dir"]).or(cfg.migrations.as_deref()).unwrap_or("migrations"));
+    let env = std::env::var("ORM_DATABASE_URL").ok().filter(|u| !u.is_empty());
+    let url = args.opt(&["--url"]).map(String::from).or(env);
+    Some((schema, dir, url, args.arg(0).map(String::from)))
+}
+
 /// Runs the command line `argv` (without the program name) and gives the exit code.
 pub async fn run(argv: &[String], host: Host) -> i32 {
     match command(argv, host).await {

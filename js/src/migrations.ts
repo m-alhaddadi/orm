@@ -23,12 +23,13 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import type { Database } from "./db.js";
+import { connect, inTransaction, type Database } from "./db.js";
 import { MigrationError } from "./errors.js";
-import { Registry } from "./model.js";
+import { Registry, load, registry as defaultRegistry } from "./model.js";
 import { call, native, wait, type NativeSchema } from "./native.js";
 
 export { MigrationError };
@@ -151,6 +152,39 @@ export interface Drift {
   readonly gaps: readonly string[];
 }
 
+type DataRun = (db: Database) => Promise<unknown>;
+
+/** `run` of the migration's `data.ts`, or null without one. */
+async function dataStep(m: Migration): Promise<DataRun | null> {
+  const file = join(m.path, "data.ts");
+  if (!existsSync(file)) return null;
+  const module = (await import(pathToFileURL(file).href)) as { run?: unknown };
+  if (typeof module.run !== "function") throw new MigrationError(`${file}: needs \`export async function run(db)\``);
+  return module.run as DataRun;
+}
+
+/** Whether a migration of `directory` has a `data.ts`. */
+export function hasDataSteps(directory: string): boolean {
+  return call(() => native().listMigrations(directory)).some(([, path]) => existsSync(join(path!, "data.ts")));
+}
+
+/** @internal `npx orm migrate` for a directory with data steps: applies with
+ * `Migrator.upgrade()`. The data modules are imported first, so the models they import
+ * are in the default registry when the database connects. */
+export async function migrateCommand(schema: string, directory: string, url: string, target: string | null): Promise<number> {
+  for (const [name, path] of call(() => native().listMigrations(directory))) await dataStep(new Migration(name!, path!));
+  if ([...defaultRegistry].length === 0) load(schema);
+  const db = await connect(url, { maxConnections: 2 });
+  try {
+    const done = await new Migrator(db, new Migrations(directory, schema)).upgrade(target ?? undefined);
+    for (const m of done) process.stdout.write(`Applied ${m.name}\n`);
+    if (done.length === 0) process.stdout.write("Nothing to apply.\n");
+  } finally {
+    await db.close();
+  }
+  return 0;
+}
+
 export interface Status {
   readonly migration: Migration;
   readonly applied: boolean;
@@ -184,9 +218,34 @@ export class Migrator {
     return rows.map((r) => ({ migration: new Migration(r.name, r.path), applied: r.applied, appliedAt: r.appliedAt }));
   }
 
-  /** Applies pending migrations up to and including `target` (default: all). */
+  /**
+   * Applies pending migrations up to and including `target` (default: all).
+   *
+   * A migration folder may hold a `data.ts` with `export async function run(db)`. It runs
+   * after `up.sql`, in the same transaction and under the same lock, before the migration
+   * is recorded; queries on `db` inside it go into that transaction. An error rolls back
+   * the SQL, the data changes and the record.
+   */
   async upgrade(target?: string): Promise<Migration[]> {
-    return this.named(await wait(() => this.db.engine.migrateUp(this.dir, target ?? null)));
+    const done: Migration[] = [];
+    for (const [name, path] of await wait(() => this.db.engine.migrationPending(this.dir, target ?? null))) {
+      const m = new Migration(name!, path!);
+      if (existsSync(join(m.path, "data.py"))) {
+        throw new MigrationError(`${m.name} has a data step (data.py); apply it with python -m orm migrate`);
+      }
+      const run = await dataStep(m);
+      const tx = await wait(() => this.db.engine.migrationBegin(m.name, m.path));
+      if (tx === null) continue;
+      try {
+        if (run !== null) await inTransaction(this.db, tx, () => run(this.db));
+      } catch (e) {
+        await wait(() => tx.rollback()).catch(() => undefined);
+        throw e;
+      }
+      await wait(() => this.db.engine.migrationFinish(tx, m.name, m.path));
+      done.push(m);
+    }
+    return done;
   }
 
   /** Compares the database with the snapshot of the newest migration. The snapshot is

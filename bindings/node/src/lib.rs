@@ -686,6 +686,37 @@ impl Engine {
         env.spawn_future(async move { Ok(engine_migrate::baseline(&*driver, Path::new(&dir)).await.map_err(engine_err)?.name) })
     }
 
+    /// The migrations `migrateUp` would apply: `[[name, path]]`.
+    #[napi]
+    pub fn migration_pending<'env>(&self, env: &'env Env, dir: String, target: Option<String>) -> napi::Result<PromiseRaw<'env, Vec<Vec<String>>>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let todo = engine_migrate::pending(&*driver, Path::new(&dir), target.as_deref()).await.map_err(engine_err)?;
+            Ok(todo.into_iter().map(|m| vec![m.name, m.path.to_string_lossy().into_owned()]).collect())
+        })
+    }
+
+    /// Starts applying one migration: its transaction, with the lock taken and `up.sql`
+    /// run; null when another migrator applied it meanwhile.
+    #[napi]
+    pub fn migration_begin<'env>(&self, env: &'env Env, name: String, path: String) -> napi::Result<PromiseRaw<'env, Option<Transaction>>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let m = engine_migrate::Migration { name, path: path.into() };
+            let tx = engine_migrate::begin_apply(&*driver, &m).await.map_err(engine_err)?;
+            Ok(tx.map(|inner| Transaction { inner }))
+        })
+    }
+
+    /// Records the migration in `tx` (from `migrationBegin`) and commits.
+    #[napi]
+    pub fn migration_finish<'env>(&self, env: &'env Env, tx: &Transaction, name: String, path: String) -> napi::Result<PromiseRaw<'env, ()>> {
+        let inner = tx.inner.clone();
+        env.spawn_future(async move {
+            engine_migrate::finish_apply(&*inner, &engine_migrate::Migration { name, path: path.into() }).await.map_err(engine_err)
+        })
+    }
+
     /// Reverts the last `steps` migrations, or every one after `target`; the names reverted.
     #[napi]
     pub fn migrate_down<'env>(
@@ -794,6 +825,16 @@ pub fn compile_schema(source: String, path: Option<String>) -> napi::Result<Stri
 #[napi]
 pub fn cli<'env>(env: &'env Env, argv: Vec<String>) -> napi::Result<PromiseRaw<'env, i32>> {
     env.spawn_future(async move { Ok(orm_cli::run(&argv, orm_cli::Host::Node).await) })
+}
+
+/// For `npx orm migrate`: `[schema, dir, url, target]` as the CLI resolves them (null
+/// entries for a missing URL or target), or null for any other command line.
+#[cfg(feature = "cli")]
+#[napi]
+pub fn cli_migrate_args(argv: Vec<String>) -> Option<Vec<Option<String>>> {
+    orm_cli::migrate_args(&argv, orm_cli::Host::Node).map(|(schema, dir, url, target)| {
+        vec![Some(schema.to_string_lossy().into_owned()), Some(dir.to_string_lossy().into_owned()), url, target]
+    })
 }
 
 /// Migration folders of `dir` in order: `[[name, path]]`.
