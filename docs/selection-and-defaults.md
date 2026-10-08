@@ -83,7 +83,7 @@ An explicit field list replaces the inherited list; local `@query.selectOut`
 removes that field from the default list. It retains the field in the model.
 An empty selected list exposes no scalar fields, while retaining identity helpers.
 
-Filter expressions support root fields, string/integer/boolean literals, NULL,
+Filter expressions support root fields, string/integer/boolean literals, `scope.<name>` values, NULL,
 `== != < <= > >=`, parentheses, `and`/`or` (or `&&`/`||`), and `not`/`!`.
 `not` binds looser than comparisons: `not a == 1` means `not (a == 1)`.
 Literal types are checked by the database when the query runs.
@@ -99,6 +99,35 @@ current explicit eager loading; subsequent explicit loading adds references.
 Defaults affect reads, count/exists, and queryset update/delete selection, including
 bulk updates. Inserts use declared client/database defaults and caller values;
 filters never provide inserted values.
+
+### Scope values: `scope.<name>`
+
+A filter can read a value that the application sets for the current request or task:
+
+```prisma
+model Order {
+  id      Int @id @default(autoincrement())
+  shop_id Int
+  @@query.filter("shop_id == scope.shop")
+}
+```
+
+```python
+with orm.scope(shop=shop.id):          # a sync `with`; tasks started inside get it
+    orders = await Order.objects.filter(Order.total > 10)
+```
+
+```ts
+await scope({ shop: shop.id }, async () => { const orders = await Order.objects.filter(...); });
+```
+
+* The frontend sends the scope values as parameters of each statement; the value is bound with the type of the column it is compared with.
+* Closed by default: a read, count, exists, update, delete or `update_many` on a model whose default filter reads `scope.shop` raises `QueryError` when no enclosing `scope()` sets `shop`. Relation hops, prefetches and joined targets of that model check it too.
+* `without_defaults()` / `withoutDefaults()` skips the filter and the check.
+* Inner `scope()` values replace outer ones.
+* Inserts do not read the scope: set `shop_id` yourself.
+* An awaited query set keeps its rows; awaiting it again under another scope gives the first rows.
+* For a check in the database as well, use Postgres row-level security with `db.tenant(id)` (see the API docs).
 
 The default order is one string for each order column: a field, `-` before it for descending, and an optional ` nulls first` or ` nulls last`.
 `@@query.defaults` takes the same strings as a list: `order: ["-created_at", "id"]`.

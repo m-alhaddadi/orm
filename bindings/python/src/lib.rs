@@ -99,9 +99,9 @@ fn update_many_plan<'py>(
         .into_iter()
         .map(|r| r.into_iter().map(|v| v.expect("no DEFAULT in update_many")).collect())
         .collect();
-    let filters: Vec<ir::Expr> =
-        serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
-    exec::plan_update_many(schema, target, model, fields, values, &filters, &PyParams(params), returning, batch_size, without_defaults)
+    let (filters, scope) = orm_engine::params::scoped_filters(filters_json).map_err(engine_err)?;
+    let params = orm_engine::params::Scoped { params: &PyParams(params), scope: &scope };
+    exec::plan_update_many(schema, target, model, fields, values, &filters, &params, returning, batch_size, without_defaults)
         .map_err(engine_err)
 }
 
@@ -241,6 +241,20 @@ impl Transaction {
     fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move { tx.rollback().await.map_err(db_err) })
+    }
+}
+
+/// A held session advisory lock (`db.lock(..., session=True)`).
+#[pyclass(frozen, module = "orm._native")]
+struct SessionLock {
+    inner: Arc<dyn db::SessionLock>,
+}
+
+#[pymethods]
+impl SessionLock {
+    fn release<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let lock = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { lock.release().await.map_err(db_err) })
     }
 }
 
@@ -429,6 +443,27 @@ impl Engine {
         let conn = self.conn(Some(tx));
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             conn.advisory_lock(key, exclusive, nowait).await.map_err(db_err)
+        })
+    }
+
+    /// This engine on the same pool, with `set_config(name, value, true)` for each
+    /// setting at the start of every transaction (statements outside one get their own).
+    fn with_settings(&self, names: Vec<String>, values: Vec<String>) -> Engine {
+        let driver: Arc<dyn Driver> = Arc::new(db::WithSettings::new(self.driver.clone(), names.into_iter().zip(values).collect()));
+        Engine { driver, target: self.target, schema: self.schema.clone(), classes: self.classes.clone() }
+    }
+
+    /// Session advisory lock on a pinned connection; `None` when it is not taken.
+    #[pyo3(signature = (key, name, exclusive, nowait, timeout_ms = None))]
+    fn session_lock<'py>(
+        &self, py: Python<'py>, key: i64, name: Option<&[u8]>,
+        exclusive: bool, nowait: bool, timeout_ms: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = name.map(orm_engine::advisory::key).unwrap_or(key);
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let lock = driver.session_lock(key, exclusive, nowait, timeout_ms).await.map_err(db_err)?;
+            Ok(lock.map(|inner| SessionLock { inner }))
         })
     }
 
@@ -685,6 +720,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySchema>()?;
     m.add_class::<Engine>()?;
     m.add_class::<Transaction>()?;
+    m.add_class::<SessionLock>()?;
     m.add("DEFAULT", Py::new(py, DefaultMarker)?)?;
     m.add("DatabaseError", py.get_type::<errors::DatabaseError>())?;
     m.add("IntegrityError", py.get_type::<errors::IntegrityError>())?;

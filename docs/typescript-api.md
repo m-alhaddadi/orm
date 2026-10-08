@@ -257,6 +257,12 @@ when it throws. The current transaction follows the async call chain through
 `AsyncLocalStorage`, so queries inside it need no handle. Nested calls are savepoints.
 A transaction that is never finished is rolled back when it is garbage-collected.
 
+`await db.onCommit(fn)` calls `fn()` after the outermost transaction on `db` commits, and awaits a promise result.
+A rollback drops the callback. A rolled-back savepoint drops only the callbacks registered inside it.
+Outside a transaction, `fn()` runs at once.
+Callbacks run in registration order, outside the transaction.
+An error in a callback rejects the `transaction()` promise, and the later callbacks do not run; the transaction is already committed.
+
 ### Protected writes
 
 `@@protected_write` is an application-level check in the ORM. It does not protect the database.
@@ -286,7 +292,31 @@ See `docs/schema.md`, "Protected writes".
   keys hash the way Python's do (BLAKE2b with an 8-byte digest), so both languages lock
   the same name.
 
-Both throw `TransactionRequired` when called outside a transaction.
+* `db.lock(key, { session: true, timeout: 5 }, async () => {...})` is a session advisory
+  lock: it holds the lock while the function runs, with no transaction, on a pool
+  connection of its own, and gives what the function gives. It waits at most `timeout`
+  seconds (no limit when absent, not at all with `nowait`) and throws `LockNotAvailable`
+  when another session still holds the lock. The lock is released when the function
+  settles; when the unlock fails, the connection is closed, so the server releases it.
+
+The transaction-scoped forms throw `TransactionRequired` when called outside a transaction.
+
+### Read replicas
+
+`connect(primaryUrl, { replicas: [replica1Url, replica2Url] })` sends reads (`select`, `count`, `exists`, prepared queries) outside a transaction to the next replica, in turn.
+Writes, raw `db.execute`, migrations, and every statement inside `db.transaction()` go to the primary.
+`db.primary` is a view of the database without its replicas; it shares the transactions of `db`.
+`qs.using("primary")` is `qs.using(<the query set's database>.primary)`, resolved when it is called.
+A replica can lag behind the primary: to read your own write, read in the same transaction or use `using("primary")`.
+There are no health checks or failover. `maxConnections` applies to each pool, and `db.close()` closes all of them.
+
+### Tenants and row-level security
+
+`await db.tenant(shop.id, async () => {...})` runs `SELECT set_config('app.tenant', '<id>', true)` (`SET LOCAL`) at the start of every transaction on `db` in the function, so RLS policies can read `current_setting('app.tenant', true)`.
+A statement outside a transaction runs in a transaction of its own (four round trips instead of one, estimated).
+A transaction that is already open keeps its setting, and the setting ends with each transaction.
+Replicas get the same setting. SQLite throws `QueryError`.
+`scope({ shop }, fn)` is the application-side filter (see `docs/selection-and-defaults.md`, "Scope values").
 
 ### Finding N+1 queries: `debug`
 

@@ -279,9 +279,9 @@ fn update_many_plan(
         .into_iter()
         .map(|r| r.into_iter().map(|v| v.expect("no defaults in update_many")).collect())
         .collect();
-    let filters: Vec<ir::Expr> =
-        serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
+    let (filters, scope) = orm_engine::params::scoped_filters(filters_json).map_err(engine_err)?;
     let p = params(env, params_)?;
+    let p = orm_engine::params::Scoped { params: &p, scope: &scope };
     exec::plan_update_many(schema, target, model, fields, values, &filters, &p, returning, batch_size.map(|n| n as usize), without_defaults)
         .map_err(engine_err)
 }
@@ -430,6 +430,21 @@ impl Transaction {
     pub fn rollback<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
         let tx = self.inner.clone();
         env.spawn_future(async move { tx.rollback().await.map_err(|e| tagged(db_kind(&e), e)) })
+    }
+}
+
+/// A held session advisory lock (`db.lock(key, { session: true }, fn)`).
+#[napi]
+pub struct SessionLock {
+    inner: Arc<dyn db::SessionLock>,
+}
+
+#[napi]
+impl SessionLock {
+    #[napi]
+    pub fn release<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
+        let lock = self.inner.clone();
+        env.spawn_future(async move { lock.release().await.map_err(|e| tagged(db_kind(&e), e)) })
     }
 }
 
@@ -589,6 +604,32 @@ impl Engine {
         let conn = self.conn(Some(tx));
         env.spawn_future(async move {
             conn.advisory_lock(key, exclusive, nowait).await.map_err(|e| tagged(db_kind(&e), e))
+        })
+    }
+
+    /// This engine on the same pool, with `set_config(name, value, true)` for each
+    /// setting at the start of every transaction (statements outside one get their own).
+    #[napi]
+    pub fn with_settings(&self, names: Vec<String>, values: Vec<String>) -> Engine {
+        let driver: Arc<dyn Driver> = Arc::new(db::WithSettings::new(self.driver.clone(), names.into_iter().zip(values).collect()));
+        Engine { driver, target: self.target, schema: self.schema.clone() }
+    }
+
+    /// Session advisory lock on a pinned connection; `null` when it is not taken.
+    #[napi]
+    pub fn session_lock<'env>(
+        &self, env: &'env Env, key: String, name: Option<napi::bindgen_prelude::Buffer>,
+        exclusive: bool, nowait: bool, timeout_ms: Option<u32>,
+    ) -> napi::Result<PromiseRaw<'env, Option<SessionLock>>> {
+        let key = match name {
+            Some(name) => orm_engine::advisory::key(&name),
+            None => key.parse::<i64>().map_err(|_| tagged("TypeError", "lock key must fit in 64 bits"))?,
+        };
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let lock = driver.session_lock(key, exclusive, nowait, timeout_ms.map(u64::from)).await
+                .map_err(|e| tagged(db_kind(&e), e))?;
+            Ok(lock.map(|inner| SessionLock { inner }))
         })
     }
 

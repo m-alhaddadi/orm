@@ -64,6 +64,10 @@ export interface NativeTransaction {
   rollback(): Promise<void>;
 }
 
+export interface NativeSessionLock {
+  release(): Promise<void>;
+}
+
 export interface NativeSchema {
   validateInsert(model: string, fields: string[], rows: unknown[][], allowed: readonly string[]): void;
   uniqueRowUpdate(opJson: string, params: unknown[], allowed: readonly string[]): boolean;
@@ -113,6 +117,8 @@ export interface NativeEngine {
   ): Promise<unknown>;
   begin(tx: NativeTransaction | null): Promise<NativeTransaction>;
   advisoryLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, tx: NativeTransaction): Promise<boolean>;
+  withSettings(names: string[], values: string[]): NativeEngine;
+  sessionLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, timeoutMs: number | null): Promise<NativeSessionLock | null>;
   execute(sql: string, tx: NativeTransaction | null): Promise<number>;
   fetchText(sql: string, tx: NativeTransaction | null): Promise<(string | null)[][]>;
   executeScript(statements: string[], tx: NativeTransaction | null): Promise<void>;

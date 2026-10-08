@@ -14,9 +14,29 @@ pub fn sql(key: i64, exclusive: bool, nowait: bool) -> String {
     )
 }
 
+/// A session lock: held until it is unlocked or the connection closes, across commits.
+pub fn session_sql(key: i64, exclusive: bool, nowait: bool) -> String {
+    format!(
+        "SELECT pg_{}advisory_lock{}({key})::text",
+        if nowait { "try_" } else { "" },
+        if exclusive { "" } else { "_shared" }
+    )
+}
+
+pub fn unlock_sql(key: i64, exclusive: bool) -> String {
+    format!("SELECT pg_advisory_unlock{}({key})::text", if exclusive { "" } else { "_shared" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_lock_sql() {
+        assert_eq!(session_sql(7, true, false), "SELECT pg_advisory_lock(7)::text");
+        assert_eq!(session_sql(-7, false, true), "SELECT pg_try_advisory_lock_shared(-7)::text");
+        assert_eq!(unlock_sql(7, false), "SELECT pg_advisory_unlock_shared(7)::text");
+    }
 
     #[test]
     fn matches_python_blake2b_8() {

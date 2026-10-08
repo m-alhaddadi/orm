@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Unpack, overload
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Unpack, overload
 
 from ._cache import cached
 from .errors import QueryError, TransactionRequired
@@ -351,7 +351,15 @@ class QuerySet(Generic[M]):
             raise ValueError("lock() takes nowait or skip_locked, not both")
         return self._clone(_lock={"exclusive": exclusive, "nowait": nowait, "skip_locked": skip_locked})
 
-    def using(self, db: Database | None) -> Self:
+    def using(self, db: Database | Literal["primary"] | None) -> Self:
+        """Run on ``db``; ``"primary"`` sends reads of this query set to the primary of
+        its database (the default one, resolved now), not to a replica."""
+        if isinstance(db, str):
+            if db != "primary":
+                raise ValueError(f'using() takes a Database or "primary", got {db!r}')
+            from .db import resolve
+
+            db = resolve(self._db).primary
         return self._clone(_db=db)
 
     # -- CTEs -------------------------------------------------------------------------------
@@ -867,7 +875,7 @@ class Prepared(Generic[M]):
     def _start(self, kind: str, values: Mapping[str, Any]) -> Awaitable[Any]:
         """Starts the statement; the engine's awaitable comes back as is, without a
         coroutine around it."""
-        from .db import resolve
+        from .db import _with_scope, resolve
 
         c = self._statement(kind)
         params = c.bind(values, self._names)
@@ -877,7 +885,8 @@ class Prepared(Generic[M]):
         db = resolve(qs._db)
         if debug._scope.get() is not None:
             debug.record("run:" + c.json, lambda: str(qs._native().statement(c.json, params)))
-        return db._engine.run(c.json, params, db._tx(), None, qs._db, allowed_writes())
+        op, params = _with_scope(c.json, params)
+        return db._reader().run(op, params, db._tx(), None, qs._db, allowed_writes())
 
     def __call__(self, **values: Any) -> Awaitable[list[M]]:
         """The rows, like awaiting the query set."""

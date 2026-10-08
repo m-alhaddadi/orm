@@ -598,6 +598,18 @@ async with db.transaction():          # commit on success, rollback on exception
 The current transaction lives in a `ContextVar`, so queries inside the block use it
 without passing it around. Tasks started inside the block inherit it.
 
+```python
+async with db.transaction():
+    order = await Order.objects.insert(...)
+    await db.on_commit(lambda: send_receipt.delay(order.id))   # after COMMIT only
+```
+
+`await db.on_commit(fn)` calls `fn()` after the outermost transaction on `db` commits, and awaits the result when it is awaitable.
+A rollback drops the callback. A rolled-back savepoint drops only the callbacks registered inside it.
+Outside a transaction, `fn()` runs at once.
+Callbacks run in registration order, outside the transaction.
+An error in a callback goes to the caller of `transaction()`, and the later callbacks do not run; the transaction is already committed.
+
 ### Protected writes
 
 `@@protected_write` is an application-level check in the ORM. It does not protect the database.
@@ -632,6 +644,9 @@ async with db.transaction():
     await Post.objects.lock(nowait=True).get(...)       # raises orm.LockNotAvailable if locked
     await db.lock("import:42")                          # advisory lock on a name, not a row
     got = await db.lock(42, exclusive=False, nowait=True)   # False instead of waiting
+
+async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction needed
+    await call_shopify(...)
 ```
 
 * `lock(exclusive=True, *, nowait=False, skip_locked=False)`: `exclusive` is
@@ -644,7 +659,47 @@ async with db.transaction():
 * `db.lock(key)` is a transaction-scoped Postgres advisory lock. Postgres keys are
   64-bit integers; a `str` key is hashed to one in Python (first 8 bytes of BLAKE2b,
   signed big-endian).
+* `async with db.lock(key, session=True, timeout=5):` is a session advisory lock: it
+  holds the lock for the block, with no transaction, so the block can make slow calls
+  (HTTP) without an open transaction. The lock pins one pool connection; queries in the
+  block use other connections. It waits at most `timeout` seconds (forever when `None`,
+  not at all with `nowait=True`) and raises `orm.LockNotAvailable` when another session
+  still holds the lock. The lock is released when the block ends, also on an error;
+  when the unlock fails or the task is cancelled, the connection is closed, so the
+  server releases the lock.
 * No optimistic locking (version columns) on purpose.
+
+### Read replicas
+
+```python
+db = await orm.connect(primary_url, replicas=[replica1_url, replica2_url])
+users = await User.objects.filter(...)                  # a replica, in turn
+fresh = await User.objects.using("primary").get(...)    # the primary
+```
+
+* Reads (`select`, `count`, `exists`, prepared queries) outside a transaction go to the next replica, in turn.
+* Writes, raw `db.execute`, migrations, and every statement inside `db.transaction()` go to the primary.
+* `db.primary` is a view of the database without its replicas; it shares the transactions of `db`.
+  `.using("primary")` is `.using(<the query set's database>.primary)`, resolved when it is called.
+* A replica can lag behind the primary. To read your own write, read in the same transaction or use `.using("primary")`.
+* No health checks or failover: an error on a replica goes to the caller.
+* `max_connections` applies to each pool. `db.close()` closes all of them.
+
+### Tenants and row-level security
+
+```python
+with db.tenant(shop.id):                 # a sync `with`: it does no I/O
+    orders = await Order.objects.all()    # RLS policies see current_setting('app.tenant')
+```
+
+* Every transaction on `db` in the block first runs `SELECT set_config('app.tenant', '<id>', true)`, the same as `SET LOCAL app.tenant = ...`, with the value bound as a parameter.
+* A statement outside a transaction runs in a transaction of its own: `BEGIN`, `set_config`, the statement, `COMMIT`. That is four round trips instead of one (estimated); put many statements in one `db.transaction()`.
+* A transaction that is already open keeps its setting. Savepoints use the setting of their transaction.
+* The setting ends with each transaction, so pooled connections keep no tenant.
+* Replicas get the same setting. Session locks (`session=True`) do not.
+* The policy must read the setting, for example `USING (shop_id::text = current_setting('app.tenant', true))`. The ORM does not create policies. A superuser and the table owner bypass RLS unless the table has `FORCE ROW LEVEL SECURITY`.
+* SQLite raises `QueryError`.
+* `orm.scope(shop=...)` is the application-side filter (see `docs/selection-and-defaults.md`, "Scope values").
 
 ### Finding N+1 queries: `orm.debug`
 

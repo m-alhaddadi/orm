@@ -123,6 +123,104 @@ pub trait Transaction: Executor {
 
 pub trait Driver: Executor {
     fn close(&self) -> BoxFuture<'_, ()>;
+    /// A session advisory lock on a pinned pool connection, outside any transaction.
+    /// `None` when it is not taken: held with `nowait`, or still held after `timeout_ms`.
+    fn session_lock(
+        &self, _key: i64, _exclusive: bool, _nowait: bool, _timeout_ms: Option<u64>,
+    ) -> BoxFuture<'_, DbResult<Option<Arc<dyn SessionLock>>>> {
+        Box::pin(async { Err(DbError::other(format!("{} does not support advisory locks", self.dialect().name()))) })
+    }
+}
+
+/// A held session advisory lock. Dropped without `release`, it closes its connection,
+/// so the server releases the lock.
+pub trait SessionLock: Send + Sync {
+    /// Unlocks, and gives the connection back to the pool.
+    fn release(&self) -> BoxFuture<'_, DbResult<()>>;
+}
+
+/// A driver whose every transaction first runs `set_config(name, value, true)` (the
+/// same as `SET LOCAL`) for each setting, so row-level security policies see them. A
+/// statement outside a transaction runs in a transaction of its own. Savepoints inherit
+/// the settings of their transaction.
+pub struct WithSettings {
+    inner: Arc<dyn Driver>,
+    settings: Vec<(String, String)>,
+}
+
+impl WithSettings {
+    pub fn new(inner: Arc<dyn Driver>, settings: Vec<(String, String)>) -> Self {
+        WithSettings { inner, settings }
+    }
+}
+
+async fn finish<T>(tx: Arc<dyn Transaction>, out: DbResult<T>) -> DbResult<T> {
+    match out {
+        Ok(v) => tx.commit().await.map(|_| v),
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
+}
+
+impl Executor for WithSettings {
+    fn dialect(&self) -> Dialect {
+        self.inner.dialect()
+    }
+    fn query(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RowSet>>> {
+        Box::pin(async move {
+            let tx = self.begin().await?;
+            let out = tx.query(sql, args).await;
+            finish(tx, out).await
+        })
+    }
+    fn execute(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<u64>> {
+        Box::pin(async move {
+            let tx = self.begin().await?;
+            let out = tx.execute(sql, args).await;
+            finish(tx, out).await
+        })
+    }
+    fn batch(&self, sql: String) -> BoxFuture<'_, DbResult<u64>> {
+        Box::pin(async move {
+            let tx = self.begin().await?;
+            let out = tx.batch(sql).await;
+            finish(tx, out).await
+        })
+    }
+    fn query_text(&self, sql: String) -> BoxFuture<'_, DbResult<Vec<Vec<Option<String>>>>> {
+        Box::pin(async move {
+            let tx = self.begin().await?;
+            let out = tx.query_text(sql).await;
+            finish(tx, out).await
+        })
+    }
+    fn begin(&self) -> BoxFuture<'_, DbResult<Arc<dyn Transaction>>> {
+        Box::pin(async move {
+            let tx = self.inner.begin().await?;
+            for (name, value) in &self.settings {
+                let args = vec![Value::from(name.clone()), Value::from(value.clone())];
+                if let Err(e) = tx.execute("SELECT set_config($1, $2, true)".into(), args).await {
+                    let _ = tx.rollback().await;
+                    return Err(e);
+                }
+            }
+            Ok(tx)
+        })
+    }
+}
+
+impl Driver for WithSettings {
+    /// The pool belongs to the wrapped driver.
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    fn session_lock(
+        &self, key: i64, exclusive: bool, nowait: bool, timeout_ms: Option<u64>,
+    ) -> BoxFuture<'_, DbResult<Option<Arc<dyn SessionLock>>>> {
+        self.inner.session_lock(key, exclusive, nowait, timeout_ms)
+    }
 }
 
 /// Opens the selected driver for `postgres://`, `postgresql://` or `sqlite://`.
