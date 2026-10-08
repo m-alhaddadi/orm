@@ -489,7 +489,8 @@ impl Engine {
     /// `conflict` (unique field names) rows hitting that constraint update the `update`
     /// fields from the new row and apply the `set` assignments (JSON list of
     /// `{"field", "value"}` IR, parameters in `params`), or are skipped if `update` is
-    /// null. Rows beyond the parameter limit, or beyond `batchSize`, go to further
+    /// null. `conflictWhere` (condition IR, parameters in `params`) is the predicate of a
+    /// partial unique index. Rows beyond the parameter limit, or beyond `batchSize`, go to further
     /// statements in one transaction (inside `tx` when given).
     #[napi(ts_return_type = "Promise<unknown>")]
     #[allow(clippy::too_many_arguments)]
@@ -506,15 +507,20 @@ impl Engine {
         tx: Option<&Transaction>,
         allowed: Option<Vec<String>>,
         batch_size: Option<u32>,
+        conflict_where: Option<String>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
         protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
             Some(json) => serde_json::from_str(&json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
             None => vec![],
         };
+        let filter: Option<ir::Expr> = match conflict_where {
+            Some(json) => Some(serde_json::from_str(&json).map_err(|e| query_err(format!("invalid condition IR: {e}")))?),
+            None => None,
+        };
         let conflict = conflict.map(|target| match update {
-            Some(update) => Conflict::Update { target, update, set },
-            None => Conflict::Nothing { target },
+            Some(update) => Conflict::Update { target, filter, update, set },
+            None => Conflict::Nothing { target, filter },
         });
         let values = convert_rows(env, &self.schema, &model, &fields, rows, true)?;
         let p = params(env, params_)?;

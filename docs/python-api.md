@@ -549,6 +549,12 @@ await post.refresh()
   the database accepts (65,535 on Postgres, 32,766 on SQLite).
   `insert_many(rows, batch_size=n)` sets a lower number of rows for each statement.
   All the statements run in one transaction (or in the current one).
+* `on_conflict(*columns, where=cond)` picks a partial unique index:
+  `.on_conflict(Task.shop, Task.task_type, where=Task.deleted_at.is_null())` gives
+  `ON CONFLICT (shop, task_type) WHERE deleted_at IS NULL`. Postgres uses the
+  condition to find the index, so it must match the index predicate without
+  parameters (`is_null()`, a boolean column); a compared value is a parameter and
+  Postgres cannot match it.
 * `do_update()` with no columns overwrites the fields you passed except the conflict
   columns, so `created_at` isn't reset to `now()`. Pass columns to choose them.
 * `do_update(*columns, **values)`: `columns` take the proposed values, `values` are

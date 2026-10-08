@@ -53,12 +53,14 @@ class Database:
         set_: tuple[list[dict[str, Any]], list[Any]] | None = None,
         db: Database | None = None,
         batch_size: int | None = None,
+        where: dict[str, Any] | None = None,
     ) -> list[Any]:
         set_json, params = (json.dumps(set_[0]), set_[1]) if set_ is not None else (None, [])
         if debug._scope.get() is not None:
             debug.record(f"insert:{model}:{fields}:{conflict}", lambda: f"INSERT INTO {model} ({', '.join(fields)}) ...")
         return await self._engine.insert(
-            model, fields, rows, conflict, update, set_json, params, self._tx(), db, allowed_writes(), batch_size
+            model, fields, rows, conflict, update, set_json, params, self._tx(), db, allowed_writes(), batch_size,
+            None if where is None else json.dumps(where),
         )
 
     async def _update_many(

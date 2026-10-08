@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DatabaseError, IntegrityError, connect } from "../src/index.js";
-import { Tag, User } from "./blog/models.js";
+import { DatabaseError, IntegrityError, connect, getDatabase } from "../src/index.js";
+import { Comment, Post, Tag, User } from "./blog/models.js";
 import { DATABASE_URL, useDatabase } from "./helpers.js";
 
 useDatabase();
@@ -61,3 +61,36 @@ test("insertMany batches by max_params", async () => {
 test("insertMany batchSize is checked", async () => {
   await assert.rejects(User.objects.insertMany([], { batchSize: 0 }), TypeError);
 });
+
+// -- upserts on a partial unique index -------------------------------------------------------
+
+async function withAnonIndex(f: () => Promise<void>): Promise<void> {
+  const db = getDatabase();
+  await db.execute("CREATE UNIQUE INDEX comments_anon_body ON comments (post_id, body) WHERE author_id IS NULL");
+  try {
+    await f();
+  } finally {
+    await db.execute("DROP INDEX comments_anon_body");
+  }
+}
+
+test("onConflict where picks a partial unique index", () =>
+  withAnonIndex(async () => {
+    const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+    const post = await Post.objects.insert({ author: alice, title: "t", body: "b" });
+    const first = await Comment.objects.insert({ post, body: "hi" });
+    await assert.rejects(
+      Comment.objects.insert({ post, body: "hi" }, { onConflict: [Comment.postId, Comment.body], doNothing: true }),
+      /no unique or exclusion constraint/,
+    );
+    const where = Comment.authorId.isNull();
+    assert.equal(await Comment.objects.insert({ post, body: "hi" }, { onConflict: [Comment.postId, Comment.body], where, doNothing: true }), null);
+    const row = await Comment.objects.insert({ post, body: "hi" }, { onConflict: [Comment.postId, Comment.body], where, set: { body: "hi again" } });
+    assert.equal(row.id, first.id);
+    assert.equal(row.body, "hi again");
+    await Comment.objects.insertMany([
+      { post, author: alice, body: "hi" },
+      { post, author: alice, body: "hi" },
+    ]);
+    assert.equal(await Comment.objects.count(), 3);
+  }));

@@ -39,3 +39,16 @@ fn batch_size_caps_the_rows_per_statement() {
     let err = exec::plan_inserts(&schema, Target::new(Dialect::Postgres), "Item", &[], vec![], None, &NoParams, Some(0));
     assert!(err.is_err());
 }
+
+#[test]
+fn conflict_target_takes_a_partial_index_predicate() {
+    const PARTIAL: &str = "model Doc {\n id BigInt @id @default(autoincrement())\n slug String\n deleted_at DateTime?\n}\n";
+    let (_, schema) = dsl::check(dsl::compile(PARTIAL, None).unwrap()).unwrap();
+    let target = Target::new(Dialect::Postgres);
+    let filter = serde_json::from_value(serde_json::json!({"t": "is_null", "item": {"t": "col", "path": [], "name": "deleted_at"}, "neg": false})).unwrap();
+    let conflict = exec::Conflict::Nothing { target: vec!["slug".into()], filter: Some(filter) };
+    let rows = vec![vec![Some(Value::String(Some("a".into())))]];
+    let plan = exec::plan_insert(&schema, target, "Doc", &["slug".into()], rows, Some(conflict), &NoParams).unwrap();
+    let sql = exec::statement(target, &plan);
+    assert!(sql.contains(r#"ON CONFLICT ("slug") WHERE "doc"."deleted_at" IS NULL DO NOTHING"#), "{sql}");
+}

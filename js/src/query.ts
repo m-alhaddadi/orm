@@ -176,6 +176,8 @@ export interface LockOptions {
 export interface ConflictOptions<M extends ModelSpec> {
   /** The column(s) of the unique constraint the rows may hit. */
   readonly onConflict: OwnColumn<M> | readonly OwnColumn<M>[];
+  /** The predicate of a partial unique index: `ON CONFLICT (...) WHERE ...`. */
+  readonly where?: Expression<boolean | null, string, unknown>;
 }
 
 /** `ON CONFLICT DO NOTHING`: keep the existing row. */
@@ -1155,6 +1157,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     let update: string[] | null = null;
     let set: string | null = null;
     const params: unknown[] = [];
+    let conflictWhere: string | null = null;
     const batchSize = options?.batchSize ?? null;
     if (batchSize !== null && !(Number.isInteger(batchSize) && batchSize >= 1)) {
       throw new TypeError("batchSize must be an integer of at least 1");
@@ -1163,6 +1166,9 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       conflict = ownFields(this.meta, toArray(options.onConflict), "onConflict");
       if (!conflict.length) {
         throw new TypeError("onConflict needs the column(s) of a unique constraint");
+      }
+      if (options.where !== undefined) {
+        conflictWhere = JSON.stringify(asCondition(options.where).ir(new IRContext(this.meta, params)));
       }
       if ("doNothing" in options && options.doNothing) {
         if ("doUpdate" in options || "set" in options) {
@@ -1193,7 +1199,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     const db = this.db();
     if (debugging()) record(`insert:${this.meta.name}:${prepared.fields}:${conflict}`, () => `INSERT INTO ${this.meta.name} (${prepared.fields.join(", ")}) ...`);
     const res = await db_wait(db, (tx) =>
-      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowedWrites(), batchSize),
+      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowedWrites(), batchSize, conflictWhere),
     );
     return new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][];
   }

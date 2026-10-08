@@ -237,6 +237,9 @@ Writes run when they are called and return a `Promise`:
   `null` with `doNothing`). `insertMany(rows, ...)` is the bulk version. A field left
   out gets its `@client_default` (filled natively, as in Python), else the database
   default; an explicit value, also `null`, wins.
+* `{ onConflict: [...], where: cond }` picks a partial unique index:
+  `ON CONFLICT (...) WHERE cond`. The condition must match the index predicate
+  without parameters (`Task.deletedAt.isNull()`, a boolean column).
 * `insertMany` splits the rows so that no statement has more parameters than the
   database accepts (65,535 on Postgres, 32,766 on SQLite). `{ batchSize: n }` sets a
   lower number of rows for each statement. All the statements run in one transaction.

@@ -1,8 +1,10 @@
 """Bulk writes: insert_many batches, partial-index upserts, get_or_insert, many-to-many
 links with extra fields, COPY."""
 
+from datetime import datetime, timezone
+
 import pytest
-from blog.models import Tag, User
+from blog.models import Comment, Post, Tag, User
 
 import orm
 from conftest import DATABASE_URL
@@ -53,3 +55,52 @@ async def test_insert_many_batches_by_max_params(clean):
 async def test_insert_many_batch_size_is_checked(clean):
     with pytest.raises(ValueError, match="batch_size"):
         User.objects.insert_many([], batch_size=0)
+
+
+# -- upserts on a partial unique index --------------------------------------------------------
+
+
+@pytest.fixture
+async def anon_index(clean):
+    """One anonymous comment per post and body: a partial unique index."""
+    await clean.execute("CREATE UNIQUE INDEX comments_anon_body ON comments (post_id, body) WHERE author_id IS NULL")
+    yield clean
+    await clean.execute("DROP INDEX comments_anon_body")
+
+
+async def test_on_conflict_where_picks_a_partial_index(anon_index):
+    alice = await User.objects.insert(email="a@x.io", name="A")
+    post = await Post.objects.insert(author=alice, title="t", body="b")
+    first = await Comment.objects.insert(post=post, body="hi")
+    with pytest.raises(orm.DatabaseError, match="no unique or exclusion constraint"):
+        await Comment.objects.insert(post=post, body="hi").on_conflict(Comment.post_id, Comment.body).do_nothing()
+    where = Comment.author_id.is_null()
+    assert await Comment.objects.insert(post=post, body="hi").on_conflict(Comment.post_id, Comment.body, where=where).do_nothing() is None
+    later = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    again = await (
+        Comment.objects.insert(post=post, body="hi", created_at=later)
+        .on_conflict(Comment.post_id, Comment.body, where=where)
+        .do_update(Comment.created_at)
+    )
+    assert again.id == first.id and again.created_at == later
+    # The other rows of the index predicate's complement are not unique.
+    await Comment.objects.insert_many([{"post": post, "author": alice, "body": "hi"}] * 2)
+    assert await Comment.objects.count() == 3
+
+
+async def test_on_conflict_where_with_set_parameters(anon_index):
+    alice = await User.objects.insert(email="a@x.io", name="A")
+    post = await Post.objects.insert(author=alice, title="t", body="b")
+    await Comment.objects.insert(post=post, body="hi")
+    row = await (
+        Comment.objects.insert(post=post, body="hi")
+        .on_conflict(Comment.post_id, Comment.body, where=Comment.author_id.is_null())
+        .do_update(body="hi again")
+    )
+    assert row.body == "hi again"
+
+
+async def test_on_conflict_where_reads_own_columns_only(anon_index):
+    # Postgres refuses a relation path (a subquery) in an index predicate.
+    with pytest.raises(orm.DatabaseError, match="subquery in index predicate"):
+        await Comment.objects.insert(post_id=1, body="x").on_conflict(Comment.post_id, where=Comment.post.title == "t").do_nothing()

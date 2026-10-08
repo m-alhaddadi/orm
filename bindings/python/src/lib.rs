@@ -311,10 +311,11 @@ impl Engine {
     /// With `conflict` (unique field names) rows hitting that constraint update the
     /// `update` fields from the new row and apply the `set` assignments (JSON list of
     /// `{"field", "value"}` IR, parameters in `params`), or are skipped if `update` is
-    /// None.
+    /// None. `conflict_where` (condition IR, parameters in `params`) is the predicate of a
+    /// partial unique index.
     /// Rows beyond the parameter limit, or beyond `batch_size`, go to further statements
     /// in one transaction (inside `tx` when given).
-    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![], batch_size = None))]
+    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![], batch_size = None, conflict_where = None))]
     #[allow(clippy::too_many_arguments)]
     fn insert<'py>(
         &self,
@@ -330,15 +331,20 @@ impl Engine {
         db: Option<Bound<'py, PyAny>>,
         allowed: Vec<String>,
         batch_size: Option<usize>,
+        conflict_where: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
             Some(json) => serde_json::from_str(json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
             None => vec![],
         };
+        let filter: Option<ir::Expr> = match conflict_where {
+            Some(json) => Some(serde_json::from_str(json).map_err(|e| query_err(format!("invalid condition IR: {e}")))?),
+            None => None,
+        };
         let conflict = conflict.map(|target| match update {
-            Some(update) => Conflict::Update { target, update, set },
-            None => Conflict::Nothing { target },
+            Some(update) => Conflict::Update { target, filter, update, set },
+            None => Conflict::Nothing { target, filter },
         });
         let values = convert_rows(&self.schema, model, &fields, rows, true)?;
         let plans =

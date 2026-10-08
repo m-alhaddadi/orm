@@ -251,12 +251,13 @@ pub fn field_types(schema: &Schema, model: &str, fields: &[String]) -> Result<Ve
     fields.iter().map(|f| m.field(f).map(|f| f.value_type())).collect::<std::result::Result<_, _>>().map_err(query_err)
 }
 
-/// What an insert does with rows hitting a unique constraint (field names; `set` is
-/// assignment IR whose parameters are the insert's `params`).
+/// What an insert does with rows hitting a unique constraint (field names; `filter`, the
+/// partial unique index's predicate, and `set` are IR whose parameters are the insert's
+/// `params`).
 #[derive(Clone)]
 pub enum Conflict {
-    Nothing { target: Vec<String> },
-    Update { target: Vec<String>, update: Vec<String>, set: Vec<ir::Assignment> },
+    Nothing { target: Vec<String>, filter: Option<ir::Expr> },
+    Update { target: Vec<String>, filter: Option<ir::Expr>, update: Vec<String>, set: Vec<ir::Assignment> },
 }
 
 /// `INSERT ... RETURNING` every column. `rows` hold a value per field (`None`: the
@@ -277,8 +278,8 @@ pub fn plan_insert(
     }
     let model_idx = schema.model_idx(model).map_err(query_err)?;
     let on_conflict = conflict.map(|c| match c {
-        Conflict::Nothing { target } => plan::OnConflict::Nothing(target),
-        Conflict::Update { target, update, set } => plan::OnConflict::Update(target, update, set),
+        Conflict::Nothing { target, filter } => plan::OnConflict::Nothing(target, filter),
+        Conflict::Update { target, filter, update, set } => plan::OnConflict::Update(target, filter, update, set),
     });
     let (stmt, types): (InsertStatement, _) =
         plan::plan_insert(schema, target, model, fields, rows, on_conflict, params)?;
