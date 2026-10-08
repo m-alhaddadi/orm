@@ -63,7 +63,7 @@ Scalar types follow Prisma's choices:
 | `Int`, `Float` | `number` |
 | `BigInt` | `bigint` (filters also take a `number`) |
 | `Decimal` | `Decimal` from decimal.js, re-exported by `orm` (filters also take a `number` or a string) |
-| `DateTime` | `Date`, with millisecond precision. Postgres keeps microseconds, so the last three digits are lost on read |
+| `DateTime` | `Date`, with millisecond precision; the microseconds below it stay in a hidden property (see below) |
 | `Date` | `Date` at 00:00 UTC |
 | `Json` | `JsonValue` |
 | `Uuid` | `string` |
@@ -141,7 +141,7 @@ const back = await Post.objects.orderBy("-createdAt").paginate({ last: 20, befor
 The rules are the same as Python's `paginate()` (see [`python-api.md`](python-api.md)).
 A nullable order column needs `{ nulls }`: `Post.rank.desc({ nulls: "last" })`.
 A cursor from Python works in TypeScript for the same schema and order, and the other way.
-A `Date` holds milliseconds. A `DateTime` value read from the database keeps its microseconds in a hidden property, so its cursor and `filter(Post.createdAt.eq(row.createdAt))` find the exact row. `new Date(row.createdAt)` drops them.
+A `Date` holds milliseconds. A `DateTime` value read from the database keeps its microseconds in a hidden property, so its cursor and `filter(Post.createdAt.eq(row.createdAt))` find the exact row. `new Date(row.createdAt)` drops them, and so does a change of the `Date` (`setTime()`, `setUTCHours()`, ...).
 `{ first, before: null }` and `{ last, after: null }` are accepted, as in Python.
 
 ### Relation filters

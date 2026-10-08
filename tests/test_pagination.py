@@ -145,6 +145,9 @@ async def test_rejected_orders_and_cursors(items):
         await qs.paginate(first=0)
     with pytest.raises(TypeError, match=r"score=Item.score.desc\(\) is an ordering, for order_by\(\); write 0 - Item.score"):
         qs.update(score=-Item.score)
+    for misuse in (lambda: qs.insert(owner_id=1, score=-Item.score, name="x", code="x", at=T0), lambda: qs.filter(Item.score == -Item.score).count()):
+        with pytest.raises(TypeError, match=r"Item.score.desc\(\) is an ordering, for order_by\(\); write 0 - Item.score"):
+            await misuse()
     cursor = (await qs.order_by(-Item.score).paginate(first=2)).next_cursor
     assert cursor == "eyJvIjoiMDQ5ZjZhMzYwOGNlYzljMiIsInYiOlsiMyIsIjgiXX0", "the same cursor as js/test/pagination.test.ts"
     with pytest.raises(QueryError, match="another order or model"):
@@ -169,11 +172,12 @@ async def test_edited_cursors_are_query_errors(items):
     for bad in ["2026-10-01T00:00:00", "2026-10-01", 5]:
         with pytest.raises(QueryError, match="invalid cursor"):
             await by_at.paginate(first=2, after=edited(at, [bad, "1"]))
-    for bad in ["1" * 23, "5.5", "2147483648", None, 3]:
+    for bad in ["1" * 23, "5.5", "2147483648", "-2147483649", "+3", " 3", None, 3]:
         with pytest.raises(QueryError, match="invalid cursor"):
             await by_score.paginate(first=2, after=edited(score, [bad, "1"]))
     with pytest.raises(QueryError, match="invalid cursor"):
         await by_score.paginate(first=2, after=edited(score, ["3", "1" * 23]))
+    assert (await by_score.paginate(first=2, after=edited(score, ["-2147483648", "1"]))).items == []
     with pytest.raises(QueryError, match="another order or model"):
         await qs.order_by(Item.rank.asc(nulls="first")).paginate(first=2, after=(await qs.order_by(Item.rank.asc(nulls="last")).paginate(first=1)).next_cursor)
     with pytest.raises(QueryError, match="json columns have no cursor value"):
@@ -290,6 +294,9 @@ async def test_non_finite_float_order_values(postgres):
     assert await walk(qs.order_by(Measure.f), 2) == [1, 5, 2, 3, 4]
     page = await qs.order_by(Measure.f).paginate(first=2, after=(await qs.order_by(Measure.f).paginate(first=2)).next_cursor)
     assert page.next_cursor == "eyJvIjoiYWY4ZDc2YzZmZDZmZTllNyIsInYiOlsiSW5maW5pdHkiLCIzIl19", "the same cursor as js/test/pagination.test.ts"
+    by_d = qs.order_by(Measure.d)
+    with pytest.raises(QueryError, match="invalid cursor"):
+        await by_d.paginate(first=1, after=edited((await by_d.paginate(first=1)).next_cursor, ["NaN", "1"]))
     await db.execute("UPDATE page07_measures SET d = 'NaN' WHERE id = 1")
     with pytest.raises(QueryError, match="can't make a cursor from the decimal NaN"):
         await qs.order_by(Measure.d.desc()).paginate(first=1)
