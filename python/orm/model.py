@@ -80,6 +80,10 @@ class ModelMeta:
         self.default_filter: dict[str, Any] | None = None
         # The schema default order: `{"field", "desc"?, "nulls"?}` per column.
         self.default_order: list[dict[str, Any]] = []
+        # The class of `objects` (`use_query_set`): `None` for QuerySet, or a "module:Class"
+        # path until first use; and the relation sets mixed with it, by base class.
+        self.query_set: type[QuerySet[Any]] | str | None = None
+        self.related_sets: dict[type, type] = {}
 
     def pk_ref(self) -> ColumnRef[Any]:
         return ColumnRef(self.model, (), self.pk)

@@ -67,6 +67,49 @@ The descriptors behave differently on the class and on an instance:
 | one-to-one `User.profile` | `_ProfilePath` | `Profile` or `None`, if loaded, else `NotLoaded` |
 | many-to-many `Post.tags` | `_TagPath` | `ManyRelatedSet[Tag]`: the post's tags, with `add()` / `remove()` |
 
+## Custom query-set methods
+
+Named filters (Django's custom managers) go in a subclass of the model's query set, in your own module:
+
+```python
+# blog/queries.py
+from typing import Self
+from blog.models import Post, PostQuerySet
+
+class PostQueries(PostQuerySet):
+    def published(self) -> Self:
+        return self.filter(Post.published)
+
+    def popular(self, views: int = 100) -> Self:
+        return self.filter(Post.views >= views)
+```
+
+Generate the models with the class, as `module:Class`:
+
+```bash
+python -m orm generate --query-set Post=blog.queries:PostQueries
+```
+
+or in `pyproject.toml`:
+
+```toml
+[tool.orm.query_sets]
+Post = "blog.queries:PostQueries"
+```
+
+Then `Post.objects` is a `PostQueries`, and the methods chain with every builder method in both orders:
+`await Post.objects.published().filter(Post.author_id == 1).popular()`.
+`models.pyi` types `Post.objects` as the class, so mypy and pyright check the calls.
+
+* `models.py` calls `orm.use_query_set(Post, "blog.queries:PostQueries")`.
+  The module is imported on the first use of `Post.objects`, so it can import `blog.models` without an import cycle.
+  `use_query_set(Model, cls)` also takes the class itself, for models from `orm.load()`.
+* Relation sets have the methods too: `await user.posts.published()`, `post.tags.<method>()`.
+  The stub does not type them on a relation set yet; `Post.objects.published().filter(Post.author_id == user.id)` is typed.
+* `Prefetch(User.posts, Post.objects.published())` uses them for related rows.
+* The class must subclass `QuerySet` and must not declare `__slots__` (it mixes with the relation-set classes); `use_query_set` raises `TypeError` otherwise.
+  Keep state in the query, not in attributes: builder methods copy the instance `__dict__`, but nothing else.
+
 ## Queries
 
 Builders return a new immutable `QuerySet`. Awaiting it runs the query. Awaiting the

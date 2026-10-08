@@ -127,6 +127,15 @@ fn related_ref(schema: &Schema, r: &RelationIr) -> Result<String, String> {
 /// schema file in the header comment; `runtime` is the module the runtime is imported
 /// from (`"orm"`).
 pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> Result<String, String> {
+    generate_with(ir, schema, source, runtime, &super::Options::default())
+}
+
+/// [`generate`] with generator options (the user's query-set classes).
+pub fn generate_with(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str, options: &super::Options) -> Result<String, String> {
+    let query_sets = options.query_sets(schema, '#')?;
+    // one namespace import per module, read lazily so an import cycle with it is safe
+    let modules: Vec<&str> = query_sets.values().map(|(module, _)| *module).collect::<BTreeSet<_>>().into_iter().collect();
+    let query_set = |model: &str| query_sets.get(model).map(|(module, class)| format!("_q{}.{class}", modules.iter().position(|m| m == module).unwrap()));
     // names: camelCase must stay unique and clear of the runtime's own
     for m in &schema.models {
         let mut seen = BTreeSet::new();
@@ -210,7 +219,8 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         for r in &m.ir.relations {
             match r.kind {
                 RelKind::Many if r.through.is_some() => {
-                    writeln!(body, "  readonly {}: ManyRelatedSet<{}Spec>;", camel(&r.name), r.target).unwrap()
+                    let queries = if query_set(&r.target).is_some() { format!(" & QueriesOf<{}Spec>", r.target) } else { String::new() };
+                    writeln!(body, "  readonly {}: ManyRelatedSet<{}Spec>{queries};", camel(&r.name), r.target).unwrap()
                 }
                 RelKind::Many => {
                     // the key and the to-one relation back, filled in by insert()
@@ -224,7 +234,8 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
                     {
                         link.push(quote(&camel(&back.name)));
                     }
-                    writeln!(body, "  readonly {}: RelatedSet<{}Spec, {}>;", camel(&r.name), r.target, link.join(" | ")).unwrap()
+                    let queries = if query_set(&r.target).is_some() { format!(" & QueriesOf<{}Spec>", r.target) } else { String::new() };
+                    writeln!(body, "  readonly {}: RelatedSet<{}Spec, {}>{queries};", camel(&r.name), r.target, link.join(" | ")).unwrap()
                 }
                 RelKind::One => {
                     #[cfg(feature = "reference-loading")]
@@ -330,6 +341,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         writeln!(body, "  readonly update: {name}Update;").unwrap();
         writeln!(body, "  readonly updateRow: {name}UpdateRow;").unwrap();
         writeln!(body, "  readonly pk: {};", value_type(pk)).unwrap();
+        if let Some(class) = query_set(name) { writeln!(body, "  readonly queries: {class};").unwrap(); }
         writeln!(body, "}}\n").unwrap();
 
         // columns and relation paths: `S` the scopes a column reads (the root model, plus
@@ -379,6 +391,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
             writeln!(body, "}}\n").unwrap();
         }
         writeln!(body, "export const {name} = models[{}] as unknown as {name}Model;\n", quote(name)).unwrap();
+        if let Some(class) = query_set(name) { writeln!(body, "useQuerySet({name}, () => {class});\n").unwrap(); }
     }
 
     let mut out = String::new();
@@ -395,9 +408,17 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str) -> 
         "RelationPath", "SchemaIR",
     ];
     types.extend(used.iter().copied());
+    if !query_sets.is_empty() {
+        types.push("QueriesOf");
+    }
     types.sort_unstable();
     let imports = types.iter().map(|t| format!("type {t}")).collect::<Vec<_>>().join(", ");
-    writeln!(out, "import {{ define, {imports} }} from {};\n", quote(runtime)).unwrap();
+    let runtime_values = if query_sets.is_empty() { "define" } else { "define, useQuerySet" };
+    writeln!(out, "import {{ {runtime_values}, {imports} }} from {};", quote(runtime)).unwrap();
+    for (i, module) in modules.iter().enumerate() {
+        writeln!(out, "import * as _q{i} from {};", quote(module)).unwrap();
+    }
+    out.push('\n');
     writeln!(out, "const SCHEMA: SchemaIR = {ir_json};\n").unwrap();
     #[cfg(feature = "reference-loading")]
     writeln!(out, "const models = define(SCHEMA, {{ requiredCapabilities: [\"reference-loading\"] }});\n").unwrap();

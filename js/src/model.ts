@@ -12,7 +12,7 @@ import { Column, PATH, RelationPath, type PathState, type Source } from "./expr.
 import { camel, type ColType, type FieldMeta, type ModelSpec, type RelationKind, type RelationMeta } from "./meta.js";
 import { call, native, type NativeShape, type NativeSchema } from "./native.js";
 import { resolve, type Database } from "./db.js";
-import type { ManyRelatedSet, QuerySet, RelatedSet } from "./query.js";
+import type { ManyRelatedSet, QuerySet, QuerySetOf, RelatedSet } from "./query.js";
 
 /** Where an instance keeps its loaded relations. */
 export const RELATED: unique symbol = Symbol("orm.related");
@@ -63,8 +63,8 @@ export type SchemaIR = { models: IRModel[]; enums?: IREnum[]; [key: string]: unk
 /** A model, as the types see it: the generated `UserModel` adds its columns and
  * relation paths. */
 export interface ModelClass<M extends ModelSpec> {
-  /** The root query set of the model. */
-  readonly objects: QuerySet<M>;
+  /** The root query set of the model, of its `useQuerySet` class if it has one. */
+  readonly objects: QuerySetOf<M>;
   /** Schema information about the model. */
   readonly _meta: ModelMeta;
   /** `get()` found no row; `instanceof User.DoesNotExist`. */
@@ -114,8 +114,12 @@ export class ModelMeta implements Source {
   /** The prototype of paths that reach this model (`User.posts` for `Post`). */
   readonly pathProto: object;
   readonly model: ModelClass<ModelSpec> & Record<string, unknown>;
-  /** @internal */
-  objects!: QuerySet<ModelSpec>;
+  /** @internal The class of `objects` and of the relation sets (`useQuerySet`), or a
+   * function that gives it on first use. */
+  querySet: unknown;
+  /** @internal Relation-set classes with the `querySet` methods, by base class. */
+  readonly relatedSets = new Map<unknown, unknown>();
+  private rootQuerySet: QuerySet<ModelSpec> | undefined;
   private decodeRow: ((row: Row) => void) | undefined;
 
   constructor(
@@ -178,6 +182,23 @@ export class ModelMeta implements Source {
     Object.defineProperty(model, "objects", { get: () => this.objects, enumerable: true });
     Object.defineProperty(model, Symbol.toStringTag, { value: name });
     this.model = model as never;
+  }
+
+  /** @internal The root query set, built on first use. */
+  get objects(): QuerySet<ModelSpec> {
+    return (this.rootQuerySet ??= makeQuerySet(this));
+  }
+
+  /** @internal A package replaces the root query set (file storage wraps it). */
+  set objects(qs: QuerySet<ModelSpec>) {
+    this.rootQuerySet = qs;
+  }
+
+  /** @internal Forget the root query set and relation-set classes (`useQuerySet`). */
+  resetQuerySet(querySet: unknown): void {
+    this.querySet = querySet;
+    this.rootQuerySet = undefined;
+    this.relatedSets.clear();
   }
 
   get name(): string {
@@ -688,7 +709,6 @@ export function define(
         Object.defineProperty(meta.model, name, { value: (value: string) => call(() => fn(value)), enumerable: true });
       }
     }
-    meta.objects = makeQuerySet(meta);
     Object.defineProperty(meta.Row, "meta", { value: meta });
     reg.add(meta);
     out[m.name] = meta.model;

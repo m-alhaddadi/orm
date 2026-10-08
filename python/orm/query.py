@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Unpack, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Unpack, cast, overload
 
 from ._cache import cached
 from .errors import QueryError, TransactionRequired
@@ -51,7 +51,7 @@ T4 = TypeVar("T4")
 T5 = TypeVar("T5")
 T6 = TypeVar("T6")
 
-__all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prefetch", "Prepared"]
+__all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prefetch", "Prepared", "use_query_set"]
 
 # Ids per query in in_bulk(), well below Postgres' 65535 parameters.
 IN_BULK_CHUNK = 10_000
@@ -913,6 +913,69 @@ class Prepared(Generic[M]):
         return f"<Prepared {self._qs!r}>"
 
 
+def use_query_set(model: type[M], query_set: type[QuerySet[M]] | str) -> None:
+    """Make ``query_set`` (a :class:`QuerySet` subclass, or ``"module:Class"``) the class
+    of ``model.objects``, of the query sets built from it and of the model's relation
+    sets (``user.posts``). A ``"module:Class"`` path is imported on the first access to
+    ``model.objects``, so that module can import the models module. Generated
+    ``models.py`` modules call this for ``--query-set Model=module:Class``."""
+    if not isinstance(query_set, str):
+        _check_query_set(model, query_set)
+    meta = model._meta
+    meta.query_set = query_set
+    meta.related_sets = {}
+    setattr(model, "objects", _Objects())
+
+
+class _Objects:
+    """``Model.objects`` until its first access, which builds the root query set and
+    puts it in the model's place."""
+
+    def __get__(self, obj: object, owner: type[Model]) -> QuerySet[Any]:
+        qs = _query_set_class(owner)(owner)
+        setattr(owner, "objects", qs)
+        return qs
+
+
+def _query_set_class(model: type[Model]) -> type[QuerySet[Any]]:
+    meta = model._meta
+    cls = meta.query_set
+    if cls is None:
+        return QuerySet
+    if isinstance(cls, str):
+        import importlib
+
+        module, sep, name = cls.partition(":")
+        if not sep or not module or not name:
+            raise TypeError(f"{model.__name__}: query set {cls!r} must be 'module:Class'")
+        found = importlib.import_module(module)
+        for part in name.split("."):
+            found = getattr(found, part)
+        cls = meta.query_set = _check_query_set(model, found)
+    return cls
+
+
+def _check_query_set(model: type[Model], cls: Any) -> type[QuerySet[Any]]:
+    if not isinstance(cls, type) or not issubclass(cls, QuerySet) or issubclass(cls, (RelatedSet, ManyRelatedSet)):
+        raise TypeError(f"{model.__name__}: a query set class is a subclass of orm.QuerySet, got {cls!r}")
+    for klass in cls.__mro__[: cls.__mro__.index(QuerySet)]:
+        if klass.__dict__.get("__slots__"):
+            raise TypeError(f"{cls.__name__} declares __slots__; a query set class can't, it mixes with relation sets")
+    return cls
+
+
+def _relation_set_class(base: type[QuerySet[Any]], model: type[Model]) -> type[QuerySet[Any]]:
+    """``base`` with the model's query set methods, built once per model."""
+    custom = _query_set_class(model)
+    if custom is QuerySet:
+        return base
+    cache: dict[type, type] = model._meta.related_sets
+    cls = cache.get(base)
+    if cls is None:
+        cls = cache[base] = type(f"{model.__name__}{base.__name__}", (base, custom), {"__slots__": ()})
+    return cls
+
+
 class RelatedSet(QuerySet[M]):
     """``user.posts``: the rows of a to-many relation of one instance.
 
@@ -921,6 +984,10 @@ class RelatedSet(QuerySet[M]):
     """
 
     __slots__ = ("_relation", "_instance")
+
+    def __new__(cls, *args: Any) -> Self:
+        made: Any = _relation_set_class(RelatedSet, args[0].target) if cls is RelatedSet and args else cls
+        return cast("Self", object.__new__(made))
 
     def __init__(self, relation: HasMany[M, Any], instance: Model) -> None:
         super().__init__(relation.target)
@@ -977,6 +1044,10 @@ class ManyRelatedSet(QuerySet[M]):
     """
 
     __slots__ = ("_relation", "_instance")
+
+    def __new__(cls, *args: Any) -> Self:
+        made: Any = _relation_set_class(ManyRelatedSet, args[0].target) if cls is ManyRelatedSet and args else cls
+        return cast("Self", object.__new__(made))
 
     def __init__(self, relation: ManyToMany[M, Any], instance: Model) -> None:
         from .expr import exists, outer

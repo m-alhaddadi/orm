@@ -102,6 +102,12 @@ fn has_server_value(f: &FieldIr) -> bool {
 /// Generates `models.py` / `models.pyi` for `ir` (already validated as `schema`).
 /// `source` names the schema file in the header comment.
 pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generated, String> {
+    generate_with(ir, schema, source, &super::Options::default())
+}
+
+/// [`generate`] with generator options (the user's query-set classes).
+pub fn generate_with(ir: &SchemaIr, schema: &Schema, source: &str, options: &super::Options) -> Result<Generated, String> {
+    let query_sets = options.query_sets(schema, ':')?;
     #[cfg(feature = "reference-loading")]
     for m in &schema.models {
         let mut seen: BTreeSet<String> = m.fields().iter().map(|f| f.name.clone())
@@ -135,9 +141,9 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         "#\n\
          # Runtime half of the generated module: the model classes are built from the compiled\n\
          # schema below. models.pyi carries the static types (columns, relation paths, typed\n\
-         # inserts / updates and query sets) for editors and type checkers.\n\n\
-         from orm import QuerySet, define\n\n",
+         # inserts / updates and query sets) for editors and type checkers.\n\n",
     );
+    writeln!(py, "from orm import QuerySet, define{}\n", if query_sets.is_empty() { "" } else { ", use_query_set" }).unwrap();
     writeln!(py, "_SCHEMA = r\"\"\"\n{ir_json}\n\"\"\"\n").unwrap();
     #[cfg(feature = "reference-loading")]
     writeln!(py, "_models = define(_SCHEMA, module=__name__, required_capabilities=(\"reference-loading\",))").unwrap();
@@ -158,6 +164,12 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     }
     for n in enums.iter().chain(&names) {
         writeln!(py, "{n} = _models[\"{n}\"]").unwrap();
+    }
+    if !query_sets.is_empty() {
+        py.push_str("\n# The user's query-set classes, imported on first use of `Model.objects`.\n");
+        for (model, (module, class)) in &query_sets {
+            writeln!(py, "use_query_set({model}, \"{module}:{class}\")").unwrap();
+        }
     }
     py.push_str("\n# Typed per model in models.pyi; plain aliases at runtime so the names can be imported.\n");
     let qs: Vec<String> = names.iter().map(|n| format!("{n}QuerySet")).collect();
@@ -238,7 +250,8 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
             let t = if nullable { format!("{} | None", r.target) } else { r.target.clone() };
             writeln!(body, "    async def load_{}(self, *, reload: bool = False) -> {t}: ...", r.name).unwrap();
         }
-        writeln!(body, "\n    objects: ClassVar[{name}QuerySet]\n").unwrap();
+        let objects = if query_sets.contains_key(name.as_str()) { format!("_{name}Objects") } else { format!("{name}QuerySet") };
+        writeln!(body, "\n    objects: ClassVar[{objects}]\n").unwrap();
         writeln!(
             body,
             "    async def update(self, **values: Unpack[{name}Update]) -> None: ...  # type: ignore[override]\n"
@@ -396,6 +409,12 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
          from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update, UpdateMany\n\
          from orm import fields as f\n\n",
     );
+    for (model, (module, class)) in &query_sets {
+        writeln!(pyi, "from {module} import {class} as _{model}Objects").unwrap();
+    }
+    if !query_sets.is_empty() {
+        pyi.push('\n');
+    }
     #[cfg(feature = "file-storage")]
     if !ir.behavior.file_fields.is_empty() {
         pyi.push_str("from collections.abc import AsyncIterator\nfrom orm_storage import Reference, Registry as StorageRegistry\nfrom orm_file_storage import Upload\n\ndef configure_file_storage(registry: StorageRegistry) -> None: ...\n\n");

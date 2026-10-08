@@ -76,6 +76,46 @@ The reserved names are `objects`, `_meta`, `DoesNotExist`, `MultipleObjectsRetur
 Without code generation, `define(schemaIR)` or `loads(schemaText)` builds the same models
 at runtime, but untyped.
 
+## Custom query-set methods
+
+Named filters (Django's custom managers) go in a subclass of `QuerySet`, in your own module:
+
+```ts
+// queries.ts
+import { QuerySet } from "orm";
+import { Post, type PostSpec } from "./models.js";
+
+export class PostQueries extends QuerySet<PostSpec> {
+  published(): this {
+    return this.filter(Post.published.eq(true)) as this;
+  }
+
+  popular(views = 100): this {
+    return this.filter(Post.views.gte(views)) as this;
+  }
+}
+```
+
+Generate the models with the class, as `specifier#Export` (the specifier is relative to `models.ts`):
+
+```bash
+npx orm generate --query-set Post=./queries.js#PostQueries
+```
+
+or in `package.json`: `"orm": { "querySets": { "Post": "./queries.js#PostQueries" } }`.
+
+Then `Post.objects` is a `PostQueries`, and the methods chain with every builder method in both orders:
+`await Post.objects.published().filter(Post.authorId.eq(1n)).popular()`.
+`PostSpec` gets `queries: PostQueries`, and builder methods return `QuerySetOf<PostSpec, ...>`, a query set with those methods.
+
+* `models.ts` imports the module as a namespace and calls `useQuerySet(Post, () => _q0.PostQueries)`.
+  The class is read on the first use of `Post.objects`, so `queries.ts` can import `models.ts` without an error from the import cycle.
+  `useQuerySet(Model, cls)` also takes the class itself, for models from `define()` or `loads()`.
+* Relation sets have the methods too: `user.posts.published()`, `post.tags.<method>()`, typed in the generated row type.
+* `new Prefetch(User.posts, Post.objects.published())` uses them for related rows.
+* A method returns `this` with a cast. TypeScript can not change the type arguments of `this`, so a custom method gives the class's own row type:
+  call custom methods before `selectRelated()`, `prefetchRelated()` or `only()`, whose row types they would drop.
+
 ## Queries
 
 Query sets are lazy and immutable: building one never touches the database. Awaiting

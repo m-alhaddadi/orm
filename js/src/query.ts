@@ -346,6 +346,13 @@ function prefetchIr(
 
 // -- query sets -----------------------------------------------------------------------------------
 
+/** The methods a model's query-set class (`useQuerySet`) adds, from `M["queries"]`. */
+export type QueriesOf<M extends ModelSpec> = M extends { readonly queries: infer Q } ? Omit<Q, keyof QuerySet<ModelSpec>> : {};
+
+/** A query set of `M` with the methods of its query-set class: what builder methods give. */
+export type QuerySetOf<M extends ModelSpec, R = M["row"], S extends string = M["name"], P = {}, X extends string = never> =
+  QuerySet<M, R, S, P, X> & QueriesOf<M>;
+
 /** @internal The state of a query set; copied, never changed. */
 export interface QueryState {
   readonly modelHelpers?: readonly string[];
@@ -454,9 +461,9 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   withoutRelated(): this { return this.clone({ withoutRelated: true, related: [] }); }
 
   /** Partial model instances; no arguments restores all public fields. */
-  only(): QuerySet<M, M["row"], S, P, X>;
-  only(...fields: readonly Column<unknown, string>[]): QuerySet<M, Partial<M["row"]> & Instance<M>, S, P, X>;
-  only(...fields: readonly Column<unknown, string>[]): QuerySet<M, Partial<M["row"]> & Instance<M>, S, P, X> {
+  only(): QuerySetOf<M, M["row"], S, P, X>;
+  only(...fields: readonly Column<unknown, string>[]): QuerySetOf<M, Partial<M["row"]> & Instance<M>, S, P, X>;
+  only(...fields: readonly Column<unknown, string>[]): QuerySetOf<M, Partial<M["row"]> & Instance<M>, S, P, X> {
     const names = fields.map((f) => {
       if (!(f instanceof Column) || f.root !== this.meta || f.path.length) throw new TypeError("only() takes root model columns");
       return f.field.ir;
@@ -468,7 +475,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   /** Keep rows matching all `conditions`. */
   filter<const C extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: C
-  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
+  ): QuerySetOf<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
     if (!conditions.length) {
       return this as never;
     }
@@ -478,7 +485,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   /** Drop rows matching all `conditions`. */
   exclude<const C extends readonly Expression<boolean | null, Allowed<S>, unknown>[]>(
     ...conditions: C
-  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
+  ): QuerySetOf<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
     if (!conditions.length) {
       return this as never;
     }
@@ -490,7 +497,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    * relations are joined. */
   orderBy<const C extends readonly (Expression<unknown, AllowedOne<S>, unknown> | Ordering<AllowedOne<S>, unknown> | FieldOrder<M>)[]>(
     ...items: C
-  ): QuerySet<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
+  ): QuerySetOf<M, R, S, P & ParamsOfAll<C>, X | OuterRefs<ScopesOf<C>, S>> {
     const named = items.map((i) => {
       if (typeof i !== "string") return i;
       const column = this.meta.column(this.meta.field(i.startsWith("-") ? i.slice(1) : i));
@@ -500,15 +507,15 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   }
 
   /** At most `n` rows; `n` may be a `param()` in a prepared query. */
-  limit<N extends string>(n: ParamRef<N>): QuerySet<M, R, S, P & ParamValues<N, number | bigint>, X>;
-  limit(n: number | null): QuerySet<M, R, S, P, X>;
+  limit<N extends string>(n: ParamRef<N>): QuerySetOf<M, R, S, P & ParamValues<N, number | bigint>, X>;
+  limit(n: number | null): QuerySetOf<M, R, S, P, X>;
   limit(n: number | null | ParamRef<string>): unknown {
     return this.clone({ limit: count(n, "limit") });
   }
 
   /** Skip `n` rows; `n` may be a `param()` in a prepared query. */
-  offset<N extends string>(n: ParamRef<N>): QuerySet<M, R, S, P & ParamValues<N, number | bigint>, X>;
-  offset(n: number | null): QuerySet<M, R, S, P, X>;
+  offset<N extends string>(n: ParamRef<N>): QuerySetOf<M, R, S, P & ParamValues<N, number | bigint>, X>;
+  offset(n: number | null): QuerySetOf<M, R, S, P, X>;
   offset(n: number | null | ParamRef<string>): unknown {
     const v = count(n, "offset");
     return this.clone({ offset: v === 0 ? undefined : v });
@@ -516,7 +523,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
 
   /** Rows `start` (inclusive) to `end` (exclusive) of the current ordering, like
    * `Array.slice`: `slice(10, 20)` is `offset(10).limit(10)`. Non-negative only. */
-  slice(start: number, end?: number): QuerySet<M, R, S, P, X> {
+  slice(start: number, end?: number): QuerySetOf<M, R, S, P, X> {
     const { limit, offset } = this.state;
     if (limit instanceof ParamRef || offset instanceof ParamRef) {
       throw new QueryError("a query set limited by param() can't be sliced; use limit() and offset()");
@@ -542,7 +549,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    */
   selectRelated<const C extends readonly RelationPath<ModelSpec, M["name"], readonly Hop[]>[]>(
     ...paths: C
-  ): QuerySet<M, R & LoadAll<C>, S, P, X> {
+  ): QuerySetOf<M, R & LoadAll<C>, S, P, X> {
     const related = [...this.state.related];
     for (const p of paths) {
       this.checkPath(p);
@@ -574,7 +581,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- `any`, not a contextual type the toAttr literal would widen to
       | Prefetch<any, any, any, M["name"] | Many, any>
     )[],
-  >(...relations: C): QuerySet<M, R & LoadAll<C>, S, P & PrefetchParams<C>, X> {
+  >(...relations: C): QuerySetOf<M, R & LoadAll<C>, S, P & PrefetchParams<C>, X> {
     const prefetch = [...this.state.prefetch];
     for (const item of relations) {
       const p = item instanceof Prefetch ? item : new Prefetch(item);
@@ -590,7 +597,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    * `FOR SHARE` with `exclusive: false`. Only this model's rows are locked, not rows joined
    * by `selectRelated`. Must run inside `db.transaction()`.
    */
-  lock(options: LockOptions & ({ readonly nowait?: false } | { readonly skipLocked?: false }) = {}): QuerySet<M, R, S, P, X> {
+  lock(options: LockOptions & ({ readonly nowait?: false } | { readonly skipLocked?: false }) = {}): QuerySetOf<M, R, S, P, X> {
     const { exclusive = true, nowait = false, skipLocked = false } = options as LockOptions;
     if (nowait && skipLocked) {
       throw new TypeError("lock() takes nowait or skipLocked, not both");
@@ -625,7 +632,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     cte: Cte<N, C, ModelSpec | null>,
     on: On,
     options: { readonly outer?: boolean } = {},
-  ): QuerySet<M, R, S | N, P & ParamsOfAll<[On]>, X | OuterRefs<ScopesOf<[On]>, S | N>> {
+  ): QuerySetOf<M, R, S | N, P & ParamsOfAll<[On]>, X | OuterRefs<ScopesOf<[On]>, S | N>> {
     if (!isCte(cte)) {
       throw new TypeError(`join() takes a CTE, got ${String(cte)}`);
     }
@@ -639,7 +646,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
    * Reads the rows from `cte` instead of the model's table (a subquery in `FROM`). The
    * CTE must have the model's columns; its other columns are `cte.c.<name>`.
    */
-  from<N extends string>(cte: Cte<N, unknown, M>): QuerySet<M, R, S | N, P, X> {
+  from<N extends string>(cte: Cte<N, unknown, M>): QuerySetOf<M, R, S | N, P, X> {
     if (!isCte(cte)) {
       throw new TypeError(`from() takes a CTE, got ${String(cte)}`);
     }
@@ -1575,13 +1582,82 @@ for (const cls of [RelatedSet, ManyRelatedSet]) {
   });
 }
 
+type QuerySetClass = new (meta: ModelMeta, state?: QueryState) => QuerySet<ModelSpec>;
+/** On a relation-set class mixed with a query-set class: the relation-set base. */
+const MIXED: unique symbol = Symbol("orm.mixed");
+
+/**
+ * Makes `querySet` (a `QuerySet` subclass, or an arrow function that gives it) the class of
+ * `model.objects`, of the query sets built from it and of the model's relation sets
+ * (`user.posts`). A function is called on the first use of `model.objects`, so the
+ * class's module can import the models module. Generated `models.ts` modules call this
+ * for `--query-set Model=specifier#Export`.
+ */
+export function useQuerySet<M extends ModelSpec>(
+  model: ModelClass<M>,
+  querySet: (new (...args: never[]) => QuerySet<M>) | (() => new (...args: never[]) => QuerySet<M>),
+): void {
+  const meta = model._meta;
+  // an arrow function (no prototype) gives the class later; anything else must be one
+  if ((querySet as { prototype?: unknown }).prototype !== undefined) checkQuerySet(meta, querySet);
+  meta.resetQuerySet(querySet);
+}
+
+function isQuerySetClass(x: unknown): boolean {
+  return x === QuerySet || (typeof x === "function" && (x as { prototype?: unknown }).prototype instanceof QuerySet);
+}
+
+function checkQuerySet(meta: ModelMeta, cls: unknown): QuerySetClass {
+  if (!isQuerySetClass(cls) || (cls as { prototype: unknown }).prototype instanceof RelatedSet || (cls as { prototype: unknown }).prototype instanceof ManyRelatedSet) {
+    throw new TypeError(`${meta.name}: a query set class extends QuerySet, got ${String(cls)}`);
+  }
+  return cls as QuerySetClass;
+}
+
+function querySetClass(meta: ModelMeta): QuerySetClass {
+  const cls = meta.querySet;
+  if (cls === undefined) return QuerySet as unknown as QuerySetClass;
+  if (isQuerySetClass(cls)) return cls as QuerySetClass;
+  const found = checkQuerySet(meta, (cls as () => unknown)());
+  meta.querySet = found;
+  return found;
+}
+
+/** `base` with the methods of the model's query-set class, built once per model. */
+function relationSetClass<B extends typeof RelatedSet | typeof ManyRelatedSet>(base: B, meta: ModelMeta): B {
+  const custom = querySetClass(meta);
+  if (custom === (QuerySet as unknown)) return base;
+  let cls = meta.relatedSets.get(base) as B | undefined;
+  if (!cls) {
+    const mixed = class extends custom {};
+    for (const key of Reflect.ownKeys(base.prototype)) {
+      if (key !== "constructor") Object.defineProperty(mixed.prototype, key, Object.getOwnPropertyDescriptor(base.prototype, key)!);
+    }
+    Object.defineProperty(mixed.prototype, MIXED, { value: base });
+    Object.defineProperty(mixed, "name", { value: `${meta.name}${base.name}` });
+    cls = mixed as unknown as B;
+    meta.relatedSets.set(base, cls);
+  }
+  return cls;
+}
+
+/** `instanceof RelatedSet` also holds for a relation set mixed with a query-set class. */
+for (const cls of [RelatedSet, ManyRelatedSet]) {
+  Object.defineProperty(cls, Symbol.hasInstance, {
+    value(this: unknown, o: unknown): boolean {
+      return Function.prototype[Symbol.hasInstance].call(this as never, o)
+        || (o !== null && typeof o === "object" && (o as { [MIXED]?: unknown })[MIXED] === this);
+    },
+  });
+}
+
 function makeRelatedSet(rel: RelationMeta, instance: object): RelatedSet<ModelSpec, never> {
   const inst = instance as Record<PropertyKey, unknown>;
   const owner = (inst.constructor as unknown as { meta: ModelMeta }).meta;
   const target = owner.registry.get(rel.target);
   const via = target.column(target.fieldByIr.get(rel.to)!);
   const key = fieldValue(inst, owner.fieldByIr.get(rel.from)!.name);
-  const qs = new RelatedSet<ModelSpec>(target, { ...EMPTY, filters: [asCondition(via.eq(key as never))] });
+  const qs = new (relationSetClass(RelatedSet, target))<ModelSpec>(target, { ...EMPTY, filters: [asCondition(via.eq(key as never))] });
   Object.assign(qs, { relation: rel, instance: inst });
   return qs as never;
 }
@@ -1596,12 +1672,12 @@ function makeManyRelatedSet(rel: RelationMeta, instance: object): ManyRelatedSet
   const to = target.column(target.fieldByIr.get(rel.to)!);
   const key = fieldValue(inst, owner.fieldByIr.get(rel.from)!.name);
   const cond = exists(join.objects.filter(source.eq(key as never) as never, tcol.eq(outer(to) as never) as never) as never);
-  const qs = new ManyRelatedSet<ModelSpec>(target, { ...EMPTY, filters: [cond] });
+  const qs = new (relationSetClass(ManyRelatedSet, target))<ModelSpec>(target, { ...EMPTY, filters: [cond] });
   Object.assign(qs, { relation: rel, instance: inst });
   return qs;
 }
 
-registerQueries((meta) => new QuerySet(meta), makeRelatedSet, makeManyRelatedSet);
+registerQueries((meta) => new (querySetClass(meta))(meta), makeRelatedSet, makeManyRelatedSet);
 
 // -- CTE / select hooks (cte.ts and select.ts register themselves) ---------------------------------
 
