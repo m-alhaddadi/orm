@@ -69,6 +69,8 @@ def prepare_rows(
         for key, value in row.items():
             if isinstance(value, Expression):
                 raise TypeError(f"{meta.name}.{key}: insert takes plain values, not expressions")
+            if isinstance(value, Ordering):
+                raise TypeError(f"{key}={value!r} is an ordering, for order_by(); write 0 - {value.expr!r} to negate a value")
             if key in meta.input_fields:
                 values[key] = value
             elif isinstance(rel := meta.relations.get(key), BelongsTo):

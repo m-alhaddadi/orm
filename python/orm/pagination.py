@@ -95,7 +95,9 @@ def _encode(f: Field[Any], v: Any) -> Any:
     if v is None or f.type_name in ("bool", "string", "text"):
         return v
     if f.type_name == "float":
-        return v if math.isfinite(v) else {math.inf: "Infinity", -math.inf: "-Infinity"}.get(v, "NaN")
+        if math.isnan(v):
+            return "NaN"
+        return v if math.isfinite(v) else ("Infinity" if v > 0 else "-Infinity")
     if f.type_name in ("date_time", "date"):
         return v.isoformat()
     if f.type_name == "decimal" and not v.is_finite():

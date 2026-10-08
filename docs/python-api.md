@@ -317,7 +317,7 @@ The primary key is added as the last order column when no column of the order is
 * A nullable order column needs `nulls=`: `Post.rank.desc(nulls="last")`.
 * A cursor is opaque base64 of the order values and a fingerprint of the order. A cursor from another order or model is a `QueryError`.
 * A cursor is not signed. A client can change it to start at any position of the same order, so do not use it for access control.
-* A damaged or edited cursor is `QueryError("invalid cursor")`; a cursor that is not a string is a `TypeError`.
+* A malformed cursor, or one with a value its column can't hold, is `QueryError("invalid cursor")`; a cursor that is not a string is a `TypeError`.
 * A cursor holds positions, not filters: it stays valid after a filter change and starts at the same position.
 * There is no total count; call `count()` for it.
 

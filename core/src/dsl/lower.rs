@@ -724,11 +724,6 @@ fn field(m: &ModelDecl, member: &Member, ctx: &Ctx<'_>) -> Result<FieldIr> {
                     if !(same && values.is_empty()) {
                         f.db_type = Some(if values.is_empty() { sql.to_owned() } else { format!("{sql}({})", values.join(", ")) });
                     }
-                    // A text parameter compares as text, where the padded `char(n)` value
-                    // of a row differs from the same value read back; bpchar ignores the padding.
-                    if sql == "char" && ty == ColType::String && !*list {
-                        f.write_sql = Some("CAST({} AS bpchar)".into());
-                    }
                 }
             }
             continue;
