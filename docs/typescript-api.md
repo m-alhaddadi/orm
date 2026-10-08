@@ -188,6 +188,23 @@ replace substr strpos` plus the window functions. `func.concat(a, " ", b)` reads
 part as an empty string; `a.concat(b)` (`a || b`) is `null` when either side is `null`.
 `Profile.links.element(1)` is SQL's 1-based element access (`null` out of range), and
 `func.unnest(...)` is valid only as a `select()` column; SQLite has no array columns.
+`func.case([cond, value], ..., { default })` is `CASE WHEN ... END`: the value of the
+first true condition, else `default` (`null` without one). It works in `select()`,
+`filter()`, `orderBy()` and `update()`, for example
+`func.sum(func.case([Post.published, 1], { default: 0 }))` for a conditional count.
+Aggregates take `{ filter: cond }` (`FILTER (WHERE cond)`), for example
+`func.count({ filter: Post.published })` or
+`func.count(User.posts, { filter: User.posts.published })`.
+JSON columns: `Doc.meta.get("author", "name").eq("Ann")` (`meta -> 'author' -> 'name'`,
+compared as JSON), `.asText()` for the last step as text (`->>`),
+`Doc.meta.jsonContains({ kind: "post" })` (`@>`), `.jsonContainedBy(...)` (`<@`),
+`.hasKey("tags")` (`?`) and `update({ meta: Doc.meta.jsonMerge({ seen: true }) })` (`||`).
+Keys are strings, indexes 0-based integers. PostgreSQL only.
+Full-text search (PostgreSQL only): `func.toTsvector("english", Post.body).matches("running dogs")`
+(`@@`, a plain string is `plainto_tsquery` with the vector's configuration),
+`func.toTsquery`, `func.plaintoTsquery`, `func.websearchToTsquery` and `func.tsRank(vector, query)`.
+The configuration is written into the SQL as `'english'::regconfig`, so it matches a GIN
+index on the same expression: `@@index([sql("to_tsvector('english', body)")], type: Gin)`.
 The result types follow the SQL: `count` is a `bigint`, `sum(Int)` is `number | null`,
 `sum(Decimal)` is `Decimal | null`, and `avg` is `number | null`. A column read through a
 nullable relation becomes nullable.

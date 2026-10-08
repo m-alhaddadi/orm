@@ -45,6 +45,10 @@ __all__ = [
     "Excluded",
     "excluded",
     "Func",
+    "Case",
+    "JsonPath",
+    "TsVector",
+    "TsQuery",
     "Labeled",
     "Window",
     "WindowDef",
@@ -260,13 +264,54 @@ class Expression(Node, Generic[T]):
     def __getitem__(self: Expression[list[E]], index: int) -> Func[E | None]: ...
     @overload
     def __getitem__(self: Expression[list[E] | None], index: int) -> Func[E | None]: ...
-    def __getitem__(self: Expression[Any], index: int) -> Func[Any]:
+    @overload
+    def __getitem__(self: Expression[Any], index: str) -> JsonPath: ...
+    def __getitem__(self: Expression[Any], index: int | str) -> Expression[Any]:
         """Array columns: the element at SQL's 1-based ``index`` (``col[1]`` is the first),
-        ``None`` out of range. PostgreSQL only."""
+        ``None`` out of range. JSON columns: the value under a key or at a 0-based array
+        index (``meta["tags"][0]``, ``meta -> 'tags' -> 0``). PostgreSQL only."""
+        if isinstance(self, JsonPath) or (isinstance(self, ColumnRef) and self._field.type_name == "json"):
+            return JsonPath(self, (index,))
+        if isinstance(index, str):
+            raise TypeError(f"{self!r} is not a JSON column; a string key needs one")
         return Func("element", (self, _Int(index)))
 
     # ``__getitem__`` alone would make every expression iterable.
     __iter__ = None
+
+    # JSON -----------------------------------------------------------------------------------
+
+    def json_contains(self, value: Any) -> Condition:
+        """JSON: the value contains ``value`` at the top level (``col @> value``):
+        ``Post.meta.json_contains({"tags": ["a"]})``. PostgreSQL only."""
+        return Comparison("contains", self, Literal(value))
+
+    def json_contained_by(self, value: Any) -> Condition:
+        """JSON: ``value`` contains the value (``col <@ value``). PostgreSQL only."""
+        return Comparison("contained_by", self, Literal(value))
+
+    def has_key(self, key: str) -> Condition:
+        """JSON: the object has the top-level key ``key``, or the array the string element
+        (``col ? key``). PostgreSQL only."""
+        if not isinstance(key, str):
+            raise TypeError(f"has_key() takes a string, got {key!r}")
+        return Comparison("has_key", self, Literal(key))
+
+    def json_merge(self, value: Any) -> Expression[Any]:
+        """JSON: ``col || value``: the objects merged (the keys of ``value`` win), or the
+        arrays joined. For updates: ``update(meta=Post.meta.json_merge({"seen": True}))``.
+        PostgreSQL only."""
+        return Arith("json_merge", self, value if isinstance(value, Node) else Literal(value))
+
+    # Full-text search ------------------------------------------------------------------------
+
+    def matches(self: Expression[TsVector], query: Expression[TsQuery] | str) -> Condition:
+        """``vector @@ query``: the document matches the search. A plain string is
+        ``plainto_tsquery(<config of the vector>, query)``. PostgreSQL only."""
+        if isinstance(query, str):
+            config = self._args[0] if isinstance(self, Func) and self._name == "to_tsvector" and len(self._args) == 2 else None
+            query = Func("plainto_tsquery", (query,) if config is None else (config, query))
+        return Comparison("match", self, query)
 
     # Strings -------------------------------------------------------------------------------
 
@@ -507,15 +552,21 @@ class Labeled(Expression[T]):
 class Func(Expression[T]):
     """A SQL function call; build it with :data:`func`."""
 
-    __slots__ = ("_name", "_args", "_rel", "_distinct")
+    __slots__ = ("_name", "_args", "_rel", "_distinct", "_filter")
 
     def __init__(
-        self, name: str, args: tuple[Any, ...] = (), rel: RelationPath[Any] | None = None, distinct: bool = False
+        self,
+        name: str,
+        args: tuple[Any, ...] = (),
+        rel: RelationPath[Any] | None = None,
+        distinct: bool = False,
+        filter: ConditionLike | None = None,
     ) -> None:
         self._name = name
         self._args = tuple(_wrap(a) for a in args)
         self._rel = rel
         self._distinct = distinct
+        self._filter = None if filter is None else as_condition(filter)
 
     def _ir(self, ctx: IRContext) -> IR:
         ir: IR = {"t": "func", "name": self._name, "args": [a._ir(ctx) for a in self._args]}
@@ -526,10 +577,14 @@ class Func(Expression[T]):
             ir["rel"] = list(self._rel._path)
         if self._distinct:
             ir["distinct"] = True
+        if self._filter is not None:
+            ir["filter"] = self._filter._ir(ctx)
         return ir
 
     def __repr__(self) -> str:
         args = [repr(a) for a in self._args] + ([repr(self._rel)] if self._rel is not None else [])
+        if self._filter is not None:
+            args.append(f"filter={self._filter!r}")
         return f"func.{self._name}({', '.join(args)})"
 
     def over(
@@ -711,6 +766,66 @@ class Outer(Expression[T]):
         return f"outer({self._column!r})"
 
 
+class Case(Expression[T]):
+    """``func.case((cond, value), ..., default=v)``: ``CASE WHEN ... END``."""
+
+    __slots__ = ("_whens", "_default")
+
+    def __init__(self, whens: tuple[tuple[Any, Any], ...], default: Any) -> None:
+        if not whens:
+            raise TypeError("case() needs at least one (condition, value) branch")
+        for w in whens:
+            if not isinstance(w, tuple) or len(w) != 2:
+                raise TypeError(f"case() branches are (condition, value) tuples, got {w!r}")
+        self._whens = [(as_condition(c), _wrap(v)) for c, v in whens]
+        self._default = None if default is None else _wrap(default)
+
+    def _ir(self, ctx: IRContext) -> IR:
+        ir: IR = {"t": "case", "whens": [{"cond": c._ir(ctx), "value": v._ir(ctx)} for c, v in self._whens]}
+        if self._default is not None:
+            ir["default"] = self._default._ir(ctx)
+        return ir
+
+    def __repr__(self) -> str:
+        whens = ", ".join(f"({c!r}, {v!r})" for c, v in self._whens)
+        return f"func.case({whens}{'' if self._default is None else f', default={self._default!r}'})"
+
+
+class JsonPath(Expression[Any]):
+    """``Post.meta["a"]["b"]``: a ``jsonb`` value inside a JSON column. It compares as JSON
+    (``== "x"`` is the JSON string ``"x"``); :meth:`as_text` reads it as text."""
+
+    __slots__ = ("_item", "_path", "_text")
+
+    def __init__(self, item: Expression[Any], path: tuple[str | int, ...], text: bool = False) -> None:
+        for key in path:
+            if isinstance(key, bool) or not isinstance(key, (str, int)):
+                raise TypeError(f"JSON path steps are str keys or int indexes, got {key!r}")
+        if isinstance(item, JsonPath):
+            inner: JsonPath = item
+            if inner._text:
+                raise TypeError("as_text() ends a JSON path")
+            item, path = inner._item, inner._path + path
+        self._item: Expression[Any] = item
+        self._path: tuple[str | int, ...] = path
+        self._text: bool = text
+
+    def as_text(self) -> Expression[str | None]:
+        """The value as text (the last step is ``->>``): a JSON string without quotes, so
+        ``like``, ``contains`` and string functions work on it."""
+        return JsonPath(self._item, self._path, text=True)
+
+    def _ir(self, ctx: IRContext) -> IR:
+        ir: IR = {"t": "json_path", "item": self._item._ir(ctx), "path": list(self._path)}
+        if self._text:
+            ir["text"] = True
+        return ir
+
+    def __repr__(self) -> str:
+        steps = "".join(f"[{k!r}]" for k in self._path)
+        return f"{self._item!r}{steps}{'.as_text()' if self._text else ''}"
+
+
 class ScalarSubquery(Expression[T]):
     """``qs.select(x).as_scalar()``: a one-column subquery used as a value."""
 
@@ -729,6 +844,36 @@ class ScalarSubquery(Expression[T]):
 N = TypeVar("N", int, float, Decimal)
 
 
+class TsVector:
+    """The type of a ``tsvector`` expression (``func.to_tsvector``): only for typing."""
+
+
+class TsQuery:
+    """The type of a ``tsquery`` expression (``func.to_tsquery``, ...): only for typing."""
+
+
+class _Config(Expression[Any]):
+    """A text search configuration (``'english'::regconfig``), written into the SQL so the
+    expression matches an expression index."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        if not isinstance(name, str):
+            raise TypeError(f"a text search configuration is a name, got {name!r}")
+        self.name = name
+
+    def _ir(self, ctx: IRContext) -> IR:
+        return {"t": "text", "value": self.name}
+
+    def __repr__(self) -> str:
+        return repr(self.name)
+
+
+def _search(a: Any, b: Any) -> tuple[Any, ...]:
+    return (a,) if b is None else (_Config(a), b)
+
+
 class _Functions:
     """``func.count(...)``, ``func.sum(...)``, ...: SQL functions as expressions.
 
@@ -736,42 +881,55 @@ class _Functions:
     subquery: ``func.count(User.posts)`` is each user's number of posts, and
     ``func.sum(User.posts.views)`` their posts' total views. Over the model's own
     columns, aggregates summarize the rows of each ``group_by()`` group (or all rows).
+
+    Every aggregate takes ``filter=cond``: ``FILTER (WHERE cond)``, so it reads only the
+    rows where ``cond`` holds: ``func.count(filter=Post.published)``.
     """
 
     __slots__ = ()
 
-    def count(self, what: Expression[Any] | RelationPath[Any] | None = None, *, distinct: bool = False) -> Func[int]:
+    def count(
+        self,
+        what: Expression[Any] | RelationPath[Any] | None = None,
+        *,
+        distinct: bool = False,
+        filter: ConditionLike | None = None,
+    ) -> Func[int]:
         """``COUNT(*)`` without argument, ``COUNT(expr)`` (non-NULL values), or the rows
         of a relation: ``func.count(User.posts)``."""
         if isinstance(what, RelationPath):
-            return Func("count", rel=what)
-        return Func("count", () if what is None else (what,), distinct=distinct)
+            return Func("count", rel=what, filter=filter)
+        return Func("count", () if what is None else (what,), distinct=distinct, filter=filter)
 
     @overload
-    def sum(self, expr: Expression[N], *, distinct: bool = False) -> Func[N | None]: ...
+    def sum(self, expr: Expression[N], *, distinct: bool = False, filter: ConditionLike | None = None) -> Func[N | None]: ...
     @overload
-    def sum(self, expr: Expression[N | None], *, distinct: bool = False) -> Func[N | None]: ...
-    def sum(self, expr: Expression[Any], *, distinct: bool = False) -> Func[Any]:
+    def sum(self, expr: Expression[N | None], *, distinct: bool = False, filter: ConditionLike | None = None) -> Func[N | None]: ...
+    def sum(self, expr: Expression[Any], *, distinct: bool = False, filter: ConditionLike | None = None) -> Func[Any]:
         """``SUM``; integer sums come back as ``int`` (cast to bigint)."""
-        return Func("sum", (expr,), distinct=distinct)
+        return Func("sum", (expr,), distinct=distinct, filter=filter)
 
     @overload
     def avg(  # type: ignore[overload-overlap]  # pyright: ignore[reportOverlappingOverload]
-        self, expr: Expression[Decimal] | Expression[Decimal | None], *, distinct: bool = False
+        self, expr: Expression[Decimal] | Expression[Decimal | None], *, distinct: bool = False, filter: ConditionLike | None = None
     ) -> Func[Decimal | None]: ...
     @overload
     def avg(
-        self, expr: Expression[int] | Expression[int | None] | Expression[float] | Expression[float | None], *, distinct: bool = False
+        self,
+        expr: Expression[int] | Expression[int | None] | Expression[float] | Expression[float | None],
+        *,
+        distinct: bool = False,
+        filter: ConditionLike | None = None,
     ) -> Func[float | None]: ...
-    def avg(self, expr: Expression[Any], *, distinct: bool = False) -> Func[Any]:
+    def avg(self, expr: Expression[Any], *, distinct: bool = False, filter: ConditionLike | None = None) -> Func[Any]:
         """``AVG``: a ``float``, or a ``Decimal`` for decimal columns (exact)."""
-        return Func("avg", (expr,), distinct=distinct)
+        return Func("avg", (expr,), distinct=distinct, filter=filter)
 
-    def min(self, expr: Expression[T]) -> Func[T | None]:
-        return Func("min", (expr,))
+    def min(self, expr: Expression[T], *, filter: ConditionLike | None = None) -> Func[T | None]:
+        return Func("min", (expr,), filter=filter)
 
-    def max(self, expr: Expression[T]) -> Func[T | None]:
-        return Func("max", (expr,))
+    def max(self, expr: Expression[T], *, filter: ConditionLike | None = None) -> Func[T | None]:
+        return Func("max", (expr,), filter=filter)
 
     def lower(self, expr: Expression[str] | Expression[str | None]) -> Func[str]:
         return Func("lower", (expr,))
@@ -841,6 +999,66 @@ class _Functions:
 
     def now(self) -> Func[datetime]:
         return Func("now")
+
+    # Branches of expressions only first: mypy can't solve `T` from `Expression[T] | T`
+    # when no plain value pins it.
+    # Full-text search: PostgreSQL only. An optional first argument names the text search
+    # configuration (``"english"``); without it the server's default applies.
+
+    @overload
+    def to_tsvector(self, document: str | Expression[str] | Expression[str | None], /) -> Func[TsVector]: ...
+    @overload
+    def to_tsvector(self, config: str, document: str | Expression[str] | Expression[str | None], /) -> Func[TsVector]: ...
+    def to_tsvector(self, a: Any, b: Any = None, /) -> Func[TsVector]:
+        """``to_tsvector([config,] document)``: the document's normalized words. Index it
+        with ``@@index([sql("to_tsvector('english', title)")], type: Gin)``."""
+        return Func("to_tsvector", _search(a, b))
+
+    @overload
+    def to_tsquery(self, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    @overload
+    def to_tsquery(self, config: str, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    def to_tsquery(self, a: Any, b: Any = None, /) -> Func[TsQuery]:
+        """``to_tsquery([config,] query)``: a query in tsquery syntax (``"cat & !dog"``)."""
+        return Func("to_tsquery", _search(a, b))
+
+    @overload
+    def plainto_tsquery(self, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    @overload
+    def plainto_tsquery(self, config: str, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    def plainto_tsquery(self, a: Any, b: Any = None, /) -> Func[TsQuery]:
+        """``plainto_tsquery([config,] text)``: every word of plain text."""
+        return Func("plainto_tsquery", _search(a, b))
+
+    @overload
+    def websearch_to_tsquery(self, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    @overload
+    def websearch_to_tsquery(self, config: str, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    def websearch_to_tsquery(self, a: Any, b: Any = None, /) -> Func[TsQuery]:
+        """``websearch_to_tsquery([config,] text)``: search-engine syntax (``"cat -dog"``,
+        ``"or"``, quoted phrases)."""
+        return Func("websearch_to_tsquery", _search(a, b))
+
+    def ts_rank(self, vector: Expression[TsVector], query: Expression[TsQuery]) -> Func[float]:
+        """``ts_rank(vector, query)``: how well the document matches, for ``order_by``."""
+        return Func("ts_rank", (vector, query))
+
+    @overload
+    def case(self, *whens: tuple[ConditionLike, Expression[T]], default: Expression[T] | T) -> Case[T]: ...
+    @overload
+    def case(self, *whens: tuple[ConditionLike, Expression[T]]) -> Case[T | None]: ...
+    @overload
+    def case(self, *whens: tuple[ConditionLike, Expression[T]] | tuple[ConditionLike, T], default: Expression[T] | T) -> Case[T]: ...
+    @overload
+    def case(self, *whens: tuple[ConditionLike, Expression[T]] | tuple[ConditionLike, T]) -> Case[T | None]: ...
+    def case(self, *whens: tuple[ConditionLike, Any], default: Any = None) -> Case[Any]:
+        """``CASE WHEN cond THEN value ... ELSE default END``: the value of the first true
+        condition, else ``default`` (``None`` when not given)::
+
+            func.case((Post.views > 100, "hot"), (Post.views > 10, "warm"), default="cold")
+            func.sum(func.case((Post.published, 1), default=0))
+        """
+        return Case(whens, default)
 
     # Window functions: only valid with .over(...).
 
@@ -1016,7 +1234,7 @@ class Comparison(Condition):
         return {"t": "cmp", "op": self.op, "l": self.left._ir(ctx), "r": self.right._ir(ctx)}
 
     def __repr__(self) -> str:
-        sym = {"eq": "==", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">="}[self.op]
+        sym = {"eq": "==", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">="}.get(self.op, self.op)
         return f"({self.left!r} {sym} {self.right!r})"
 
 
@@ -1032,7 +1250,7 @@ class Arith(Expression[Any]):
         return {"t": "arith", "op": self.op, "l": self.left._ir(ctx), "r": self.right._ir(ctx)}
 
     def __repr__(self) -> str:
-        sym = {"add": "+", "sub": "-", "mul": "*", "div": "/", "concat": "||"}[self.op]
+        sym = {"add": "+", "sub": "-", "mul": "*", "div": "/", "concat": "||", "json_merge": "||"}[self.op]
         return f"({self.left!r} {sym} {self.right!r})"
 
 

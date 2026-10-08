@@ -83,3 +83,80 @@ fn substr_takes_a_start_from_one_and_a_length_from_zero() {
         assert!(plan(dialect, vec![substr(&[1, 0])], vec![]).is_ok());
     }
 }
+
+fn cmp(op: &str, l: Value, r: Value) -> Value { json!({"t":"cmp","op":op,"l":l,"r":r}) }
+fn int(value: i64) -> Value { json!({"t":"int","value":value}) }
+
+#[test]
+fn case_expression() {
+    let case = json!({"t":"case","whens":[
+        {"cond":cmp("gt", col("views"), int(10)),"value":text("hot")},
+        {"cond":cmp("gt", col("views"), int(0)),"value":col("title")},
+    ],"default":text("cold")});
+    assert_eq!(plan(Dialect::Postgres, vec![case.clone()], vec![]).unwrap(),
+        r#"SELECT CASE WHEN "notes"."views" > (10) THEN $1 WHEN "notes"."views" > (0) THEN "notes"."title" ELSE $2 END FROM "notes""#);
+    let sqlite = plan(Dialect::Sqlite, vec![case], vec![]).unwrap();
+    assert!(sqlite.contains(r#"CASE WHEN "notes"."views" > (10) THEN ? WHEN "notes"."views" > (0) THEN "notes"."title" ELSE ? END"#), "{sqlite}");
+    let nullable = json!({"t":"case","whens":[{"cond":cmp("gt", col("views"), int(1)),"value":col("views")}]});
+    assert!(plan(Dialect::Postgres, vec![nullable], vec![]).unwrap().contains(r#"THEN "notes"."views" END"#));
+    let empty = json!({"t":"case","whens":[]});
+    assert!(plan(Dialect::Postgres, vec![col("id")], vec![cmp("eq", empty, text("x"))]).unwrap_err().contains("at least one"));
+}
+
+#[test]
+fn aggregate_filter() {
+    let count = json!({"t":"func","name":"count","args":[],"filter":cmp("gt", col("views"), int(1))});
+    let sum = json!({"t":"func","name":"sum","args":[col("views")],"filter":cmp("eq", col("title"), text("x"))});
+    assert_eq!(plan(Dialect::Postgres, vec![count.clone(), sum.clone()], vec![]).unwrap(),
+        r#"SELECT COUNT(*) FILTER (WHERE "notes"."views" > (1)), CAST(SUM("notes"."views") FILTER (WHERE "notes"."title" = $1) AS BIGINT) FROM "notes""#);
+    let sqlite = plan(Dialect::Sqlite, vec![count, sum], vec![]).unwrap();
+    assert!(sqlite.contains(r#"COUNT(*) FILTER (WHERE "notes"."views" > (1))"#), "{sqlite}");
+    let lower = json!({"t":"func","name":"lower","args":[col("title")],"filter":cmp("gt", col("views"), int(1))});
+    assert!(plan(Dialect::Postgres, vec![lower], vec![]).unwrap_err().contains("only aggregates take a filter"));
+}
+
+#[test]
+fn json_paths_containment_and_merge() {
+    let mut fields = vec![
+        json!({"name":"id","column":"id","type":"big_int","primary_key":true}),
+        json!({"name":"meta","column":"meta","type":"json"}),
+        json!({"name":"title","column":"title","type":"text"}),
+    ];
+    let schema = |dialect: &str, fields: &Vec<Value>| Schema::from_ir(serde_json::from_value(json!({"dialect": dialect, "models":[{"name":"Doc","table":"docs","fields":fields}]})).unwrap()).unwrap();
+    let pg = schema("postgres", &fields);
+    let plan = |schema: &Schema, dialect: Dialect, columns: Vec<Value>| -> Result<String, String> {
+        let columns = columns.into_iter().map(|e| json!({"t":"expr","expr":e})).collect::<Vec<_>>();
+        let op: Operation = serde_json::from_value(json!({"op":"select","model":"Doc","columns":columns})).unwrap();
+        match Planner::plan(schema, Target::new(dialect), &op, &NoParams).map_err(|e| e.to_string())? {
+            Plan::Select(p) => Ok(db::build(dialect, &p.stmt).0),
+            _ => panic!("select"),
+        }
+    };
+    let path = json!({"t":"json_path","item":col("meta"),"path":["a", 0, "b"],"text":true});
+    let has = json!({"t":"cmp","op":"has_key","l":col("meta"),"r":text("k")});
+    let merge = json!({"t":"arith","op":"json_merge","l":col("meta"),"r":col("meta")});
+    assert_eq!(plan(&pg, Dialect::Postgres, vec![path.clone(), has.clone(), merge.clone()]).unwrap(),
+        r#"SELECT (("docs"."meta" -> $1) -> 0) ->> $2, "docs"."meta" ? $3, "docs"."meta" || "docs"."meta" FROM "docs""#);
+    let not_json = json!({"t":"json_path","item":col("title"),"path":["a"]});
+    assert!(plan(&pg, Dialect::Postgres, vec![not_json]).unwrap_err().contains("needs a Json column"));
+    fields.truncate(3);
+    let lite = schema("sqlite", &fields);
+    for e in [path, has, merge] {
+        assert!(plan(&lite, Dialect::Sqlite, vec![e]).unwrap_err().contains("sqlite does not support"));
+    }
+}
+
+#[test]
+fn full_text_search() {
+    let vector = func("to_tsvector", vec![text("english"), col("title")]);
+    let query = func("websearch_to_tsquery", vec![text("english"), text("fox -dog")]);
+    let rank = func("ts_rank", vec![vector.clone(), query.clone()]);
+    let matches = cmp("match", vector.clone(), query.clone());
+    assert_eq!(plan(Dialect::Postgres, vec![rank], vec![matches.clone()]).unwrap(),
+        r#"SELECT CAST(TS_RANK(TO_TSVECTOR('english'::regconfig, "notes"."title"), WEBSEARCH_TO_TSQUERY('english'::regconfig, $1)) AS DOUBLE PRECISION) FROM "notes" WHERE TO_TSVECTOR('english'::regconfig, "notes"."title") @@ WEBSEARCH_TO_TSQUERY('english'::regconfig, $2)"#);
+    let bad = func("to_tsvector", vec![text("english') --"), col("title")]);
+    assert!(plan(Dialect::Postgres, vec![col("id")], vec![cmp("match", bad, query.clone())]).unwrap_err().contains("not a text search configuration"));
+    assert!(plan(Dialect::Postgres, vec![vector.clone()], vec![]).unwrap_err().contains("can't be a select() column"));
+    let error = plan(Dialect::Sqlite, vec![col("id")], vec![matches]).unwrap_err();
+    assert!(error.contains("full-text search needs PostgreSQL"), "{error}");
+}

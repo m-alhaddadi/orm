@@ -238,6 +238,50 @@ await Profile.objects.select(func.unnest(Profile.links))                # one ro
   text, and an index out of range gives `None`. `func.unnest(...)` returns one row per
   element, so it is valid only as a `select()` column. SQLite has no array columns.
 
+### JSON columns
+
+```python
+await Doc.objects.filter(Doc.meta["author"]["name"] == "Ann")       # meta -> 'author' -> 'name' = '"Ann"'
+await Doc.objects.filter(Doc.meta["n"] > 3)                         # jsonb ordering: numbers compare as numbers
+await Doc.objects.filter(Doc.meta["tags"][0].as_text() == "x")      # ->> : text, no JSON quotes
+await Doc.objects.filter(Doc.meta["name"].as_text().icontains("an"))
+await Doc.objects.filter(Doc.meta.json_contains({"kind": "post"}))  # meta @> '{"kind": "post"}'
+Doc.meta.json_contained_by(value) / Doc.meta.has_key("tags")        # <@ / ?
+await Doc.objects.filter(...).update(meta=Doc.meta.json_merge({"seen": True}))   # meta || '{...}'
+```
+
+* A path step is a string key or a 0-based integer index. The value is `jsonb`, so a
+  comparison binds the other side as JSON: `== "x"` is the JSON string `"x"`, `== 5` the
+  number. `as_text()` ends a path and reads the value as text (`->>`).
+* On an array column, `col[1]` stays SQL's 1-based element access; a string key on a
+  column that is not `Json` is a `TypeError`.
+* `json_contains`, `json_contained_by` and `has_key` work on the column and on a path,
+  and use a GIN index on the column (`@@index([meta], type: Gin)`).
+* `json_merge(value)` is `||`: objects merge one level deep (the keys of `value` win);
+  arrays join.
+* PostgreSQL only: on SQLite these are a `QueryError`.
+
+### Full-text search
+
+```python
+vector = func.to_tsvector("english", Post.body)
+await Post.objects.filter(vector.matches("running dogs"))        # @@ plainto_tsquery('english', ...)
+query = func.websearch_to_tsquery("english", '"quick fox" -lazy')
+await Post.objects.filter(vector.matches(query)).order_by(func.ts_rank(vector, query).desc())
+func.to_tsquery("english", "cat & !dog") / func.plainto_tsquery("english", text)
+```
+
+* The first argument `"english"` names the text search configuration; without it the
+  server's `default_text_search_config` applies. It is written into the SQL as
+  `'english'::regconfig` (it must be a name), so the expression matches an expression
+  index in every plan, also a prepared statement's generic plan.
+* `vector.matches("text")` with a plain string uses `plainto_tsquery` with the vector's
+  configuration.
+* Index the same expression with a GIN index in the schema:
+  `@@index([sql("to_tsvector('english', body)")], type: Gin)`.
+* `ts_rank` is a `float`. A tsvector or tsquery itself can't be a `select()` column.
+* PostgreSQL only: on SQLite these are a `QueryError`.
+
 ### Big tables: batches
 
 ```python
@@ -371,6 +415,22 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
   COUNT(*) FROM posts WHERE posts.author_id = users.id)`. So two aggregates over different
   relations never multiply each other, unlike Django's JOIN-based `annotate(Count(...),
   Count(...))`, and they work in `filter()` too.
+* **Filtered aggregates**: every aggregate takes `filter=cond`, which is
+  `FILTER (WHERE cond)`: the aggregate reads only the rows where `cond` holds. Several
+  conditional counts fit in one grouped query:
+
+  ```python
+  await Post.objects.select(
+      Post.author_id,
+      func.count(filter=Post.published),
+      func.sum(Post.views, filter=Post.created_at > last_week),
+  ).group_by(Post.author_id)
+  await User.objects.select(User, func.count(User.posts, filter=User.posts.published))
+  ```
+
+  Over a relation, the filter applies inside the correlated subquery; it must read the
+  same relation path as the aggregate. With `.over(...)` the filter comes before `OVER`.
+  SQLite supports `FILTER` since 3.30 (the bundled SQLite is newer).
 * **String concatenation** has two forms with different `NULL` rules:
   `func.concat(a, " ", b)` is `CONCAT(...)` and reads a `NULL` part as an empty string;
   `a.concat(b)` is `a || b` and is `NULL` when either side is `NULL`.
@@ -382,6 +442,22 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
   `group_by` or `distinct`. `select_related` / `prefetch_related` don't combine with
   `select()`.
 * A condition is a boolean column once labelled: `select(User.name, (User.id > 3).label("big"))`.
+* **`CASE`** is `func.case((cond, value), ..., default=v)`: the value of the first true
+  condition, else `default` (`None` without one). It is a value like any other, in
+  `select()`, `filter()`, `order_by()`, `update()` and `do_update()`:
+
+  ```python
+  heat = func.case((Post.views >= 50, "hot"), (Post.views >= 20, "warm"), default="cold")
+  await Post.objects.filter(heat == "hot")
+  # Django's Sum(Case(When(published=True, then=1), default=0)):
+  await Post.objects.select(Post.author_id, func.sum(func.case((Post.published, 1), default=0))).group_by(Post.author_id)
+  await Post.objects.update(views=func.case((Post.views > 100, 100), default=Post.views))
+  ```
+
+  Plain values bind with the type the context expects (the updated field, the other side
+  of a comparison), else with the type of the first branch that is not a plain value.
+  With only plain values, a float or `Decimal` among integers makes the result a float or
+  `Decimal`.
 
 ## Subqueries: `exists()`, scalar values, `outer()`
 

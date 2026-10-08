@@ -45,6 +45,38 @@ export async function stringsAndArrays() {
   Post.title.element(1);
 }
 
+export async function caseExpressions() {
+  const rows = await Post.objects.select({ h: func.case([Post.views.gt(3), "hot"], { default: "cold" }), t: func.case([Post.published, Post.title]), n: func.case([Post.published, Post.views], [Post.views.gt(1), 2], { default: 0 }) }).all();
+  same<(typeof rows)[number], { h: string; t: string | null; n: number }>();
+  // @ts-expect-error a branch is a [condition, value] pair
+  func.case(Post.published);
+}
+
+export async function aggregateFilters() {
+  const rows = await Post.objects.select({ c: func.count({ filter: Post.published }), s: func.sum(Post.views, { filter: Post.views.gt(3) }), m: func.max(Post.title, { filter: Post.published }) }).all();
+  same<(typeof rows)[number], { c: bigint; s: number | bigint | null; m: string | null }>();
+  // @ts-expect-error the filter is a condition
+  func.count({ filter: Post.views });
+}
+
+export function json(meta: import("../../src/index.js").Column<JsonValue, "Post">) {
+  same<ReturnType<typeof meta.get>, import("../../src/index.js").JsonPath<"Post", {}>>();
+  same<ReturnType<ReturnType<typeof meta.get>["asText"]>, import("../../src/index.js").Expression<string | null, "Post", {}>>();
+  void meta.jsonContains({ a: [1] }).and(meta.hasKey("a"));
+  void Post.objects.update({ views: 1 });
+  // @ts-expect-error JSON paths need a JSON value
+  Post.views.get("a");
+}
+
+export async function fullTextSearch() {
+  const vector = func.toTsvector("english", Post.title);
+  same<typeof vector, import("../../src/index.js").Func<import("../../src/index.js").TsVector, "Post", {}>>();
+  const rows = await Post.objects.filter(vector.matches("dog")).select({ r: func.tsRank(vector, func.plaintoTsquery("dog")) }).all();
+  same<(typeof rows)[number], { r: number }>();
+  // @ts-expect-error matches() needs a tsvector
+  Post.title.matches("dog");
+}
+
 export async function filters() {
   await User.objects.filter(User.email.eq("a"), User.posts.views.gt(3)).all();
   await Post.objects.filter(Post.published).all();

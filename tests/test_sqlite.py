@@ -181,6 +181,37 @@ async def test_string_functions_and_concatenation():
         await db.close()
 
 
+async def test_case_expression():
+    from orm import func
+    registry, m = models('datasource db { provider = "sqlite" }\nmodel Note {\n  id BigInt @id @default(autoincrement())\n  n Int\n}')
+    Note = m["Note"]
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    try:
+        await db.create_tables()
+        await Note.objects.using(db).insert_many([{"n": 1}, {"n": 5}, {"n": 10}])
+        size = func.case((Note.n >= 10, "big"), (Note.n >= 5, "mid"), default="small")
+        assert await Note.objects.using(db).order_by(Note.id).select(size).scalars() == ["small", "mid", "big"]
+        assert await Note.objects.using(db).select(func.sum(func.case((Note.n >= 5, 1), default=0))).scalar() == 2
+        await Note.objects.using(db).update(n=func.case((Note.n == 1, 100), default=Note.n))
+        assert await Note.objects.using(db).order_by(Note.id).select(Note.n).scalars() == [100, 5, 10]
+    finally:
+        await db.close()
+
+
+async def test_aggregate_filter():
+    from orm import func
+    registry, m = models('datasource db { provider = "sqlite" }\nmodel Note {\n  id BigInt @id @default(autoincrement())\n  n Int\n}')
+    Note = m["Note"]
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    try:
+        await db.create_tables()
+        await Note.objects.using(db).insert_many([{"n": 1}, {"n": 5}, {"n": 10}])
+        row = await Note.objects.using(db).select(func.count(filter=Note.n >= 5), func.sum(Note.n, filter=Note.n < 10)).one()
+        assert tuple(row) == (2, 6)
+    finally:
+        await db.close()
+
+
 async def test_file_database_and_target_mismatch(tmp_path):
     reg, _ = models()
     url = f"sqlite://{tmp_path / 'database.db'}"
