@@ -162,7 +162,7 @@ async def pull(db: Database) -> Pulled:
     file, and checks the result by creating it again in a shadow schema that is rolled
     back (SQLite: an in-memory database)."""
     schema, gaps, steps = await db._engine.pull_schema()
-    return Pulled(schema, gaps, [Step(summary, sql) for summary, sql in steps])
+    return Pulled(schema, gaps, [Step(*step) for step in steps])
 
 
 @dataclass(frozen=True)
@@ -315,7 +315,7 @@ class Migrator:
         created in a shadow (a Postgres schema in a transaction that is rolled back, or an
         in-memory SQLite database) and read back, so both sides use the database's text."""
         migration, steps, gaps = await self.db._engine.migration_drift(self._dir)
-        return Drift(migration, [Step(summary, sql) for summary, sql in steps], gaps)
+        return Drift(migration, [Step(*step) for step in steps], gaps)
 
     async def baseline(self) -> Migration:
         """Marks the first migration as applied without running it, for a database that

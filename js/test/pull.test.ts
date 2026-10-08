@@ -48,7 +48,9 @@ test("pull, baseline and drift of a Django-style database", async () => {
 
   const pulled = await pull(db);
   assert.ok(pulled.schema.includes('map: "bundles_bundle_shop_id_8f3e_fk_account_shop_id"'));
-  assert.ok(pulled.schema.includes("@@trigger(account_shop_updated_at, after: [update], for_each: statement"));
+  // a trigger with REFERENCING transition tables is left out, not written without them
+  assert.ok(!pulled.schema.includes("@@trigger(account_shop_updated_at"));
+  assert.ok(pulled.gaps.some((g) => g.includes("account_shop_updated_at has REFERENCING transition tables")));
   assert.ok(pulled.gaps.some((g) => g.startsWith("rule bundles_bundle_soft_delete")));
   assert.deepEqual(pulled.differences.map((s) => s.summary), EXPECTED);
 

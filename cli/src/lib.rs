@@ -562,10 +562,14 @@ async fn database(command: &str, args: &Args, dir: &Path, schema: &Path) -> Resu
                 }
                 let m = migrate::baseline(&*driver, dir).await?;
                 println!("Marked {} as applied", m.name);
-                let found = introspect::drift(&*driver, dir).await?;
-                if !found.steps.is_empty() {
-                    println!("warning: the database differs from {}; a migration to it would:", m.name);
-                    print_steps(&found.steps);
+                // the mark is done: a failed check is a warning, not a failed baseline
+                match introspect::drift(&*driver, dir).await {
+                    Ok(found) if !found.steps.is_empty() => {
+                        println!("warning: the database differs from {}; a migration to it would:", m.name);
+                        print_steps(&found.steps);
+                    }
+                    Ok(_) => {}
+                    Err(e) => println!("warning: the database was not compared with {}: {e}", m.name),
                 }
             }
             "drift" => {
