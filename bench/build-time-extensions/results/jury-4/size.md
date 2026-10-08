@@ -9,10 +9,10 @@ Each artifact is a default-feature release build (fat LTO, one codegen unit) of 
 | Build | Python `_native.so` | Node `orm.node` |
 |---|---:|---:|
 | `3a710ca` (before branch 01) | 10,493,424 | 9,122,224 |
-| `360685a` (branch 01) | 11,067,808 (+5.5%) | 9,616,080 (+5.4%) |
+| `360685a` (branch 01) | 11,067,808 (+5.5% against `3a710ca`) | 9,616,080 (+5.4% against `3a710ca`) |
 | `d244e5d` (main before the merges) | 10,532,624 | 9,159,712 |
 | `136dc1d` without `reference-loading` | 11,454,432 | 9,985,152 |
-| `136dc1d` (main) | 11,517,088 (+9.3%) | 10,039,152 (+9.6%) |
+| `136dc1d` (main) | 11,517,088 (+9.3% against `d244e5d`) | 10,039,152 (+9.6% against `d244e5d`) |
 
 The branch 01 rebuilds have the same byte counts as `results/final-structural.json`.
 

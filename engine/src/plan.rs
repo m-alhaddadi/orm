@@ -1082,7 +1082,7 @@ impl<'s> Planner<'s> {
         if let Some(scope) = self.scopes.iter().rev().chain(self.joins.iter().map(|(s, _)| s)).find(|s| s.path == path) {
             if scope.model < self.schema.models.len() {
                 let model = self.model(scope.model);
-                return crate::ownership::column(self.schema, model, &alias, model.field(name).map_err(query_err)?);
+                return crate::ownership::column_at(self.schema, model, &alias, model.field_pos(name).map_err(query_err)?);
             }
         }
         Ok(col(&alias, &column))
@@ -1801,8 +1801,6 @@ impl<'s> Planner<'s> {
         }).collect() }))
     }
 
-    /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
-    /// columns.
     /// `q` with the root and joined query defaults; borrowed when no default applies.
     #[cfg(feature = "query-defaults")]
     fn with_query_defaults<'q>(&self, q: &'q Select) -> Result<std::borrow::Cow<'q, Select>> {
@@ -1825,6 +1823,8 @@ impl<'s> Planner<'s> {
         Ok(q)
     }
 
+    /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
+    /// columns.
     fn build_select(&mut self, q: &Select) -> Result<SelectPlan> {
         #[cfg(feature = "query-defaults")]
         let defaulted = self.with_query_defaults(q)?;

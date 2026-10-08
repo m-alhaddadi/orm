@@ -125,13 +125,13 @@ impl Composition {
 use crate::ir::SchemaIr;
 use crate::behavior::{{Artifact, Manifest, SCHEMA_CONTRACT, validate_declarations, validate_requirements, capture_storage}};
 use std::sync::OnceLock;
-// Every schema preparation reads these constants; parse each once per process.
+// The host caches the artifact once per process.
 pub fn artifact() -> Artifact {{ serde_json::from_str({artifact:?}).expect("generated artifact") }}
-fn manifest_list() -> &'static [Manifest] {{ static M: OnceLock<Vec<Manifest>> = OnceLock::new(); M.get_or_init(|| serde_json::from_str({manifests:?}).expect("generated manifests")) }}
-pub fn manifests() -> Vec<Manifest> {{ manifest_list().to_vec() }}
+// Every schema preparation reads these constants; parse each once per process.
+pub fn manifests() -> &'static [Manifest] {{ static M: OnceLock<Vec<Manifest>> = OnceLock::new(); M.get_or_init(|| serde_json::from_str({manifests:?}).expect("generated manifests")) }}
 fn pass_ids() -> &'static [String] {{ static P: OnceLock<Vec<String>> = OnceLock::new(); P.get_or_init(|| serde_json::from_str({ids:?}).expect("generated pass IDs")) }}
 pub fn prepare(ir: &mut SchemaIr, language: Option<&str>) -> Result<(), String> {{
-    let manifests = manifest_list();
+    let manifests = manifests();
     validate_declarations(ir, manifests, language)?;
     let expected = pass_ids();
     if !ir.behavior.completed_passes.is_empty() && ir.behavior.completed_passes != expected {{ return Err("incompatible lowering state; rebuild schema and native artifact".into()); }}

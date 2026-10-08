@@ -161,7 +161,7 @@ fn compile_project_mode(source: &str, origin: Option<&Path>, update: Option<Iden
         }
     }
     let label = origin.display().to_string();
-    let mut declarations = lower::behavior_declarations(&mut items, &label, &crate::behavior::manifests()).map_err(|e| loader.located(e))?;
+    let mut declarations = lower::behavior_declarations(&mut items, &label, crate::behavior::manifests()).map_err(|e| loader.located(e))?;
     for declaration in &mut declarations {
         let location = &mut declaration.location;
         if let Some((start, _, file)) = loader.locations.iter().find(|(start, end, _)| location.line >= *start && location.line < *end) {
