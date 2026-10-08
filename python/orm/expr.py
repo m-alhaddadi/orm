@@ -47,6 +47,8 @@ __all__ = [
     "Func",
     "Case",
     "JsonPath",
+    "TsVector",
+    "TsQuery",
     "Labeled",
     "Window",
     "WindowDef",
@@ -300,6 +302,16 @@ class Expression(Node, Generic[T]):
         arrays joined. For updates: ``update(meta=Post.meta.json_merge({"seen": True}))``.
         PostgreSQL only."""
         return Arith("json_merge", self, value if isinstance(value, Node) else Literal(value))
+
+    # Full-text search ------------------------------------------------------------------------
+
+    def matches(self: Expression[TsVector], query: Expression[TsQuery] | str) -> Condition:
+        """``vector @@ query``: the document matches the search. A plain string is
+        ``plainto_tsquery(<config of the vector>, query)``. PostgreSQL only."""
+        if isinstance(query, str):
+            config = self._args[0] if isinstance(self, Func) and self._name == "to_tsvector" and len(self._args) == 2 else None
+            query = Func("plainto_tsquery", (query,) if config is None else (config, query))
+        return Comparison("match", self, query)
 
     # Strings -------------------------------------------------------------------------------
 
@@ -828,6 +840,36 @@ class ScalarSubquery(Expression[T]):
 N = TypeVar("N", int, float, Decimal)
 
 
+class TsVector:
+    """The type of a ``tsvector`` expression (``func.to_tsvector``): only for typing."""
+
+
+class TsQuery:
+    """The type of a ``tsquery`` expression (``func.to_tsquery``, ...): only for typing."""
+
+
+class _Config(Expression[Any]):
+    """A text search configuration (``'english'::regconfig``), written into the SQL so the
+    expression matches an expression index."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        if not isinstance(name, str):
+            raise TypeError(f"a text search configuration is a name, got {name!r}")
+        self.name = name
+
+    def _ir(self, ctx: IRContext) -> IR:
+        return {"t": "text", "value": self.name}
+
+    def __repr__(self) -> str:
+        return repr(self.name)
+
+
+def _search(a: Any, b: Any) -> tuple[Any, ...]:
+    return (a,) if b is None else (_Config(a), b)
+
+
 class _Functions:
     """``func.count(...)``, ``func.sum(...)``, ...: SQL functions as expressions.
 
@@ -949,6 +991,47 @@ class _Functions:
 
     # Branches of expressions only first: mypy can't solve `T` from `Expression[T] | T`
     # when no plain value pins it.
+    # Full-text search: PostgreSQL only. An optional first argument names the text search
+    # configuration (``"english"``); without it the server's default applies.
+
+    @overload
+    def to_tsvector(self, document: str | Expression[str] | Expression[str | None], /) -> Func[TsVector]: ...
+    @overload
+    def to_tsvector(self, config: str, document: str | Expression[str] | Expression[str | None], /) -> Func[TsVector]: ...
+    def to_tsvector(self, a: Any, b: Any = None, /) -> Func[TsVector]:
+        """``to_tsvector([config,] document)``: the document's normalized words. Index it
+        with ``@@index([sql("to_tsvector('english', title)")], type: Gin)``."""
+        return Func("to_tsvector", _search(a, b))
+
+    @overload
+    def to_tsquery(self, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    @overload
+    def to_tsquery(self, config: str, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    def to_tsquery(self, a: Any, b: Any = None, /) -> Func[TsQuery]:
+        """``to_tsquery([config,] query)``: a query in tsquery syntax (``"cat & !dog"``)."""
+        return Func("to_tsquery", _search(a, b))
+
+    @overload
+    def plainto_tsquery(self, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    @overload
+    def plainto_tsquery(self, config: str, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    def plainto_tsquery(self, a: Any, b: Any = None, /) -> Func[TsQuery]:
+        """``plainto_tsquery([config,] text)``: every word of plain text."""
+        return Func("plainto_tsquery", _search(a, b))
+
+    @overload
+    def websearch_to_tsquery(self, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    @overload
+    def websearch_to_tsquery(self, config: str, query: str | Expression[str], /) -> Func[TsQuery]: ...
+    def websearch_to_tsquery(self, a: Any, b: Any = None, /) -> Func[TsQuery]:
+        """``websearch_to_tsquery([config,] text)``: search-engine syntax (``"cat -dog"``,
+        ``"or"``, quoted phrases)."""
+        return Func("websearch_to_tsquery", _search(a, b))
+
+    def ts_rank(self, vector: Expression[TsVector], query: Expression[TsQuery]) -> Func[float]:
+        """``ts_rank(vector, query)``: how well the document matches, for ``order_by``."""
+        return Func("ts_rank", (vector, query))
+
     @overload
     def case(self, *whens: tuple[ConditionLike, Expression[T]], default: Expression[T] | T) -> Case[T]: ...
     @overload

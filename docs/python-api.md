@@ -258,6 +258,27 @@ await Doc.objects.filter(...).update(meta=Doc.meta.json_merge({"seen": True}))  
   arrays join.
 * PostgreSQL only: on SQLite these are a `QueryError`.
 
+### Full-text search
+
+```python
+vector = func.to_tsvector("english", Post.body)
+await Post.objects.filter(vector.matches("running dogs"))        # @@ plainto_tsquery('english', ...)
+query = func.websearch_to_tsquery("english", '"quick fox" -lazy')
+await Post.objects.filter(vector.matches(query)).order_by(func.ts_rank(vector, query).desc())
+func.to_tsquery("english", "cat & !dog") / func.plainto_tsquery("english", text)
+```
+
+* The first argument `"english"` names the text search configuration; without it the
+  server's `default_text_search_config` applies. It is written into the SQL as
+  `'english'::regconfig` (it must be a name), so the expression matches an expression
+  index in every plan, also a prepared statement's generic plan.
+* `vector.matches("text")` with a plain string uses `plainto_tsquery` with the vector's
+  configuration.
+* Index the same expression with a GIN index in the schema:
+  `@@index([sql("to_tsvector('english', body)")], type: Gin)`.
+* `ts_rank` is a `float`. A tsvector or tsquery itself can't be a `select()` column.
+* PostgreSQL only: on SQLite these are a `QueryError`.
+
 ### Big tables: batches
 
 ```python

@@ -349,6 +349,18 @@ export abstract class Expression<T, S extends string = never, P = {}> extends No
     return new Arith("json_merge", this, value instanceof Node ? value : new Literal(value)) as never;
   }
 
+  // Full-text search ---------------------------------------------------------------------------
+
+  /** `vector @@ query`: the document matches the search. A plain string is
+   * `plainto_tsquery(<config of the vector>, query)`. PostgreSQL only. */
+  matches<S2 extends string = never, P2 = {}>(this: Expression<TsVector, S, P>, query: string | Expression<TsQuery, S2, P2>): Condition<S | S2, P & P2> {
+    if (typeof query === "string") {
+      const config = this instanceof Func && this.name === "to_tsvector" && this.args.length === 2 ? this.args[0]! : undefined;
+      query = new Func("plainto_tsquery", config === undefined ? [new Literal(query)] : [config, new Literal(query)]);
+    }
+    return new Comparison("match", this, query) as never;
+  }
+
   // Strings ----------------------------------------------------------------------------------
 
   /** `this || other`: `null` when either side is `null`. {@link Functions.concat}
@@ -957,6 +969,34 @@ class Int extends Expression<number, never, {}> {
 }
 
 type Num = number | bigint | Decimal;
+/** The type of a `tsvector` expression (`func.toTsvector`): only for typing. */
+export interface TsVector {
+  readonly "~tsvector": true;
+}
+/** The type of a `tsquery` expression (`func.toTsquery`, ...): only for typing. */
+export interface TsQuery {
+  readonly "~tsquery": true;
+}
+
+/** A text search configuration (`'english'::regconfig`), written into the SQL so the
+ * expression matches an expression index. */
+class Config extends Expression<never, never, {}> {
+  constructor(readonly value: string) {
+    super();
+    if (typeof value !== "string") {
+      throw new TypeError(`a text search configuration is a name, got ${typeof value}`);
+    }
+  }
+
+  ir(): IR {
+    return { t: "text", value: this.value };
+  }
+}
+
+type SearchArgs<S extends string, P> = [text: string | Expression<string | null, S, P>] | [config: string, text: string | Expression<string | null, S, P>];
+function search(args: readonly unknown[]): Node[] {
+  return args.length === 2 ? [new Config(args[0] as string), wrap(args[1])] : [wrap(args[0])];
+}
 /** Options of an aggregate: `DISTINCT`, and `FILTER (WHERE filter)` (only the rows
  * where `filter` holds). */
 export interface AggregateOptions<S extends string, P> {
@@ -1106,6 +1146,36 @@ class Functions {
 
   now(): Func<Date> {
     return new Func("now");
+  }
+
+  // Full-text search, PostgreSQL only. An optional first argument names the text search
+  // configuration ("english"); without it the server's default applies.
+
+  /** `to_tsvector([config,] document)`: the document's normalized words. Index it with
+   * `@@index([sql("to_tsvector('english', title)")], type: Gin)`. */
+  toTsvector<S extends string = never, P = {}>(...args: SearchArgs<S, P>): Func<TsVector, S, P> {
+    return new Func("to_tsvector", search(args));
+  }
+
+  /** `to_tsquery([config,] query)`: a query in tsquery syntax (`"cat & !dog"`). */
+  toTsquery<S extends string = never, P = {}>(...args: SearchArgs<S, P>): Func<TsQuery, S, P> {
+    return new Func("to_tsquery", search(args));
+  }
+
+  /** `plainto_tsquery([config,] text)`: every word of plain text. */
+  plaintoTsquery<S extends string = never, P = {}>(...args: SearchArgs<S, P>): Func<TsQuery, S, P> {
+    return new Func("plainto_tsquery", search(args));
+  }
+
+  /** `websearch_to_tsquery([config,] text)`: search-engine syntax (`"cat -dog"`, `or`,
+   * quoted phrases). */
+  websearchToTsquery<S extends string = never, P = {}>(...args: SearchArgs<S, P>): Func<TsQuery, S, P> {
+    return new Func("websearch_to_tsquery", search(args));
+  }
+
+  /** `ts_rank(vector, query)`: how well the document matches, for `orderBy`. */
+  tsRank<S extends string, P, S2 extends string = never, P2 = {}>(vector: Expression<TsVector, S, P>, query: Expression<TsQuery, S2, P2>): Func<number, S | S2, P & P2> {
+    return new Func("ts_rank", [vector, query]);
   }
 
   /**

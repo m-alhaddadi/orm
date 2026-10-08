@@ -219,6 +219,10 @@ const WINDOW_FUNCS: [&str; 11] = [
     "last_value", "nth_value",
 ];
 
+/// Full-text search functions (PostgreSQL only); all but `ts_rank` take an optional
+/// text search configuration first.
+const SEARCH_FUNCS: [&str; 5] = ["to_tsvector", "to_tsquery", "plainto_tsquery", "websearch_to_tsquery", "ts_rank"];
+
 fn is_aggregate(name: &str) -> bool {
     AGGREGATES.contains(&name)
 }
@@ -928,6 +932,9 @@ impl<'s> Planner<'s> {
     fn leaf(&mut self, e: &Expr) -> Result<SExpr> {
         Ok(match e {
             Expr::Cmp { op, l, r } => {
+                if self.target.dialect == Dialect::Sqlite && matches!(op, CmpOp::Match) {
+                    return Err(Error::query("full-text search needs PostgreSQL"));
+                }
                 if self.target.dialect == Dialect::Sqlite && matches!(op, CmpOp::Contains | CmpOp::ContainedBy | CmpOp::Overlaps | CmpOp::HasKey) {
                     return Err(Error::query("sqlite does not support PostgreSQL containment, overlap or JSON key operators"));
                 }
@@ -946,6 +953,7 @@ impl<'s> Planner<'s> {
                     CmpOp::ContainedBy => SExpr::cust_with_exprs("$1 <@ $2", [l, r]),
                     CmpOp::Overlaps => SExpr::cust_with_exprs("$1 && $2", [l, r]),
                     CmpOp::HasKey => SExpr::cust_with_exprs("$1 ? $2", [l, r]),
+                    CmpOp::Match => SExpr::cust_with_exprs("$1 @@ $2", [l, r]),
                 }
             }
             Expr::In { item, values, neg } => {
@@ -1192,6 +1200,34 @@ impl<'s> Planner<'s> {
         })
     }
 
+    /// A full-text search function. A configuration (`Expr::Text`) is written into the SQL
+    /// as `'english'::regconfig`, so the call matches an expression index in every plan.
+    fn search_call(&mut self, name: &str, args: &[Expr]) -> Result<SExpr> {
+        if self.target.dialect == Dialect::Sqlite {
+            return Err(Error::query("full-text search needs PostgreSQL"));
+        }
+        let rank = name == "ts_rank";
+        let (config, rest) = match args {
+            [Expr::Text { value }, rest @ ..] if !rank && rest.len() == 1 => {
+                let mut parts = value.split('.');
+                let ident = |p: &str| p.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !(value.split('.').count() <= 2 && parts.all(ident)) {
+                    return Err(Error::query(format!("{value:?} is not a text search configuration name")));
+                }
+                (format!("'{value}'::regconfig, "), rest)
+            }
+            _ => (String::new(), args),
+        };
+        if rest.len() != if rank { 2 } else { 1 } {
+            return Err(Error::query(format!("wrong arguments for {name}()")));
+        }
+        let hint = if rank { Hint::default() } else { Hint::ty(ColType::Text) };
+        let planned = rest.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>()?;
+        let slots = (1..=planned.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+        Ok(template(self.target.dialect, format!("{}({config}{slots})", name.to_uppercase()), planned))
+    }
+
     /// `<item> -> 'a' -> 0 ...` (`->>` for the last step with `text`): keys bind as text,
     /// indexes are written into the SQL.
     fn json_path(&mut self, item: &Expr, path: &[JsonKey], text: bool) -> Result<SExpr> {
@@ -1315,6 +1351,10 @@ impl<'s> Planner<'s> {
                         _ => return Err(Error::query(format!("{} needs an array", if name == "element" { "an index" } else { "unnest()" }))),
                     },
                     "now" => scalar(ColType::DateTime),
+                    "ts_rank" => scalar(ColType::Float),
+                    "to_tsvector" | "to_tsquery" | "plainto_tsquery" | "websearch_to_tsquery" => {
+                        return Err(Error::query(format!("{name}() is a tsvector or tsquery: it can't be a select() column")))
+                    }
                     // SUM of integers is cast to bigint (see `func`).
                     "sum" => match first()? {
                         t if matches!(t.ty, ColType::Int | ColType::BigInt) => scalar(ColType::BigInt),
@@ -1348,7 +1388,7 @@ impl<'s> Planner<'s> {
         if WINDOW_FUNCS.contains(&name) {
             return Err(Error::query(format!("{name}() is a window function: add .over(...)")));
         }
-        if !is_aggregate(name) && !SCALAR_FUNCS.contains(&name) {
+        if !is_aggregate(name) && !SCALAR_FUNCS.contains(&name) && !SEARCH_FUNCS.contains(&name) {
             return Err(Error::query(format!("unknown function {name}()")));
         }
         if is_aggregate(name) {
@@ -1465,6 +1505,12 @@ impl<'s> Planner<'s> {
         }
         if self.target.dialect == Dialect::Sqlite && matches!(name, "element" | "unnest") {
             return Err(Error::query("sqlite does not support array element access or unnest()"));
+        }
+        if SEARCH_FUNCS.contains(&name) {
+            if filter.is_some() {
+                return Err(Error::query(format!("{name}() is not an aggregate: only aggregates take a filter")));
+            }
+            return Ok((self.search_call(name, args)?, (name == "ts_rank").then_some("DOUBLE PRECISION")));
         }
         if name == "unnest" && !self.allow_unnest {
             return Err(Error::query("unnest() returns several rows: it can only be a select() column"));

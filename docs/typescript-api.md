@@ -196,6 +196,11 @@ compared as JSON), `.asText()` for the last step as text (`->>`),
 `Doc.meta.jsonContains({ kind: "post" })` (`@>`), `.jsonContainedBy(...)` (`<@`),
 `.hasKey("tags")` (`?`) and `update({ meta: Doc.meta.jsonMerge({ seen: true }) })` (`||`).
 Keys are strings, indexes 0-based integers. PostgreSQL only.
+Full-text search (PostgreSQL only): `func.toTsvector("english", Post.body).matches("running dogs")`
+(`@@`, a plain string is `plainto_tsquery` with the vector's configuration),
+`func.toTsquery`, `func.plaintoTsquery`, `func.websearchToTsquery` and `func.tsRank(vector, query)`.
+The configuration is written into the SQL as `'english'::regconfig`, so it matches a GIN
+index on the same expression: `@@index([sql("to_tsvector('english', body)")], type: Gin)`.
 The result types follow the SQL: `count` is a `bigint`, `sum(Int)` is `number | null`,
 `sum(Decimal)` is `Decimal | null`, and `avg` is `number | null`. A column read through a
 nullable relation becomes nullable.

@@ -540,6 +540,8 @@ pub enum CmpOp {
     Overlaps,
     /// JSON: `l ? r`, the object has the key `r` (or the array the string element).
     HasKey,
+    /// Full-text search: `l @@ r`, the tsvector `l` matches the tsquery `r`.
+    Match,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug)]

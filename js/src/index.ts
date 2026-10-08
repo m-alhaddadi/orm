@@ -23,6 +23,8 @@ export {
   Expression,
   Case,
   JsonPath,
+  type TsQuery,
+  type TsVector,
   Func,
   Ordering,
   ParamRef,

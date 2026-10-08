@@ -122,3 +122,18 @@ fn json_paths_containment_and_merge() {
         assert!(plan(&lite, Dialect::Sqlite, vec![e]).unwrap_err().contains("sqlite does not support"));
     }
 }
+
+#[test]
+fn full_text_search() {
+    let vector = func("to_tsvector", vec![text("english"), col("title")]);
+    let query = func("websearch_to_tsquery", vec![text("english"), text("fox -dog")]);
+    let rank = func("ts_rank", vec![vector.clone(), query.clone()]);
+    let matches = cmp("match", vector.clone(), query.clone());
+    assert_eq!(plan(Dialect::Postgres, vec![rank], vec![matches.clone()]).unwrap(),
+        r#"SELECT CAST(TS_RANK(TO_TSVECTOR('english'::regconfig, "notes"."title"), WEBSEARCH_TO_TSQUERY('english'::regconfig, $1)) AS DOUBLE PRECISION) FROM "notes" WHERE TO_TSVECTOR('english'::regconfig, "notes"."title") @@ WEBSEARCH_TO_TSQUERY('english'::regconfig, $2)"#);
+    let bad = func("to_tsvector", vec![text("english') --"), col("title")]);
+    assert!(plan(Dialect::Postgres, vec![col("id")], vec![cmp("match", bad, query.clone())]).unwrap_err().contains("not a text search configuration"));
+    assert!(plan(Dialect::Postgres, vec![vector.clone()], vec![]).unwrap_err().contains("can't be a select() column"));
+    let error = plan(Dialect::Sqlite, vec![col("id")], vec![matches]).unwrap_err();
+    assert!(error.contains("full-text search needs PostgreSQL"), "{error}");
+}

@@ -1,9 +1,9 @@
-/** JSON paths, containment and merge, on a schema loaded at runtime. */
+/** JSON paths, containment and merge, and full-text search, on schemas loaded at runtime. */
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
-import { QueryError, Registry, connect, loads, type Database } from "../src/index.js";
+import { QueryError, Registry, connect, func, loads, type Database } from "../src/index.js";
 import { DATABASE_URL } from "./helpers.js";
 
 const SCHEMA = `
@@ -75,5 +75,33 @@ test("JSON operators on SQLite are an error", async () => {
     }
   } finally {
     await sqlite.close();
+  }
+});
+
+test("full-text search", async () => {
+  const fts = new Registry();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const Article = loads(`model Article {
+  id   BigInt @id @default(autoincrement())
+  body String
+  @@index([sql("to_tsvector('english', body)")], type: Gin, name: "articles_js_body_search")
+  @@map("expr_articles_js")
+}`, { registry: fts })["Article"] as any;
+  const pg = await connect(DATABASE_URL, { default: false, registry: fts, maxConnections: 1 });
+  try {
+    await pg.dropTables();
+    await pg.createTables();
+    const articles = Article.objects.using(pg);
+    await articles.insertMany([{ body: "The quick brown fox jumps" }, { body: "A lazy dog sleeps" }, { body: "Dogs are running; the fox and the dog" }]);
+    const vector = func.toTsvector("english", Article.body);
+    assert.deepEqual(await articles.filter(vector.matches("running dogs")).select({ id: Article.id }).scalars(), [3n]);
+    const query = func.websearchToTsquery("english", "fox -lazy");
+    const found = await articles.filter(vector.matches(query)).orderBy(Article.id).select({ id: Article.id }).scalars();
+    assert.deepEqual(found, [1n, 3n]);
+    const rank = await articles.filter(Article.id.eq(3)).select({ r: func.tsRank(vector, func.toTsquery("english", "dog")) }).scalar();
+    assert.ok(typeof rank === "number" && rank > 0);
+  } finally {
+    await pg.dropTables();
+    await pg.close();
   }
 });

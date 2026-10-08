@@ -66,6 +66,15 @@ export function json(meta: import("../../src/index.js").Column<JsonValue, "Post"
   Post.views.get("a");
 }
 
+export async function fullTextSearch() {
+  const vector = func.toTsvector("english", Post.title);
+  same<typeof vector, import("../../src/index.js").Func<import("../../src/index.js").TsVector, "Post", {}>>();
+  const rows = await Post.objects.filter(vector.matches("dog")).select({ r: func.tsRank(vector, func.plaintoTsquery("dog")) }).all();
+  same<(typeof rows)[number], { r: number }>();
+  // @ts-expect-error matches() needs a tsvector
+  Post.title.matches("dog");
+}
+
 export async function filters() {
   await User.objects.filter(User.email.eq("a"), User.posts.views.gt(3)).all();
   await Post.objects.filter(Post.published).all();

@@ -314,6 +314,15 @@ test("JSON path, containment and merge SQL", () => {
   assert.throws(() => Doc.meta.get(), /at least one/);
 });
 
+test("full-text search SQL", () => {
+  const vector = func.toTsvector("english", Post.title);
+  assert.equal(where(Post.objects.filter(vector.matches("running dogs"))), `TO_TSVECTOR('english'::regconfig, "posts"."title") @@ PLAINTO_TSQUERY('english'::regconfig, 'running dogs')`);
+  const query = func.websearchToTsquery("english", "fox -lazy");
+  assert.ok(Post.objects.orderBy(func.tsRank(vector, query).desc()).sql().includes(`ORDER BY CAST(TS_RANK(TO_TSVECTOR('english'::regconfig, "posts"."title"), WEBSEARCH_TO_TSQUERY('english'::regconfig, 'fox -lazy')) AS DOUBLE PRECISION) DESC`));
+  assert.equal(where(Post.objects.filter(func.toTsvector(Post.body).matches(func.toTsquery("cat & !dog")))), `TO_TSVECTOR("posts"."body") @@ TO_TSQUERY('cat & !dog')`);
+  assert.throws(() => Post.objects.filter(func.toTsvector("x'y", Post.title).matches("a")).sql(), /not a text search configuration/);
+});
+
 test("string functions and concatenation SQL", () => {
   const sql = Post.objects.select({
     c: func.concat(Post.title, " by ", Post.views), p: Post.title.concat("!"), t: func.trim(Post.title), l: func.ltrim(Post.title),
