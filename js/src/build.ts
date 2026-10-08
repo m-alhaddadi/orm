@@ -10,6 +10,7 @@ import type {
   NativeColumns,
   NativeInstances,
   NativePrefetch,
+  NativePrefetched,
   NativeReturned,
   NativeRows,
   NativeSelect,
@@ -79,6 +80,13 @@ export class Builder {
       return objs;
     }
     return this.columns(res.output, res.rows, keys ?? []);
+  }
+
+  /** Puts the relations of `res` on `parents`, whose key rows `res.rows` are (`prefetch()`). */
+  prefetched(meta: ModelMeta, parents: Obj[], res: NativePrefetched): void {
+    for (const f of res.prefetched) {
+      this.attach(meta, parents, res.rows, f);
+    }
   }
 
   private columns(out: NativeColumns, rows: NativeRows, keys: readonly string[]): Obj[] {

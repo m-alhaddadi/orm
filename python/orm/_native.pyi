@@ -57,6 +57,16 @@ class Transaction:
 
 @final
 class Engine:
+    def prefetch(
+        self,
+        op_json: str,
+        params: list[Any],
+        keys: list[str],
+        rows: list[list[Any]],
+        parents: list[Any],
+        tx: Transaction | None = None,
+        db: Any = None,
+    ) -> Awaitable[None]: ...
     def run(
         self,
         op_json: str,

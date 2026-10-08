@@ -42,7 +42,7 @@ export {
 export type { Many, Compat, Operand, OrderOptions } from "./expr.js";
 export { ModelMeta, Registry, define, load, loads, registry } from "./model.js";
 export type { Instance, ModelClass, Row, SchemaIR } from "./model.js";
-export { ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet, useQuerySet } from "./query.js";
+export { ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet, prefetch, useQuerySet } from "./query.js";
 export type { Page, PageOptions } from "./pagination.js";
 export type { DoNothing, DoUpdate, FieldOrder, LoadOf, LockOptions, PreparedInsert, PreparedUpdate, QueriesOf, QuerySetOf, Simplify } from "./query.js";
 export { Select } from "./select.js";

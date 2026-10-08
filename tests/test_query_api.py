@@ -165,3 +165,45 @@ def test_cli_reads_query_sets_from_pyproject(tmp_path, monkeypatch, capfd):
     assert "objects: ClassVar[_BookObjects]" in (tmp_path / "models.pyi").read_text()
     assert orm._native.cli(["generate", "python", "-o", "models.py", "--query-set", "Book=nomodule"]) == 1
     assert "expected module:Class" in capfd.readouterr().err
+
+
+# -- prefetch on loaded instances (F10) -----------------------------------------------------
+
+
+async def test_prefetch_onto_loaded_instances(clean):
+    alice, bob, posts = await seed()
+    await Comment.objects.insert_many([{"post": posts[1], "body": "a"}, {"post": posts[1], "body": "b"}])
+    users = await User.objects.order_by(User.id)
+    await orm.prefetch(users, User.posts.comments, orm.Prefetch(User.posts, Post.objects.filter(Post.published)[:1], to_attr="top"))
+    assert [p.title for p in users[0].posts.cached] == ["draft", "hit", "quiet"]
+    assert [c.body for c in users[0].posts.cached[1].comments.cached] == ["a", "b"]
+    assert users[0].posts.cached[0].author is users[0]
+    assert [[p.title for p in u.top] for u in users] == [["hit"], ["bob"]]
+
+
+async def test_prefetch_to_one_and_many_to_many(clean):
+    _, _, posts = await seed()
+    tags = await Tag.objects.insert_many([{"name": "a"}, {"name": "b"}])
+    await posts[0].tags.add(*tags)
+    loaded = await Post.objects.order_by(Post.id)
+    await orm.prefetch(loaded, Post.author, Post.tags)
+    assert [p.author.name for p in loaded] == ["Alice", "Alice", "Alice", "Bob"]
+    assert [t.name for t in loaded[0].tags.cached] == ["a", "b"] and loaded[1].tags.cached == []
+
+
+async def test_prefetch_reads_keys_from_the_instances(clean):
+    _, _, posts = await seed()
+    await Comment.objects.insert_many([{"post": posts[0], "body": "a"}, {"post": posts[3], "body": "b"}])
+    comments = await Comment.objects.order_by(Comment.id)
+    await Comment.objects.delete()  # the instances' own rows are not read again
+    await orm.prefetch(comments, Comment.post.author)
+    assert [(c.post.title, c.post.author.name) for c in comments] == [("draft", "Alice"), ("bob", "Bob")]
+
+
+async def test_prefetch_checks_its_input(clean):
+    alice, _, posts = await seed()
+    await orm.prefetch([], User.posts)
+    with pytest.raises(TypeError, match="one model"):
+        await orm.prefetch([alice, posts[0]], User.posts)
+    with pytest.raises(ValueError, match="does not start at User"):
+        await orm.prefetch([alice], Post.author)

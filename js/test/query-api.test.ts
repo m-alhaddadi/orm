@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ManyRelatedSet, Prefetch, QuerySet, RelatedSet, useQuerySet } from "../src/index.js";
-import { Post, Tag, User, type PostSpec, type TagSpec } from "./blog/models.js";
+import { ManyRelatedSet, Prefetch, QuerySet, RelatedSet, prefetch, useQuerySet } from "../src/index.js";
+import { Comment, Post, Tag, User, type PostSpec, type TagSpec } from "./blog/models.js";
 import { useDatabase } from "./helpers.js";
 
 useDatabase();
@@ -88,4 +88,40 @@ test("a query-set class is checked", () => {
     useQuerySet(Post, QuerySet);
   }
   assert.equal(Post.objects.constructor, QuerySet);
+});
+
+// -- prefetch on loaded instances -------------------------------------------------------------
+
+test("prefetch onto loaded instances", async () => {
+  const { posts: rows } = await seed();
+  await Comment.objects.insertMany([{ post: rows[1]!, body: "a" }, { post: rows[1]!, body: "b" }]);
+  const users = await User.objects.orderBy("id");
+  await prefetch(users, User.posts.comments, new Prefetch(User.posts, Post.objects.filter(Post.published.eq(true)).slice(0, 1), { toAttr: "top" }));
+  type Loaded = { posts: { cached: { title: string; comments: { cached: { body: string }[] } }[] }; top: { title: string }[] };
+  const loaded = users as unknown as Loaded[];
+  assert.deepEqual(loaded[0]!.posts.cached.map((p) => p.title), ["draft", "hit", "quiet"]);
+  assert.deepEqual(loaded[0]!.posts.cached[1]!.comments.cached.map((c) => c.body), ["a", "b"]);
+  assert.deepEqual(loaded.map((u) => u.top.map((p) => p.title)), [["hit"], ["bob"]]);
+});
+
+test("prefetch reads keys from the instances, to-one and many-to-many", async () => {
+  const { posts: rows } = await seed();
+  await Comment.objects.insertMany([{ post: rows[0]!, body: "a" }, { post: rows[3]!, body: "b" }]);
+  const comments = await Comment.objects.orderBy("id");
+  await Comment.objects.delete(); // the instances' own rows are not read again
+  await prefetch(comments, Comment.post.author);
+  const loaded = comments as unknown as { post: { title: string; author: { name: string } } }[];
+  assert.deepEqual(loaded.map((c) => [c.post.title, c.post.author.name]), [["draft", "Alice"], ["bob", "Bob"]]);
+  const tags = await Tag.objects.insertMany([{ name: "a" }, { name: "b" }]);
+  await rows[0]!.tags.add(...tags);
+  const posts = await Post.objects.orderBy("id");
+  await prefetch(posts, Post.tags);
+  assert.deepEqual((posts[0]!.tags as unknown as { cached: { name: string }[] }).cached.map((t) => t.name), ["a", "b"]);
+});
+
+test("prefetch checks its input", async () => {
+  const { alice, posts: rows } = await seed();
+  await prefetch([], User.posts);
+  await assert.rejects(prefetch([alice, rows[0]!], User.posts), /one model/);
+  await assert.rejects(prefetch([alice], Post.author as never), /does not start at User|User has no relation/);
 });

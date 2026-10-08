@@ -201,6 +201,10 @@ separate calls are independent. `exclude()` is `NOT EXISTS`.
   sets a custom query (filtered, nested, or sliced per parent) and a typed target
   attribute (`u.top: Post[]`).
 
+* `await prefetch(instances, ...paths)` loads relations onto instances you already have, with the same paths and `Prefetch` objects.
+  Only the prefetch queries run: the keys come from the instances. A last `{ using: db }` argument names the database.
+  The row type does not change; read the relations as `cached` or cast.
+
 Related sets: `await user.posts`, `.filter()`, `.count()`, and `.insert({...})`, where the
 key is filled in. Many-to-many sets also have `post.tags.add(tag, ...)`, `.remove()`,
 `.clear()` and `.set([...])`.

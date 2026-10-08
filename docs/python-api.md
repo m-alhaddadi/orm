@@ -212,6 +212,16 @@ SQL text client-side, so the limit doesn't apply to it.)
   planned as `ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY views DESC, id)` in a
   subquery and `WHERE _rn <= 3` around it (Django 4.2 does the same).
 
+**Instances you already have.** `await orm.prefetch(instances, *paths)` loads relations onto them, as `prefetch_related` does for the rows of a query (Django's `prefetch_related_objects`):
+
+```python
+bundle = await Bundle.objects.get(Bundle.id == 1)
+await orm.prefetch([bundle], Bundle.items.product, Prefetch(Bundle.versions, Version.objects.order_by(-Version.id)[:1], to_attr="latest"))
+```
+
+It takes the same paths and `Prefetch` objects. Only the prefetch queries run: the keys come from the instances, so their own rows are not read again.
+The instances are of one model, and the queries run on the database each came from (`using=db` names another).
+
 ### One-to-one and many-to-many
 
 ```python

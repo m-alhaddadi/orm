@@ -47,7 +47,7 @@ from .expr import (
 )
 from .model import Model, Registry, define, load, loads, registry
 from .protection import allow_writes
-from .query import ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet, use_query_set
+from .query import ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet, prefetch, use_query_set
 from .cte import Cte, CteColumn
 from .select import Row, Select
 from .write import Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update, UpdateMany
@@ -69,6 +69,7 @@ __all__ = [
     "ManyRelatedSet",
     "Prefetch",
     "Prepared",
+    "prefetch",
     "use_query_set",
     "param",
     "Cte",

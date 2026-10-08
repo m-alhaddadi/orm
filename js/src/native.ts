@@ -85,8 +85,15 @@ export interface NativeSchema {
   makeMigration(dir: string, name?: string | null, empty?: boolean | null): string | null;
 }
 
+/** The prefetched rows for parent key rows (`prefetch()`), and those parent rows. */
+export interface NativePrefetched {
+  readonly rows: NativeRows;
+  readonly prefetched: readonly NativePrefetch[];
+}
+
 export interface NativeEngine {
   run(opJson: string, params: unknown[], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<unknown>;
+  prefetch(opJson: string, params: unknown[], keys: string[], rows: unknown[][], tx: NativeTransaction | null): Promise<NativePrefetched>;
   insert(
     model: string,
     fields: string[],

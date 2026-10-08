@@ -220,6 +220,13 @@ fn outcome_js(env: &Env, schema: &schema::Schema, out: Outcome) -> napi::Result<
         Outcome::Count(n) => js.number(n as f64)?,
         Outcome::Exists(b) => js.boolean(b)?,
         Outcome::Affected(n) => js.number(n as f64)?,
+        Outcome::Prefetched { parents, prefetched } => {
+            let o = js.object()?;
+            let model = parents_model(schema, &prefetched);
+            js.set(o, "rows", rows_js(c, parents.as_ref(), &model)?)?;
+            js.set(o, "prefetched", prefetched_js(c, schema, &prefetched)?)?;
+            o
+        }
         Outcome::Rows { model, rows, types, shape } => {
             let o = js.object()?;
             js.set(o, "model", match model_name(schema, model) {
@@ -231,6 +238,17 @@ fn outcome_js(env: &Env, schema: &schema::Schema, out: Outcome) -> napi::Result<
             o
         }
     }))
+}
+
+/// The column types of parent key rows: only the key columns the prefetches read are
+/// set, so every other cell is read as its own `NULL`'s type.
+fn parents_model(_schema: &schema::Schema, prefetched: &[Fetched]) -> Vec<ValueType> {
+    let width = prefetched.iter().map(|f| f.plan.key_pos + 1).max().unwrap_or(0);
+    let mut types = vec![ValueType { ty: ir::ColType::Bool, array: false, enum_idx: None }; width];
+    for f in prefetched {
+        types[f.plan.key_pos] = f.plan.key_type;
+    }
+    types
 }
 
 /// Insert / `update_many` rows (arrays aligned with `fields`) as bind values of the
@@ -479,6 +497,44 @@ impl Engine {
         let schema = self.schema.clone();
         env.spawn_future_with_callback(
             async move { exec::run(conn.as_ref(), target, plan).await.map_err(engine_err) },
+            move |env, out| outcome_js(env, &schema, out),
+        )
+    }
+
+    /// Runs only the prefetches of a select IR for parent rows the caller has: `keys`
+    /// names the root fields they read, `rows` holds those values per parent. The promise
+    /// gives `{rows, prefetched}`, `rows` the parents' key rows.
+    #[napi(ts_return_type = "Promise<unknown>")]
+    pub fn prefetch<'env>(
+        &self,
+        env: &'env Env,
+        op_json: String,
+        params_: Unknown<'_>,
+        keys: Vec<String>,
+        rows: Unknown<'_>,
+        tx: Option<&Transaction>,
+    ) -> napi::Result<PromiseRaw<'env, Raw>> {
+        let ir::Operation::Select(q) = parse_op(&op_json).map_err(engine_err)? else {
+            return Err(query_err("prefetch() takes a select"));
+        };
+        let target = self.target;
+        let plans = plan::plan_prefetch_only(&self.schema, target, &q, &params(env, params_)?).map_err(engine_err)?;
+        let m = self.schema.model(self.schema.model_idx(&q.model).map_err(query_err)?);
+        let positions = keys.iter().map(|k| m.field_pos(k).map_err(query_err)).collect::<napi::Result<Vec<_>>>()?;
+        let c = conv(env)?;
+        let mut values = vec![];
+        for row in c.js.elements(rows.raw())? {
+            let items = c.js.elements(row)?;
+            let mut out = vec![None; m.fields().len()];
+            for (item, &pos) in items.into_iter().zip(&positions) {
+                out[pos] = Some(c.value(item, Some(m.fields()[pos].value_type())).map_err(engine_err)?);
+            }
+            values.push(out);
+        }
+        let conn = self.conn(tx);
+        let schema = self.schema.clone();
+        env.spawn_future_with_callback(
+            async move { exec::prefetch(conn.as_ref(), target, Box::new(exec::ValueRows(values)), plans).await.map_err(engine_err) },
             move |env, out| outcome_js(env, &schema, out),
         )
     }

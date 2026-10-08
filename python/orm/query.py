@@ -51,7 +51,7 @@ T4 = TypeVar("T4")
 T5 = TypeVar("T5")
 T6 = TypeVar("T6")
 
-__all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prefetch", "Prepared", "use_query_set"]
+__all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prefetch", "Prepared", "prefetch", "use_query_set"]
 
 # Ids per query in in_bulk(), well below Postgres' 65535 parameters.
 IN_BULK_CHUNK = 10_000
@@ -911,6 +911,44 @@ class Prepared(Generic[M]):
 
     def __repr__(self) -> str:
         return f"<Prepared {self._qs!r}>"
+
+
+async def prefetch(
+    instances: Iterable[M], *relations: RelationPath[Any] | Prefetch[Any], using: Database | None = None
+) -> None:
+    """Load relations onto instances you already have, as ``prefetch_related`` does for
+    the rows of a query: one query per relation level, and no query for the instances
+    themselves::
+
+        await orm.prefetch([bundle], Bundle.items.product, Prefetch(Bundle.versions, ...))
+
+    The instances are of one model. They are read from the database each came from,
+    unless ``using`` names another."""
+    from .db import resolve
+    from .fields import BelongsTo
+
+    objs = list(instances)
+    if not objs or not relations:
+        return
+    model = type(objs[0])
+    if any(type(o) is not model for o in objs):
+        raise TypeError("prefetch() takes instances of one model")
+    qs = model.objects.prefetch_related(*relations)
+    if using is not None:
+        qs = qs.using(using)
+    params: list[Any] = []
+    ir = qs._select_ir("select", params)
+    meta = model._meta
+    keys: list[str] = []
+    for node in _prefetch_tree(model, ((p.path._path, p) for p in qs._prefetch)).values():
+        rel = meta.relations[node.relation]
+        key = rel.via if isinstance(rel, BelongsTo) else rel.from_  # type: ignore[attr-defined]
+        if key not in keys:
+            keys.append(key)
+    rows = [[o._field_value(k) for k in keys] for o in objs]
+    db = using if using is not None else objs[0].__dict__.get("_db")
+    database = resolve(db)
+    await database._engine.prefetch(json.dumps(ir), params, keys, rows, objs, database._tx(), db)
 
 
 def use_query_set(model: type[M], query_set: type[QuerySet[M]] | str) -> None:

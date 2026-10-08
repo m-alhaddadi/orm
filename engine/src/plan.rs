@@ -2110,6 +2110,14 @@ pub fn plan_select(schema: &Schema, target: Target, q: &Select, params: &dyn Par
     Ok(plan)
 }
 
+/// The prefetch plans of `q` for parent rows the caller already has (`prefetch()` on
+/// loaded instances): no statement for the parents, whose rows hold the root model's
+/// fields in schema order.
+pub fn plan_prefetch_only(schema: &Schema, target: Target, q: &Select, params: &dyn Params) -> Result<Vec<PrefetchPlan>> {
+    let root = schema.model_idx(&q.model).map_err(query_err)?;
+    q.prefetch.iter().map(|node| plan_prefetch(schema, target, params, root, node, q.without_defaults)).collect()
+}
+
 /// The query loading `node` (a relation of `parent`) for a set of parent keys. A slice
 /// applies per parent: `ROW_NUMBER() OVER (PARTITION BY <key> ORDER BY ...)` numbers
 /// the related rows and the outer query keeps the slice.

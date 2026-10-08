@@ -1582,6 +1582,44 @@ for (const cls of [RelatedSet, ManyRelatedSet]) {
   });
 }
 
+/**
+ * Loads relations onto instances you already have, as `prefetchRelated` does for the
+ * rows of a query: one query per relation level, and no query for the instances
+ * themselves. The instances are of one model; they are read from the database each came
+ * from, unless a last `{ using }` argument names another.
+ *
+ * ```ts
+ * await prefetch([bundle], Bundle.items.product, new Prefetch(Bundle.versions, ...));
+ * ```
+ */
+export async function prefetch(
+  instances: readonly object[],
+  ...relations: readonly (RelationPath<ModelSpec, string, readonly Hop[]> | Prefetch<readonly Hop[], unknown, string | undefined, string, unknown> | { readonly using: Database })[]
+): Promise<void> {
+  const last = relations[relations.length - 1];
+  const using = last !== undefined && !(last instanceof RelationPath) && !(last instanceof Prefetch) ? (last as { using: Database }).using : undefined;
+  const paths = using === undefined ? relations : relations.slice(0, -1);
+  const objs = [...instances] as Record<PropertyKey, unknown>[];
+  if (!objs.length || !paths.length) return;
+  const meta = (objs[0]!.constructor as { meta?: ModelMeta }).meta;
+  if (meta === undefined || objs.some((o) => (o.constructor as { meta?: ModelMeta }).meta !== meta)) {
+    throw new TypeError("prefetch() takes instances of one model");
+  }
+  const qs = (meta.objects.prefetchRelated as (...r: unknown[]) => QuerySet<ModelSpec>)(...paths).using(using);
+  const params: unknown[] = [];
+  const ir = qs.selectIr("select", params);
+  const keys: string[] = [];
+  for (const node of prefetchTree(meta, qs.state.prefetch.map((p) => [[...p.path[PATH].path], p] as [string[], typeof p])).values()) {
+    const rel = meta.relationByIr.get(node.relation)!;
+    if (!keys.includes(rel.from)) keys.push(rel.from);
+  }
+  const names = keys.map((k) => meta.fieldByIr.get(k)!.name);
+  const rows = objs.map((o) => names.map((n) => fieldValue(o, n)));
+  const db = resolve(using ?? (objs[0]![DB] as Database | undefined));
+  const res = await wait(() => db.engine.prefetch(JSON.stringify(ir), params, keys, rows, db.tx()));
+  new Builder(db.registry, using ?? (objs[0]![DB] as Database | undefined)).prefetched(meta, objs, res);
+}
+
 type QuerySetClass = new (meta: ModelMeta, state?: QueryState) => QuerySet<ModelSpec>;
 /** On a relation-set class mixed with a query-set class: the relation-set base. */
 const MIXED: unique symbol = Symbol("orm.mixed");
