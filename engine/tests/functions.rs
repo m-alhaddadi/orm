@@ -60,3 +60,26 @@ fn array_element_and_unnest() {
         assert!(error.contains("sqlite does not support"), "{error}");
     }
 }
+
+#[test]
+fn unnest_is_not_planned_inside_an_aggregate_coalesce_or_window() {
+    let unnest = func("unnest", vec![col("links")]);
+    let window = json!({"t":"window","func":func("lag",vec![col("title")]),"partition_by":[unnest.clone()]});
+    for e in [func("count", vec![unnest.clone()]), func("coalesce", vec![unnest.clone(), text("z")]), window] {
+        let error = plan(Dialect::Postgres, vec![e], vec![]).unwrap_err();
+        assert!(error.contains("only be a select() column"), "{error}");
+    }
+    assert_eq!(plan(Dialect::Postgres, vec![func("lower", vec![unnest])], vec![]).unwrap(), r#"SELECT LOWER(UNNEST("notes"."links")) FROM "notes""#);
+}
+
+#[test]
+fn substr_takes_a_start_from_one_and_a_length_from_zero() {
+    let substr = |args: &[i64]| func("substr", std::iter::once(col("title")).chain(args.iter().map(|v| json!({"t":"int","value":v}))).collect());
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        for args in [&[0][..], &[-2], &[2, -1]] {
+            let error = plan(dialect, vec![substr(args)], vec![]).unwrap_err();
+            assert!(error.contains("substr() takes a start of at least 1 and a length of at least 0"), "{error}");
+        }
+        assert!(plan(dialect, vec![substr(&[1, 0])], vec![]).is_ok());
+    }
+}

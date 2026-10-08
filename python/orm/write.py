@@ -23,7 +23,7 @@ from collections.abc import Generator, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from . import _native
-from .expr import ColumnRef, Expression, IRContext
+from .expr import ColumnRef, Expression, IRContext, Ordering
 from .errors import QueryError
 from .fields import BelongsTo
 
@@ -139,6 +139,8 @@ def assignments(model: type[Model], values: Mapping[str, Any], ctx: IRContext) -
             name, value = rel.via, (None if value is None else _key_of(value, rel.to))
         if name not in meta.input_fields:
             raise TypeError(f"{meta.name} has no field {name!r}")
+        if isinstance(value, Ordering):
+            raise TypeError(f"{name}={value!r} is an ordering, for order_by(); write 0 - {value.expr!r} to negate a value")
         node = value._ir(ctx) if isinstance(value, Expression) else ctx.param(value)
         out.append({"field": name, "value": node})
     return out

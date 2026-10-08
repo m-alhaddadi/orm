@@ -141,7 +141,8 @@ const back = await Post.objects.orderBy("-createdAt").paginate({ last: 20, befor
 The rules are the same as Python's `paginate()` (see [`python-api.md`](python-api.md)).
 A nullable order column needs `{ nulls }`: `Post.rank.desc({ nulls: "last" })`.
 A cursor from Python works in TypeScript for the same schema and order, and the other way.
-A `Date` keeps milliseconds only. On Postgres, a `DateTime` order column with two values in one millisecond can skip or repeat rows: store such timestamps at millisecond precision, or order by another column.
+A `Date` holds milliseconds. A `DateTime` value read from the database keeps its microseconds in a hidden property, so its cursor and `filter(Post.createdAt.eq(row.createdAt))` find the exact row. `new Date(row.createdAt)` drops them.
+`{ first, before: null }` and `{ last, after: null }` are accepted, as in Python.
 
 ### Relation filters
 

@@ -257,7 +257,9 @@ page = await qs.paginate(first=20, after=page.next_cursor)       # the next page
 page = await qs.paginate(last=20, before=page.previous_cursor)   # the previous page
 ```
 
-`paginate()` reads one page by keyset, like `batches()`, so deep pages stay fast and rows added between pages do not repeat others.
+`paginate()` reads one page by keyset, like `batches()`, so rows added between pages do not repeat others.
+A deep page stays fast when an index matches the order and its first column is NOT NULL: the page then starts with a plain bound on that column.
+With a nullable first column there is no such bound, and Postgres reads the index from its start to the cursor.
 The order is `order_by()`, else the schema default order, else the primary key.
 The primary key is added as the last order column when no column of the order is unique.
 `select_related`, `prefetch_related`, `only()` and query defaults apply to each page.
@@ -268,6 +270,8 @@ The primary key is added as the last order column when no column of the order is
 * A nullable order column needs `nulls=`: `Post.rank.desc(nulls="last")`.
 * A cursor is opaque base64 of the order values and a fingerprint of the order. A cursor from another order or model is a `QueryError`.
 * A cursor is not signed. A client can change it to start at any position of the same order, so do not use it for access control.
+* A damaged or edited cursor is `QueryError("invalid cursor")`; a cursor that is not a string is a `TypeError`.
+* A cursor holds positions, not filters: it stays valid after a filter change and starts at the same position.
 * There is no total count; call `count()` for it.
 
 ### Prepared queries

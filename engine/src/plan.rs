@@ -1149,7 +1149,11 @@ impl<'s> Planner<'s> {
                 SExpr::SubQuery(None, Box::new(self.subselect(select, false)?.into()))
             }
             Expr::Window { func, base, partition_by, order_by, frame } => {
-                self.window(func, base.as_deref(), partition_by, order_by, frame)?
+                // Postgres rejects a set-returning function in a window.
+                let unnest = std::mem::replace(&mut self.allow_unnest, false);
+                let e = self.window(func, base.as_deref(), partition_by, order_by, frame);
+                self.allow_unnest = unnest;
+                e?
             }
             Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
             Expr::Arith { op, l, r } => {
@@ -1365,15 +1369,22 @@ impl<'s> Planner<'s> {
         if self.target.dialect == Dialect::Sqlite && name == "cardinality" {
             return Err(Error::query("sqlite does not support cardinality()"));
         }
-        if self.target.dialect == Dialect::Sqlite && matches!(name, "element" | "unnest") {
-            return Err(Error::query("sqlite does not support array element access or unnest()"));
+        // Below these bounds SQLite and Postgres give different results.
+        let below = |i: usize, min: i64| matches!(args.get(i), Some(Expr::Int { value }) if *value < min);
+        if name == "substr" && (below(1, 1) || below(2, 0)) {
+            return Err(Error::query("substr() takes a start of at least 1 and a length of at least 0"));
         }
         if name == "unnest" && !self.allow_unnest {
             return Err(Error::query("unnest() returns several rows: it can only be a select() column"));
         }
         let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
         let hint = Hint { ty: if TEXT_FUNCS.contains(&name) { Some(ValueType::scalar(ColType::Text)) } else { hint.ty }, field: None };
-        let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>()?;
+        // Postgres rejects a set-returning function inside an aggregate or `COALESCE`.
+        let unnest = self.allow_unnest;
+        self.allow_unnest &= !(is_aggregate(name) || name == "coalesce");
+        let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>();
+        self.allow_unnest = unnest;
+        let planned = planned?;
         let d = if distinct { "DISTINCT " } else { "" };
         let n = planned.len();
         let dialect = self.target.dialect;

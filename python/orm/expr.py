@@ -270,7 +270,11 @@ class Expression(Node, Generic[T]):
 
     # Strings -------------------------------------------------------------------------------
 
-    def concat(self: Expression[str] | Expression[str | None], other: str | Expression[str] | Expression[str | None]) -> Expression[str]:
+    @overload
+    def concat(self: Expression[str], other: str | Expression[str]) -> Expression[str]: ...  # pyright: ignore[reportOverlappingOverload]
+    @overload
+    def concat(self: Expression[str] | Expression[str | None], other: str | Expression[str] | Expression[str | None]) -> Expression[str | None]: ...
+    def concat(self: Expression[Any], other: Any) -> Expression[Any]:
         """``self || other``: ``NULL`` when either side is ``NULL``. :func:`func.concat`
         reads ``NULL`` as an empty string instead."""
         return Arith("concat", self, _wrap(other))
@@ -459,7 +463,7 @@ class ColumnRef(Expression[T]):
     def __neg__(self) -> Ordering:
         """``-Post.created_at`` is ``Post.created_at.desc()``, for ``order_by()``. It is
         never SQL negation; write ``0 - Post.views`` for that."""
-        return Ordering(self, desc=True)
+        return self.desc()
 
     def __repr__(self) -> str:
         return ".".join((self._root.__name__, *self._path, self._field.name))
@@ -779,7 +783,8 @@ class _Functions:
         return Func("length", (expr,))
 
     def concat(self, *parts: str | Expression[Any]) -> Func[str]:
-        """``CONCAT(...)``: the parts as text, a ``NULL`` part as an empty string.
+        """``CONCAT(...)``: the parts as text, a ``NULL`` part as an empty string. A
+        literal part is a ``str``; write a number as text (``"1"``) or as a column.
         ``a.concat(b)`` (``a || b``) is ``NULL`` when either side is ``NULL``."""
         if not parts:
             raise TypeError("concat() needs at least one part")
@@ -797,15 +802,21 @@ class _Functions:
         """Without trailing spaces."""
         return Func("rtrim", (expr,))
 
-    def replace(self, expr: Expression[str] | Expression[str | None], old: str | Expression[str], new: str | Expression[str]) -> Func[str]:
+    def replace(
+        self,
+        expr: Expression[str] | Expression[str | None],
+        old: str | Expression[str] | Expression[str | None],
+        new: str | Expression[str] | Expression[str | None],
+    ) -> Func[str]:
         """Every ``old`` in ``expr`` replaced by ``new``."""
         return Func("replace", (expr, old, new))
 
     def substr(self, expr: Expression[str] | Expression[str | None], start: int, length: int | None = None) -> Func[str]:
-        """The characters from the 1-based ``start``, ``length`` of them (default: all)."""
+        """The characters from the 1-based ``start`` (at least 1), ``length`` of them
+        (at least 0; default: all)."""
         return Func("substr", (expr, _Int(start)) if length is None else (expr, _Int(start), _Int(length)))
 
-    def strpos(self, expr: Expression[str] | Expression[str | None], part: str | Expression[str]) -> Func[int]:
+    def strpos(self, expr: Expression[str] | Expression[str | None], part: str | Expression[str] | Expression[str | None]) -> Func[int]:
         """The 1-based position of the first ``part`` in ``expr``, 0 if absent
         (``STRPOS``; ``INSTR`` on SQLite)."""
         return Func("strpos", (expr, part))

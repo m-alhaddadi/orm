@@ -313,8 +313,10 @@ export abstract class Expression<T, S extends string = never, P = {}> extends No
 
   /** `this || other`: `null` when either side is `null`. {@link Functions.concat}
    * reads `null` as an empty string instead. */
-  concat<S2 extends string = never, P2 = {}>(this: Expression<string | null, S, P>, other: Operand<string, S2, P2>): Expression<string, S | S2, P & P2> {
-    return new Arith("concat", this, wrap(other)) as never;
+  concat<U extends string | null, S2 extends string = never, P2 = {}>(this: Expression<U, S, P>, other: string | Expression<string, S2, P2>): Expression<string | Extract<U, null>, S | S2, P & P2>;
+  concat<S2 extends string = never, P2 = {}>(this: Expression<string | null, S, P>, other: Operand<string, S2, P2>): Expression<string | null, S | S2, P & P2>;
+  concat(other: unknown): unknown {
+    return new Arith("concat", this, wrap(other));
   }
 
   // Arithmetic -------------------------------------------------------------------------------
@@ -920,7 +922,7 @@ class Functions {
     return new Func("replace", [expr, wrap(old), wrap(replacement)]);
   }
 
-  /** The characters from the 1-based `start`, `length` of them (default: all). */
+  /** The characters from the 1-based `start` (at least 1), `length` of them (at least 0; default: all). */
   substr<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>, start: number, length?: number): Func<T, S, P> {
     return new Func("substr", length === undefined ? [expr, new Int(start)] : [expr, new Int(start), new Int(length)]);
   }

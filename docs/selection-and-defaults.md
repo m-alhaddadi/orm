@@ -42,16 +42,26 @@ Each option also has its own attribute.
 One option comes from one place on a model:
 
 ```prisma
+model Base {
+  id Int @id @default(autoincrement())
+  @@query.filter("id > 0")
+}
+model Profile {
+  id Int @id @default(autoincrement())
+  user User?
+}
 model User {
   id Int @id @default(autoincrement())
   name String
   active Boolean @default(true)
   created_at DateTime @default(now())
   bio String @query.selectOut
+  profile_id Int @unique
+  profile Profile @relation(fields: [profile_id], references: [id])
   @@query.filter("active == true")
   @@query.fields(["id", "name"])
   @@query.related(["profile"])
-  @@query.order("-created_at nulls last", "id")
+  @@query.order("-created_at", "id")
   @@query.parent("Base")
 }
 ```
@@ -94,10 +104,14 @@ The default order is one string for each order column: a field, `-` before it fo
 `@@query.defaults` takes the same strings as a list: `order: ["-created_at", "id"]`.
 Order columns are fields of the model itself, not related columns.
 A child inherits the order, and `@@query.order()` or `order: []` clears it.
+The schema load checks the resolved order of each model, inherited ones included: each column is a field of the model, once; a nullable column has `nulls first` or `nulls last`; and a `json` or `xml` column is an error.
+Index the order columns: without an index, each read sorts all matching rows.
+A composed child that inherits the order reads the parent's columns through a subquery, which no index serves.
 
 The default order applies to model reads that give no `order_by()` / `orderBy()`, which include `first()`, `last()` and the rows of a `Prefetch` query set without its own order.
 An explicit order replaces it, and `without_defaults()` removes it.
 `select(...)` rows, subqueries, `count`, `exists`, `update` and `delete` ignore it.
+For a composed model, the internal reads of an insert, update or delete keep it; it does not change which rows they write.
 `batches()` and `iterate()` keep their primary-key order.
 
 A filtered-out joined target is `None`/`null`, including a physically required

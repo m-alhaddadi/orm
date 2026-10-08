@@ -885,8 +885,8 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     yield* await this.fromCache();
   }
 
-  /** The order of this read: `orderBy()`, else the schema default order, else the pk. */
-  private defaultOrder(): readonly Ordering<string, unknown>[] {
+  /** @internal The order of this read: `orderBy()`, else the schema default order, else the pk. */
+  defaultOrder(): readonly Ordering<string, unknown>[] {
     if (this.state.order.length) return this.state.order;
     const keys = this.meta.defaultOrder;
     if (keys.length && !this.state.withoutDefaults && !this.state.from) {
@@ -908,7 +908,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     void check;
     const forward = options.first !== undefined;
     if (forward === (options.last !== undefined)) throw new TypeError("paginate() takes first or last");
-    if ((forward && options.before !== undefined) || (!forward && options.after !== undefined)) {
+    if ((forward && options.before != null) || (!forward && options.after != null)) {
       throw new TypeError("paginate() takes first with after, or last with before");
     }
     const size = forward ? options.first : options.last;
@@ -922,7 +922,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     const helpers = [...(this.state.modelHelpers ?? [])];
     for (const [f] of keys) if (!helpers.includes(f.ir)) helpers.push(f.ir);
     const cursor = (forward ? options.after : options.before) ?? null;
-    const filters = cursor === null ? this.state.filters : [...this.state.filters, after(order, decodeCursor(cursor, fp, keys))];
+    const filters = cursor === null ? this.state.filters : [...this.state.filters, after(this.meta, order, decodeCursor(this.meta, cursor, fp, keys))];
     const fetched = (await this.clone({ modelHelpers: helpers, filters, order, limit: size! + 1, offset: undefined }).fetch()) as R[];
     const more = fetched.length > size!;
     const items = forward ? fetched.slice(0, size!) : fetched.slice(0, size!).reverse();
@@ -1304,8 +1304,7 @@ export class Prepared<M extends ModelSpec, R, P> {
       if (kind === "get") {
         qs = qs.limit(2) as never;
       } else if (kind === "first") {
-        const order = qs.state.order.length ? qs.state.order : [qs.meta.column(qs.meta.pk).asc()];
-        qs = (qs as never as { clone(c: Partial<QueryState>): typeof qs }).clone({ order });
+        qs = (qs as never as { clone(c: Partial<QueryState>): typeof qs }).clone({ order: qs.defaultOrder() });
         qs = (qs.state.limit instanceof ParamRef ? qs.limit(1) : qs.slice(0, 1)) as never;
       } else if (kind === "count" || kind === "exists") {
         op = kind;
