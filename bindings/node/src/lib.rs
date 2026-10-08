@@ -54,12 +54,23 @@ fn db_kind(e: &DbError) -> &'static str {
     }
 }
 
+/// A database error; with SQLSTATE fields the tag is `[orm:<Kind>+] <json>\n<message>`
+/// (JSON escapes newlines, so the first line is the whole object).
+fn db_tagged(e: DbError) -> napi::Error {
+    let kind = db_kind(&e);
+    if e.sqlstate.is_none() && e.constraint.is_none() && e.detail.is_none() {
+        return tagged(kind, e);
+    }
+    let fields = serde_json::json!({ "sqlstate": e.sqlstate, "constraint": e.constraint, "detail": e.detail });
+    napi::Error::from_reason(format!("[orm:{kind}+] {fields}\n{}", e.message))
+}
+
 fn engine_err(e: Error) -> napi::Error {
     match e {
         Error::Query(m) => tagged("QueryError", m),
         Error::Schema(m) => tagged("SchemaError", m),
         Error::Migration(m) => tagged("MigrationError", m),
-        Error::Db(e) => tagged(db_kind(&e), e),
+        Error::Db(e) => db_tagged(e),
         Error::Value(m) => tagged("TypeError", m),
         Error::WriteProtected(m) => tagged("WriteProtected", format!("{m} is write-protected (@@protected_write); write it inside allowWrites([{m}], ...)")),
         Error::Binding(e) => tagged("TypeError", e),
@@ -131,7 +142,7 @@ fn rows_js(c: Conv, rows: &dyn RowSet, types: &[ValueType]) -> napi::Result<V> {
     let mut k = 0u32;
     for r in 0..rows.len() {
         for (col, ty) in types.iter().enumerate() {
-            let cell = rows.cell(r, col, *ty).map_err(|e| tagged(db_kind(&e), e))?;
+            let cell = rows.cell(r, col, *ty).map_err(db_tagged)?;
             js.set_element(values, k, c.cell(cell)?)?;
             k += 1;
         }
@@ -204,9 +215,9 @@ fn prefetched_js(c: Conv, schema: &schema::Schema, fetched: &[Fetched]) -> napi:
 /// rows a write returned.
 fn outcome_js(env: &Env, schema: &schema::Schema, out: Outcome) -> napi::Result<Raw> {
     #[cfg(feature = "composition")]
-    let out = orm_engine::behavior::results(&schema.native_models, out).map_err(|e| tagged(db_kind(&e), e))?;
+    let out = orm_engine::behavior::results(&schema.native_models, out).map_err(db_tagged)?;
     #[cfg(feature = "proxy-models")]
-    orm_engine::proxy::emit(&orm_engine::proxy::diagnostics(&schema.proxy_models, &out).map_err(|e| tagged(db_kind(&e), e))?);
+    orm_engine::proxy::emit(&orm_engine::proxy::diagnostics(&schema.proxy_models, &out).map_err(db_tagged)?);
     let c = conv(env)?;
     let js = c.js;
     Ok(Raw(match out {
@@ -220,6 +231,13 @@ fn outcome_js(env: &Env, schema: &schema::Schema, out: Outcome) -> napi::Result<
         Outcome::Count(n) => js.number(n as f64)?,
         Outcome::Exists(b) => js.boolean(b)?,
         Outcome::Affected(n) => js.number(n as f64)?,
+        Outcome::Prefetched { parents, prefetched } => {
+            let o = js.object()?;
+            let model = parents_model(schema, &prefetched);
+            js.set(o, "rows", rows_js(c, parents.as_ref(), &model)?)?;
+            js.set(o, "prefetched", prefetched_js(c, schema, &prefetched)?)?;
+            o
+        }
         Outcome::Rows { model, rows, types, shape } => {
             let o = js.object()?;
             js.set(o, "model", match model_name(schema, model) {
@@ -231,6 +249,17 @@ fn outcome_js(env: &Env, schema: &schema::Schema, out: Outcome) -> napi::Result<
             o
         }
     }))
+}
+
+/// The column types of parent key rows: only the key columns the prefetches read are
+/// set, so every other cell is read as its own `NULL`'s type.
+fn parents_model(_schema: &schema::Schema, prefetched: &[Fetched]) -> Vec<ValueType> {
+    let width = prefetched.iter().map(|f| f.plan.key_pos + 1).max().unwrap_or(0);
+    let mut types = vec![ValueType { ty: ir::ColType::Bool, array: false, enum_idx: None }; width];
+    for f in prefetched {
+        types[f.plan.key_pos] = f.plan.key_type;
+    }
+    types
 }
 
 /// Insert / `update_many` rows (arrays aligned with `fields`) as bind values of the
@@ -423,13 +452,54 @@ impl Transaction {
     #[napi]
     pub fn commit<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
         let tx = self.inner.clone();
-        env.spawn_future(async move { tx.commit().await.map_err(|e| tagged(db_kind(&e), e)) })
+        env.spawn_future(async move { tx.commit().await.map_err(db_tagged) })
     }
 
     #[napi]
     pub fn rollback<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
         let tx = self.inner.clone();
-        env.spawn_future(async move { tx.rollback().await.map_err(|e| tagged(db_kind(&e), e)) })
+        env.spawn_future(async move { tx.rollback().await.map_err(db_tagged) })
+    }
+}
+
+// -- trace ----------------------------------------------------------------------------------------
+
+/// One statement the database ran: `start` in Unix milliseconds, `duration` in milliseconds.
+#[napi(object)]
+pub struct QueryEvent {
+    pub sql: String,
+    pub start: f64,
+    pub duration: f64,
+    pub rows: f64,
+    pub error: Option<String>,
+}
+
+/// The statements of the engine calls it is passed to, drained by `take()`.
+#[napi]
+pub struct Trace(orm_engine::trace::Trace);
+
+#[napi]
+impl Trace {
+    #[napi(constructor)]
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Trace(orm_engine::trace::Trace::new())
+    }
+
+    /// The events so far, oldest first; the trace is empty afterwards.
+    #[napi]
+    pub fn take(&self) -> Vec<QueryEvent> {
+        self.0
+            .take()
+            .into_iter()
+            .map(|e| QueryEvent {
+                sql: e.sql,
+                start: e.start.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64() * 1000.0,
+                duration: e.duration.as_secs_f64() * 1000.0,
+                rows: e.rows as f64,
+                error: e.error,
+            })
+            .collect()
     }
 }
 
@@ -437,14 +507,18 @@ impl Transaction {
 #[napi]
 pub struct SessionLock {
     inner: Arc<dyn db::SessionLock>,
+    unlock: String,
 }
 
 #[napi]
 impl SessionLock {
     #[napi]
-    pub fn release<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
+    pub fn release<'env>(&self, env: &'env Env, trace: Option<&Trace>) -> napi::Result<PromiseRaw<'env, ()>> {
         let lock = self.inner.clone();
-        env.spawn_future(async move { lock.release().await.map_err(|e| tagged(db_kind(&e), e)) })
+        let (sql, trace) = (self.unlock.clone(), trace.map(|t| t.0.clone()));
+        env.spawn_future(async move {
+            orm_engine::trace::timed(trace.as_ref(), sql, lock.release(), |_| 1).await.map_err(db_tagged)
+        })
     }
 }
 
@@ -463,6 +537,11 @@ impl Engine {
             Some(tx) => tx.inner.clone(),
             None => self.driver.clone(),
         }
+    }
+
+    /// `conn(tx)`, recording each statement into `trace` when given.
+    fn traced(&self, tx: Option<&Transaction>, trace: Option<&Trace>) -> Arc<dyn Executor> {
+        orm_engine::trace::wrap(self.conn(tx), trace.map(|t| &t.0))
     }
 
     fn script<'env>(
@@ -488,6 +567,7 @@ impl Engine {
         params_: Unknown<'_>,
         tx: Option<&Transaction>,
         allowed: Option<Vec<String>>,
+        trace: Option<&Trace>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
         let op = parse_op(&op_json).map_err(engine_err)?;
         if let ir::Operation::Update(ir::Update { model, .. }) | ir::Operation::Delete(ir::Delete { model, .. }) = &op {
@@ -495,10 +575,48 @@ impl Engine {
         }
         let target = self.target;
         let plan = Planner::plan(&self.schema, target, &op, &params(env, params_)?).map_err(engine_err)?;
-        let conn = self.conn(tx);
+        let conn = self.traced(tx, trace);
         let schema = self.schema.clone();
         env.spawn_future_with_callback(
             async move { exec::run(conn.as_ref(), target, plan).await.map_err(engine_err) },
+            move |env, out| outcome_js(env, &schema, out),
+        )
+    }
+
+    /// Runs only the prefetches of a select IR for parent rows the caller has: `keys`
+    /// names the root fields they read, `rows` holds those values per parent. The promise
+    /// gives `{rows, prefetched}`, `rows` the parents' key rows.
+    #[napi(ts_return_type = "Promise<unknown>")]
+    pub fn prefetch<'env>(
+        &self,
+        env: &'env Env,
+        op_json: String,
+        params_: Unknown<'_>,
+        keys: Vec<String>,
+        rows: Unknown<'_>,
+        tx: Option<&Transaction>,
+    ) -> napi::Result<PromiseRaw<'env, Raw>> {
+        let ir::Operation::Select(q) = parse_op(&op_json).map_err(engine_err)? else {
+            return Err(query_err("prefetch() takes a select"));
+        };
+        let target = self.target;
+        let plans = plan::plan_prefetch_only(&self.schema, target, &q, &params(env, params_)?).map_err(engine_err)?;
+        let m = self.schema.model(self.schema.model_idx(&q.model).map_err(query_err)?);
+        let positions = keys.iter().map(|k| m.field_pos(k).map_err(query_err)).collect::<napi::Result<Vec<_>>>()?;
+        let c = conv(env)?;
+        let mut values = vec![];
+        for row in c.js.elements(rows.raw())? {
+            let items = c.js.elements(row)?;
+            let mut out = vec![None; m.fields().len()];
+            for (item, &pos) in items.into_iter().zip(&positions) {
+                out[pos] = Some(c.value(item, Some(m.fields()[pos].value_type())).map_err(engine_err)?);
+            }
+            values.push(out);
+        }
+        let conn = self.conn(tx);
+        let schema = self.schema.clone();
+        env.spawn_future_with_callback(
+            async move { exec::prefetch(conn.as_ref(), target, Box::new(exec::ValueRows(values)), plans).await.map_err(engine_err) },
             move |env, out| outcome_js(env, &schema, out),
         )
     }
@@ -529,6 +647,7 @@ impl Engine {
         allowed: Option<Vec<String>>,
         batch_size: Option<u32>,
         conflict_where: Option<String>,
+        trace: Option<&Trace>,
         returning: Option<bool>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
         let returning = returning.unwrap_or(true);
@@ -550,7 +669,7 @@ impl Engine {
         let plans = exec::plan_inserts(&self.schema, self.target, &model, &fields, values, conflict, &p, batch_size.map(|n| n as usize), returning)
             .map_err(engine_err)?;
         let target = self.target;
-        let conn = self.conn(tx);
+        let conn = self.traced(tx, trace);
         let own_tx = tx.is_none();
         let schema = self.schema.clone();
         env.spawn_future_with_callback(
@@ -597,13 +716,14 @@ impl Engine {
         tx: Option<&Transaction>,
         without_defaults: Option<bool>,
         allowed: Option<Vec<String>>,
+        trace: Option<&Trace>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
         protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
         let (_, um) = update_many_plan(
             env, &self.schema, self.target, &model, &fields, rows, &filters_json, params_, returning, batch_size,
             without_defaults.unwrap_or(false),
         )?;
-        let conn = self.conn(tx);
+        let conn = self.traced(tx, trace);
         let own_tx = tx.is_none();
         let schema = self.schema.clone();
         env.spawn_future_with_callback(
@@ -617,24 +737,25 @@ impl Engine {
     pub fn begin<'env>(&self, env: &'env Env, tx: Option<&Transaction>) -> napi::Result<PromiseRaw<'env, Transaction>> {
         let conn = self.conn(tx);
         env.spawn_future(async move {
-            let inner = conn.begin().await.map_err(|e| tagged(db_kind(&e), e))?;
+            let inner = conn.begin().await.map_err(db_tagged)?;
             Ok(Transaction { inner })
         })
     }
 
     /// Advisory lock on a validated integer key or UTF-8 name, returning a boolean.
     #[napi]
+    #[allow(clippy::too_many_arguments)]
     pub fn advisory_lock<'env>(
         &self, env: &'env Env, key: String, name: Option<napi::bindgen_prelude::Buffer>,
-        exclusive: bool, nowait: bool, tx: &Transaction,
+        exclusive: bool, nowait: bool, tx: &Transaction, trace: Option<&Trace>,
     ) -> napi::Result<PromiseRaw<'env, bool>> {
         let key = match name {
             Some(name) => orm_engine::advisory::key(&name),
             None => key.parse::<i64>().map_err(|_| tagged("TypeError", "lock key must fit in 64 bits"))?,
         };
-        let conn = self.conn(Some(tx));
+        let conn = self.traced(Some(tx), trace);
         env.spawn_future(async move {
-            conn.advisory_lock(key, exclusive, nowait).await.map_err(|e| tagged(db_kind(&e), e))
+            conn.advisory_lock(key, exclusive, nowait).await.map_err(db_tagged)
         })
     }
 
@@ -648,27 +769,81 @@ impl Engine {
 
     /// Session advisory lock on a pinned connection; `null` when it is not taken.
     #[napi]
+    #[allow(clippy::too_many_arguments)]
     pub fn session_lock<'env>(
         &self, env: &'env Env, key: String, name: Option<napi::bindgen_prelude::Buffer>,
-        exclusive: bool, nowait: bool, timeout_ms: Option<u32>,
+        exclusive: bool, nowait: bool, timeout_ms: Option<u32>, trace: Option<&Trace>,
     ) -> napi::Result<PromiseRaw<'env, Option<SessionLock>>> {
         let key = match name {
             Some(name) => orm_engine::advisory::key(&name),
             None => key.parse::<i64>().map_err(|_| tagged("TypeError", "lock key must fit in 64 bits"))?,
         };
         let driver = self.driver.clone();
+        let trace = trace.map(|t| t.0.clone());
+        let sql = orm_engine::advisory::session_sql(key, exclusive, nowait);
+        let unlock = orm_engine::advisory::unlock_sql(key, exclusive);
         env.spawn_future(async move {
-            let lock = driver.session_lock(key, exclusive, nowait, timeout_ms.map(u64::from)).await
-                .map_err(|e| tagged(db_kind(&e), e))?;
-            Ok(lock.map(|inner| SessionLock { inner }))
+            let taken = driver.session_lock(key, exclusive, nowait, timeout_ms.map(u64::from));
+            let lock = orm_engine::trace::timed(trace.as_ref(), sql, taken, |l| l.is_some() as u64).await.map_err(db_tagged)?;
+            Ok(lock.map(|inner| SessionLock { inner, unlock }))
         })
     }
 
     /// Raw SQL escape hatch (one or more statements); gives the rows affected.
     #[napi]
-    pub fn execute<'env>(&self, env: &'env Env, sql: String, tx: Option<&Transaction>) -> napi::Result<PromiseRaw<'env, f64>> {
-        let conn = self.conn(tx);
-        env.spawn_future(async move { conn.batch(sql).await.map(|n| n as f64).map_err(|e| tagged(db_kind(&e), e)) })
+    pub fn execute<'env>(&self, env: &'env Env, sql: String, tx: Option<&Transaction>, trace: Option<&Trace>) -> napi::Result<PromiseRaw<'env, f64>> {
+        let conn = self.traced(tx, trace);
+        env.spawn_future(async move { conn.batch(sql).await.map(|n| n as f64).map_err(db_tagged) })
+    }
+
+    /// The query plan of a read IR document (see `exec::explain`), as text.
+    #[napi]
+    pub fn explain<'env>(
+        &self,
+        env: &'env Env,
+        op_json: String,
+        params_: Unknown<'_>,
+        analyze: bool,
+        tx: Option<&Transaction>,
+        trace: Option<&Trace>,
+    ) -> napi::Result<PromiseRaw<'env, String>> {
+        let op = parse_op(&op_json).map_err(engine_err)?;
+        let target = self.target;
+        let plan = Planner::plan(&self.schema, target, &op, &params(env, params_)?).map_err(engine_err)?;
+        let conn = self.traced(tx, trace);
+        env.spawn_future(async move { exec::explain(conn.as_ref(), target, &plan, analyze).await.map_err(engine_err) })
+    }
+
+    /// Raw SQL with parameters (types taken from the values); an array of objects by
+    /// column name, cells typed by the database.
+    #[napi(ts_return_type = "Promise<Record<string, unknown>[]>")]
+    pub fn fetch<'env>(
+        &self,
+        env: &'env Env,
+        sql: String,
+        params_: Unknown<'_>,
+        tx: Option<&Transaction>,
+        trace: Option<&Trace>,
+    ) -> napi::Result<PromiseRaw<'env, Raw>> {
+        let c = conv(env)?;
+        let args = c.js.elements(params_.raw())?.into_iter().map(|v| c.value(v, None)).collect::<orm_engine::Result<Vec<_>>>().map_err(engine_err)?;
+        let conn = self.traced(tx, trace);
+        env.spawn_future_with_callback(
+            async move { conn.fetch(sql, args).await.map_err(db_tagged) },
+            move |env, rows| {
+                let c = conv(env)?;
+                let js = c.js;
+                let out = js.array(rows.len())?;
+                for r in 0..rows.len() {
+                    let obj = js.object()?;
+                    for (col, name) in rows.columns().iter().enumerate() {
+                        js.set(obj, name, c.cell(rows.cell(r, col).map_err(db_tagged)?)?)?;
+                    }
+                    js.set_element(out, r as u32, obj)?;
+                }
+                Ok(Raw(out))
+            },
+        )
     }
 
     /// Raw query whose columns are all read as text. For tooling such as the migration
@@ -681,7 +856,7 @@ impl Engine {
         tx: Option<&Transaction>,
     ) -> napi::Result<PromiseRaw<'env, Vec<Vec<Option<String>>>>> {
         let conn = self.conn(tx);
-        env.spawn_future(async move { conn.query_text(sql).await.map_err(|e| tagged(db_kind(&e), e)) })
+        env.spawn_future(async move { conn.query_text(sql).await.map_err(db_tagged) })
     }
 
     #[napi]
@@ -837,7 +1012,7 @@ pub fn connect<'env>(
 ) -> napi::Result<PromiseRaw<'env, Engine>> {
     let schema = schema.inner.clone();
     env.spawn_future(async move {
-        let driver = db::connect(&url, max_connections as usize).await.map_err(|e| tagged(db_kind(&e), e))?;
+        let driver = db::connect(&url, max_connections as usize).await.map_err(db_tagged)?;
         if driver.dialect() != schema.dialect {
             driver.close().await;
             return Err(schema_err(format!("schema targets {}, connection uses {}", schema.dialect.name(), driver.dialect().name())));
@@ -852,14 +1027,14 @@ pub fn connect<'env>(
 impl Engine {
     /// Attach local values to an existing shared-key parent.
     #[napi(ts_return_type = "Promise<unknown>")]
-    pub fn attach<'env>(&self, env: &'env Env, model: String, parent_id: Unknown<'_>, fields: Vec<String>, rows: Unknown<'_>, tx: Option<&Transaction>, allowed: Option<Vec<String>>) -> napi::Result<PromiseRaw<'env, Raw>> {
+    pub fn attach<'env>(&self, env: &'env Env, model: String, parent_id: Unknown<'_>, fields: Vec<String>, rows: Unknown<'_>, tx: Option<&Transaction>, allowed: Option<Vec<String>>, trace: Option<&Trace>) -> napi::Result<PromiseRaw<'env, Raw>> {
         protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
         let model_idx = self.schema.model_idx(&model).map_err(schema_err)?;
         let identity = conv(env)?.value(parent_id.raw(), Some(self.schema.model(model_idx).pk_field().value_type())).map_err(engine_err)?;
         let values = convert_rows(env, &self.schema, &model, &fields, rows, true)?;
         let plan = orm_engine::composed::prepare_attach(&self.schema, self.target, &model, identity, &fields, values).map_err(engine_err)?;
         let target = self.target;
-        let conn = self.conn(tx);
+        let conn = self.traced(tx, trace);
         let schema = self.schema.clone();
         env.spawn_future_with_callback(
             async move { orm_engine::composed::run_insert(conn.as_ref(), target, plan).await.map_err(engine_err) },

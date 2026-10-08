@@ -88,6 +88,7 @@ pub fn results(kinds: &[NativeModel], out: Outcome) -> DbResult<Outcome> {
             let computations = match &shape { Some(shape) => shape_computations(kinds[model], 0, &shape.fields.iter().map(|f| f.field.position).collect::<Vec<_>>()), None => model_computations(kinds[model], 0) };
             Outcome::Rows { model, rows: rows(result, &types, &computations)?, types, shape }
         }
+        Outcome::Prefetched { parents, prefetched } => Outcome::Prefetched { parents, prefetched: prefetched.into_iter().map(fetched).collect::<DbResult<_>>()? },
         out => out,
     })
 }

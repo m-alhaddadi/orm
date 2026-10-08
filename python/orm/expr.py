@@ -107,6 +107,8 @@ class IRContext:
         self.windows: list[tuple[WindowDef, IR]] = []
 
     def param(self, value: Any) -> IR:
+        if isinstance(value, Ordering):
+            raise TypeError(f"{value!r} is an ordering, for order_by(); write 0 - {value.expr!r} to negate a value")
         self.params.append(value)
         return {"t": "param", "i": len(self.params) - 1}
 

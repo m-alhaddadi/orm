@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  DatabaseError,
   DoesNotExist,
   IntegrityError,
   LockNotAvailable,
@@ -440,8 +441,26 @@ test("string lock keys hash like the Python package's", async () => {
 });
 
 test("integrity errors", async () => {
-  await User.objects.insert({ email: "dup@example.com", name: "A" });
-  await assert.rejects(User.objects.insert({ email: "dup@example.com", name: "B" }), IntegrityError);
+  const a = await User.objects.insert({ email: "dup@example.com", name: "A" });
+  await assert.rejects(User.objects.insert({ email: "dup@example.com", name: "B" }), (e: unknown) => {
+    assert.ok(e instanceof IntegrityError);
+    assert.equal(e.sqlstate, "23505");
+    assert.equal(e.constraint, "users_email_key");
+    assert.equal(e.detail, "Key (email)=(dup@example.com) already exists.");
+    assert.ok(e.message.startsWith("ERROR (23505)"));
+    return true;
+  });
+  await assert.rejects(Post.objects.insert({ authorId: a.id + 1000n, title: "t", body: "b" }), (e: unknown) => {
+    assert.ok(e instanceof IntegrityError);
+    assert.deepEqual([e.sqlstate, e.constraint], ["23503", "posts_author_id_fkey"]);
+    return true;
+  });
+  await assert.rejects(getDatabase().execute("SELECT 1/0"), (e: unknown) => {
+    assert.ok(e instanceof DatabaseError && !(e instanceof IntegrityError));
+    assert.deepEqual([e.sqlstate, e.constraint, e.detail], ["22012", null, null]);
+    return true;
+  });
+  assert.equal(new DatabaseError("from user code").sqlstate, null);
 });
 
 test("transactions", async () => {

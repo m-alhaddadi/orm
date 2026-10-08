@@ -11,7 +11,7 @@ use crate::db::{self, BoxFuture, Cell, DbError, DbResult, Executor, RowSet};
 use crate::error::{query_err, Error, Result};
 use crate::params::{null_of, Params};
 use crate::plan::{self, Plan, PrefetchPlan, SelectPlan};
-use orm_core::dialect::Target;
+use orm_core::dialect::{Dialect, Target};
 use orm_core::ir::{self, ValueType};
 use orm_core::schema::Schema;
 
@@ -38,6 +38,8 @@ pub enum Outcome {
     Affected(u64),
     /// Rows of `model` returned by a write (`RETURNING` every column).
     Rows { model: usize, rows: Box<dyn RowSet>, types: Vec<ValueType>, shape: Option<orm_core::behavior::ResultShape> },
+    /// The related rows of parent rows the caller gave ([`prefetch`]), and those rows.
+    Prefetched { parents: Box<dyn RowSet>, prefetched: Vec<Fetched> },
 }
 
 /// Runs `plan` on `conn` (the pool or a transaction).
@@ -107,6 +109,44 @@ pub fn statement(target: Target, plan: &Plan) -> String {
     }
 }
 
+/// The query plan of a read's main statement (not of its prefetch queries): Postgres
+/// `EXPLAIN`, with `analyze` `EXPLAIN (ANALYZE, BUFFERS)`, which runs the statement;
+/// SQLite `EXPLAIN QUERY PLAN`, each step indented under its parent.
+pub async fn explain(conn: &dyn Executor, target: Target, plan: &Plan, analyze: bool) -> Result<String> {
+    let d = target.dialect;
+    let (sql, args) = match plan {
+        Plan::Select(p) => db::build(d, &p.stmt),
+        Plan::Count(s) | Plan::Exists(s) => db::build(d, s),
+        _ => return Err(Error::query("explain() takes a read query")),
+    };
+    let mut lines = vec![];
+    if d == Dialect::Sqlite {
+        if analyze {
+            return Err(Error::query("sqlite has no EXPLAIN ANALYZE; call explain() without analyze"));
+        }
+        let rows = conn.fetch(format!("EXPLAIN QUERY PLAN {sql}"), args).await?;
+        // Columns: id, parent, notused, detail.
+        let mut depth = std::collections::HashMap::new();
+        for i in 0..rows.len() {
+            let (Cell::BigInt(id), Cell::BigInt(parent), Cell::Text(detail)) = (rows.cell(i, 0)?, rows.cell(i, 1)?, rows.cell(i, 3)?) else {
+                return Err(Error::query("unexpected EXPLAIN QUERY PLAN row"));
+            };
+            let level = if parent == 0 { 0 } else { depth.get(&parent).map_or(0, |l| l + 1) };
+            depth.insert(id, level);
+            lines.push(format!("{}{detail}", "  ".repeat(level)));
+        }
+    } else {
+        let prefix = if analyze { "EXPLAIN (ANALYZE, BUFFERS) " } else { "EXPLAIN " };
+        let rows = conn.fetch(format!("{prefix}{sql}"), args).await?;
+        for i in 0..rows.len() {
+            if let Cell::Text(line) = rows.cell(i, 0)? {
+                lines.push(line.to_owned());
+            }
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
 /// An UPDATE / DELETE: the row count, or the rows when it has `RETURNING`.
 async fn count_or_rows(
     conn: &dyn Executor,
@@ -125,6 +165,46 @@ async fn run_select(conn: &dyn Executor, target: Target, mut plan: SelectPlan) -
     let rows = conn.query(sql, args).await?;
     let prefetched = run_prefetch(conn, target, rows.as_ref(), std::mem::take(&mut plan.prefetch)).await?;
     Ok(Selected { rows, plan, prefetched })
+}
+
+/// Runs only the prefetch queries of `plans` ([`plan::plan_prefetch_only`]) for parent
+/// rows the caller already has: no statement reads the parents.
+pub async fn prefetch(conn: &dyn Executor, target: Target, parents: Box<dyn RowSet>, plans: Vec<PrefetchPlan>) -> Result<Outcome> {
+    let prefetched = run_prefetch(conn, target, parents.as_ref(), plans).await?;
+    Ok(Outcome::Prefetched { parents, prefetched })
+}
+
+/// Parent rows given by the caller: the model's fields in schema order, of which only
+/// the keys the prefetch plans read are set.
+pub struct ValueRows(pub Vec<Vec<Option<Value>>>);
+
+impl RowSet for ValueRows {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn cell(&self, row: usize, col: usize, _: ValueType) -> DbResult<Cell<'_>> {
+        let Some(value) = &self.0[row][col] else { return Ok(Cell::Null) };
+        Ok(match value {
+            Value::Bool(v) => v.map_or(Cell::Null, Cell::Bool),
+            Value::Int(v) => v.map_or(Cell::Null, Cell::Int),
+            Value::BigInt(v) => v.map_or(Cell::Null, Cell::BigInt),
+            Value::Double(v) => v.map_or(Cell::Null, Cell::Float),
+            Value::String(v) => v.as_deref().map_or(Cell::Null, Cell::Text),
+            Value::Uuid(v) => v.map_or(Cell::Null, Cell::Uuid),
+            Value::ChronoDate(v) => v.map_or(Cell::Null, Cell::Date),
+            Value::ChronoDateTimeWithTimeZone(v) => v.map_or(Cell::Null, |d| Cell::DateTime(d.with_timezone(&chrono::Utc))),
+            other => return Err(DbError::other(format!("a prefetch key can't be {other:?}"))),
+        })
+    }
+    fn value(&self, row: usize, col: usize, _: ValueType) -> DbResult<Value> {
+        self.0[row][col].clone().ok_or_else(|| DbError::other("not a key of the parent rows"))
+    }
+    fn get_i64(&self, _: usize, _: usize) -> DbResult<i64> {
+        Err(DbError::other("parent key rows have no counts"))
+    }
+    fn get_bool(&self, _: usize, _: usize) -> DbResult<bool> {
+        Err(DbError::other("parent key rows have no counts"))
+    }
 }
 
 /// Runs each prefetch query for the keys in `parent`, then the prefetches nested in it.

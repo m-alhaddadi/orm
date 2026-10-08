@@ -67,6 +67,49 @@ The descriptors behave differently on the class and on an instance:
 | one-to-one `User.profile` | `_ProfilePath` | `Profile` or `None`, if loaded, else `NotLoaded` |
 | many-to-many `Post.tags` | `_TagPath` | `ManyRelatedSet[Tag]`: the post's tags, with `add()` / `remove()` |
 
+## Custom query-set methods
+
+Named filters (Django's custom managers) go in a subclass of the model's query set, in your own module:
+
+```python
+# blog/queries.py
+from typing import Self
+from blog.models import Post, PostQuerySet
+
+class PostQueries(PostQuerySet):
+    def published(self) -> Self:
+        return self.filter(Post.published)
+
+    def popular(self, views: int = 100) -> Self:
+        return self.filter(Post.views >= views)
+```
+
+Generate the models with the class, as `module:Class`:
+
+```bash
+python -m orm generate --query-set Post=blog.queries:PostQueries
+```
+
+or in `pyproject.toml`:
+
+```toml
+[tool.orm.query_sets]
+Post = "blog.queries:PostQueries"
+```
+
+Then `Post.objects` is a `PostQueries`, and the methods chain with every builder method in both orders:
+`await Post.objects.published().filter(Post.author_id == 1).popular()`.
+`models.pyi` types `Post.objects` as the class, so mypy and pyright check the calls.
+
+* `models.py` calls `orm.use_query_set(Post, "blog.queries:PostQueries")`.
+  The module is imported on the first use of `Post.objects`, so it can import `blog.models` without an import cycle.
+  `use_query_set(Model, cls)` also takes the class itself, for models from `orm.load()`.
+* Relation sets have the methods too: `await user.posts.published()`, `post.tags.<method>()`.
+  The stub does not type them on a relation set yet; `Post.objects.published().filter(Post.author_id == user.id)` is typed.
+* `Prefetch(User.posts, Post.objects.published())` uses them for related rows.
+* The class must subclass `QuerySet` and must not declare `__slots__` (it mixes with the relation-set classes); `use_query_set` raises `TypeError` otherwise.
+  Keep state in the query, not in attributes: builder methods copy the instance `__dict__`, but nothing else.
+
 ## Queries
 
 Builders return a new immutable `QuerySet`. Awaiting it runs the query. Awaiting the
@@ -168,6 +211,16 @@ SQL text client-side, so the limit doesn't apply to it.)
 * A **slice applies per parent**: `[:3]` above is each user's three most viewed posts,
   planned as `ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY views DESC, id)` in a
   subquery and `WHERE _rn <= 3` around it (Django 4.2 does the same).
+
+**Instances you already have.** `await orm.prefetch(instances, *paths)` loads relations onto them, as `prefetch_related` does for the rows of a query (Django's `prefetch_related_objects`):
+
+```python
+bundle = await Bundle.objects.get(Bundle.id == 1)
+await orm.prefetch([bundle], Bundle.items.product, Prefetch(Bundle.versions, Version.objects.order_by(-Version.id)[:1], to_attr="latest"))
+```
+
+It takes the same paths and `Prefetch` objects. Only the prefetch queries run: the keys come from the instances, so their own rows are not read again.
+The instances are of one model, and the queries run on the database each came from (`using=db` names another).
 
 ### One-to-one and many-to-many
 
@@ -282,6 +335,21 @@ func.to_tsquery("english", "cat & !dog") / func.plainto_tsquery("english", text)
 * `ts_rank` is a `float`. A tsvector or tsquery itself can't be a `select()` column.
 * PostgreSQL only: on SQLite these are a `QueryError`.
 
+### Partial rows, OR of query sets, column paths
+
+* `only(...)` gives partial instances (see [`selection-and-defaults.md`](selection-and-defaults.md)).
+  A column through to-one relations trims the joined instance: `Comment.objects.only(Comment.body, Comment.post.title)` loads `comment.post` with `select_related`, with only `title` public.
+  Without a column of the model itself (`only(Comment.post.title)`), the model's instances keep only their primary key and relation keys, hidden, as Django's `only("post__title")`.
+  A to-many path raises `TypeError`.
+* `qs1 | qs2` is one query set with the filter `(filters of qs1) OR (filters of qs2)`; order, loading and `using` come from `qs1`.
+  `qs2` must set nothing but filters, neither may be sliced, and each side has at most one `filter()`/`exclude()` call, else `QueryError`:
+  conditions of one call through a to-many relation must hold for one related row, so two calls can't be joined into one.
+* `Prefetch(User.posts, Post.objects.order_by(-Post.views), to_attr="best", one=True)` stores the first related row, or `None`, in `user.best` instead of a list.
+  It needs `to_attr` and a to-many relation, and takes no slice (it is a limit of one per parent).
+* `orm.column(Bundle, "items.product.title")` is the column a dotted path names, the same as `Bundle.items.product.title`.
+  Each name before the last is a relation, the last a field; an unknown name raises `LookupError`.
+  It is for adapters that map request names to columns (search and ordering filters). It is a function, not `Model.column`, so it can't collide with a field named `column`.
+
 ### Big tables: batches
 
 ```python
@@ -317,7 +385,7 @@ The primary key is added as the last order column when no column of the order is
 * A nullable order column needs `nulls=`: `Post.rank.desc(nulls="last")`.
 * A cursor is opaque base64 of the order values and a fingerprint of the order. A cursor from another order or model is a `QueryError`.
 * A cursor is not signed. A client can change it to start at any position of the same order, so do not use it for access control.
-* A damaged or edited cursor is `QueryError("invalid cursor")`; a cursor that is not a string is a `TypeError`.
+* A malformed cursor, or one with a value its column can't hold, is `QueryError("invalid cursor")`; a cursor that is not a string is a `TypeError`.
 * A cursor holds positions, not filters: it stays valid after a filter change and starts at the same position.
 * There is no total count; call `count()` for it.
 
@@ -714,6 +782,11 @@ Rails. What's left out on purpose: SQLAlchemy's session and dirty tracking, Rail
 `save` / `attr=` + `save`, and callbacks. A write happens only where the code says
 `await ...insert/update/delete`.
 
+The column-role extensions change these writes (see `schema-extensions.md`).
+`@timestamps.updated_at` and `@locking.version` fields are set on each update.
+On a `@soft_delete.deleted_at` model, `delete()` soft-deletes, and `hard_delete()`, `undelete()`, `all_with_deleted()` and `deleted_only()` exist.
+A stale versioned instance write raises `orm.VersionConflict`.
+
 ### Transactions
 
 ```python
@@ -735,6 +808,45 @@ A rollback drops the callback. A rolled-back savepoint drops only the callbacks 
 Outside a transaction, `fn()` runs at once.
 Callbacks run in registration order, outside the transaction.
 An error in a callback goes to the caller of `transaction()`, and the later callbacks do not run; the transaction is already committed.
+
+### Database errors
+
+An `orm.DatabaseError` (and its subclasses `IntegrityError`, `LockNotAvailable`) has three attributes:
+
+* `sqlstate`: the five-character SQLSTATE, for example `"23505"` (unique), `"23503"` (foreign key), `"23502"` (not null), `"23514"` (check).
+  SQLite constraint failures get the same Postgres codes; other SQLite errors give `None`.
+* `constraint`: the name of the violated constraint (Postgres only), for example `"users_email_key"`.
+* `detail`: the database's DETAIL line (Postgres only), for example `"Key (email)=(a@example.com) already exists."`.
+
+Each is `None` when the database did not give it.
+
+```python
+try:
+    await User.objects.insert(email=email, name=name)
+except orm.IntegrityError as e:
+    if e.constraint != "users_email_key":
+        raise
+    ...  # the email is taken
+```
+
+The ORM does not retry a transaction.
+A transaction that fails with a serialization failure (`40001`) or a deadlock (`40P01`) can run again:
+
+```python
+async def transfer(db, a, b, amount, attempts=3):
+    for attempt in range(attempts):
+        try:
+            async with db.transaction():
+                ...  # the whole transaction, reads included
+            return
+        except orm.DatabaseError as e:
+            if e.sqlstate not in ("40001", "40P01") or attempt == attempts - 1:
+                raise
+            await asyncio.sleep(0.05 * 2**attempt)
+```
+
+Retry the whole transaction, never one statement in it: Postgres aborts the transaction on these errors.
+`40001` occurs only at the `REPEATABLE READ` and `SERIALIZABLE` isolation levels; the default `READ COMMITTED` gives deadlocks only.
 
 ### Protected writes
 
@@ -793,7 +905,8 @@ async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction ne
   still holds the lock. The lock is released when the block ends, also on an error;
   when the unlock fails or the task is cancelled, the connection is closed, so the
   server releases the lock.
-* No optimistic locking (version columns) on purpose.
+* Optimistic locking (version columns) is not in the core.
+  Select the `orm-locking` extension and mark the field `@locking.version`; see `schema-extensions.md`.
 
 ### Read replicas
 
@@ -840,10 +953,13 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
 #   at app/views.py:42; use select_related(Customer.person)
 ```
 
-* The scope counts its queries by statement shape: the query without its values.
+* The scope counts its statements by shape: the SQL with placeholders, without values.
+  It reads the same events as `db.on_query`, so prefetch queries and `update_many` batches count one by one.
   Tasks started in the scope count too, and so do the queries of an inner scope.
-  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `in_bulk()`) count as one query.
+  An inner scope cannot raise the threshold of an outer scope; the outer scope also counts the inner queries.
+  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `in_bulk()`) count as one query when they have one shape.
 * The call site is the line that awaits the query (`await qs`, `await p.customers.all()`).
+  A query that `asyncio.gather()` or `create_task()` runs reports the line that started the event loop.
 * When the block ends, a shape that ran more than `threshold` times (default 5) raises `orm.debug.NPlusOne` with `fail=True`, or gives an `orm.debug.NPlusOneWarning`.
   The exception and the `with ... as report` value carry the report: each shape, its SQL, its count, the call site of its first query and the fix.
 * The fix is `select_related(...)` for a repeated `load_x()`, and `prefetch_related(...)` for a repeated unchanged to-many or many-to-many query (`await post.comments`, `await post.tags`).
@@ -851,6 +967,66 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
   Outside it, each query pays one `ContextVar` read (about 15 ns, measured).
 * In a test suite, add `pytest_plugins = ["orm.testing"]` to `conftest.py`.
   The `n_plus_one` fixture counts the whole test and fails it at teardown; set `n_plus_one.threshold` to change the threshold.
+
+### Raw SQL and query plans
+
+```python
+rows = await db.fetch("SELECT id, email FROM users WHERE created_at > $1 AND name = $2", since, "Ann")
+# [{"id": 7, "email": "ann@example.com"}]
+n = await db.execute("VACUUM ANALYZE posts")        # one or more statements, no parameters; rows affected
+
+print(await Post.objects.filter(Post.author_id == 7).explain())              # EXPLAIN
+print(await Post.objects.filter(Post.author_id == 7).explain(analyze=True))  # runs it: real times and rows
+```
+
+* `db.fetch(sql, *params)` runs one query and gives a list of dicts by column name (a repeated column name keeps the last value).
+  Placeholders are `$1, $2, ...` on Postgres and `?` on SQLite.
+* A parameter's type comes from its Python value: `int` is `bigint`, `str` is `text`, `dict` and `list` are JSON, and `datetime`, `date`, `Decimal`, `UUID` and `bool` have their own types.
+  Cast in the SQL where a column needs another type: `WHERE id = $1::uuid` for a `str`.
+* Cells come back by the column type that the database reports.
+  Postgres gives `bigint`, `integer`, `smallint`, `double precision`, `real`, `boolean`, text types and enums, `timestamptz`, `date`, `uuid`, `json`, `jsonb`, `numeric` and arrays of them.
+  Any other type (`timestamp`, `interval`, `bytea`, ...) raises `DatabaseError`; cast it in the SQL (`::text`, `::timestamptz`).
+  SQLite gives each value by its storage class (`int`, `float`, `str`, `None`); a blob raises.
+* `fetch` runs in the current transaction, and query hooks see it.
+* `qs.explain(analyze=False)` gives the plan of the query set's SELECT as text, not of its prefetch queries.
+  On Postgres, `analyze=True` runs the query with `EXPLAIN (ANALYZE, BUFFERS)`; a query set with `lock()` raises `QueryError` there, because the run would take the row locks.
+  On SQLite, it gives `EXPLAIN QUERY PLAN`, each step indented under its parent. SQLite has no `analyze`, so `analyze=True` raises `QueryError`.
+
+### Query hooks and OpenTelemetry
+
+`db.on_query(hook)` calls `hook(event)` after each statement that the database runs, and gives a function that removes the hook:
+
+```python
+def log_slow(e: orm.QueryEvent) -> None:
+    if e.duration > 0.1:
+        logger.warning("%.0f ms, %d rows: %s", e.duration * 1000, e.rows, e.sql)
+
+remove = db.on_query(log_slow)
+```
+
+* `orm.QueryEvent` has `sql` (the SQL with placeholders, never the values), `start` (Unix seconds), `duration` (seconds), `rows` and `error`.
+  `rows` is the rows returned, or the rows affected by a statement that returns no rows.
+  `error` is the database's message when the statement failed; the ORM call still raises.
+* Each statement gives one event: a prefetch query, each `update_many` batch, each `db.execute`.
+  Reads sent to a replica and the lock and unlock of `db.lock(..., session=True)` give events too.
+  `COMMIT`, `ROLLBACK` and the `set_config` statements of `db.tenant()` give no event.
+* The hooks belong to the database: `db.primary` shares them.
+* The engine times the statement in Rust, from the send to the last row, without the conversion to Python objects.
+* The hook runs after the ORM call ends, in the task that made the call.
+  So context variables, for example the current span or a request id, are those of the caller.
+  An exception in a hook propagates to that caller.
+* With no hook and no N+1 scope, a query pays one list check and one `ContextVar` read.
+  With a hook, each call creates a trace and each statement records one event.
+  A prepared `get` on SQLite took 252 µs with an empty hook and 247 µs without (measured on a loaded machine, so the difference is noise-level).
+
+`orm.otel.instrument(db)` gives each statement a client span, and gives a function that stops the spans.
+It needs `opentelemetry-api` (`pip install 'orm[otel]'`); configure the SDK and the exporter as usual.
+`instrument(db, tracer=t)` uses the tracer `t` instead of `get_tracer("orm")`.
+
+* The span starts and ends at the statement's times. Its parent is the current span of the caller.
+* The span name is the SQL operation (`SELECT`, `INSERT`, ...).
+  The attributes are `db.system.name` (`postgresql` or `sqlite`), `db.operation.name`, `db.query.text` (with placeholders) and `db.response.returned_rows`.
+* A failed statement gets the `ERROR` status and the database's message.
 
 ### Hooks for packages: `orm.hooks`
 
@@ -866,6 +1042,39 @@ A package that changes writes and reads from outside the ORM (for example
   runs it.
 * `decode_field(Model, name, decode)` reads the loaded value of a field as
   `decode(value)`. The instance keeps the stored value for writes and filters.
+
+## Model metadata and test factories
+
+The ORM has no factory library. It gives the two things a factory library needs:
+
+* `orm.describe(Model)`: plain data about the model.
+  `fields` gives per field the name, column, schema type, `python_type` (an enum field gives its enum class), `nullable`, `array` (with `element_type`), `max_length`, `primary_key`, `unique`, `default` (`"database"`, `"client"` or `None`) and `insert` (whether `insert()` takes it).
+  `relations` gives the kind (`belongs_to`, `has_one`, `has_many`, `many_to_many`), the target class, the `from`/`to` fields, the `through` model and `nullable`.
+  `unique` lists the unique keys, the primary key first.
+* The insert path: `await Model.objects.insert(**values)`, which also takes a related instance for a to-one key (`author=user`).
+
+Instances come only from the database, so a factory builds the insert values, not an instance.
+With factory_boy, `_build` gives the values and `_create` gives the insert, to await:
+
+```python
+class PostFactory(factory.Factory):
+    class Meta:
+        model = Post
+
+    title = factory.Sequence(lambda n: f"post {n}")
+    body = "..."
+    author = factory.SubFactory(UserFactory)  # a User instance, awaited by the caller first
+
+    @classmethod
+    def _build(cls, model_class, *args, **kwargs):
+        return kwargs
+
+    @classmethod
+    def _create(cls, model_class, *args, **kwargs):
+        return model_class.objects.insert(**kwargs)  # a coroutine: `await PostFactory.create()`
+```
+
+factory_boy has no async support, so a `SubFactory` with `create` gives a coroutine; build related rows first, or use a small async factory over `describe()` (see `tests/test_query_api.py`).
 
 ## The FFI boundary
 

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { connect, define, Registry as ModelRegistry } from '../../../js/dist/src/index.js';
+import { allowWrites, connect, define, Registry as ModelRegistry, WriteProtected } from '../../../js/dist/src/index.js';
 import { LocalStorage, Reference, Registry } from '../../typescript/dist/src/index.js';
 import { Upload, FileField, FileWriteError, FileFieldError } from '../typescript/dist/src/index.js';
 import { installModel } from '../typescript/dist/src/model.js';
@@ -14,7 +14,7 @@ class CountingStorage extends LocalStorage {
   upload(...args) { this.uploads++; return super.upload(...args); }
   delete(...args) { this.deletes++; return super.delete(...args); }
 }
-async function fixture(run) {
+async function fixture(run, { protectedWrite = false } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'orm-file07-')));
   const storage = new CountingStorage('reports', root);
   const providers = new Registry(new Map([['reports', storage]]));
@@ -28,6 +28,7 @@ async function fixture(run) {
       field_adapters: [{ model: 'FileReport07', field: 'file', adapter: 'file-storage.reference.v1' }],
       file_fields: [{ model: 'FileReport07', field: 'file', storage: 'reports', reference_contract: 1 }] },
   };
+  ir.models[0].protected_write = protectedWrite;
   const registry = new ModelRegistry();
   const Report = define(ir, { registry }).FileReport07;
   installModel(Report._meta.Row.prototype, new Map([['file', new FileField('file', 'reports', true)]]), providers, Report._meta);
@@ -61,6 +62,19 @@ test('unsupported shapes and invalid ordinary values reject before upload', () =
   }
   assert.equal(storage.uploads, 0);
 }));
+
+test('a protected file write outside the scope gives a rejected promise before upload', () => fixture(async ({ Report, storage }) => {
+  const writes = [() => Report.objects.insert({ id: 1, file: new Upload(Buffer.from('x')) }),
+    () => Report.objects.filter(Report.id.eq(1)).update({ file: new Upload(Buffer.from('y')) })];
+  for (const write of writes) {
+    let pending;
+    assert.doesNotThrow(() => { pending = write(); });
+    await assert.rejects(pending, WriteProtected);
+  }
+  assert.equal(storage.uploads, 0);
+  await allowWrites([Report], async () => { for (const write of writes) await write(); });
+  assert.equal(storage.uploads, 2);
+}, { protectedWrite: true }));
 
 test('SQL failure exposes reference and explicit retry never uploads again', () => fixture(async ({ Report, storage }) => {
   await Report.objects.insert({ id: 1, file: null });

@@ -44,11 +44,22 @@ pub enum ErrorKind {
 pub struct DbError {
     pub kind: ErrorKind,
     pub message: String,
+    /// The five-character SQLSTATE (`23505`); SQLite constraint failures get the
+    /// Postgres code too.
+    pub sqlstate: Option<String>,
+    /// The violated constraint's name (Postgres only).
+    pub constraint: Option<String>,
+    /// The database's DETAIL line (Postgres only).
+    pub detail: Option<String>,
 }
 
 impl DbError {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        DbError { kind, message: message.into(), sqlstate: None, constraint: None, detail: None }
+    }
+
     pub fn other(message: impl Into<String>) -> Self {
-        DbError { kind: ErrorKind::Other, message: message.into() }
+        DbError::new(ErrorKind::Other, message)
     }
 }
 
@@ -92,6 +103,17 @@ pub trait RowSet: Send + Sync {
     fn get_bool(&self, row: usize, col: usize) -> DbResult<bool>;
 }
 
+/// The rows of raw SQL: column names, and cells decoded by the column types the database
+/// reports (Postgres) or by each value's storage class (SQLite).
+pub trait RawRows: Send + Sync {
+    fn columns(&self) -> &[String];
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn cell(&self, row: usize, col: usize) -> DbResult<Cell<'_>>;
+}
+
 /// Something statements run on: the pool (each call takes a connection) or an open
 /// transaction (every call uses its connection).
 pub trait Executor: Send + Sync {
@@ -99,6 +121,8 @@ pub trait Executor: Send + Sync {
     /// A migration may rebuild SQLite tables with FK checks deferred until commit.
     fn begin_migration(&self) -> BoxFuture<'_, DbResult<Arc<dyn Transaction>>> { self.begin() }
     fn query(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RowSet>>>;
+    /// Raw SQL with parameters, the columns typed by the database.
+    fn fetch(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RawRows>>>;
     /// Rows affected.
     fn execute(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<u64>>;
     /// One or more statements without parameters (DDL scripts, raw SQL).
@@ -178,6 +202,13 @@ impl Executor for WithSettings {
         Box::pin(async move {
             let tx = self.begin().await?;
             let out = tx.query(sql, args).await;
+            finish(tx, out).await
+        })
+    }
+    fn fetch(&self, sql: String, args: Vec<Value>) -> BoxFuture<'_, DbResult<Box<dyn RawRows>>> {
+        Box::pin(async move {
+            let tx = self.begin().await?;
+            let out = tx.fetch(sql, args).await;
             finish(tx, out).await
         })
     }

@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import { connect, loads, NotLoaded, QueryError, Registry } from "../src/index.js";
 import { native } from "../src/native.js";
+import { after } from "../src/pagination.js";
 
 const schema = `
 datasource db {
@@ -34,8 +35,16 @@ const T0 = Date.UTC(2026, 9, 1);
 /** T0 plus `us` microseconds, as the driver reads such a value. */
 function at(us: number): Date {
   const d = new Date(T0 + Math.floor(us / 1000));
-  if (us % 1000) Object.defineProperty(d, "orm:micros", { value: us % 1000 });
+  if (us % 1000) {
+    Object.defineProperty(d, "orm:micros", { value: us % 1000 });
+    Object.defineProperty(d, "orm:micros-ms", { value: d.getTime() });
+  }
   return d;
+}
+
+/** The order values of `cursor`. */
+function values(cursor: string): unknown[] {
+  return (JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as { v: unknown[] }).v;
 }
 
 /** `cursor` with its order values replaced by `values`. */
@@ -153,15 +162,17 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     try {
       const byAt = qs.orderBy("-at");
       const atCursor = (await byAt.paginate({ first: 1 })).nextCursor;
-      for (const bad of ["2026-10-01T00:00:00", "2026-10-01", 5]) {
+      for (const bad of ["2026-10-01T00:00:00", "2026-10-01", 5, "2026-02-30T00:00:00+00:00", "10000-03-15T00:00:00+00:00"]) {
         await assert.rejects(byAt.paginate({ first: 2, after: edited(atCursor, [bad, "1"]) }), (e: Error) => e instanceof QueryError && /invalid cursor/.test(e.message), String(bad));
       }
       const byScore = qs.orderBy("-score");
       const score = (await byScore.paginate({ first: 1 })).nextCursor;
-      for (const bad of ["1".repeat(23), "5.5", "2147483648", null, 3]) {
+      for (const bad of ["1".repeat(23), "5.5", "2147483648", "-2147483649", "+3", " 3", null, 3]) {
         await assert.rejects(byScore.paginate({ first: 2, after: edited(score, [bad, "1"]) }), (e: Error) => e instanceof QueryError && /invalid cursor/.test(e.message), String(bad));
       }
       await assert.rejects(byScore.paginate({ first: 2, after: edited(score, ["3", "1".repeat(23)]) }), (e: Error) => e instanceof QueryError);
+      await assert.rejects(byScore.paginate({ first: 2, after: edited(score, ["3", "9223372036854775808"]) }), /invalid cursor/);
+      assert.equal((await byScore.paginate({ first: 2, after: edited(score, ["-2147483648", "1"]) })).items.length, 0);
       const lastNulls = (await qs.orderBy(Item.rank.asc({ nulls: "last" })).paginate({ first: 1 })).nextCursor;
       await assert.rejects(qs.orderBy(Item.rank.asc({ nulls: "first" })).paginate({ first: 2, after: lastNulls }), /another order or model/);
       await assert.rejects(qs.orderBy("tags").paginate({ first: 2 }), /json columns have no cursor value/);
@@ -182,6 +193,25 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       assert.ok(back.hasNext && !back.hasPrevious);
       assert.deepEqual((await qs.paginate({ first: 1, before: null })).items.map((x: any) => x.pk), [1n]);
       assert.deepEqual((await qs.paginate({ last: 1, after: null })).items.map((x: any) => x.pk), [23n]);
+      // More than one millisecond past T0: the hidden part holds only the microseconds below it.
+      await qs.filter(Item.id.eq(1n)).update({ at: at(1147) });
+      const late = (await qs.orderBy("-at").paginate({ first: 1 })).items[0];
+      assert.equal(late.pk, 1n);
+      assert.equal(values((await qs.orderBy("-at").paginate({ first: 1 })).nextCursor!)[0], "2026-10-01T00:00:00.001147+00:00");
+      // A whole second has no fraction, as Python's isoformat() writes it.
+      await qs.filter(Item.id.eq(1n)).update({ at: new Date(T0 + 1000) });
+      assert.equal(values((await qs.orderBy("-at").paginate({ first: 1 })).nextCursor!)[0], "2026-10-01T00:00:01+00:00");
+      // The microseconds belong to the time they were read with, not to a later setTime().
+      const moved = (await qs.get(Item.id.eq(22n))).at as Date;
+      moved.setTime(T0 + 5);
+      await qs.filter(Item.id.eq(22n)).update({ at: moved });
+      const stored = (await qs.get(Item.id.eq(22n))).at as Date;
+      assert.equal(stored.getTime(), T0 + 5);
+      assert.equal((stored as any)["orm:micros"], undefined);
+      const bad = new Date(T0);
+      Object.defineProperty(bad, "orm:micros", { value: 1500 });
+      Object.defineProperty(bad, "orm:micros-ms", { value: T0 });
+      await assert.rejects(qs.filter(Item.at.eq(bad)).fetch(), /invalid orm:micros 1500/);
     } finally {
       await db.dropTables(); await db.close();
     }
@@ -226,6 +256,33 @@ test("non-finite float order values: postgres", async () => {
   }
 });
 
+test("a deep page has a leading bound", () => {
+  const registry = new Registry();
+  const { Item } = loads(schema, { registry }) as any;
+  const sql = Item.objects.filter(after(Item._meta, [Item.score.desc(), Item.at.desc()], [3, new Date(T0)])).sql();
+  assert.match(sql, /WHERE "page07_js_items"\."score" <= \S+ AND \(/);
+  const nullable = Item.objects.filter(after(Item._meta, [Item.rank.asc({ nulls: "last" }), Item.id.asc()], [1, 1n])).sql();
+  assert.ok(!nullable.includes('"rank" >=') && nullable.includes('"rank" > '), nullable);
+});
+
+test("edited cursors of decimal and uuid keys: postgres", async () => {
+  const { db, models } = await postgres('model Keyed {\n  id String @id @db.Uuid\n  d Decimal\n  @@map("page07_js_keyed")\n}');
+  const { Keyed } = models;
+  const qs = Keyed.objects.using(db);
+  try {
+    await qs.insertMany(["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"].map((id, i) => ({ id, d: i })));
+    const byD = qs.orderBy("d");
+    const cursor = (await byD.paginate({ first: 1 })).nextCursor!;
+    for (const bad of [["NaN", values(cursor)[1]], ["0", "not-a-uuid"]]) {
+      await assert.rejects(byD.paginate({ first: 1, after: edited(cursor, bad) }), (e: Error) => e instanceof QueryError && /invalid cursor/.test(e.message), String(bad));
+    }
+    await db.execute("UPDATE page07_js_keyed SET d = 'NaN'");
+    await assert.rejects(byD.paginate({ first: 1 }), /can't make a cursor from the decimal NaN/);
+  } finally {
+    await db.dropTables(); await db.close();
+  }
+});
+
 test("a date order column past year 9999: postgres", async () => {
   const { db, models } = await postgres('model Dated {\n  id Int @id\n  d DateTime @db.Date\n  @@map("page07_js_dated")\n}');
   const { Dated } = models;
@@ -233,6 +290,10 @@ test("a date order column past year 9999: postgres", async () => {
   try {
     await qs.insertMany(["9999-12-31", "+010000-03-15", "+010000-03-20"].map((d, i) => ({ id: i + 1, d: new Date(d) })));
     assert.deepEqual(await walk(qs.orderBy("d"), 1), [1, 2, 3]);
+    const cursor = (await qs.orderBy("d").paginate({ first: 1 })).nextCursor!;
+    for (const bad of ["2024-02-30", "10000-03-15", "2024"]) {
+      await assert.rejects(qs.orderBy("d").paginate({ first: 1, after: edited(cursor, [bad, "1"]) }), /invalid cursor/, bad);
+    }
   } finally {
     await db.dropTables(); await db.close();
   }

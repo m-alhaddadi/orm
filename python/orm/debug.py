@@ -12,7 +12,7 @@ import asyncio
 import os
 import sys
 import warnings
-from collections.abc import Callable, Coroutine, Generator
+from collections.abc import Coroutine, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -167,23 +167,32 @@ def relation_load(model: str, relation: str, fix: str) -> Generator[None]:
         _hint.reset(token)
 
 
-def record(key: str, sql: Callable[[], str]) -> None:
-    """Count one query of shape ``key``; ``sql()`` gives its SQL text when it is new."""
+def capture() -> tuple[str, str | None] | None:
+    """Where user code sends the next queries and the fix to name; None outside a scope.
+
+    Called before the engine runs them, while the caller's frames are on the stack."""
+    if _scope.get() is None:
+        return None
+    hint = _hint.get()
+    return (hint[1], hint[0]) if hint else (call_site(), None)
+
+
+def record(sql: str, origin: tuple[str, str | None]) -> None:
+    """Count one query of shape ``sql`` (the SQL with placeholders), sent at ``origin``."""
     report = _scope.get()
     if report is None:
         return
     seen = _loop.get()
     if seen is not None:
-        if key in seen:
+        if sql in seen:
             return
-        seen.add(key)
-    shape = report.shapes.get(key)
+        seen.add(sql)
+    shape = report.shapes.get(sql)
     if shape is None:
-        hint = _hint.get()
-        shape = report.shapes[key] = Shape(key, sql(), site=hint[1] if hint else call_site(), fix=hint[0] if hint else None)
+        shape = report.shapes[sql] = Shape(sql, sql, site=origin[0], fix=origin[1])
     shape.count += 1
     for enclosing in _outer.get():
-        counted = enclosing.shapes.get(key)
+        counted = enclosing.shapes.get(sql)
         if counted is None:
-            counted = enclosing.shapes[key] = Shape(key, shape.sql, site=shape.site, fix=shape.fix)
+            counted = enclosing.shapes[sql] = Shape(sql, shape.sql, site=shape.site, fix=shape.fix)
         counted.count += 1

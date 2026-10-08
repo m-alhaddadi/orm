@@ -244,6 +244,22 @@ fn two_hints_for_one_old_name_are_an_error() {
     ir["models"][0]["renamed_from"] = json!("old");
     ir["models"][1]["renamed_from"] = json!("old");
     assert!(super::plan(&schema(ir), &DbSchema::default()).unwrap_err().contains("both have the rename hint \"old\""));
+    // One old column name in two tables is two renames.
+    let mut ir = blog(vec![json!({"name": "contact", "column": "contact", "type": "string", "renamed_from": "email"})], json!({}));
+    ir["models"][0]["fields"][1]["renamed_from"] = json!("email");
+    ir["models"][0]["fields"][1]["column"] = json!("mail");
+    assert!(super::plan(&schema(ir), &DbSchema::default()).is_ok());
+}
+
+#[test]
+fn sqlite_rebuild_creates_triggers_after_every_table_has_its_name() {
+    let s = schema(json!({"dialect": "sqlite", "models": [
+        {"name": "A", "table": "a", "fields": [id()], "triggers": [{"name": "touch", "timing": "after", "events": ["update"], "body": "UPDATE b SET id = id"}]},
+        {"name": "B", "table": "b", "fields": [id()]},
+    ]}));
+    let rebuild = &super::plan(&s, &DbSchema::default()).unwrap().up[0].sql;
+    let (renamed, trigger) = (rebuild.rfind("ALTER TABLE \"__orm_new_b\" RENAME TO \"b\"").unwrap(), rebuild.find("CREATE TRIGGER").unwrap());
+    assert!(renamed < trigger, "{rebuild}");
 }
 
 #[test]

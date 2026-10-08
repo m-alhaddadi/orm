@@ -88,6 +88,11 @@ model PersonTag {
       .then(() => null, (e: unknown) => e);
     assert.ok(error instanceof debug.NPlusOne);
     assert.equal(error.report.repeated[0]!.fix, "prefetchRelated(Person.tags)");
+    // A changed many-to-many query set is not a plain relation load, so it names no fix.
+    const filtered = await debug.nPlusOne(async () => { for (const p of people) await p.tags.using(db).filter(models.Tag.id.gte(0)).all(); }, { threshold: 3, fail: true })
+      .then(() => null, (e: unknown) => e);
+    assert.ok(filtered instanceof debug.NPlusOne);
+    assert.equal(filtered.report.repeated[0]!.fix, null);
   } finally { await db.close(); }
 });
 
@@ -140,6 +145,9 @@ test("the pages of one ORM loop count once, and long SQL is cut", async () => {
     const report = new debug.Report(1);
     report.shapes.set("k", { key: "k", sql: "SELECT " + "?, ".repeat(10_000), count: 2, site: "x", fix: null });
     assert.ok(report.message().length < 600 && report.message().includes(" ..."));
+    const exact = new debug.Report(1);
+    exact.shapes.set("k", { key: "k", sql: "x".repeat(500), count: 2, site: "x", fix: null });
+    assert.ok(!exact.message().includes(" ..."));
   } finally { await db.close(); }
 });
 
@@ -149,9 +157,10 @@ test("nested scopes count in the outer scope; updateMany counts; a changed relat
     const people = await Person.objects.using(db).orderBy(Person.id).all();
     const counted: debug.Report[] = [];
     await debug.nPlusOne(async () => {
-      await debug.nPlusOne(async () => {
+      // The innermost scope's queries count in every enclosing scope.
+      await debug.nPlusOne(() => debug.nPlusOne(async () => {
         for (const p of people.slice(0, 3)) await Person.objects.using(db).filter(Person.id.eq(p.id)).exists();
-      }, { threshold: 2, fail: true }).catch((e: debug.NPlusOne) => { counted.push(e.report); });
+      }, { threshold: 10 }), { threshold: 2, fail: true }).catch((e: debug.NPlusOne) => { counted.push(e.report); });
       for (const p of people.slice(0, 3)) await Person.objects.using(db).updateMany([{ id: p.id, name: "x" }]);
       for (const p of people.slice(0, 3)) await p.customers.using(db).filter(Customer.id.gte(0)).all();
     }, { threshold: 2, fail: true }).catch((e: debug.NPlusOne) => { counted.push(e.report); });

@@ -15,8 +15,9 @@
 //! Anything else is a `TypeError`, not a silent coercion.
 //!
 //! A `Date` holds milliseconds. A `DateTime` with a sub-millisecond part gets it as the
-//! hidden property `MICROS` (0-999), and a `Date` that has it binds at full precision, so
-//! a row's own value finds the row again.
+//! hidden property `MICROS` (0-999), with its milliseconds in `MICROS_MS`. A `Date` that
+//! still holds those milliseconds binds at full precision, so a row's own value finds the
+//! row again; after `setTime()` and the like it binds as a plain `Date`.
 
 use std::str::FromStr;
 
@@ -35,6 +36,8 @@ const MAX_SAFE: f64 = 9007199254740991.0;
 
 /// The hidden property of a `Date` with the microseconds below its milliseconds.
 const MICROS: &str = "orm:micros";
+/// The milliseconds of the `Date` when `MICROS` was set: the micros belong to that time only.
+const MICROS_MS: &str = "orm:micros-ms";
 
 fn raw(e: napi::Error) -> Error {
     Error::value(e.reason.clone())
@@ -141,7 +144,13 @@ impl Conv {
     fn datetime_micros(self, v: V) -> Result<DateTime<Utc>> {
         let d = self.datetime(v)?;
         let us = self.js.get(v, MICROS).map_err(raw)?;
-        if self.js.type_of(us).map_err(raw)? != sys::ValueType::napi_number {
+        let ms = self.js.get(v, MICROS_MS).map_err(raw)?;
+        for x in [us, ms] {
+            if self.js.type_of(x).map_err(raw)? != sys::ValueType::napi_number {
+                return Ok(d);
+            }
+        }
+        if self.js.f64(ms).map_err(raw)? != d.timestamp_millis() as f64 {
             return Ok(d);
         }
         let us = self.js.f64(us).map_err(raw)?;
@@ -271,10 +280,12 @@ impl Conv {
             Cell::Float(n) => js.number(n),
             Cell::Text(s) => js.str(s),
             Cell::DateTime(d) => {
-                let date = js.date(d.timestamp_millis() as f64)?;
+                let ms = d.timestamp_millis() as f64;
+                let date = js.date(ms)?;
                 let us = d.timestamp_subsec_micros() % 1000;
                 if us != 0 {
                     js.define_hidden(date, MICROS, js.int(us as i32)?)?;
+                    js.define_hidden(date, MICROS_MS, js.number(ms)?)?;
                 }
                 Ok(date)
             }

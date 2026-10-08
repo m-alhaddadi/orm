@@ -151,6 +151,10 @@ test("the generated models are current", async () => {
   };
   assert.deepEqual(comparable(readFileSync(join(ROOT, "examples/blog/models.ts"), "utf8")), comparable(native().generateTypescript(schema, "orm")), "run `orm generate typescript`");
   assert.deepEqual(comparable(readFileSync(join(ROOT, "js/test/blog/models.ts"), "utf8")), comparable(native().generateTypescript(schema, "../../src/index.js")));
+  const out = join(tmp(), "models.ts");
+  const sets = ["--query-set", "Post=./queries.js#PostQueries", "--query-set", "Tag=./queries.js#TagQueries"];
+  assert.equal(cli(["--schema", schema, "generate", "typescript", "-o", out, "--import", "../../../src/index.js", ...sets]).code, 0);
+  assert.deepEqual(comparable(readFileSync(join(ROOT, "js/test/typing/queries/models.ts"), "utf8")), comparable(readFileSync(out, "utf8")), "regenerate js/test/typing/queries/models.ts");
 });
 
 test("the CLI", () => {
@@ -162,6 +166,10 @@ test("the CLI", () => {
   assert.ok(readFileSync(join(dir, "app/models.ts"), "utf8").includes("export interface BookSpec"));
   assert.equal(run("generate").code, 0); // TypeScript by default under npx orm
   assert.ok(existsSync(join(dir, "models.ts")));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ orm: { querySets: { Author: "./queries.js#AuthorQueries" } } }));
+  assert.equal(run("generate", "-o", "q/models.ts").code, 0);
+  assert.ok(readFileSync(join(dir, "q/models.ts"), "utf8").includes("useQuerySet(Author, () => _q0.AuthorQueries);"));
+  assert.match(run("generate", "-o", "q/models.ts", "--query-set", "Nope=./x.js#X").err, /no model Nope/);
   assert.equal(run("makemigrations", "--check").code, 1);
   const made = run("makemigrations");
   assert.equal(made.code, 0);

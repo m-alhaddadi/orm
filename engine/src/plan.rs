@@ -172,10 +172,20 @@ pub(crate) fn returning_col(f: &FieldIr) -> SExpr {
 
 /// A bound value for a field: through the field's `write_sql` template, if any.
 pub(crate) fn bind(v: sea_query::Value, f: Option<&FieldIr>) -> SExpr {
-    match f.and_then(|f| f.write_sql.as_ref()) {
+    match f.and_then(param_template) {
         Some(t) => SExpr::cust_with_expr(t.replace("{}", "$1"), SExpr::val(v)),
         None => SExpr::val(v),
     }
+}
+
+/// The template of a parameter for field `f`. A text parameter compares as text, where the
+/// padded `char(n)` value of a row differs from the same value read back; bpchar ignores the padding.
+fn param_template(f: &FieldIr) -> Option<&str> {
+    if let Some(t) = &f.write_sql {
+        return Some(t);
+    }
+    let char_n = f.db_type.as_deref().is_some_and(|t| t == "char" || t.starts_with("char("));
+    (char_n && !f.array).then_some("CAST({} AS bpchar)")
 }
 
 /// Internal expression templates use numbered slots. SQLite's builder consumes
@@ -548,6 +558,14 @@ impl<'s> Planner<'s> {
                 }
                 let virt = derive_ctes(schema, target, &q.with, params)?;
                 let mut p = Planner::new(schema, &virt, target, &q.model, None, params, vec![], 0)?;
+                #[cfg(feature = "soft-delete")]
+                if let Some(position) = p.model(p.root).soft_delete.filter(|_| !q.hard) {
+                    let (mut stmt, types) = p.soft_delete(q, position)?;
+                    if let Some(w) = p.with_clause(&q.with)? {
+                        stmt.with_cte(w);
+                    }
+                    return Ok(Plan::Update(stmt, types.map(|(types, shape)| (p.root, types, shape))));
+                }
                 let (mut stmt, types) = p.delete(q)?;
                 if let Some(w) = p.with_clause(&q.with)? {
                     stmt.with_cte(w);
@@ -1191,10 +1209,7 @@ impl<'s> Planner<'s> {
             }
             Expr::Window { func, base, partition_by, order_by, frame } => {
                 // Postgres rejects a set-returning function in a window.
-                let unnest = std::mem::replace(&mut self.allow_unnest, false);
-                let e = self.window(func, base.as_deref(), partition_by, order_by, frame);
-                self.allow_unnest = unnest;
-                e?
+                self.with_unnest(false, |p| p.window(func, base.as_deref(), partition_by, order_by, frame))?
             }
             Expr::Func { name, args, rel, distinct, filter } => self.func(name, args, rel.as_deref(), *distinct, filter.as_deref())?,
             Expr::Case { whens, default } => self.case(whens, default.as_deref(), hint)?,
@@ -1509,6 +1524,14 @@ impl<'s> Planner<'s> {
         ))
     }
 
+    /// `f` with `unnest()` allowed or not, and the outer setting restored after it.
+    fn with_unnest<T>(&mut self, allowed: bool, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let outer = std::mem::replace(&mut self.allow_unnest, allowed);
+        let out = f(self);
+        self.allow_unnest = outer;
+        out
+    }
+
     /// The SQL call itself, arguments planned in the current scope.
     fn call(&mut self, name: &str, args: &[Expr], distinct: bool, filter: Option<&Expr>) -> Result<SExpr> {
         let (e, cast) = self.call_parts(name, args, distinct, filter)?;
@@ -1543,11 +1566,8 @@ impl<'s> Planner<'s> {
         let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
         let hint = Hint { ty: if TEXT_FUNCS.contains(&name) { Some(ValueType::scalar(ColType::Text)) } else { hint.ty }, field: None };
         // Postgres rejects a set-returning function inside an aggregate or `COALESCE`.
-        let unnest = self.allow_unnest;
-        self.allow_unnest &= !(is_aggregate(name) || name == "coalesce");
-        let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>();
-        self.allow_unnest = unnest;
-        let planned = planned?;
+        let allowed = self.allow_unnest && !(is_aggregate(name) || name == "coalesce");
+        let planned = self.with_unnest(allowed, |p| args.iter().map(|a| p.value(a, hint)).collect::<Result<Vec<_>>>())?;
         let d = if distinct { "DISTINCT " } else { "" };
         let n = planned.len();
         let dialect = self.target.dialect;
@@ -2035,6 +2055,9 @@ impl<'s> Planner<'s> {
             stmt.expr(self.read_field(self.root, &alias, position, f)?);
             types.push(f.value_type());
         }
+        if let Some(r) = q.related_fields.iter().find(|r| !q.select_related.contains(&r.path)) {
+            return Err(Error::query(format!("only() names fields of {} without select_related", r.path.join("."))));
+        }
         let mut joins: Vec<JoinShape> = vec![];
         for path in &q.select_related {
             let (alias, model) = self.ensure_join(path, "select_related")?;
@@ -2049,10 +2072,10 @@ impl<'s> Planner<'s> {
                         .ok_or_else(|| Error::query("select_related paths must list their prefixes first"))?,
                 ),
             };
+            let named = q.related_fields.iter().find(|r| r.path == *path).map(|r| r.fields.as_slice());
             #[cfg(feature = "query-defaults")]
-            let joined_shape = self.instance_shape(model, if q.without_defaults { None } else { m.query_defaults.fields.as_deref() }, &[])?;
-            #[cfg(not(feature = "query-defaults"))]
-            let joined_shape = None;
+            let named = named.or(if q.without_defaults { None } else { m.query_defaults.fields.as_deref() });
+            let joined_shape = self.instance_shape(model, named, &[])?;
             let joined_positions = shape_positions(m, joined_shape.as_ref());
             joins.push(JoinShape {
                 parent,
@@ -2202,6 +2225,10 @@ impl<'s> Planner<'s> {
             let v = self.value(&a.value, Hint { ty: Some(f.value_type()), field: Some(f) })?;
             stmt.value(Alias::new(&f.column), v);
         }
+        #[cfg(any(feature = "updated-at", feature = "optimistic-locking"))]
+        for (column, v) in maintained(root, |name| q.set.iter().any(|a| a.field == name)) {
+            stmt.value(Alias::new(column), v);
+        }
         for w in self.apply_filters(&q.filters, q.without_defaults)? {
             stmt.and_where(w);
         }
@@ -2209,6 +2236,39 @@ impl<'s> Planner<'s> {
             return Ok((stmt, None));
         }
         self.require(self.caps.returning, "update().returning()")?;
+        let shape = self.return_shape(q.model_fields.as_deref(), q.without_defaults)?;
+        let positions = shape_positions(root, shape.as_ref());
+        stmt.returning(Query::returning().exprs(positions.iter().map(|pos| {
+            let f = &root.fields()[pos];
+            #[cfg(feature = "composition")]
+            if root.native.computed().contains(&pos) { return SExpr::cust("NULL"); }
+            returning_col(f)
+        })));
+        Ok((stmt, Some((positions.iter().map(|pos| root.fields()[pos].value_type()).collect(), shape))))
+    }
+
+    /// A delete of a soft-delete model: `UPDATE ... SET <field> = <now> WHERE ... AND <field> IS NULL`.
+    #[cfg(feature = "soft-delete")]
+    fn soft_delete(&mut self, q: &Delete, position: usize) -> Result<(UpdateStatement, Option<ReturnColumns>)> {
+        let root = self.model(self.root);
+        #[cfg(feature = "composition")]
+        crate::ownership::require_local_write(root)?;
+        let field = &root.fields()[position];
+        let mut stmt = Query::update();
+        stmt.table(Alias::new(root.table()));
+        stmt.value(Alias::new(&field.column), bind(crate::client_default::now(field.ty), Some(field)));
+        #[cfg(any(feature = "updated-at", feature = "optimistic-locking"))]
+        for (column, v) in maintained(root, |_| false) {
+            stmt.value(Alias::new(column), v);
+        }
+        for w in self.apply_filters(&q.filters, q.without_defaults)? {
+            stmt.and_where(w);
+        }
+        stmt.and_where(col(root.table(), &field.column).is_null());
+        if !q.returning {
+            return Ok((stmt, None));
+        }
+        self.require(self.caps.returning, "delete().returning()")?;
         let shape = self.return_shape(q.model_fields.as_deref(), q.without_defaults)?;
         let positions = shape_positions(root, shape.as_ref());
         stmt.returning(Query::returning().exprs(positions.iter().map(|pos| {
@@ -2292,6 +2352,14 @@ pub fn plan_select(schema: &Schema, target: Target, q: &Select, params: &dyn Par
     Ok(plan)
 }
 
+/// The prefetch plans of `q` for parent rows the caller already has (`prefetch()` on
+/// loaded instances): no statement for the parents, whose rows hold the root model's
+/// fields in schema order.
+pub fn plan_prefetch_only(schema: &Schema, target: Target, q: &Select, params: &dyn Params) -> Result<Vec<PrefetchPlan>> {
+    let root = schema.model_idx(&q.model).map_err(query_err)?;
+    q.prefetch.iter().map(|node| plan_prefetch(schema, target, params, root, node, q.without_defaults)).collect()
+}
+
 /// The query loading `node` (a relation of `parent`) for a set of parent keys. A slice
 /// applies per parent: `ROW_NUMBER() OVER (PARTITION BY <key> ORDER BY ...)` numbers
 /// the related rows and the outer query keeps the slice.
@@ -2315,8 +2383,17 @@ fn plan_prefetch(
     if node.query.columns.is_some() || node.query.lock.is_some() {
         return Err(Error::query("a prefetch query can't select columns or lock rows"));
     }
-    let many = rel.kind == RelKind::Many;
+    if node.one && (rel.kind != RelKind::Many || node.attr.is_none()) {
+        return Err(Error::query(format!("one=True needs a to-many relation and to_attr ({}.{})", pm.ir.name, node.relation)));
+    }
+    let many = rel.kind == RelKind::Many && !node.one;
     let mut q = node.query.clone();
+    if node.one {
+        if q.limit.is_some() || q.offset.is_some() {
+            return Err(Error::query("one=True takes the first row by the query's order; drop the slice"));
+        }
+        q.limit = Some(Count::Value(1));
+    }
     q.without_defaults |= without_defaults;
     let pk_order = Order { expr: Expr::Col { path: vec![], name: cm.pk_field().name.clone() }, desc: false, nulls: None };
     #[cfg(feature = "query-defaults")]
@@ -2667,6 +2744,10 @@ pub fn plan_update_many(
             }
             stmt.and_where(pk_col.clone().is_in(chunk.iter().map(|r| bind(r[0].clone(), Some(cols[0])))));
         }
+        #[cfg(any(feature = "updated-at", feature = "optimistic-locking"))]
+        for (column, v) in maintained(m, |name| fields.iter().skip(1).any(|f| f == name)) {
+            stmt.value(Alias::new(column), v);
+        }
         for w in &where_ {
             stmt.and_where(w.clone());
         }
@@ -2679,6 +2760,24 @@ pub fn plan_update_many(
         stmts.push(stmt);
     }
     Ok((stmts, returning.then(|| m.fields().iter().map(|f| f.value_type()).collect())))
+}
+
+/// Assignments the ORM adds to each update of `m` unless `is_set(field)`: the current time
+/// for `updated_at` fields and `version + 1` for the version field.
+#[cfg(any(feature = "updated-at", feature = "optimistic-locking"))]
+pub(crate) fn maintained<'m>(m: &'m Model, is_set: impl Fn(&str) -> bool) -> Vec<(&'m str, SExpr)> {
+    let mut out = vec![];
+    #[cfg(feature = "updated-at")]
+    for &p in &m.updated_at {
+        let f = &m.fields()[p];
+        if !is_set(&f.name) { out.push((f.column.as_str(), bind(crate::client_default::now(f.ty), Some(f)))); }
+    }
+    #[cfg(feature = "optimistic-locking")]
+    if let Some(p) = m.version {
+        let f = &m.fields()[p];
+        if !is_set(&f.name) { out.push((f.column.as_str(), col(m.table(), &f.column).add(1))); }
+    }
+    out
 }
 
 /// An expression assigned to field `f`: through its `write_sql` template, if any.

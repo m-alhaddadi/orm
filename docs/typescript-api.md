@@ -63,7 +63,7 @@ Scalar types follow Prisma's choices:
 | `Int`, `Float` | `number` |
 | `BigInt` | `bigint` (filters also take a `number`) |
 | `Decimal` | `Decimal` from decimal.js, re-exported by `orm` (filters also take a `number` or a string) |
-| `DateTime` | `Date`, with millisecond precision. Postgres keeps microseconds, so the last three digits are lost on read |
+| `DateTime` | `Date`, with millisecond precision; the microseconds below it stay in a hidden property (see below) |
 | `Date` | `Date` at 00:00 UTC |
 | `Json` | `JsonValue` |
 | `Uuid` | `string` |
@@ -75,6 +75,46 @@ The reserved names are `objects`, `_meta`, `DoesNotExist`, `MultipleObjectsRetur
 
 Without code generation, `define(schemaIR)` or `loads(schemaText)` builds the same models
 at runtime, but untyped.
+
+## Custom query-set methods
+
+Named filters (Django's custom managers) go in a subclass of `QuerySet`, in your own module:
+
+```ts
+// queries.ts
+import { QuerySet } from "orm";
+import { Post, type PostSpec } from "./models.js";
+
+export class PostQueries extends QuerySet<PostSpec> {
+  published(): this {
+    return this.filter(Post.published.eq(true)) as this;
+  }
+
+  popular(views = 100): this {
+    return this.filter(Post.views.gte(views)) as this;
+  }
+}
+```
+
+Generate the models with the class, as `specifier#Export` (the specifier is relative to `models.ts`):
+
+```bash
+npx orm generate --query-set Post=./queries.js#PostQueries
+```
+
+or in `package.json`: `"orm": { "querySets": { "Post": "./queries.js#PostQueries" } }`.
+
+Then `Post.objects` is a `PostQueries`, and the methods chain with every builder method in both orders:
+`await Post.objects.published().filter(Post.authorId.eq(1n)).popular()`.
+`PostSpec` gets `queries: PostQueries`, and builder methods return `QuerySetOf<PostSpec, ...>`, a query set with those methods.
+
+* `models.ts` imports the module as a namespace and calls `useQuerySet(Post, () => _q0.PostQueries)`.
+  The class is read on the first use of `Post.objects`, so `queries.ts` can import `models.ts` without an error from the import cycle.
+  `useQuerySet(Model, cls)` also takes the class itself, for models from `define()` or `loads()`.
+* Relation sets have the methods too: `user.posts.published()`, `post.tags.<method>()`, typed in the generated row type.
+* `new Prefetch(User.posts, Post.objects.published())` uses them for related rows.
+* A method returns `this` with a cast. TypeScript can not change the type arguments of `this`, so a custom method gives the class's own row type:
+  call custom methods before `selectRelated()`, `prefetchRelated()` or `only()`, whose row types they would drop.
 
 ## Queries
 
@@ -130,6 +170,14 @@ The types check the following:
   not in `orderBy()` or as a plain `select()` column, because those would repeat rows.
   Aggregates over it are fine.
 
+### Partial rows, OR of query sets, column paths
+
+* `only(Comment.body, Comment.post.title)`: a column through to-one relations loads the relation with `selectRelated` and trims the joined instance to the given fields.
+  Without a column of the model itself, its instances keep only their hidden keys. A to-many path throws. The row type does not show the joined relation; cast it.
+* `qs1.or(qs2)`: one query set with the filter `(filters of qs1) OR (filters of qs2)`. `qs2` sets nothing but filters, neither is sliced, and each side has at most one `filter()`/`exclude()` call.
+* `new Prefetch(User.posts, Post.objects.orderBy("-views"), { toAttr: "best", one: true })` stores the first related row, or `null`, in `user.best` (typed `Post | null`). It needs `toAttr` and takes no slice.
+* `column(Bundle, "items.product.title")` is the column a dotted path of TypeScript names gives, for adapters that map request names to columns.
+
 ### Cursor pagination
 
 ```ts
@@ -141,7 +189,7 @@ const back = await Post.objects.orderBy("-createdAt").paginate({ last: 20, befor
 The rules are the same as Python's `paginate()` (see [`python-api.md`](python-api.md)).
 A nullable order column needs `{ nulls }`: `Post.rank.desc({ nulls: "last" })`.
 A cursor from Python works in TypeScript for the same schema and order, and the other way.
-A `Date` holds milliseconds. A `DateTime` value read from the database keeps its microseconds in a hidden property, so its cursor and `filter(Post.createdAt.eq(row.createdAt))` find the exact row. `new Date(row.createdAt)` drops them.
+A `Date` holds milliseconds. A `DateTime` value read from the database keeps its microseconds in a hidden property, so its cursor and `filter(Post.createdAt.eq(row.createdAt))` find the exact row. `new Date(row.createdAt)` drops them, and so does a change of the `Date` (`setTime()`, `setUTCHours()`, ...).
 `{ first, before: null }` and `{ last, after: null }` are accepted, as in Python.
 
 ### Relation filters
@@ -161,6 +209,10 @@ separate calls are independent. `exclude()` is `NOT EXISTS`.
 * `new Prefetch(User.posts, Post.objects.filter(...).orderBy(...).limit(2), { toAttr: "top" })`
   sets a custom query (filtered, nested, or sliced per parent) and a typed target
   attribute (`u.top: Post[]`).
+
+* `await prefetch(instances, ...paths)` loads relations onto instances you already have, with the same paths and `Prefetch` objects.
+  Only the prefetch queries run: the keys come from the instances. A last `{ using: db }` argument names the database.
+  The row type does not change; read the relations as `cached` or cast.
 
 Related sets: `await user.posts`, `.filter()`, `.count()`, and `.insert({...})`, where the
 key is filled in. Many-to-many sets also have `post.tags.add(tag, ...)`, `.remove()`,
@@ -304,6 +356,11 @@ The other writes run when they are called and return a `Promise`:
   transaction.
 * On an instance: `post.update({...})` (refreshed from `RETURNING`), `post.delete()` and
   `post.refresh()`.
+* With the column-role extensions (`schema-extensions.md`): `@timestamps.updated_at` and
+  `@locking.version` are set on each update; on a `@soft_delete.deleted_at` model,
+  `delete()` soft-deletes, and `hardDelete()`, `undelete()`, `allWithDeleted()` and
+  `deletedOnly()` exist (instances: the `SoftDeletable` type). A stale versioned
+  instance write throws `VersionConflict`.
 
 Values in `update()` can be expressions over the same model (`Post.views.add(1)`).
 `excluded(col)` reads the proposed row in an upsert. A related row can stand in for its
@@ -392,9 +449,11 @@ await debug.nPlusOne(async () => {
 //   at src/views.ts:42; use selectRelated(Customer.person)
 ```
 
-* The scope counts the queries of `fn` by statement shape: the query without its values.
+* The scope counts the statements of `fn` by shape: the SQL with placeholders, without values.
+  It reads the same events as `db.onQuery`, so prefetch queries and `updateMany` batches count one by one.
   Work that `fn` starts counts too, and so do the queries of an inner scope.
-  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `inBulk()`) count as one query.
+  An inner scope cannot raise the threshold of an outer scope; the outer scope also counts the inner queries.
+  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `inBulk()`) count as one query when they have one shape.
 * When `fn` resolves, a shape that ran more than `threshold` times (default 5) throws `debug.NPlusOne` with `fail: true`, or emits an `NPlusOneWarning` process warning.
   `error.report` has each shape, its SQL, its count, the call site of its first query and the fix.
 * The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated unchanged to-many or many-to-many query (`post.comments.all()`, `post.tags.all()`).
@@ -402,6 +461,37 @@ await debug.nPlusOne(async () => {
   Outside it, each query pays one `AsyncLocalStorage` read (about 2 ns, measured).
 * In tests, `await debug.expectNoNPlusOne(fn, { threshold })` throws `NPlusOne` when `fn` sends an N+1.
   Without source maps (`node --enable-source-maps`), the call site is a line of the compiled JavaScript.
+
+### Raw SQL and query plans
+
+```ts
+const rows = await db.fetch("SELECT id, email FROM users WHERE created_at > $1 AND name = $2", since, "Ann");
+// [{ id: 7n, email: "ann@example.com" }]
+console.log(await Post.objects.filter(Post.authorId.eq(7n)).explain());
+console.log(await Post.objects.filter(Post.authorId.eq(7n)).explain({ analyze: true }));
+```
+
+`db.fetch(sql, ...params)` gives an array of objects by column name, and `qs.explain({ analyze })` gives the plan as text.
+They work as in Python (`docs/python-api.md`, "Raw SQL and query plans").
+A parameter's type comes from its JS value: `bigint` and integer numbers are `bigint`, strings are `text`, plain objects and arrays are JSON, and `Date` is `timestamptz`.
+`bigint` columns come back as `bigint`, and `timestamptz` and `date` as `Date`.
+
+### Query hooks and OpenTelemetry
+
+`db.onQuery(hook)` calls `hook(event)` after each statement that the database runs, and gives a function that removes the hook:
+
+```ts
+const off = db.onQuery((e: QueryEvent) => {
+  if (e.duration > 100) console.warn(`${e.duration.toFixed(0)} ms, ${e.rows} rows: ${e.sql}`);
+});
+```
+
+* `QueryEvent` has `sql` (the SQL with placeholders, never the values), `start` (Unix milliseconds), `duration` (milliseconds), `rows` and `error` (`null` on success).
+* The events, the timing and the context are the same as in Python (`docs/python-api.md`, "Query hooks and OpenTelemetry").
+  The hook runs in the async context of the caller, after the ORM call ends. An error that the hook throws rejects that call.
+
+`instrument(db, { tracer })` from `orm/otel` gives each statement a client span with the same name, attributes and status as in Python, and gives a function that stops the spans.
+Without `tracer`, it loads `@opentelemetry/api` (an optional peer dependency) and uses `trace.getTracer("orm")`.
 
 ### Hooks for packages
 
@@ -416,12 +506,60 @@ A package that changes writes and reads from outside the ORM (for example
 * `Model._meta.addRowDecoder(decode)` runs `decode(row)` on each instance that a query
   or write returns. A partial instance has only its loaded fields as own properties.
 
+## Model metadata and test factories
+
+The ORM has no factory library. It gives the two things a factory library needs:
+
+* `describe(Model)`: plain data about the model, with TypeScript (camelCase) names.
+  `fields` gives per field the name, column, schema type, `nullable`, `array`, `enum` (the enum's name), `maxLength`, `primaryKey`, `unique`, `default` (`"database"`, `"client"` or `null`) and `insert` (whether `insert()` takes it).
+  `relations` gives the kind, the target model, the `from`/`to` fields, the `through` model and `nullable`. `unique` lists the unique keys, the primary key first.
+* The insert path: `await Model.objects.insert(values)`, typed by the generated `PostInsert`.
+
+With fishery, the factory builds `PostInsert` values and `onCreate` inserts them:
+
+```ts
+const postFactory = Factory.define<PostInsert, {}, Post>(({ sequence, onCreate }) => {
+  onCreate((values) => Post.objects.insert(values));
+  return { title: `post ${sequence}`, body: "...", authorId: 1n };
+});
+const post = await postFactory.create();
+```
+
 ## Errors
 
 Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,
 `IntegrityError`, `LockNotAvailable`, `QueryError`, `SchemaError`, `NotConnected`,
 `NotLoaded`, `TransactionRequired`, `DoesNotExist`, `MultipleObjectsReturned`,
-`MigrationError` and `WriteProtected`. Values of the wrong type throw a `TypeError` before any SQL runs.
+`MigrationError`, `WriteProtected` and `VersionConflict`. Values of the wrong type throw a `TypeError` before any SQL runs.
+
+A `DatabaseError` (and its subclasses) has `sqlstate`, `constraint` and `detail`, each `null` when the database did not give it.
+They are the same as in Python (see `docs/python-api.md`, "Database errors"): SQLite constraint failures get the Postgres SQLSTATE, and only Postgres gives `constraint` and `detail`.
+
+```ts
+try {
+  await User.objects.insert({ email, name });
+} catch (e) {
+  if (!(e instanceof IntegrityError) || e.constraint !== "users_email_key") throw e;
+  // the email is taken
+}
+```
+
+The ORM does not retry a transaction.
+Run the whole transaction again on a serialization failure (`40001`) or a deadlock (`40P01`):
+
+```ts
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await db.transaction(fn);
+    } catch (e) {
+      const retry = e instanceof DatabaseError && (e.sqlstate === "40001" || e.sqlstate === "40P01");
+      if (!retry || attempt === attempts - 1) throw e;
+      await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
+    }
+  }
+}
+```
 
 ## Migrations and the CLI
 

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import copy
+import datetime
+import decimal
 import enum
 import json
 import types
+import uuid
 from os import PathLike
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from . import _native
-from .errors import DoesNotExist, MultipleObjectsReturned, NotLoaded
+from .errors import DoesNotExist, MultipleObjectsReturned, NotLoaded, VersionConflict
 from .expr import ColumnRef
 from .fields import BY_TYPE, Array, BelongsTo, Enum, Field, HasMany, HasOne, ManyToMany, Relation, String
 
@@ -30,7 +33,7 @@ if "reference-loading" in _CAPABILITIES:
     from . import _references
     _reference_adapter = _references
 
-__all__ = ["Model", "ModelMeta", "Registry", "registry", "define", "load", "loads"]
+__all__ = ["Model", "ModelMeta", "Registry", "registry", "column", "define", "describe", "load", "loads"]
 
 
 _ABSENT = object()
@@ -80,8 +83,16 @@ class ModelMeta:
         self.default_filter: dict[str, Any] | None = None
         # The schema default order: `{"field", "desc"?, "nulls"?}` per column.
         self.default_order: list[dict[str, Any]] = []
+        # The `@soft_delete.deleted_at` field name: `delete()` sets it.
+        self.soft_delete: str | None = None
+        # The `@locking.version` field name: instance writes check it.
+        self.version_field: str | None = None
         # Fields that a proxy declares non-null over a nullable stored column.
         self.narrowed: frozenset[str] = frozenset()
+        # The class of `objects` (`use_query_set`): `None` for QuerySet, or a "module:Class"
+        # path until first use; and the relation sets mixed with it, by base class.
+        self.query_set: type[QuerySet[Any]] | str | None = None
+        self.related_sets: dict[type, type] = {}
 
     def pk_ref(self) -> ColumnRef[Any]:
         return ColumnRef(self.model, (), self.pk)
@@ -252,6 +263,9 @@ class Registry:
             policy: dict[str, Any] = next((d for d in prepared.get("behavior", {}).get("query_defaults", ()) if d["model"] == meta.name), {})
             meta.default_filter = policy.get("filter")
             meta.default_order = policy.get("order", [])
+            behavior = prepared.get("behavior", {})
+            meta.soft_delete = next((d["field"] for d in behavior.get("soft_delete", ()) if d["model"] == meta.name), None)
+            meta.version_field = next((d["field"] for d in behavior.get("versions", ()) if d["model"] == meta.name), None)
             proxy: dict[str, Any] = next((p for p in prepared.get("behavior", {}).get("proxy_models", ()) if p["model"] == meta.name), {})
             meta.narrowed = frozenset(f["field"] for f in proxy.get("fields", ()) if f.get("non_null"))
             meta.field_names = tuple(fields)
@@ -289,7 +303,7 @@ class Registry:
         return self._native
 
 
-_RESERVED = {"pk", "objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "update", "delete", "refresh", "to_dict", "_field_value", "_orm_internal"}
+_RESERVED = {"pk", "objects", "_meta", "DoesNotExist", "MultipleObjectsReturned", "update", "delete", "hard_delete", "undelete", "refresh", "to_dict", "_field_value", "_orm_internal"}
 
 registry = Registry()
 
@@ -514,22 +528,61 @@ class Model:
         else:
             self.__dict__.pop("_orm_internal", None)
 
+    def _version_filter(self, query: QuerySet[Self]) -> QuerySet[Self]:
+        """With ``@locking.version``, match only the loaded version of the row."""
+        name = self._meta.version_field
+        if name is None:
+            return query
+        return query.filter(ColumnRef(type(self), (), self._meta.fields[name]) == getattr(self, name))
+
+    async def _raise_if_changed(self) -> None:
+        """No row matched a versioned write: raise when the row has another version."""
+        name = self._meta.version_field
+        if name is not None:
+            changed = self._row_query().filter(ColumnRef(type(self), (), self._meta.fields[name]) != getattr(self, name))
+            if await changed.exists():
+                raise VersionConflict(f"{type(self).__name__} {self.pk!r} was changed since it was loaded")
+
     async def update(self, **values: Any) -> None:
         """``UPDATE ... SET <values> WHERE pk = ... RETURNING`` the loaded fields.
 
         Values may be expressions (``views=Post.views + 1``); the instance is refreshed
-        from the returned row, so it shows what the database stored.
+        from the returned row, so it shows what the database stored. With
+        ``@locking.version``, raises :class:`orm.VersionConflict` when the row has a
+        newer version.
         """
         if not values:
             return
-        rows = await self._loaded_query().update(**values).returning()
+        version = self._meta.version_field
+        query = self._version_filter(self._loaded_query(*(() if version is None else (version,))))
+        rows = await query.update(**values).returning()
         if not rows:
+            await self._raise_if_changed()
             raise self.DoesNotExist(f"{type(self).__name__} {self.pk!r} no longer exists")
         self._replace_from(rows[0])
 
     async def delete(self) -> None:
-        """``DELETE ... WHERE pk = ...``. The instance keeps its last values."""
-        await self._row_query().delete()
+        """``DELETE ... WHERE pk = ...``; with ``@soft_delete.deleted_at``, a soft delete.
+        The instance keeps its last values. With ``@locking.version``, raises
+        :class:`orm.VersionConflict` when the row has a newer version."""
+        if not await self._version_filter(self._row_query()).delete():
+            await self._raise_if_changed()
+
+    async def hard_delete(self) -> None:
+        """``DELETE ... WHERE pk = ...`` also for a soft-delete model. In database mode,
+        the trigger soft-deletes a live row; a soft-deleted row is deleted."""
+        await self._row_query().hard_delete()
+
+    async def undelete(self) -> None:
+        """Clear the soft-delete field of this row and refresh it."""
+        name = self._soft_delete_field()
+        await self.update(**{name: None})
+
+    def _soft_delete_field(self) -> str:
+        name = self._meta.soft_delete
+        if name is None:
+            raise TypeError(f"{type(self).__name__} has no @soft_delete.deleted_at field")
+        return name
 
     async def refresh(self, *fields: ColumnRef[Any]) -> None:
         """Reload column values from the database."""
@@ -554,6 +607,80 @@ class Model:
         shown = ", ".join(f"{n}={d[n]!r}" for n in self._meta.field_names if n in d)
         return f"{type(self).__name__}({shown})"
 
+
+
+_PYTHON_TYPES: dict[str, type] = {
+    "big_int": int, "int": int, "float": float, "bool": bool, "string": str, "text": str,
+    "date_time": datetime.datetime, "date": datetime.date, "uuid": uuid.UUID, "json": object, "decimal": decimal.Decimal,
+}
+_RELATION_KINDS: tuple[tuple[type, str], ...] = (
+    (ManyToMany, "many_to_many"), (HasMany, "has_many"), (HasOne, "has_one"), (BelongsTo, "belongs_to"),
+)
+
+
+def column(model: type[Model], path: str) -> ColumnRef[Any]:
+    """The column a dotted path names: ``column(Bundle, "items.product.title")`` is
+    ``Bundle.items.product.title``. Each name before the last is a relation (to-one or
+    to-many), the last a field. For adapters that take names from a request, such as a
+    search or ordering filter."""
+    *hops, name = path.split(".")
+    target: type[Model] = model
+    for hop in hops:
+        rel = target._meta.relations.get(hop)
+        if rel is None:
+            raise LookupError(f"{target.__name__} has no relation {hop!r} (in {path!r})")
+        target = rel.target
+    field = target._meta.fields.get(name)
+    if field is None:
+        raise LookupError(f"{target.__name__} has no field {name!r} (in {path!r})")
+    return ColumnRef(model, tuple(hops), field)
+
+
+def describe(model: type[Model]) -> dict[str, Any]:
+    """Plain data about ``model`` for code that builds rows from it, such as a test
+    factory: its fields (schema and Python type, nullability, enum, length, unique,
+    who gives a default, whether ``insert()`` takes it), its relations and its unique
+    keys. Each entry is a new object; changing it changes nothing."""
+    meta = model._meta
+    ir = meta.ir()
+    registry = meta.registry
+    fields = []
+    for f in ir["fields"]:
+        enum_cls = registry.get_enum(f["enum"]) if "enum" in f else None
+        python_type: type = enum_cls or _PYTHON_TYPES[f["type"]]
+        database = bool(f.get("auto_increment") or "default" in f or f.get("default_now") or "default_sql" in f)
+        fields.append({
+            "name": f["name"],
+            "column": f["column"],
+            "type": f["type"],
+            "python_type": list if f.get("array") else python_type,
+            "element_type": python_type if f.get("array") else None,
+            "nullable": bool(f.get("nullable")),
+            "array": bool(f.get("array")),
+            "enum": enum_cls,
+            "max_length": f.get("max_length"),
+            "primary_key": bool(f.get("primary_key")),
+            "unique": bool(f.get("unique") or f.get("primary_key")),
+            "default": "database" if database else "client" if "client_default" in f else None,
+            "insert": f["name"] in meta.input_fields,
+        })
+    relations = []
+    for name, rel in meta.relations.items():
+        kind = next(k for cls, k in _RELATION_KINDS if isinstance(rel, cls))
+        r = next(r for r in ir.get("relations", ()) if r["name"] == name)
+        relations.append({
+            "name": name,
+            "kind": kind,
+            "target": rel.target,
+            "from": r["from"],
+            "to": r["to"],
+            "through": registry.get(r["through"]["model"]) if "through" in r else None,
+            "nullable": kind != "belongs_to" or bool(meta.fields[r["from"]].nullable),
+        })
+    unique: list[tuple[str, ...]] = [(meta.pk.name,)]
+    unique += [(f["name"],) for f in ir["fields"] if f.get("unique") and not f.get("primary_key")]
+    unique += [tuple(c["fields"]) for c in ir.get("constraints", ()) if c.get("kind") == "unique"]
+    return {"name": meta.name, "table": meta.table, "primary_key": meta.pk.name, "fields": fields, "relations": relations, "unique": unique}
 
 
 def loads(

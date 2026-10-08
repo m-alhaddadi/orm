@@ -44,16 +44,17 @@ export {
   window,
 } from "./expr.js";
 export type { Many, Compat, Operand, OrderOptions } from "./expr.js";
-export { ModelMeta, Registry, define, load, loads, registry } from "./model.js";
-export type { Instance, ModelClass, Row, SchemaIR } from "./model.js";
-export { InsertMany, InsertOne, ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet, UpsertOne } from "./query.js";
+export { ModelMeta, Registry, column, define, describe, load, loads, registry } from "./model.js";
+export type { FieldInfo, ModelInfo, RelationInfo } from "./model.js";
+export type { Instance, ModelClass, Row, SchemaIR, SoftDeletable } from "./model.js";
+export { InsertMany, InsertOne, ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet, UpsertOne, prefetch, useQuerySet } from "./query.js";
 export type { Page, PageOptions } from "./pagination.js";
-export type { AddOptions, BatchOptions, CopyOptions, FieldOrder, LoadOf, LockOptions, OnConflictOptions, PreparedInsert, PreparedUpdate, Simplify } from "./query.js";
+export type { AddOptions, BatchOptions, CopyOptions, FieldOrder, LoadOf, LockOptions, OnConflictOptions, PreparedInsert, PreparedUpdate, QueriesOf, QuerySetOf, Simplify } from "./query.js";
 export { Select } from "./select.js";
 export { Cte, CteColumn } from "./cte.js";
 export type { CteSelf } from "./cte.js";
 export { Database, connect, getDatabase, scope } from "./db.js";
-export type { ConnectOptions, SessionLockOptions } from "./db.js";
+export type { ConnectOptions, QueryEvent, SessionLockOptions } from "./db.js";
 export {
   DatabaseError,
   DoesNotExist,
@@ -66,6 +67,7 @@ export {
   QueryError,
   SchemaError,
   TransactionRequired,
+  VersionConflict,
   WriteProtected,
 } from "./errors.js";
 export { allowWrites } from "./protection.js";

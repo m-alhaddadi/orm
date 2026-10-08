@@ -90,7 +90,7 @@ model PersonTag {
     await Person.objects.using(db).insert_many([{"id": i, "name": f"p{i}"} for i in range(6)])
     people = await Person.objects.using(db).order_by(Person.id)
     try:
-        for loop in ("related", "many", "query set"):
+        for loop in ("related", "many", "filtered many", "query set"):
             with warnings.catch_warnings(), debug.n_plus_one(threshold=3) as report:
                 warnings.simplefilter("ignore")
                 for p in people:
@@ -98,11 +98,13 @@ model PersonTag {
                         await p.customers.using(db).all(); here = line()  # noqa: E702
                     elif loop == "many":
                         await p.tags.using(db).all(); here = line()  # noqa: E702
+                    elif loop == "filtered many":
+                        await p.tags.using(db).filter(models["Tag"].id >= 0); here = line()  # noqa: E702
                     else:
                         await Person.objects.using(db).filter(Person.id == p.id); here = line()  # noqa: E702
             [shape] = report.repeated
             assert shape.site.endswith(f"test_n_plus_one.py:{here}"), (loop, shape.site)
-            fix = {"related": "prefetch_related(Person.customers)", "many": "prefetch_related(Person.tags)", "query set": None}[loop]
+            fix = {"related": "prefetch_related(Person.customers)", "many": "prefetch_related(Person.tags)", "filtered many": None, "query set": None}[loop]
             assert shape.fix == fix, (loop, shape.fix)
     finally:
         await db.close()
@@ -174,6 +176,7 @@ async def test_the_pages_of_one_orm_loop_count_once_and_long_sql_is_cut(shop):
                 await Customer.objects.using(db).filter(Customer.person_id == p.id).exists()
     report = debug.Report(1, {"k": debug.Shape("k", "SELECT " + "?, " * 10_000, count=2)})
     assert len(report.message()) < 600 and report.message().count("...") == 1
+    assert "..." not in debug.Report(1, {"k": debug.Shape("k", "x" * 500, count=2)}).message()
 
 
 async def test_nested_scopes_prepared_update_many_and_a_filtered_related_set(shop):
@@ -183,14 +186,14 @@ async def test_nested_scopes_prepared_update_many_and_a_filtered_related_set(sho
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         with debug.n_plus_one(threshold=10) as outer:
-            with debug.n_plus_one(threshold=10) as inner:
+            with debug.n_plus_one(threshold=10) as inner, debug.n_plus_one(threshold=10):
                 for p in people[:3]:
                     await by_id(id=p.id)
             for p in people[:3]:
                 await Person.objects.using(db).update_many([{"id": p.id, "name": "x"}])
             for p in people[:3]:
                 await p.customers.using(db).filter(Customer.id >= 0)
-    # The inner scope's queries count in the outer scope too.
+    # The innermost scope's queries count in every enclosing scope.
     assert [s.count for s in inner.shapes.values()] == [3]
     counts = sorted((s.count, s.fix) for s in outer.shapes.values())
     assert [c for c, _ in counts] == [3, 3, 3]

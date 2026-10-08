@@ -8,7 +8,7 @@
 //! orm [--schema FILE] [--dir DIR] [--url URL] <command>
 //!   check                                         compile the schema and report errors
 //!   compile [-o ir.json]                          the compiled schema (JSON IR)
-//!   generate [python|typescript] [-o FILE] [--import MODULE]
+//!   generate [python|typescript] [-o FILE] [--import MODULE] [--query-set Model=TARGET]...
 //!   makemigrations [name] [--empty] [--check]
 //!   sqlmigrate <migration> [--down]
 //!   migrate [target]
@@ -22,7 +22,8 @@
 //! The schema file and the migrations directory come from `--schema` / `--dir`, else
 //! from `[tool.orm]` in `pyproject.toml` or the `"orm"` key of `package.json`
 //! (`schema`, `migrations`), else `schema.prisma` and `migrations`. The database URL
-//! comes from `--url` or `ORM_DATABASE_URL`.
+//! comes from `--url` or `ORM_DATABASE_URL`. `generate` also reads the query-set classes
+//! from `[tool.orm.query_sets]` (Python) or `"orm": {"querySets": ...}` (TypeScript).
 //!
 //! Output goes to the process's stdout and stderr. Exit codes: 0 success, 1 failure
 //! (an invalid schema, a migration error, a database error, `makemigrations --check`
@@ -67,8 +68,9 @@ impl Host {
 
 const COMMANDS: &str = "  identities [--rename Old=New] [--restore Model]\n                                           explicitly update frozen ContentType IDs\n  check                                    compile the schema and report errors
   compile [-o ir.json]                     print or write the compiled schema (JSON IR)
-  generate [python|typescript] [-o FILE] [--import MODULE]
-                                           the models module from the schema
+  generate [python|typescript] [-o FILE] [--import MODULE] [--query-set Model=TARGET]...
+                                           the models module from the schema; TARGET is
+                                           module:Class (Python) or specifier#Export (TypeScript)
   makemigrations [name] [--empty] [--check]
                                            write the next migration from schema changes
   sqlmigrate <migration> [--down]          print a migration's SQL
@@ -117,7 +119,7 @@ struct Args {
 }
 
 const FLAGS: [&str; 6] = ["--empty", "--check", "--down", "--force", "-h", "--help"];
-const VALUED: [&str; 11] = ["--schema", "--dir", "--url", "-o", "--out", "--import", "--name", "--steps", "--to", "--rename", "--restore"];
+const VALUED: [&str; 12] = ["--schema", "--dir", "--url", "-o", "--out", "--import", "--name", "--steps", "--to", "--rename", "--restore", "--query-set"];
 
 impl Args {
     fn parse(raw: &[String]) -> Result<Self> {
@@ -192,6 +194,25 @@ fn package_json() -> Option<Config> {
     let orm = doc.get("orm")?;
     let get = |k: &str| orm.get(k).and_then(|v| v.as_str()).map(String::from);
     Some(Config { schema: get("schema"), migrations: get("migrations") })
+}
+
+/// The query-set classes of `language` from its configuration file: `[tool.orm.query_sets]`
+/// in `pyproject.toml` (Python) or `"orm": {"querySets": ...}` in `package.json`.
+fn configured_query_sets(language: &str) -> Result<std::collections::BTreeMap<String, String>> {
+    let table: Option<Vec<(String, Option<String>)>> = if language == "python" {
+        std::fs::read_to_string("pyproject.toml").ok().and_then(|t| t.parse::<toml::Table>().ok()).and_then(|doc| {
+            let sets = doc.get("tool")?.get("orm")?.get("query_sets")?.as_table()?.clone();
+            Some(sets.into_iter().map(|(k, v)| (k, v.as_str().map(String::from))).collect())
+        })
+    } else {
+        std::fs::read_to_string("package.json").ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|doc| {
+            let sets = doc.get("orm")?.get("querySets")?.as_object()?.clone();
+            Some(sets.into_iter().map(|(k, v)| (k, v.as_str().map(String::from))).collect())
+        })
+    };
+    table.unwrap_or_default().into_iter()
+        .map(|(model, target)| target.map(|t| (model.clone(), t)).ok_or_else(|| Failure::Setup(format!("query set of {model} must be a string"))))
+        .collect()
 }
 
 fn config(host: Host) -> Config {
@@ -315,7 +336,7 @@ async fn command(argv: &[String], host: Host) -> Result<i32> {
             }
         }
         "generate" => {
-            args.allow(command, &["-o", "--out", "--import"], 1)?;
+            args.allow(command, &["-o", "--out", "--import", "--query-set"], 1)?;
             generate(&args, host, &schema)?;
         }
         "makemigrations" => {
@@ -386,6 +407,14 @@ fn generate(args: &Args, host: Host, schema: &Path) -> Result<()> {
     let project = dsl::compile_project_file(schema).map_err(Failure::Failed)?;
     let (ir, compiled) = dsl::check(project.ir).map_err(Failure::Failed)?;
     let source = schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut options = codegen::Options { query_sets: configured_query_sets(language)? };
+    for (key, value) in &args.options {
+        if let ("--query-set", Some(value)) = (key.as_str(), value) {
+            let (model, target) = value.split_once('=').filter(|(m, t)| !m.is_empty() && !t.is_empty())
+                .ok_or_else(|| Failure::Usage("--query-set needs Model=TARGET".into()))?;
+            options.query_sets.insert(model.to_owned(), target.to_owned());
+        }
+    }
     match language {
         #[cfg(feature = "generate-python")]
         "python" => {
@@ -393,7 +422,7 @@ fn generate(args: &Args, host: Host, schema: &Path) -> Result<()> {
                 return Err(Failure::Usage("--import is for typescript".into()));
             }
             let out = out.unwrap_or_else(|| schema.with_file_name("models.py"));
-            let g = codegen::python::generate(&ir, &compiled, &source).map_err(Failure::Failed)?;
+            let g = codegen::python::generate_with(&ir, &compiled, &source, &options).map_err(Failure::Failed)?;
             if project.units.len() == 1 {
                 write(&out, &g.module)?;
                 write(&out.with_extension("pyi"), &g.stub)?;
@@ -425,7 +454,7 @@ fn generate(args: &Args, host: Host, schema: &Path) -> Result<()> {
         "typescript" => {
             let out = out.unwrap_or_else(|| schema.with_file_name("models.ts"));
             let runtime = args.opt(&["--import"]).unwrap_or("orm");
-            write(&out, &codegen::typescript::generate(&ir, &compiled, &source, runtime).map_err(Failure::Failed)?)?;
+            write(&out, &codegen::typescript::generate_with(&ir, &compiled, &source, runtime, &options).map_err(Failure::Failed)?)?;
             println!("wrote {}", out.display());
         }
         #[cfg(not(feature = "generate-python"))]

@@ -179,7 +179,9 @@ pub fn lower_specs(ir: &mut SchemaIr, specs: &[ProxyModel]) -> Result<(), String
                 let subset = prepared.fields.iter().find(|c| c.field == f.name).and_then(|c| c.subset.as_ref());
                 if let Some(subset) = subset {
                     if values.iter().any(|v| !v.is_null() && !e.values.iter().any(|m| m.value == **v && subset.contains(&m.name))) {
-                        return Err(format!("{}.{}: client default is outside the enum subset {}({})", spec.model, f.name, e.name, subset.join(", ")));
+                        let own = placeholder.fields.iter().any(|d| d.name == f.name && d.client_default.is_some());
+                        let (which, cure) = if own { ("", String::new()) } else { ("inherited ", format!("; redeclare @client_default on {}", spec.model)) };
+                        return Err(format!("{}.{}: {which}client default is outside the enum subset {}({}){cure}", spec.model, f.name, e.name, subset.join(", ")));
                     }
                 }
             }

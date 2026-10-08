@@ -56,7 +56,7 @@ Definition fails with the field name when an omission breaks a rule:
 
 An omitted nullable field also drops its `@client_default`: a proxy insert stores NULL, and a parent insert stores the default.
 A proxy inherits `@@query.defaults` of its source; when it names an omitted field, definition fails with `model P has no field "note"`.
-Override it on the proxy, for example with `@@query.defaults(filter: "none")` or a field list without the omitted field.
+Override it on the proxy with a field list without the omitted field.
 
 **Redeclared fields** change only the logical view. A redeclared field must be in
 the inherited set, and it must equal the source field in everything except

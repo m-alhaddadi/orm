@@ -747,6 +747,10 @@ pub struct Prefetch {
     /// Attribute the rows are stored under; the relation's name when absent.
     #[serde(default)]
     pub attr: Option<String>,
+    /// Store the first related row (or none) instead of a list: a to-many relation
+    /// read with a limit of one per parent.
+    #[serde(default)]
+    pub one: bool,
     #[serde(flatten)]
     pub query: Select,
 }
@@ -772,6 +776,13 @@ pub struct Order {
     /// `NULLS FIRST` / `NULLS LAST`; the database default when absent.
     #[serde(default)]
     pub nulls: Option<Nulls>,
+}
+
+/// The public fields of the model a `select_related` path joins (`only()` through it).
+#[derive(Deserialize, Debug, Clone)]
+pub struct RelatedFields {
+    pub path: Vec<String>,
+    pub fields: Vec<String>,
 }
 
 /// One entry per `filter()` call. Entries are AND-ed, but each is planned on its own:
@@ -818,6 +829,9 @@ pub struct Select {
     /// To-one relation paths loaded with LEFT JOINs in the same statement.
     #[serde(default)]
     pub select_related: Vec<Vec<String>>,
+    /// The fields of joined models that `only()` names, by `select_related` path.
+    #[serde(default)]
+    pub related_fields: Vec<RelatedFields>,
     /// Relations of the root model loaded with one extra `IN (...)` query each, inside
     /// the same frontend call.
     #[serde(default)]
@@ -911,6 +925,9 @@ pub struct Delete {
     /// Return the deleted rows (every column) instead of a row count.
     #[serde(default)]
     pub returning: bool,
+    /// Send `DELETE` to a soft-delete model instead of setting its soft-delete field.
+    #[serde(default)]
+    pub hard: bool,
 }
 
 #[derive(Deserialize, Debug)]

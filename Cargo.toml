@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["contracts", "extension-build", "model-composition", "query-defaults", "extensions/generic", "extensions/proxy", "extensions/proxy-runtime", "core", "engine", "cli", "bindings/python", "bindings/node"]
+members = ["contracts", "extension-build", "model-composition", "query-defaults", "extensions/generic", "extensions/timestamps", "extensions/soft-delete", "extensions/locking", "extensions/proxy", "extensions/proxy-runtime", "core", "engine", "cli", "bindings/python", "bindings/node"]
 # bench/ormcore is a separate workspace (Phase 0 harness).
 exclude = ["bench", "storage/reference", "storage/orm-extension"]
 

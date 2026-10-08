@@ -49,10 +49,10 @@ fn order_key(model: &orm_contracts::ir::ModelIr, source: &Value) -> Result<Order
 }
 
 /// A default order the model can run: its own fields, once each, an orderable type, and
-/// `nulls` on a column that can hold NULL. `setter` is the model whose attribute set it.
-fn check_order(ir: &SchemaIr, model: &orm_contracts::ir::ModelIr, order: &[OrderKey], setter: &str) -> Result<(), String> {
+/// `nulls` on a column that can hold NULL. `source` is the model whose attribute set it.
+fn check_order(ir: &SchemaIr, model: &orm_contracts::ir::ModelIr, order: &[OrderKey], source: &str) -> Result<(), String> {
     let name = &model.name;
-    let from = if setter == name { String::new() } else { format!(" (from the default order of {setter}; give {name} its own @@query.order(...), or clear it with @@query.order())") };
+    let from = if source == name { String::new() } else { format!(" (from the default order of {source}; give {name} its own @@query.order(...), or clear it with @@query.order())") };
     let narrowed = |field: &str| ir.behavior.proxy_models.iter().any(|p| p.model == *name && p.fields.iter().any(|f| f.field == field && f.non_null));
     for (i, k) in order.iter().enumerate() {
         let field = &k.field;
@@ -76,8 +76,8 @@ fn check_order(ir: &SchemaIr, model: &orm_contracts::ir::ModelIr, order: &[Order
 pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
     let declarations = &ir.behavior.declarations;
     let mut resolved: HashMap<String, QueryDefaults> = ir.behavior.query_defaults.iter().map(|d| (d.model.clone(), d.clone())).collect();
-    let mut setters: HashMap<String, String> = HashMap::new();
-    fn resolve(ir: &SchemaIr, name: &str, resolved: &mut HashMap<String, QueryDefaults>, setters: &mut HashMap<String, String>, stack: &mut Vec<String>) -> Result<QueryDefaults, String> {
+    let mut order_sources: HashMap<String, String> = HashMap::new();
+    fn resolve(ir: &SchemaIr, name: &str, resolved: &mut HashMap<String, QueryDefaults>, order_sources: &mut HashMap<String, String>, stack: &mut Vec<String>) -> Result<QueryDefaults, String> {
         if let Some(d) = resolved.get(name) { return Ok(d.clone()); }
         if stack.iter().any(|n| n == name) { return Err(format!("query-default inheritance cycle: {} -> {name}", stack.join(" -> "))); }
         stack.push(name.into());
@@ -87,7 +87,7 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         let proxy_parent = ir.behavior.proxy_models.iter().find(|p| p.model == name).map(|p| p.parent.as_str());
         let composed_parent = ir.behavior.declarations.iter().find(|d| d.model == name && d.attribute == "composition.model").and_then(|d| d.arguments.get("parent")).and_then(Value::as_str);
         let parent = given.get("parent").and_then(Value::as_str).or(proxy_parent).or(composed_parent);
-        let inherited = match parent { Some(p) => resolve(ir, p, resolved, setters, stack)?, None => QueryDefaults::default() };
+        let inherited = match parent { Some(p) => resolve(ir, p, resolved, order_sources, stack)?, None => QueryDefaults::default() };
         let mut out = inherited.clone(); out.model = name.into(); out.parent = parent.map(str::to_owned);
         if let Some(source) = given.get("filter") {
             let source = source.as_str().ok_or("filter must be a string")?;
@@ -103,12 +103,12 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         if let Some(order) = given.get("order") {
             out.order = order.as_array().ok_or("order must be a list of strings")?.iter().map(|k| order_key(model, k)).collect::<Result<_, _>>()?;
         }
-        let setter = match parent.and_then(|p| setters.get(p)) {
+        let source = match parent.and_then(|p| order_sources.get(p)) {
             Some(s) if !given.contains_key("order") => s.clone(),
             _ => name.to_owned(),
         };
-        check_order(ir, model, &out.order, &setter)?;
-        setters.insert(name.into(), setter);
+        check_order(ir, model, &out.order, &source)?;
+        order_sources.insert(name.into(), source);
         let excluded: Vec<&str> = ir.behavior.declarations.iter().filter(|d| d.model == name && d.attribute == "query.selectOut").filter_map(|d| d.field.as_deref()).collect();
         if !excluded.is_empty() {
             let fields = out.fields.get_or_insert_with(|| model.fields.iter().map(|f| f.name.clone()).collect());
@@ -117,7 +117,7 @@ pub fn lower(ir: &mut SchemaIr) -> Result<(), String> {
         stack.pop(); resolved.insert(name.into(), out.clone()); Ok(out)
     }
     if !declarations.iter().any(|d| d.attribute.starts_with("query.")) && resolved.is_empty() { return Ok(()); }
-    for model in &ir.models { resolve(ir, &model.name, &mut resolved, &mut setters, &mut vec![])?; }
+    for model in &ir.models { resolve(ir, &model.name, &mut resolved, &mut order_sources, &mut vec![])?; }
     ir.behavior.query_defaults = ir.models.iter().map(|m| resolved.remove(&m.name).expect("resolved model")).collect();
     Ok(())
 }
@@ -342,11 +342,32 @@ mod tests {
         assert!(lowered(true, None, json!(["-bio nulls last"]), None).is_ok());
         let error = lowered(false, Some("json"), json!(["bio"]), None).unwrap_err();
         assert!(error.contains("order column \"bio\" is json, which the database can't order"), "{error}");
+        let error = lowered(false, Some("xml"), json!(["bio"]), None).unwrap_err();
+        assert!(error.contains("order column \"bio\" is xml, which the database can't order"), "{error}");
         assert!(lowered(false, None, json!(["id", "-id"]), None).unwrap_err().contains("order column \"id\" is given twice"));
         let error = lowered(false, None, json!(["visible"]), None).unwrap_err();
         assert!(error.contains("Child: order column \"visible\" is not a field of the model (from the default order of Parent; give Child its own @@query.order(...), or clear it with @@query.order())"), "{error}");
         assert!(lowered(false, None, json!(["visible"]), Some(json!([]))).is_ok());
         assert!(lowered(false, None, json!(["id nulls first x"]), None).unwrap_err().contains("write \"[-]field [nulls first|last]\""));
+    }
+    #[test]
+    fn an_order_error_names_the_model_that_set_the_order() {
+        // A proxy narrows a nullable column; the order is the child's own.
+        let mut schema = ir();
+        declare(&mut schema, "Child", "query.order", json!({}), json!(["bio"]));
+        schema.behavior.proxy_models.push(serde_json::from_value(json!({"model":"Child","parent":"Parent","fields":[{"field":"bio","non_null":true}]})).unwrap());
+        let error = lower(&mut schema).unwrap_err();
+        assert!(error.ends_with("Child: order column \"bio\" can be NULL: write \"bio nulls first\" or \"bio nulls last\""), "{error}");
+        // Two levels down, the error still names the model that set the order.
+        let mut schema = ir();
+        let mut grandchild = serde_json::to_value(&schema.models[1]).unwrap();
+        grandchild["name"] = json!("Grandchild");
+        grandchild["fields"].as_array_mut().unwrap().retain(|f| f["name"] != "visible");
+        schema.models.push(serde_json::from_value(grandchild).unwrap());
+        declare(&mut schema, "Parent", "query.order", json!({}), json!(["visible"]));
+        declare(&mut schema, "Grandchild", "query.parent", json!({}), json!(["Child"]));
+        let error = lower(&mut schema).unwrap_err();
+        assert!(error.contains("Grandchild: order column \"visible\" is not a field of the model (from the default order of Parent;"), "{error}");
     }
     #[test]
     fn query_parent_wins_over_the_proxy_parent() {

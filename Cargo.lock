@@ -862,6 +862,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orm-locking"
+version = "0.1.0"
+dependencies = [
+ "orm-contracts",
+ "serde_json",
+]
+
+[[package]]
 name = "orm-model-composition"
 version = "0.1.0"
 dependencies = [
@@ -926,6 +934,26 @@ name = "orm-query-defaults"
 version = "0.1.0"
 dependencies = [
  "orm-contracts",
+ "serde_json",
+]
+
+[[package]]
+name = "orm-soft-delete"
+version = "0.1.0"
+dependencies = [
+ "orm-contracts",
+ "orm-core",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
+name = "orm-timestamps"
+version = "0.1.0"
+dependencies = [
+ "orm-contracts",
+ "orm-core",
+ "rusqlite",
  "serde_json",
 ]
 

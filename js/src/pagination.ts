@@ -67,18 +67,25 @@ export function fingerprint(meta: ModelMeta, keys: readonly Key[]): string {
   return Buffer.from(blake2b(new TextEncoder().encode(text), 8)).toString("hex");
 }
 
-/** The hidden property of a `Date` from a `DateTime` column with the microseconds
- * below its milliseconds (set by the native driver). */
+/** The hidden properties of a `Date` from a `DateTime` column (set by the native driver):
+ * the microseconds below its milliseconds, and the milliseconds they belong to. */
 const MICROS = "orm:micros";
+const MICROS_MS = "orm:micros-ms";
 const INT32 = 2 ** 31;
 const INT64 = 2n ** 63n;
 const UUID = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 const NONFINITE: Record<string, number> = { Infinity: Infinity, "-Infinity": -Infinity, NaN: NaN };
 
+/** The hidden microseconds of `d`, unless its time changed after they were set. */
+function micros(d: Date): number {
+  const hidden = d as unknown as Record<string, unknown>;
+  return hidden[MICROS_MS] === d.getTime() ? ((hidden[MICROS] as number | undefined) ?? 0) : 0;
+}
+
 // The cursor text of a DateTime is Python's `isoformat()`: microseconds and `+00:00`.
 function isoDateTime(d: Date): string {
   const [day, time] = d.toISOString().split("T") as [string, string];
-  const us = d.getUTCMilliseconds() * 1000 + (((d as unknown as Record<string, unknown>)[MICROS] as number | undefined) ?? 0);
+  const us = d.getUTCMilliseconds() * 1000 + micros(d);
   return `${day}T${time.slice(0, 8)}${us ? `.${String(us).padStart(6, "0")}` : ""}+00:00`;
 }
 
@@ -107,12 +114,28 @@ function invalid(): never {
   throw new QueryError("invalid cursor");
 }
 
+// A year has four digits, or six with a sign (ECMAScript's expanded years).
+const DAY = /^(\d{4}|[+-]\d{6})-(\d\d)-(\d\d)/;
+
+/** Whether `text` starts with a day the calendar has; `Date` rolls `02-30` over to March. */
+function realDay(text: string): boolean {
+  const m = DAY.exec(text);
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]) - 1, Number(m[3])];
+  const t = new Date(0);
+  t.setUTCFullYear(y, mo, d);
+  return t.getUTCFullYear() === y && t.getUTCMonth() === mo && t.getUTCDate() === d;
+}
+
 function decodeDateTime(text: string): Date {
-  const m = /^[+-]?\d{4,6}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.(\d{1,9}))?(?:Z|[+-]\d\d:\d\d)$/.exec(text);
-  const d = m ? new Date(text) : undefined;
+  const m = /^(?:\d{4}|[+-]\d{6})-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.(\d{1,9}))?(?:Z|[+-]\d\d:\d\d)$/.exec(text);
+  const d = m && realDay(text) ? new Date(text) : undefined;
   if (!d || Number.isNaN(d.getTime())) invalid();
   const us = Number((m![1] ?? "").padEnd(6, "0").slice(3, 6));
-  if (us) Object.defineProperty(d, MICROS, { value: us });
+  if (us) {
+    Object.defineProperty(d, MICROS, { value: us });
+    Object.defineProperty(d, MICROS_MS, { value: d.getTime() });
+  }
   return d;
 }
 
@@ -140,7 +163,7 @@ function decode(f: FieldMeta, nullable: boolean, v: unknown): unknown {
     case "date_time":
       return text !== undefined ? decodeDateTime(text) : invalid();
     case "date": {
-      const d = text !== undefined && /^[+-]?\d{4,6}-\d\d-\d\d$/.test(text) ? new Date(text) : undefined;
+      const d = text !== undefined && /^(?:\d{4}|[+-]\d{6})-\d\d-\d\d$/.test(text) && realDay(text) ? new Date(text) : undefined;
       return d && !Number.isNaN(d.getTime()) ? d : invalid();
     }
     case "float":

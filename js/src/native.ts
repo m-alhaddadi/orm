@@ -65,7 +65,7 @@ export interface NativeTransaction {
 }
 
 export interface NativeSessionLock {
-  release(): Promise<void>;
+  release(trace?: NativeTrace | null): Promise<void>;
 }
 
 export interface NativeSchema {
@@ -89,8 +89,28 @@ export interface NativeSchema {
   makeMigration(dir: string, name?: string | null, empty?: boolean | null): string | null;
 }
 
+/** One traced statement: `start` in Unix milliseconds, `duration` in milliseconds. */
+export interface NativeQueryEvent {
+  readonly sql: string;
+  readonly start: number;
+  readonly duration: number;
+  readonly rows: number;
+  readonly error?: string | null;
+}
+
+export interface NativeTrace {
+  take(): NativeQueryEvent[];
+}
+
+/** The prefetched rows for parent key rows (`prefetch()`), and those parent rows. */
+export interface NativePrefetched {
+  readonly rows: NativeRows;
+  readonly prefetched: readonly NativePrefetch[];
+}
+
 export interface NativeEngine {
-  run(opJson: string, params: unknown[], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<unknown>;
+  run(opJson: string, params: unknown[], tx: NativeTransaction | null, allowed?: readonly string[], trace?: NativeTrace | null): Promise<unknown>;
+  prefetch(opJson: string, params: unknown[], keys: string[], rows: unknown[][], tx: NativeTransaction | null): Promise<NativePrefetched>;
   insert(
     model: string,
     fields: string[],
@@ -103,10 +123,11 @@ export interface NativeEngine {
     allowed?: readonly string[],
     batchSize?: number | null,
     conflictWhere?: string | null,
+    trace?: NativeTrace | null,
     returning?: boolean,
   ): Promise<unknown>;
   copyInsert(model: string, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<number>;
-  attach(model: string, parentId: unknown, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<unknown>;
+  attach(model: string, parentId: unknown, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[], trace?: NativeTrace | null): Promise<unknown>;
   updateMany(
     model: string,
     fields: string[],
@@ -118,12 +139,15 @@ export interface NativeEngine {
     tx: NativeTransaction | null,
     withoutDefaults: boolean,
     allowed?: readonly string[],
+    trace?: NativeTrace | null,
   ): Promise<unknown>;
   begin(tx: NativeTransaction | null): Promise<NativeTransaction>;
-  advisoryLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, tx: NativeTransaction): Promise<boolean>;
+  advisoryLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, tx: NativeTransaction, trace?: NativeTrace | null): Promise<boolean>;
   withSettings(names: string[], values: string[]): NativeEngine;
-  sessionLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, timeoutMs: number | null): Promise<NativeSessionLock | null>;
-  execute(sql: string, tx: NativeTransaction | null): Promise<number>;
+  sessionLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, timeoutMs: number | null, trace?: NativeTrace | null): Promise<NativeSessionLock | null>;
+  execute(sql: string, tx: NativeTransaction | null, trace?: NativeTrace | null): Promise<number>;
+  explain(opJson: string, params: unknown[], analyze: boolean, tx: NativeTransaction | null, trace?: NativeTrace | null): Promise<string>;
+  fetch(sql: string, params: unknown[], tx: NativeTransaction | null, trace?: NativeTrace | null): Promise<Record<string, unknown>[]>;
   fetchText(sql: string, tx: NativeTransaction | null): Promise<(string | null)[][]>;
   executeScript(statements: string[], tx: NativeTransaction | null): Promise<void>;
   migrationStatus(dir: string): Promise<string>;
@@ -142,6 +166,7 @@ export interface NativeEngine {
 
 interface Addon {
   Schema: new (schemaJson: string) => NativeSchema;
+  Trace: new () => NativeTrace;
   connect(url: string, schema: NativeSchema, maxConnections: number, disable: string[]): Promise<NativeEngine>;
   prepareSchema(schemaJson: string, contextJson?: string): string;
   nativeArtifact(): string;

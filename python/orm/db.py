@@ -8,14 +8,17 @@ import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from typing import Any, Literal, overload
+from dataclasses import dataclass
+from typing import Any, Literal, TypeVar, overload
 
 from . import _native, debug
 from .errors import LockNotAvailable, NotConnected, QueryError, TransactionRequired
 from .protection import allowed_writes
 from .model import Registry, registry
 
-__all__ = ["Database", "connect", "get_database", "scope"]
+__all__ = ["Database", "QueryEvent", "connect", "get_database", "scope"]
+
+T = TypeVar("T")
 
 # Statements a replica may answer.
 _READS = frozenset({"select", "count", "exists"})
@@ -33,6 +36,22 @@ _scope: ContextVar[dict[str, Any]] = ContextVar("orm_scope", default={})
 _callbacks: ContextVar[dict[Database, list[Callable[[], Any]]]] = ContextVar("orm_on_commit", default={})
 
 
+@dataclass(frozen=True, slots=True)
+class QueryEvent:
+    """One statement the database ran, given to the hooks of :meth:`Database.on_query`."""
+
+    #: The SQL with its parameter placeholders: the statement shape, without values.
+    sql: str
+    #: When the statement started, in Unix seconds (``time.time()``).
+    start: float
+    #: How long it ran, in seconds.
+    duration: float
+    #: Rows returned, or rows affected by a statement that returns no rows.
+    rows: int
+    #: The database's error message when the statement failed.
+    error: str | None
+
+
 class Database:
     """A connection pool. Created by :func:`connect`."""
 
@@ -42,6 +61,8 @@ class Database:
         self._base = engine
         self.url = url
         self._registry = registry
+        # Hooks live on the root: `primary` views share them.
+        self._hooks: list[Callable[[QueryEvent], object]] = []
         self._replicas = list(replicas)
         self._turn = 0
         # The database a `primary` view belongs to: they share transactions and callbacks.
@@ -95,15 +116,51 @@ class Database:
         finally:
             _tenants.reset(token)
 
+    def on_query(self, hook: Callable[[QueryEvent], object]) -> Callable[[], None]:
+        """Call ``hook(event)`` after each statement this database runs (prefetch queries
+        and ``update_many`` batches included), also when it fails. Returns a function
+        that removes the hook.
+
+        The hook runs in the task that sent the query, after the ORM call ends, so
+        context variables (a current span, a request id) are those of the caller. An
+        exception in the hook propagates to that caller.
+        """
+        self._root._hooks.append(hook)
+
+        def remove() -> None:
+            if hook in self._root._hooks:
+                self._root._hooks.remove(hook)
+
+        return remove
+
+    def _call(self, start: Callable[[_native.Trace | None], Awaitable[T]]) -> Awaitable[T]:
+        """``start(trace)`` starts an engine call. Without hooks or an N+1 scope the
+        engine's awaitable comes back as is, untraced."""
+        if not self._root._hooks and debug._scope.get() is None:
+            return start(None)
+        trace = _native.Trace()
+        return self._observe(trace, debug.capture(), start(trace))
+
+    async def _observe(self, trace: _native.Trace, origin: tuple[str, str | None] | None, call: Awaitable[T]) -> T:
+        try:
+            return await call
+        finally:
+            events = [QueryEvent(*e) for e in trace.take()]
+            if origin is not None:
+                for e in events:
+                    debug.record(e.sql, origin)
+            for hook in list(self._root._hooks):
+                for e in events:
+                    hook(e)
+
     async def _run(
         self, ir: dict[str, Any], params: list[Any], row_cls: type | None = None, db: Database | None = None
     ) -> Any:
         """Runs a query; instances it builds get ``db`` to write back to (``using()``)."""
         op, params = _with_scope(json.dumps(ir), params)
-        if debug._scope.get() is not None:
-            debug.record("run:" + op, lambda: self._registry.native().statement(op, params))
         engine = self._reader() if ir["op"] in _READS else self._engine
-        return await engine.run(op, params, self._tx(), row_cls, db, allowed_writes())
+        tx, allowed = self._tx(), allowed_writes()
+        return await self._call(lambda t: engine.run(op, params, tx, row_cls, db, allowed, t))
 
     async def _insert(
         self,
@@ -120,16 +177,15 @@ class Database:
         returning: bool = True,
     ) -> Any:
         set_json, params = (json.dumps(set_[0]), set_[1]) if set_ is not None else (None, [])
-        if debug._scope.get() is not None:
-            debug.record(f"insert:{model}:{fields}:{conflict}", lambda: f"INSERT INTO {model} ({', '.join(fields)}) ...")
-        return await self._engine.insert(
-            model, fields, rows, conflict, update, set_json, params, self._tx(), db, allowed_writes(), batch_size,
-            None if where is None else json.dumps(where), returning,
+        tx, allowed = self._tx(), allowed_writes()
+        wh = None if where is None else json.dumps(where)
+        return await self._call(
+            lambda t: self._engine.insert(
+                model, fields, rows, conflict, update, set_json, params, tx, db, allowed, batch_size, wh, t, returning
+            )
         )
 
     async def _copy(self, model: str, fields: list[str], rows: list[list[Any]]) -> int:
-        if debug._scope.get() is not None:
-            debug.record(f"copy:{model}:{fields}", lambda: f"COPY {model} ({', '.join(fields)}) FROM STDIN (FORMAT binary)")
         n: int = await self._engine.copy_insert(model, fields, rows, self._tx(), allowed_writes())
         return n
 
@@ -145,12 +201,12 @@ class Database:
         db: Database | None = None,
         without_defaults: bool = False,
     ) -> Any:
-        if debug._scope.get() is not None:
-            debug.record(f"update_many:{model}:{fields}:{json.dumps(filters)}", lambda: f"UPDATE {model} SET {', '.join(fields)} ... (update_many)")
         filters_json, params = _with_scope(json.dumps(filters), params, key="filters")
-        return await self._engine.update_many(
-            model, fields, rows, filters_json, params, returning, batch_size, self._tx(), db, without_defaults,
-            allowed_writes(),
+        tx, allowed = self._tx(), allowed_writes()
+        return await self._call(
+            lambda t: self._engine.update_many(
+                model, fields, rows, filters_json, params, returning, batch_size, tx, db, without_defaults, allowed, t
+            )
         )
 
     @asynccontextmanager
@@ -266,7 +322,7 @@ class Database:
                 "run it inside `async with db.transaction():` or use `session=True`"
             )
         k, name = self._lock_key(key)
-        return await self._engine.advisory_lock(k, name, bool(exclusive), bool(nowait), tx)
+        return await self._call(lambda t: self._engine.advisory_lock(k, name, bool(exclusive), bool(nowait), tx, t))
 
     @asynccontextmanager
     async def _session_lock(
@@ -278,7 +334,8 @@ class Database:
         if timeout is not None and not timeout >= 0:
             raise ValueError("lock timeout must be a number of seconds >= 0")
         timeout_ms = None if timeout is None else math.ceil(timeout * 1000)
-        held = await self._engine.session_lock(k, name, bool(exclusive), bool(nowait), timeout_ms)
+        engine = self._engine
+        held = await self._call(lambda t: engine.session_lock(k, name, bool(exclusive), bool(nowait), timeout_ms, t))
         if held is None:
             raise LockNotAvailable(
                 f"advisory lock {key!r} is held by another session"
@@ -287,11 +344,24 @@ class Database:
         try:
             yield
         finally:
-            await held.release()
+            await self._call(held.release)
 
     async def execute(self, sql: str) -> int:
         """Run raw SQL (one or more statements); returns the number of rows affected."""
-        return await self._engine.execute(sql, self._tx())
+        tx = self._tx()
+        return await self._call(lambda t: self._engine.execute(sql, tx, t))
+
+    async def fetch(self, sql: str, *params: Any) -> list[dict[str, Any]]:
+        """Run one raw SQL query with parameters; returns its rows as dicts by column name.
+
+        Placeholders are ``$1, $2, ...`` on Postgres and ``?`` on SQLite. A parameter's
+        type comes from its Python value (``int`` is ``bigint``, ``str`` is ``text``,
+        ``dict`` / ``list`` are JSON); cast in the SQL where the column needs another
+        type (``$1::uuid``). Cells come back by the column types the database reports.
+        Runs in the current transaction, and query hooks see it.
+        """
+        tx, args = self._tx(), list(params)
+        return await self._call(lambda t: self._engine.fetch(sql, args, tx, t))
 
     async def _fetch_text(self, sql: str) -> list[tuple[str | None, ...]]:
         return await self._engine.fetch_text(sql, self._tx())

@@ -3,7 +3,8 @@
 #
 #   ORM_TEST_DATABASE_URL=postgres://... scripts/feature-check.sh [artifact...]
 #
-# Artifacts: proxy-models query-defaults model-composition file-storage generic-relations all
+# Artifacts: proxy-models query-defaults model-composition file-storage generic-relations
+# updated-at soft-delete optimistic-locking all
 # (default: every one). Each artifact selects only extension crates; the manifests turn on
 # the host Cargo features, so no cargo command here passes --features.
 # Output, logs and the pass/fail matrix go to $ORM_FEATURE_CHECK_DIR (default target/feature-check).
@@ -14,7 +15,7 @@ WORK=${ORM_FEATURE_CHECK_DIR:-$ROOT/target/feature-check}
 : "${ORM_TEST_DATABASE_URL:?set ORM_TEST_DATABASE_URL to a PostgreSQL test database}"
 export ORM_TEST_DATABASE_URL
 export CARGO_TARGET_DIR=$WORK/target
-ARTIFACTS=${*:-proxy-models query-defaults model-composition file-storage generic-relations all}
+ARTIFACTS=${*:-proxy-models query-defaults model-composition file-storage generic-relations updated-at soft-delete optimistic-locking all}
 LOGS=$WORK/logs
 MATRIX=$WORK/matrix.txt
 case "$(uname -s)" in
@@ -30,10 +31,13 @@ dependency() {
     model-composition) echo '"composition":{"package":"orm-model-composition","path":"'"$ROOT"'/model-composition"}' ;;
     file-storage) echo '"file_storage":{"package":"orm-file-storage-extension","path":"'"$ROOT"'/storage/orm-extension"}' ;;
     generic-relations) echo '"generic":{"package":"orm-generic","path":"'"$ROOT"'/extensions/generic"}' ;;
+    updated-at) echo '"timestamps":{"package":"orm-timestamps","path":"'"$ROOT"'/extensions/timestamps"}' ;;
+    soft-delete) echo '"soft_delete":{"package":"orm-soft-delete","path":"'"$ROOT"'/extensions/soft-delete"}' ;;
+    optimistic-locking) echo '"locking":{"package":"orm-locking","path":"'"$ROOT"'/extensions/locking"}' ;;
     *) echo "unknown feature $1" >&2; return 1 ;;
   esac
 }
-FEATURES="proxy-models query-defaults model-composition file-storage generic-relations"
+FEATURES="proxy-models query-defaults model-composition file-storage generic-relations updated-at soft-delete optimistic-locking"
 features_of() { if [ "$1" = all ]; then echo "$FEATURES"; else echo "$1"; fi; }
 has() { case " $(features_of "$1") " in *" $2 "*) return 0 ;; *) return 1 ;; esac; }
 

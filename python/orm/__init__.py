@@ -9,7 +9,7 @@ expressions over model attributes, Django-style managers on top::
 """
 
 from . import debug, fields
-from .db import Database, connect, get_database, scope
+from .db import Database, QueryEvent, connect, get_database, scope
 from .errors import (
     DatabaseError,
     DoesNotExist,
@@ -22,6 +22,7 @@ from .errors import (
     QueryError,
     SchemaError,
     TransactionRequired,
+    VersionConflict,
     WriteProtected,
 )
 from .pagination import Page
@@ -49,9 +50,9 @@ from .expr import (
     param,
     window,
 )
-from .model import Model, Registry, define, load, loads, registry
+from .model import Model, Registry, column, define, describe, load, loads, registry
 from .protection import allow_writes
-from .query import ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet
+from .query import ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet, prefetch, use_query_set
 from .cte import Cte, CteColumn
 from .select import Row, Select
 from .write import CopyInsert, Delete, InsertMany, InsertOne, InsertReturning, Returning, Update, UpdateMany, UpsertOne
@@ -60,10 +61,13 @@ __all__ = [
     "debug",
     "fields",
     "Registry",
+    "column",
     "define",
+    "describe",
     "load",
     "loads",
     "Database",
+    "QueryEvent",
     "connect",
     "scope",
     "get_database",
@@ -74,6 +78,8 @@ __all__ = [
     "ManyRelatedSet",
     "Prefetch",
     "Prepared",
+    "prefetch",
+    "use_query_set",
     "param",
     "Cte",
     "CteColumn",
@@ -119,6 +125,7 @@ __all__ = [
     "DoesNotExist",
     "MultipleObjectsReturned",
     "NotLoaded",
+    "VersionConflict",
     "NotConnected",
     "TransactionRequired",
     "WriteProtected",

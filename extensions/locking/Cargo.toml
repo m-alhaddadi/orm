@@ -1,0 +1,30 @@
+[package]
+name = "orm-locking"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Selected optimistic-locking compiler for ORM: a version field checked on instance writes"
+
+[dependencies]
+orm-contracts = { path = "../../contracts" }
+serde_json = "1"
+
+[package.metadata.orm-extension]
+id = "orm.locking"
+version = "0.1.0"
+host_contract = 1
+schema_contract = 1
+languages = ["python", "typescript"]
+databases = ["postgres", "sqlite"]
+capabilities = ["optimistic-locking"]
+
+[[package.metadata.orm-extension.passes]]
+id = "orm.locking.prepare"
+phase = "behavior"
+rust = "crate::prepare"
+effects = ["behavior.versions"]
+
+# `version Int @default(0) @locking.version`.
+[[package.metadata.orm-extension.attributes]]
+name = "locking.version"
+target = "field"

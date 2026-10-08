@@ -3,7 +3,7 @@
 Writes are explicit statements, never side effects of touching an instance::
 
     user = await User.objects.insert(email="a@b.c", name="A")
-    users = await User.objects.insert_many([{"email": ..., "name": ...}, ...])
+    users = await User.objects.insert_many([{"email": ..., "name": ...}, ...]).returning()
     n = await User.objects.insert_many(rows)
     users = await User.objects.insert_many(rows).returning()
     user = await User.objects.insert(email="a@b.c", name="A2").on_conflict(User.email, update=True).returning()
@@ -72,6 +72,8 @@ def prepare_rows(
         for key, value in row.items():
             if isinstance(value, Expression):
                 raise TypeError(f"{meta.name}.{key}: insert takes plain values, not expressions")
+            if isinstance(value, Ordering):
+                raise TypeError(f"{key}={value!r} is an ordering, for order_by(); write 0 - {value.expr!r} to negate a value")
             if key in meta.input_fields:
                 values[key] = value
             elif isinstance(rel := meta.relations.get(key), BelongsTo):
@@ -508,9 +510,12 @@ class Delete(_SetStatement[M]):
     _verb = "deleted"
 
     @classmethod
-    def build(cls, qs: QuerySet[M]) -> Delete[M]:
+    def build(cls, qs: QuerySet[M], *, hard: bool = False) -> Delete[M]:
         params: list[Any] = []
-        return cls(qs, qs._mutation_ir("delete", params), params)
+        ir = qs._mutation_ir("delete", params)
+        if hard:
+            ir["hard"] = True
+        return cls(qs, ir, params)
 
 
 class Returning(Generic[M]):

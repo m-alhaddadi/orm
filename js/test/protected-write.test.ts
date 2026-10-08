@@ -81,6 +81,7 @@ test("the check is on the model the SQL writes; scopes nest; work started inside
     await allowWrites([Post], async () => { started = Post.objects.using(db).insert({ id: 2, title: "b" }); });
     await started;
     await assert.rejects(allowWrites(["Post"] as never, async () => {}), TypeError);
+    await assert.rejects(allowWrites([] as never, undefined as never), TypeError);
     await assert.rejects(allowWrites(Post as never, async () => {}), /takes a list of models and a function/);
     // A package checks its write with prepareInsert/prepareUpdate before its own I/O (file uploads).
     assert.throws(() => Post.objects.using(db).prepareInsert({ id: 3, title: "c" }), WriteProtected);
