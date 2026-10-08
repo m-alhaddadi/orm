@@ -248,32 +248,45 @@ async def test_session_lock_validation():
         await db.close()
 
 
-async def replica_url(db):
-    """A second database with the same tables, standing in for a replica."""
-    url = db.url.rsplit("/", 1)[0] + "/orm_s6_replica"
-    if not await db._fetch_text("SELECT 1 FROM pg_database WHERE datname = 'orm_s6_replica'"):
-        await db.execute("CREATE DATABASE orm_s6_replica")
+async def replica_url(db, n=1):
+    """Another database with the same tables, standing in for a replica: replica ``n`` holds
+    ``n`` users. Its name comes from the test database, so parallel runs do not share it."""
+    name = f"{db.url.rsplit('/', 1)[1]}_s6_replica{n}"
+    url = db.url.rsplit("/", 1)[0] + "/" + name
+    if not await db._fetch_text(f"SELECT 1 FROM pg_database WHERE datname = '{name}'"):
+        await db.execute(f'CREATE DATABASE "{name}"')
     replica = await orm.connect(url, default=False, max_connections=1)
     try:
         await replica.drop_tables()
         await replica.create_tables()
-        await User.objects.using(replica).insert(email="r@example.com", name="Replica")
+        names = ["Replica"] if n == 1 else [f"R{n}-{i}" for i in range(n)]
+        await User.objects.using(replica).insert_many([{"email": f"{u}@example.com", "name": u} for u in names])
     finally:
         await replica.close()
     return url
 
 
+async def backends(db, url):
+    rows = await db._fetch_text(f"SELECT count(*) FROM pg_stat_activity WHERE datname = '{url.rsplit('/', 1)[1]}'")
+    return int(rows[0][0] or 0)
+
+
 async def test_replicas_answer_reads_outside_a_transaction(clean):
     db = clean
-    url = await replica_url(db)
-    routed = await orm.connect(db.url, replicas=[url, url], default=False, max_connections=2)
+    url, url2 = await replica_url(db), await replica_url(db, 2)
+    routed = await orm.connect(db.url, replicas=[url, url2], default=False, max_connections=2)
     try:
         await User.objects.using(routed).insert(email="p@example.com", name="Primary")
         users = User.objects.using(routed)
-        assert [u.name for u in await users] == ["Replica"]
-        assert [u.name for u in await users.filter(User.name == "Replica")] == ["Replica"]
-        assert await users.count() == 1
-        assert [u.name for u in await users.filter(User.name == orm.param("n")).prepare()(n="Replica")] == ["Replica"]
+        # Reads take the replicas in turn.
+        reads = [sorted(u.name for u in await User.objects.using(routed)) for _ in range(2)]
+        assert sorted(reads) == [["R2-0", "R2-1"], ["Replica"]]
+        assert sorted([await users.count(), await users.count()]) == [1, 2]
+        r2 = users.filter(User.name == "R2-0")
+        assert sorted([await r2.exists(), await r2.exists()]) == [False, True]
+        assert [u.name for u in await users.filter(User.name == "Replica")] in (["Replica"], [])
+        prepared = users.filter(User.name == orm.param("n")).prepare()
+        assert sorted([len(await prepared(n="Replica")), len(await prepared(n="Replica"))]) == [0, 1]
         assert [u.name for u in await users.using("primary")] == ["Primary"]
         assert [u.name for u in await User.objects.using(routed.primary)] == ["Primary"]
         async with routed.transaction():
@@ -285,7 +298,9 @@ async def test_replicas_answer_reads_outside_a_transaction(clean):
         assert await users.filter(User.name == "Primary").update(name="P2") == 1
         assert [u.name for u in await User.objects.using(db)] == ["P2"]
     finally:
-        await routed.close()
+        # Closing a primary view closes the whole database: the primary and each replica.
+        await routed.primary.close()
+    assert [await backends(db, url), await backends(db, url2)] == [0, 0]
 
 
 async def test_using_primary_resolves_the_default_database(clean):
@@ -365,6 +380,18 @@ async def test_tenant_sets_app_tenant_for_row_level_security(db):
                 pass
     finally:
         await sqlite.close()
+
+
+async def test_tenant_ids_are_checked(db):
+    for bad in (True, None, 1.5):
+        with pytest.raises(TypeError, match="tenant id"):
+            with db.tenant(bad):  # type: ignore[arg-type]
+                pass
+    # An empty id would look like no tenant: Postgres gives '' for a setting a pooled
+    # connection had before.
+    with pytest.raises(ValueError, match="empty"):
+        with db.tenant(""):
+            pass
 
 
 QUERY_DEFAULTS = "query-defaults" in json.loads(_native.native_artifact()).get("capabilities", [])

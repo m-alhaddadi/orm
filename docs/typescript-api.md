@@ -322,6 +322,9 @@ There are no health checks or failover. `maxConnections` applies to each pool, a
 `await db.tenant(shop.id, async () => {...})` runs `SELECT set_config('app.tenant', '<id>', true)` (`SET LOCAL`) at the start of every transaction on `db` in the function, so RLS policies can read `current_setting('app.tenant', true)`.
 A statement outside a transaction runs in a transaction of its own (four round trips instead of one, estimated).
 A transaction that is already open keeps its setting, and the setting ends with each transaction.
+A connection that had a tenant reads `''` (not `NULL`) for the setting after that, so a policy should read `NULLIF(current_setting('app.tenant', true), '')`; an empty id throws `RangeError`.
+Raw `db.execute(...)` in the function also runs in a transaction of its own, so `CREATE INDEX CONCURRENTLY` or `VACUUM` fails there.
+Each table of a composed model needs its own policy.
 Replicas get the same setting. SQLite throws `QueryError`.
 `scope({ shop }, fn)` is the application-side filter (see `docs/selection-and-defaults.md`, "Scope values").
 

@@ -704,6 +704,9 @@ with db.tenant(shop.id):                 # a sync `with`: it does no I/O
 * A statement outside a transaction runs in a transaction of its own: `BEGIN`, `set_config`, the statement, `COMMIT`. That is four round trips instead of one (estimated); put many statements in one `db.transaction()`.
 * A transaction that is already open keeps its setting. Savepoints use the setting of their transaction.
 * The setting ends with each transaction, so pooled connections keep no tenant.
+  A connection that had a tenant reads `''` (not `NULL`) for the setting after that, so a policy should read `NULLIF(current_setting('app.tenant', true), '')`; `tenant("")` raises `ValueError`.
+* Raw `db.execute(...)` in the block also runs in a transaction of its own, so a statement that cannot run in a transaction (`CREATE INDEX CONCURRENTLY`, `VACUUM`) fails there; run it outside the block.
+* A composed model (model composition) stores its rows in a table for each level: each of these tables needs its own policy, for example a child policy `USING (EXISTS (SELECT 1 FROM parent p WHERE p.id = child.id))`.
 * Replicas get the same setting. Session locks (`session=True`) do not.
 * The policy must read the setting, for example `USING (shop_id::text = current_setting('app.tenant', true))`. The ORM does not create policies. A superuser and the table owner bypass RLS unless the table has `FORCE ROW LEVEL SECURITY`.
 * SQLite raises `QueryError`.

@@ -91,6 +91,8 @@ class Database:
             raise QueryError("db.tenant() sets a Postgres setting for row-level security; sqlite has none")
         if isinstance(id, bool) or not isinstance(id, (str, int)):
             raise TypeError(f"tenant id must be a str or an int, got {id!r}")
+        if id == "":
+            raise ValueError("tenant id must not be empty: a pooled connection reads '' for no tenant")
         root, value = self._root, [str(id)]
         engines = (
             root._base.with_settings(["app.tenant"], value),

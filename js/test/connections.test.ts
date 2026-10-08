@@ -198,34 +198,47 @@ test('a session lock needs Postgres', async () => {
   }
 });
 
-/** A second database with the same tables, standing in for a replica. */
-async function replicaUrl(): Promise<string> {
+/** Another database with the same tables, standing in for a replica: replica `n` holds `n`
+ * users. Its name comes from the test database, so parallel runs do not share it. */
+async function replicaUrl(n = 1): Promise<string> {
   const db = getDatabase();
-  const url = db.url.replace(/\/[^/]*$/, '/orm_s6_replica_js');
-  if ((await db.fetchText("SELECT 1 FROM pg_database WHERE datname = 'orm_s6_replica_js'")).length === 0) {
-    await db.execute('CREATE DATABASE orm_s6_replica_js');
+  const name = `${db.url.split('/').pop()}_s6_replica_js${n}`;
+  const url = db.url.replace(/\/[^/]*$/, `/${name}`);
+  if ((await db.fetchText(`SELECT 1 FROM pg_database WHERE datname = '${name}'`)).length === 0) {
+    await db.execute(`CREATE DATABASE "${name}"`);
   }
   const replica = await connect(url, { default: false, maxConnections: 1 });
   try {
     await replica.dropTables();
     await replica.createTables();
-    await User.objects.using(replica).insert({ email: 'r@example.com', name: 'Replica' });
+    const names = n === 1 ? ['Replica'] : Array.from({ length: n }, (_, i) => `R${n}-${i}`);
+    await User.objects.using(replica).insertMany(names.map((u) => ({ email: `${u}@example.com`, name: u })));
   } finally {
     await replica.close();
   }
   return url;
 }
 
+async function backends(url: string): Promise<number> {
+  const rows = await getDatabase().fetchText(`SELECT count(*) FROM pg_stat_activity WHERE datname = '${url.split('/').pop()}'`);
+  return Number(rows[0]![0]);
+}
+
 test('replicas answer reads outside a transaction; writes and transactions use the primary', async () => {
-  const db = getDatabase(), url = await replicaUrl();
-  const routed = await connect(db.url, { replicas: [url, url], default: false, maxConnections: 2 });
+  const db = getDatabase(), url = await replicaUrl(), url2 = await replicaUrl(2);
+  const routed = await connect(db.url, { replicas: [url, url2], default: false, maxConnections: 2 });
   try {
     await User.objects.using(routed).insert({ email: 'p@example.com', name: 'Primary' });
     const users = User.objects.using(routed);
-    assert.deepEqual((await users).map((u) => u.name), ['Replica']);
-    assert.equal(await users.count(), 1);
+    // Reads take the replicas in turn.
+    const reads = [];
+    for (let i = 0; i < 2; i++) reads.push((await User.objects.using(routed)).map((u) => u.name).sort().join());
+    assert.deepEqual(reads.sort(), ['R2-0,R2-1', 'Replica']);
+    assert.deepEqual([await users.count(), await users.count()].sort(), [1, 2]);
+    const r2 = users.filter(User.name.eq('R2-0'));
+    assert.deepEqual([await r2.exists(), await r2.exists()].sort(), [false, true]);
     const byName = users.filter(User.name.eq(param('n'))).prepare();
-    assert.deepEqual((await byName.all({ n: 'Replica' })).map((u) => u.name), ['Replica']);
+    assert.deepEqual([(await byName.all({ n: 'Replica' })).length, (await byName.all({ n: 'Replica' })).length].sort(), [0, 1]);
     assert.deepEqual((await users.using('primary')).map((u) => u.name), ['Primary']);
     assert.deepEqual((await User.objects.using(routed.primary)).map((u) => u.name), ['Primary']);
     await routed.transaction(async () => {
@@ -236,8 +249,24 @@ test('replicas answer reads outside a transaction; writes and transactions use t
     assert.deepEqual((await User.objects.using(db)).map((u) => u.name), ['P2']);
     assert.throws(() => User.objects.using('replica' as never), TypeError);
   } finally {
-    await routed.close();
+    // Closing a primary view closes the whole database: the primary and each replica.
+    await routed.primary.close();
   }
+  assert.deepEqual([await backends(url), await backends(url2)], [0, 0]);
+  // A replica that fails to open closes the pools opened before it.
+  const before = await backends(url);
+  await assert.rejects(connect(db.url, { replicas: [url, url.replace(/\/[^/]*$/, '/orm_s6_missing')], default: false }));
+  assert.equal(await backends(url), before);
+});
+
+test('tenant ids are checked', async () => {
+  const db = getDatabase();
+  for (const bad of [true, null, NaN, Infinity]) {
+    assert.throws(() => db.tenant(bad as never, async () => {}), /tenant id/);
+  }
+  // An empty id would look like no tenant: Postgres gives '' for a setting a pooled
+  // connection had before.
+  assert.throws(() => db.tenant('', async () => {}), /empty/);
 });
 
 const NOTES = `datasource db { provider = "postgresql" }

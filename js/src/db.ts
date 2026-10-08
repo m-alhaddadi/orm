@@ -101,8 +101,11 @@ export class Database {
     if (this.url.startsWith("sqlite://")) {
       throw new QueryError("db.tenant() sets a Postgres setting for row-level security; sqlite has none");
     }
-    if (!["string", "number", "bigint"].includes(typeof id)) {
-      throw new TypeError(`tenant id must be a string or a number, got ${String(id)}`);
+    if (!["string", "number", "bigint"].includes(typeof id) || (typeof id === "number" && !Number.isFinite(id))) {
+      throw new TypeError(`tenant id must be a string or a finite number, got ${String(id)}`);
+    }
+    if (id === "") {
+      throw new RangeError("tenant id must not be empty: a pooled connection reads '' for no tenant");
     }
     const root = this.root, value = [String(id)];
     const engines = {
@@ -191,7 +194,7 @@ export class Database {
    *
    * `db.lock(key, { session: true, timeout }, fn)` holds the lock while `fn` runs, on a
    * connection of its own, with no transaction, and gives what `fn` gives. It waits at
-   * most `timeout` seconds (no limit when absent; not at all with `nowait`) and throws
+   * most `timeout` seconds (no limit when absent or `Infinity`; not at all with `nowait`) and throws
    * `LockNotAvailable` when another session still holds the lock.
    *
    * A string key is hashed to a 64-bit one the way the Python package hashes it (the
@@ -318,8 +321,15 @@ export async function connect(url: string, options: ConnectOptions = {}): Promis
     wait(() => call(() => native().connect(u, schema, options.maxConnections ?? 10, [...(options.disable ?? [])])));
   const engine = await open(url);
   const readers: NativeEngine[] = [];
-  for (const replica of options.replicas ?? []) {
-    readers.push(await open(replica));
+  try {
+    for (const replica of options.replicas ?? []) {
+      readers.push(await open(replica));
+    }
+  } catch (e) {
+    for (const opened of [engine, ...readers]) {
+      await wait(() => opened.close());
+    }
+    throw e;
   }
   const db = new Database(engine, url, reg, readers);
   if (options.default ?? true) {
