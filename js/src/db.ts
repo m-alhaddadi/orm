@@ -5,9 +5,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { NotConnected, QueryError, TransactionRequired } from "./errors.js";
 import type { IR } from "./expr.js";
 import { registry as defaultRegistry, type Registry } from "./model.js";
-import { call, native, wait, type NativeEngine, type NativeTransaction } from "./native.js";
+import { call, native, wait, type NativeEngine, type NativeTrace, type NativeTransaction } from "./native.js";
 import { allowedWrites } from "./protection.js";
-import { active as debugging, record } from "./debug.js";
+import { active as debugging, capture, record } from "./debug.js";
 
 let defaultDb: Database | undefined;
 
@@ -21,14 +21,66 @@ export interface LockOptions {
   readonly nowait?: boolean;
 }
 
+/** One statement the database ran, given to the hooks of {@link Database.onQuery}. */
+export interface QueryEvent {
+  /** The SQL with its parameter placeholders: the statement shape, without values. */
+  readonly sql: string;
+  /** When the statement started, in Unix milliseconds (`Date.now()`). */
+  readonly start: number;
+  /** How long it ran, in milliseconds. */
+  readonly duration: number;
+  /** Rows returned, or rows affected by a statement that returns no rows. */
+  readonly rows: number;
+  /** The database's error message when the statement failed. */
+  readonly error: string | null;
+}
+
 /** A connection pool. Created by {@link connect}. */
 export class Database {
+  readonly #hooks: ((event: QueryEvent) => unknown)[] = [];
+
   /** @internal */
   constructor(
     readonly engine: NativeEngine,
     readonly url: string,
     readonly registry: Registry,
   ) {}
+
+  /**
+   * Calls `hook(event)` after each statement this database runs (prefetch queries and
+   * `updateMany` batches included), also when it fails. Gives a function that removes
+   * the hook.
+   *
+   * The hook runs in the async context that sent the query, after the ORM call ends, so
+   * `AsyncLocalStorage` values (a current span, a request id) are those of the caller.
+   * An error the hook throws rejects that call.
+   */
+  onQuery(hook: (event: QueryEvent) => unknown): () => void {
+    this.#hooks.push(hook);
+    return () => {
+      const i = this.#hooks.indexOf(hook);
+      if (i >= 0) this.#hooks.splice(i, 1);
+    };
+  }
+
+  /** @internal Runs an engine call in the current transaction; traced when a hook or an
+   * N+1 scope listens. */
+  send<T>(start: (tx: NativeTransaction | null, trace: NativeTrace | null) => Promise<T>): Promise<T> {
+    const tx = this.tx();
+    if (!this.#hooks.length && !debugging()) return wait(() => start(tx, null));
+    const trace = new (native().Trace)();
+    return this.#observe(trace, capture(), wait(() => start(tx, trace)));
+  }
+
+  async #observe<T>(trace: NativeTrace, origin: ReturnType<typeof capture>, pending: Promise<T>): Promise<T> {
+    try {
+      return await pending;
+    } finally {
+      const events: QueryEvent[] = trace.take().map((e) => ({ ...e, error: e.error ?? null }));
+      if (origin) for (const e of events) record(e.sql, origin);
+      for (const hook of [...this.#hooks]) for (const e of events) hook(e);
+    }
+  }
 
   /** @internal The transaction queries on this database run in, if any. */
   tx(): NativeTransaction | null {
@@ -43,8 +95,8 @@ export class Database {
 
   /** @internal */
   runJson(json: string, params: unknown[]): Promise<unknown> {
-    if (debugging()) record(`run:${json}`, () => this.registry.native().statement(json, params));
-    return wait(() => this.engine.run(json, params, this.tx(), allowedWrites()));
+    const allowed = allowedWrites();
+    return this.send((tx, trace) => this.engine.run(json, params, tx, allowed, trace));
   }
 
   /**
@@ -97,12 +149,12 @@ export class Database {
       throw new TypeError(`lock key must be an integer or a string, got ${String(key)}`);
     }
     const { exclusive = true, nowait = false } = options;
-    return wait(() => this.engine.advisoryLock(String(k), name, Boolean(exclusive), Boolean(nowait), this.tx()!));
+    return this.send((tx, trace) => this.engine.advisoryLock(String(k), name, Boolean(exclusive), Boolean(nowait), tx!, trace));
   }
 
   /** Runs raw SQL (one or more statements); gives the number of rows affected. */
   execute(sql: string): Promise<number> {
-    return wait(() => this.engine.execute(sql, this.tx()));
+    return this.send((tx, trace) => this.engine.execute(sql, tx, trace));
   }
 
   /** Raw query whose columns are all read as text. For tooling (migrations). */

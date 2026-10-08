@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import warnings
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -123,13 +123,22 @@ def relation_load(model: str, relation: str, fix: str) -> Generator[None]:
         _hint.reset(token)
 
 
-def record(key: str, sql: Callable[[], str]) -> None:
-    """Count one query of shape ``key``; ``sql()`` gives its SQL text when it is new."""
+def capture() -> tuple[str, str | None] | None:
+    """Where user code sends the next queries and the fix to name; None outside a scope.
+
+    Called before the engine runs them, while the caller's frames are on the stack."""
+    if _scope.get() is None:
+        return None
+    hint = _hint.get()
+    return (hint[1], hint[0]) if hint else (call_site(), None)
+
+
+def record(sql: str, origin: tuple[str, str | None]) -> None:
+    """Count one query of shape ``sql`` (the SQL with placeholders), sent at ``origin``."""
     report = _scope.get()
     if report is None:
         return
-    shape = report.shapes.get(key)
+    shape = report.shapes.get(sql)
     if shape is None:
-        hint = _hint.get()
-        shape = report.shapes[key] = Shape(key, sql(), site=hint[1] if hint else call_site(), fix=hint[0] if hint else None)
+        shape = report.shapes[sql] = Shape(sql, sql, site=origin[0], fix=origin[1])
     shape.count += 1

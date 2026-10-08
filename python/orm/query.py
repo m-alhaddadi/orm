@@ -860,7 +860,7 @@ class Prepared(Generic[M]):
 
     def _start(self, kind: str, values: Mapping[str, Any]) -> Awaitable[Any]:
         """Starts the statement; the engine's awaitable comes back as is, without a
-        coroutine around it."""
+        coroutine around it, unless a query hook or an N+1 scope observes it."""
         from .db import resolve
 
         c = self._statement(kind)
@@ -869,9 +869,8 @@ class Prepared(Generic[M]):
         if qs._lock is not None:
             qs._check_lock()
         db = resolve(qs._db)
-        if debug._scope.get() is not None:
-            debug.record("run:" + c.json, lambda: str(qs._native().statement(c.json, params)))
-        return db._engine.run(c.json, params, db._tx(), None, qs._db, allowed_writes())
+        tx, allowed = db._tx(), allowed_writes()
+        return db._call(lambda t: db._engine.run(c.json, params, tx, None, qs._db, allowed, t))
 
     def __call__(self, **values: Any) -> Awaitable[list[M]]:
         """The rows, like awaiting the query set."""

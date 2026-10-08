@@ -49,7 +49,7 @@ export { Select } from "./select.js";
 export { Cte, CteColumn } from "./cte.js";
 export type { CteSelf } from "./cte.js";
 export { Database, connect, getDatabase } from "./db.js";
-export type { ConnectOptions } from "./db.js";
+export type { ConnectOptions, QueryEvent } from "./db.js";
 export {
   DatabaseError,
   DoesNotExist,

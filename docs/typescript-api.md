@@ -299,7 +299,8 @@ await debug.nPlusOne(async () => {
 //   at src/views.ts:42; use selectRelated(Customer.person)
 ```
 
-* The scope counts the queries of `fn` by statement shape: the query without its values.
+* The scope counts the statements of `fn` by shape: the SQL with placeholders, without values.
+  It reads the same events as `db.onQuery`, so prefetch queries and `updateMany` batches count one by one.
   Work that `fn` starts counts too.
 * When `fn` resolves, a shape that ran more than `threshold` times (default 5) throws `debug.NPlusOne` with `fail: true`, or emits an `NPlusOneWarning` process warning.
   `error.report` has each shape, its SQL, its count, the call site of its first query and the fix.
@@ -308,6 +309,23 @@ await debug.nPlusOne(async () => {
   Outside it, each query pays one `AsyncLocalStorage` read (about 2 ns, measured).
 * In tests, `await debug.expectNoNPlusOne(fn, { threshold })` throws `NPlusOne` when `fn` sends an N+1.
   Without source maps (`node --enable-source-maps`), the call site is a line of the compiled JavaScript.
+
+### Query hooks and OpenTelemetry
+
+`db.onQuery(hook)` calls `hook(event)` after each statement that the database runs, and gives a function that removes the hook:
+
+```ts
+const off = db.onQuery((e: QueryEvent) => {
+  if (e.duration > 100) console.warn(`${e.duration.toFixed(0)} ms, ${e.rows} rows: ${e.sql}`);
+});
+```
+
+* `QueryEvent` has `sql` (the SQL with placeholders, never the values), `start` (Unix milliseconds), `duration` (milliseconds), `rows` and `error` (`null` on success).
+* The events, the timing and the context are the same as in Python (`docs/python-api.md`, "Query hooks and OpenTelemetry").
+  The hook runs in the async context of the caller, after the ORM call ends. An error that the hook throws rejects that call.
+
+`instrument(db, { tracer })` from `orm/otel` gives each statement a client span with the same name, attributes and status as in Python, and gives a function that stops the spans.
+Without `tracer`, it loads `@opentelemetry/api` (an optional peer dependency) and uses `trace.getTracer("orm")`.
 
 ### Hooks for packages
 

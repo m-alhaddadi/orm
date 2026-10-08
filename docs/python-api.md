@@ -690,7 +690,8 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
 #   at app/views.py:42; use select_related(Customer.person)
 ```
 
-* The scope counts its queries by statement shape: the query without its values.
+* The scope counts its statements by shape: the SQL with placeholders, without values.
+  It reads the same events as `db.on_query`, so prefetch queries and `update_many` batches count one by one.
   Tasks started in the scope count too.
 * When the block ends, a shape that ran more than `threshold` times (default 5) raises `orm.debug.NPlusOne` with `fail=True`, or gives an `orm.debug.NPlusOneWarning`.
   The exception and the `with ... as report` value carry the report: each shape, its SQL, its count, the call site of its first query and the fix.
@@ -699,6 +700,40 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
   Outside it, each query pays one `ContextVar` read (about 15 ns, measured).
 * In a test suite, add `pytest_plugins = ["orm.testing"]` to `conftest.py`.
   The `n_plus_one` fixture counts the whole test and fails it at teardown; set `n_plus_one.threshold` to change the threshold.
+
+### Query hooks and OpenTelemetry
+
+`db.on_query(hook)` calls `hook(event)` after each statement that the database runs, and gives a function that removes the hook:
+
+```python
+def log_slow(e: orm.QueryEvent) -> None:
+    if e.duration > 0.1:
+        logger.warning("%.0f ms, %d rows: %s", e.duration * 1000, e.rows, e.sql)
+
+remove = db.on_query(log_slow)
+```
+
+* `orm.QueryEvent` has `sql` (the SQL with placeholders, never the values), `start` (Unix seconds), `duration` (seconds), `rows` and `error`.
+  `rows` is the rows returned, or the rows affected by a statement that returns no rows.
+  `error` is the database's message when the statement failed; the ORM call still raises.
+* Each statement gives one event: a prefetch query, each `update_many` batch, each `db.execute`.
+  `COMMIT` and `ROLLBACK` give no event.
+* The engine times the statement in Rust, from the send to the last row, without the conversion to Python objects.
+* The hook runs after the ORM call ends, in the task that made the call.
+  So context variables, for example the current span or a request id, are those of the caller.
+  An exception in a hook propagates to that caller.
+* With no hook and no N+1 scope, a query pays one list check and one `ContextVar` read.
+  With a hook, each call creates a trace and each statement records one event.
+  A prepared `get` on SQLite took 252 µs with an empty hook and 247 µs without (measured on a loaded machine, so the difference is noise-level).
+
+`orm.otel.instrument(db)` gives each statement a client span, and gives a function that stops the spans.
+It needs `opentelemetry-api` (`pip install 'orm[otel]'`); configure the SDK and the exporter as usual.
+`instrument(db, tracer=t)` uses the tracer `t` instead of `get_tracer("orm")`.
+
+* The span starts and ends at the statement's times. Its parent is the current span of the caller.
+* The span name is the SQL operation (`SELECT`, `INSERT`, ...).
+  The attributes are `db.system.name` (`postgresql` or `sqlite`), `db.operation.name`, `db.query.text` (with placeholders) and `db.response.returned_rows`.
+* A failed statement gets the `ERROR` status and the database's message.
 
 ### Hooks for packages: `orm.hooks`
 

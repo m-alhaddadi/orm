@@ -37,11 +37,11 @@ import {
 import { NotLoaded, QueryError, TransactionRequired } from "./errors.js";
 import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
 import { DB, fieldValue, RELATED, registerQueries, type Instance, type ModelClass, type ModelMeta } from "./model.js";
-import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
+import { call, type NativeReturned, type NativeSelect, type NativeTrace, type NativeTransaction } from "./native.js";
 import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
 import { after, decodeCursor, encodeCursor, fingerprint, keyset, type Page, type PageOptions } from "./pagination.js";
 import { allowedWrites } from "./protection.js";
-import { active as debugging, record, relationLoad } from "./debug.js";
+import { active as debugging, relationLoad } from "./debug.js";
 import type { Cte, CteColumnsOf, CteSelf } from "./cte.js";
 import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./select.js";
 
@@ -1093,9 +1093,8 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       throw new QueryError("updateMany() filters can't read CTEs");
     }
     const db = this.db();
-    if (debugging()) record(`updateMany:${this.meta.name}:${prepared.fields}:${JSON.stringify(ir["filters"])}`, () => `UPDATE ${this.meta.name} SET ${prepared.fields.join(", ")} ... (updateMany)`);
-    const res = await db_wait(db, (tx) =>
-      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx, this.state.withoutDefaults, allowedWrites()),
+    const res = await db_wait(db, (tx, allowed, trace) =>
+      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx, this.state.withoutDefaults, allowed, trace),
     );
     return returning ? (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][]) : (res as number);
   }
@@ -1118,7 +1117,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   async attach(parentId: In<M["pk"]>, values: M extends { readonly attach: infer A extends object } ? A : never): Promise<M["row"]> {
     const prepared = prepareAttach(this.meta, values);
     const db = this.db();
-    const res = await db_wait(db, (tx) => db.engine.attach(this.meta.name, parentId, prepared.fields, prepared.rows, tx, allowedWrites()));
+    const res = await db_wait(db, (tx, allowed, trace) => db.engine.attach(this.meta.name, parentId, prepared.fields, prepared.rows, tx, allowed, trace));
     return (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][])[0]!;
   }
 
@@ -1178,9 +1177,8 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       return [];
     }
     const db = this.db();
-    if (debugging()) record(`insert:${this.meta.name}:${prepared.fields}:${conflict}`, () => `INSERT INTO ${this.meta.name} (${prepared.fields.join(", ")}) ...`);
-    const res = await db_wait(db, (tx) =>
-      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowedWrites()),
+    const res = await db_wait(db, (tx, allowed, trace) =>
+      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowed, trace),
     );
     return new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][];
   }
@@ -1190,8 +1188,12 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   }
 }
 
-function db_wait(db: Database, f: (tx: ReturnType<Database["tx"]>) => Promise<unknown>): Promise<unknown> {
-  return wait(() => f(db.tx()));
+function db_wait(
+  db: Database,
+  f: (tx: NativeTransaction | null, allowed: readonly string[], trace: NativeTrace | null) => Promise<unknown>,
+): Promise<unknown> {
+  const allowed = allowedWrites();
+  return db.send((tx, trace) => f(tx, allowed, trace));
 }
 
 function toArray<T>(x: T | readonly T[]): readonly T[] {

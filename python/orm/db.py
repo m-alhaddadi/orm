@@ -3,23 +3,42 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, TypeVar
 
 from . import _native, debug
 from .errors import NotConnected, QueryError, TransactionRequired
 from .protection import allowed_writes
 from .model import Registry, registry
 
-__all__ = ["Database", "connect", "get_database"]
+__all__ = ["Database", "QueryEvent", "connect", "get_database"]
+
+T = TypeVar("T")
 
 _default: Database | None = None
 # The innermost open transaction of the current task, with the database it belongs to.
 _current_tx: ContextVar[tuple[Database, _native.Transaction] | None] = ContextVar(
     "orm_current_tx", default=None
 )
+
+
+@dataclass(frozen=True, slots=True)
+class QueryEvent:
+    """One statement the database ran, given to the hooks of :meth:`Database.on_query`."""
+
+    #: The SQL with its parameter placeholders: the statement shape, without values.
+    sql: str
+    #: When the statement started, in Unix seconds (``time.time()``).
+    start: float
+    #: How long it ran, in seconds.
+    duration: float
+    #: Rows returned, or rows affected by a statement that returns no rows.
+    rows: int
+    #: The database's error message when the statement failed.
+    error: str | None
 
 
 class Database:
@@ -29,19 +48,56 @@ class Database:
         self._engine = engine
         self.url = url
         self._registry = registry
+        self._hooks: list[Callable[[QueryEvent], object]] = []
 
     def _tx(self) -> _native.Transaction | None:
         cur = _current_tx.get()
         return cur[1] if cur is not None and cur[0] is self else None
+
+    def on_query(self, hook: Callable[[QueryEvent], object]) -> Callable[[], None]:
+        """Call ``hook(event)`` after each statement this database runs (prefetch queries
+        and ``update_many`` batches included), also when it fails. Returns a function
+        that removes the hook.
+
+        The hook runs in the task that sent the query, after the ORM call ends, so
+        context variables (a current span, a request id) are those of the caller. An
+        exception in the hook propagates to that caller.
+        """
+        self._hooks.append(hook)
+
+        def remove() -> None:
+            if hook in self._hooks:
+                self._hooks.remove(hook)
+
+        return remove
+
+    def _call(self, start: Callable[[_native.Trace | None], Awaitable[T]]) -> Awaitable[T]:
+        """``start(trace)`` starts an engine call. Without hooks or an N+1 scope the
+        engine's awaitable comes back as is, untraced."""
+        if not self._hooks and debug._scope.get() is None:
+            return start(None)
+        trace = _native.Trace()
+        return self._observe(trace, debug.capture(), start(trace))
+
+    async def _observe(self, trace: _native.Trace, origin: tuple[str, str | None] | None, call: Awaitable[T]) -> T:
+        try:
+            return await call
+        finally:
+            events = [QueryEvent(*e) for e in trace.take()]
+            if origin is not None:
+                for e in events:
+                    debug.record(e.sql, origin)
+            for hook in list(self._hooks):
+                for e in events:
+                    hook(e)
 
     async def _run(
         self, ir: dict[str, Any], params: list[Any], row_cls: type | None = None, db: Database | None = None
     ) -> Any:
         """Runs a query; instances it builds get ``db`` to write back to (``using()``)."""
         op = json.dumps(ir)
-        if debug._scope.get() is not None:
-            debug.record("run:" + op, lambda: self._registry.native().statement(op, params))
-        return await self._engine.run(op, params, self._tx(), row_cls, db, allowed_writes())
+        tx, allowed = self._tx(), allowed_writes()
+        return await self._call(lambda t: self._engine.run(op, params, tx, row_cls, db, allowed, t))
 
     async def _insert(
         self,
@@ -54,9 +110,10 @@ class Database:
         db: Database | None = None,
     ) -> list[Any]:
         set_json, params = (json.dumps(set_[0]), set_[1]) if set_ is not None else (None, [])
-        if debug._scope.get() is not None:
-            debug.record(f"insert:{model}:{fields}:{conflict}", lambda: f"INSERT INTO {model} ({', '.join(fields)}) ...")
-        return await self._engine.insert(model, fields, rows, conflict, update, set_json, params, self._tx(), db, allowed_writes())
+        tx, allowed = self._tx(), allowed_writes()
+        return await self._call(
+            lambda t: self._engine.insert(model, fields, rows, conflict, update, set_json, params, tx, db, allowed, t)
+        )
 
     async def _update_many(
         self,
@@ -70,11 +127,11 @@ class Database:
         db: Database | None = None,
         without_defaults: bool = False,
     ) -> Any:
-        if debug._scope.get() is not None:
-            debug.record(f"update_many:{model}:{fields}:{json.dumps(filters)}", lambda: f"UPDATE {model} SET {', '.join(fields)} ... (update_many)")
-        return await self._engine.update_many(
-            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx(), db, without_defaults,
-            allowed_writes(),
+        filters_json, tx, allowed = json.dumps(filters), self._tx(), allowed_writes()
+        return await self._call(
+            lambda t: self._engine.update_many(
+                model, fields, rows, filters_json, params, returning, batch_size, tx, db, without_defaults, allowed, t
+            )
         )
 
     @asynccontextmanager
@@ -121,11 +178,13 @@ class Database:
             key = 0
         if not -(2**63) <= key < 2**63:
             raise ValueError("lock key must fit in 64 bits")
-        return await self._engine.advisory_lock(int(key), name, bool(exclusive), bool(nowait), tx)
+        k = int(key)
+        return await self._call(lambda t: self._engine.advisory_lock(k, name, bool(exclusive), bool(nowait), tx, t))
 
     async def execute(self, sql: str) -> int:
         """Run raw SQL (one or more statements); returns the number of rows affected."""
-        return await self._engine.execute(sql, self._tx())
+        tx = self._tx()
+        return await self._call(lambda t: self._engine.execute(sql, tx, t))
 
     async def _fetch_text(self, sql: str) -> list[tuple[str | None, ...]]:
         return await self._engine.fetch_text(sql, self._tx())

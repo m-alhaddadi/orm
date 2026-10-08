@@ -101,15 +101,22 @@ export function relationLoad<T>(model: string, relation: string, fix: string, fn
   return hint.run({ fix: `${fix}(${model}.${relation})`, site: callSite() }, fn);
 }
 
-/** @internal Counts one query of shape `key`; `sql()` gives its SQL text when it is new. */
-export function record(key: string, sql: () => string): void {
+/** @internal Where user code sends the next queries and the fix to name; `undefined`
+ * outside a scope. Called before the engine runs them, while the caller is on the stack. */
+export function capture(): { readonly site: string; readonly fix: string | null } | undefined {
+  if (scope.getStore() === undefined) return undefined;
+  const h = hint.getStore();
+  return h ? { site: h.site, fix: h.fix } : { site: callSite(), fix: null };
+}
+
+/** @internal Counts one query of shape `sql` (the SQL with placeholders), sent at `origin`. */
+export function record(sql: string, origin: { readonly site: string; readonly fix: string | null }): void {
   const report = scope.getStore();
   if (report === undefined) return;
-  let shape = report.shapes.get(key);
+  let shape = report.shapes.get(sql);
   if (shape === undefined) {
-    const h = hint.getStore();
-    shape = { key, sql: sql(), count: 0, site: h?.site ?? callSite(), fix: h?.fix ?? null };
-    report.shapes.set(key, shape);
+    shape = { key: sql, sql, count: 0, site: origin.site, fix: origin.fix };
+    report.shapes.set(sql, shape);
   }
   shape.count++;
 }
