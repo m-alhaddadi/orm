@@ -38,7 +38,7 @@ import { NotLoaded, QueryError, TransactionRequired } from "./errors.js";
 import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
 import { DB, fieldValue, RELATED, registerQueries, type Instance, type ModelClass, type ModelMeta } from "./model.js";
 import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
-import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
+import { assignments, lookupValues, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
 import { after, decodeCursor, encodeCursor, fingerprint, keyset, type Page, type PageOptions } from "./pagination.js";
 import { allowedWrites } from "./protection.js";
 import { active as debugging, internalLoop, record, relationLoad } from "./debug.js";
@@ -49,6 +49,8 @@ import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./
 
 /** Ids per query in `inBulk()`, well below Postgres' 65535 parameters. */
 const IN_BULK_CHUNK = 10_000;
+// getOrInsert: rounds of read, then insert, before a concurrent delete wins.
+const GET_OR_INSERT_ROUNDS = 3;
 
 export type UnionToIntersection<U> = (U extends unknown ? (x: U) => void : never) extends (x: infer I) => void ? I : never;
 /** Flattens an intersection for readable hovers. */
@@ -176,6 +178,8 @@ export interface LockOptions {
 export interface ConflictOptions<M extends ModelSpec> {
   /** The column(s) of the unique constraint the rows may hit. */
   readonly onConflict: OwnColumn<M> | readonly OwnColumn<M>[];
+  /** The predicate of a partial unique index: `ON CONFLICT (...) WHERE ...`. */
+  readonly where?: Expression<boolean | null, string, unknown>;
 }
 
 /** `ON CONFLICT DO NOTHING`: keep the existing row. */
@@ -208,6 +212,19 @@ export interface DoUpdate<M extends ModelSpec> extends ConflictOptions<M> {
 }
 
 type InsertOptions<M extends ModelSpec> = DoNothing<M> | DoUpdate<M>;
+
+/** `insertMany`: rows per statement. By default as many as fit in the parameter limit;
+ * the statements run in one transaction. */
+export interface BatchOptions {
+  readonly batchSize?: number;
+}
+
+type InsertManyOptions<M extends ModelSpec> = (InsertOptions<M> & BatchOptions) | BatchOptions;
+
+/** `insertMany(rows, { copy: true })`: a Postgres `COPY`. */
+export interface CopyOptions {
+  readonly copy: true;
+}
 
 // -- prefetch -------------------------------------------------------------------------------------
 
@@ -1123,6 +1140,29 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return rows[0] ?? null;
   }
 
+  /**
+   * The row matching `lookup`, or a new row of `lookup` and `defaults`: `[row, created]`.
+   * `lookup` names the fields of one unique constraint (the database checks this). Safe
+   * under concurrency: the insert is `ON CONFLICT (lookup) DO NOTHING`, and a row that a
+   * concurrent insert wins is read back.
+   */
+  async getOrInsert(lookup: Partial<M["insert"]>, options?: { readonly defaults?: Partial<M["insert"]> }): Promise<[M["row"], boolean]> {
+    const key = lookupValues(this.meta, lookup);
+    const cols = [...key.keys()].map((f) => this.meta.column(this.meta.fieldByIr.get(f)!));
+    const values = { ...options?.defaults, ...lookup } as M["insert"];
+    for (let round = 0; round < GET_OR_INSERT_ROUNDS; round++) {
+      const found = await this.filter(...(cols.map((c) => c.eq(key.get(c.field.ir) as never)) as never[])).limit(2).fetch();
+      if (found.length) {
+        return [one(this.meta, found) as M["row"], false];
+      }
+      const row = await this.insert(values, { onConflict: cols as never, doNothing: true });
+      if (row !== null) {
+        return [row, true];
+      }
+    }
+    throw new QueryError(`getOrInsert: a ${this.meta.name} row matching the lookup was deleted concurrently ${GET_OR_INSERT_ROUNDS} times`);
+  }
+
   /** Attaches local child values to an existing parent, without a change to the parent.
    * Only composed child models accept it. */
   async attach(parentId: In<M["pk"]>, values: M extends { readonly attach: infer A extends object } ? A : never): Promise<M["row"]> {
@@ -1132,10 +1172,32 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][])[0]!;
   }
 
-  /** `INSERT` many rows with one statement; gives the new instances in input order (rows
-   * skipped by `doNothing` are left out). */
-  insertMany(rows: readonly M["insert"][], options?: InsertOptions<M>): Promise<M["row"][]> {
-    return this.insertRows(rows, options);
+  /** `INSERT` many rows; gives the new instances in input order (rows skipped by
+   * `doNothing` are left out). Rows beyond the parameter limit, or beyond `batchSize`,
+   * go to further statements in one transaction. */
+  insertMany(rows: readonly M["insert"][], options?: InsertManyOptions<M>): Promise<M["row"][]>;
+  /** `{ copy: true }`: load the rows with Postgres `COPY`, for large imports; gives the
+   * row count. No `onConflict`, no instances. */
+  insertMany(rows: readonly M["insert"][], options: CopyOptions): Promise<number>;
+  insertMany(rows: readonly M["insert"][], options?: InsertManyOptions<M> | CopyOptions): Promise<M["row"][] | number> {
+    if (options && "copy" in options && options.copy) {
+      return this.copyRows(rows, options);
+    }
+    return this.insertRows(rows, options as InsertManyOptions<M> | undefined);
+  }
+
+  /** @internal */
+  protected async copyRows(rows: readonly object[], options: CopyOptions): Promise<number> {
+    if ("onConflict" in options || "batchSize" in options) {
+      throw new TypeError("insertMany(rows, { copy: true }) can't be combined with onConflict or batchSize");
+    }
+    const prepared = prepareRows(this.meta, rows);
+    if (!prepared.rows.length) {
+      return 0;
+    }
+    const db = this.db();
+    if (debugging()) record(`copy:${this.meta.name}:${prepared.fields}`, () => `COPY ${this.meta.name} (${prepared.fields.join(", ")}) FROM STDIN (FORMAT binary)`);
+    return (await db_wait(db, (tx) => db.engine.copyInsert(this.meta.name, prepared.fields, prepared.rows, tx, allowedWrites()))) as number;
   }
 
   /**
@@ -1150,16 +1212,24 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   }
 
   /** @internal */
-  protected async insertRows(rows: readonly object[], options: InsertOptions<M> | undefined): Promise<M["row"][]> {
+  protected async insertRows(rows: readonly object[], options: InsertManyOptions<M> | undefined): Promise<M["row"][]> {
     const prepared = prepareRows(this.meta, rows);
     let conflict: string[] | null = null;
     let update: string[] | null = null;
     let set: string | null = null;
     const params: unknown[] = [];
-    if (options) {
+    let conflictWhere: string | null = null;
+    const batchSize = options?.batchSize ?? null;
+    if (batchSize !== null && !(Number.isInteger(batchSize) && batchSize >= 1)) {
+      throw new TypeError("batchSize must be an integer of at least 1");
+    }
+    if (options && "onConflict" in options) {
       conflict = ownFields(this.meta, toArray(options.onConflict), "onConflict");
       if (!conflict.length) {
         throw new TypeError("onConflict needs the column(s) of a unique constraint");
+      }
+      if (options.where !== undefined) {
+        conflictWhere = JSON.stringify(asCondition(options.where).ir(new IRContext(this.meta, params)));
       }
       if ("doNothing" in options && options.doNothing) {
         if ("doUpdate" in options || "set" in options) {
@@ -1190,7 +1260,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     const db = this.db();
     if (debugging()) record(`insert:${this.meta.name}:${prepared.fields}:${conflict}`, () => `INSERT INTO ${this.meta.name} (${prepared.fields.join(", ")}) ...`);
     const res = await db_wait(db, (tx) =>
-      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowedWrites()),
+      db.engine.insert(this.meta.name, prepared.fields, prepared.rows, conflict, update, set, params, tx, allowedWrites(), batchSize, conflictWhere),
     );
     return new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][];
   }
@@ -1415,10 +1485,27 @@ export class RelatedSet<M extends ModelSpec, L extends string = never> extends Q
   }
 
   /** Inserts related rows pointing at this instance. */
-  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: InsertOptions<M>): Promise<M["row"][]> {
+  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: InsertManyOptions<M>): Promise<M["row"][]>;
+  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options: CopyOptions): Promise<number>;
+  override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: InsertManyOptions<M> | CopyOptions): Promise<M["row"][] | number> {
     const link = this.link();
-    return this.insertRows(rows.map((r) => ({ ...r, ...link })), options);
+    const linked = rows.map((r) => ({ ...r, ...link }));
+    if (options && "copy" in options && options.copy) {
+      return this.copyRows(linked, options);
+    }
+    return this.insertRows(linked, options as InsertManyOptions<M> | undefined);
   }
+
+}
+
+/** Options of a many-to-many `add()` / `set()`. */
+export interface AddOptions {
+  /** Values of other fields of the new join rows (`{ position: 1 }`). */
+  readonly throughDefaults?: Readonly<Record<string, unknown>>;
+}
+
+function isPlainObject(x: unknown): boolean {
+  return x !== null && typeof x === "object" && Object.getPrototypeOf(x) === Object.prototype;
 }
 
 /**
@@ -1503,8 +1590,18 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     }
   }
 
-  /** Links the given instances (or keys); links that exist are left alone. */
-  async add(...objs: readonly (M["data"] | In<M["pk"]>)[]): Promise<void> {
+  /**
+   * Links the given instances (or keys); links that exist are left alone. An options
+   * object as the last argument sets other fields of the new join rows:
+   * `post.tags.add(tag, { throughDefaults: { position: 1 } })`.
+   */
+  add(...objs: readonly (M["data"] | In<M["pk"]>)[]): Promise<void>;
+  add(...args: readonly [...(M["data"] | In<M["pk"]>)[], AddOptions]): Promise<void>;
+  async add(...args: readonly unknown[]): Promise<void> {
+    const last = args.at(-1);
+    const options = isPlainObject(last) ? (last as AddOptions) : undefined;
+    const objs = options === undefined ? args : args.slice(0, -1);
+    const extra = this.throughDefaults(options?.throughDefaults);
     const keys = this.targetKeys(objs);
     if (!keys.length) {
       return;
@@ -1514,11 +1611,26 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     const have = (await this.links().filter(col.in(keys as never) as never).all()) as Record<string, unknown>[];
     const known = new Set(have.map((r) => String(r[col.field.name])));
     const source = join.fieldByIr.get(this.relation.through!.source)!.name;
-    const rows = keys.filter((k) => !known.has(String(k))).map((k) => ({ [source]: this.key(), [col.field.name]: k }));
+    const rows = keys.filter((k) => !known.has(String(k))).map((k) => ({ ...extra, [source]: this.key(), [col.field.name]: k }));
     if (rows.length) {
       await this.links().insertMany(rows as never);
     }
     this.forget();
+  }
+
+  private throughDefaults(values: Readonly<Record<string, unknown>> | undefined): Record<string, unknown> {
+    const join = this.through;
+    const keys = new Set([this.relation.through!.source, this.relation.through!.target].map((ir) => join.fieldByIr.get(ir)!.name));
+    for (const [name, rel] of join.relations) {
+      if (rel.kind === "belongsTo" && (rel.from === this.relation.through!.source || rel.from === this.relation.through!.target)) {
+        keys.add(name);
+      }
+    }
+    const bad = Object.keys(values ?? {}).filter((k) => keys.has(k)).sort();
+    if (bad.length) {
+      throw new TypeError(`throughDefaults can't set the link's key ${bad.join(", ")}`);
+    }
+    return { ...values };
   }
 
   /** Unlinks the given instances (or keys); gives the number of links removed. */
@@ -1539,11 +1651,13 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     return n;
   }
 
-  /** Makes the given instances (or keys) exactly the linked ones. */
-  async set(objs: readonly (M["data"] | In<M["pk"]>)[]): Promise<void> {
+  /** Makes the given instances (or keys) exactly the linked ones; `throughDefaults` sets
+   * other fields of the new join rows. */
+  async set(objs: readonly (M["data"] | In<M["pk"]>)[], options?: AddOptions): Promise<void> {
+    this.throughDefaults(options?.throughDefaults);
     const keys = this.targetKeys(objs);
     await this.links().filter(this.targetColumn().notIn(keys as never) as never).delete();
-    await this.add(...(keys as never[]));
+    await this.add(...(keys as never[]), { throughDefaults: options?.throughDefaults ?? {} });
   }
 
   /** Inserts a related row and links it, in one transaction. */
@@ -1560,6 +1674,11 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
       }
       return obj ?? null;
     });
+  }
+
+  /** Not supported: `getOrInsert()` on the model's query set, then `add()`. */
+  override getOrInsert(): never {
+    throw new TypeError(`${this.relation.name}.getOrInsert() isn't supported; use ${this.meta.name}.objects.getOrInsert(), then add()`);
   }
 
   /** Not supported: insert the rows, then link them with `add()`. */

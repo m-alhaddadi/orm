@@ -58,6 +58,21 @@ export function prepareRows(
   return { fields, rows: normalized.map((v) => fields.map((n) => v.get(n))), provided };
 }
 
+/** `getOrInsert`'s lookup by IR field name: plain, non-null values; a to-one relation
+ * (`author: user`) gives its key field. */
+export function lookupValues(meta: ModelMeta, lookup: object): Map<string, unknown> {
+  const values = normalize(meta, lookup, "getOrInsert", false);
+  for (const [field, value] of values) {
+    if (value === null) {
+      throw new TypeError(`getOrInsert: ${meta.name}.${meta.fieldByIr.get(field)!.name} is null; NULL never conflicts, so the row is not unique`);
+    }
+  }
+  if (!values.size) {
+    throw new TypeError("getOrInsert() needs the fields of a unique constraint");
+  }
+  return values;
+}
+
 /**
  * Validates `updateMany` rows: each has the primary key and the same fields, plain
  * values only, no primary key twice. Gives the fields (IR names, the primary key first)

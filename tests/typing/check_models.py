@@ -57,6 +57,10 @@ async def check() -> None:
     if c is not None:
         assert_type(c.author, User | None)
     assert_type(await User.objects.count(), int)
+    assert_type(await User.objects.insert_many([{"email": "a", "name": "A"}], batch_size=10), list[User])
+    assert_type(await User.objects.insert_many([{"email": "a", "name": "A"}], copy=True), int)
+    assert_type(await User.objects.get_or_insert(email="a", defaults={"name": "A"}), tuple[User, bool])
+    await User.objects.insert(email="a", name="A").on_conflict(User.email, where=User.name == "A").do_nothing()
     async for p in Post.objects.order_by(Post.created_at.desc())[:10]:
         assert_type(p, Post)
     assert_type(-Post.created_at, Ordering)

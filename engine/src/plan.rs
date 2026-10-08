@@ -2297,13 +2297,16 @@ fn no_lock(q: &Select, what: &str) -> Result<()> {
 }
 
 /// What an insert does with rows that hit a unique constraint.
+///
+/// The optional condition is `ON CONFLICT (<fields>) WHERE <condition>`: the predicate of
+/// a partial unique index, which the database needs to pick that index.
 pub enum OnConflict {
     /// `ON CONFLICT (<fields>) DO NOTHING`: such rows are skipped (and not returned).
-    Nothing(Vec<String>),
+    Nothing(Vec<String>, Option<Expr>),
     /// `ON CONFLICT (<fields>) DO UPDATE SET <col> = EXCLUDED.<col>, ..., <field> = <expr>, ...`.
     /// The expressions see the existing row as the model's columns and the proposed
     /// row as `EXCLUDED`; their parameters are the ones passed to `plan_insert`.
-    Update(Vec<String>, Vec<String>, Vec<Assignment>),
+    Update(Vec<String>, Option<Expr>, Vec<String>, Vec<Assignment>),
 }
 
 /// `INSERT INTO <table> (<fields>) VALUES ... [ON CONFLICT ...] RETURNING <all columns>`.
@@ -2388,13 +2391,23 @@ pub fn plan_insert(
                 })
                 .collect()
         };
+        let index_where = |filter: Option<Expr>| -> Result<Option<SExpr>> {
+            let Some(filter) = filter else { return Ok(None) };
+            let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
+            Ok(Some(planner.cond(&filter)?))
+        };
         let clause = match oc {
-            OnConflict::Nothing(conflict) => sea_query::OnConflict::columns(columns(&conflict)?).do_nothing().to_owned(),
-            OnConflict::Update(conflict, update, set) => {
+            OnConflict::Nothing(conflict, filter) => {
+                let mut clause = sea_query::OnConflict::columns(columns(&conflict)?);
+                clause.target_and_where_option(index_where(filter)?);
+                clause.do_nothing().to_owned()
+            }
+            OnConflict::Update(conflict, filter, update, set) => {
                 if update.is_empty() && set.is_empty() {
                     return Err(Error::query("on_conflict(...).do_update() has no columns to update"));
                 }
                 let mut clause = sea_query::OnConflict::columns(columns(&conflict)?);
+                clause.target_and_where_option(index_where(filter)?);
                 clause.update_columns(columns(&update)?);
                 let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
                 planner.allow_excluded = true;

@@ -164,7 +164,10 @@ separate calls are independent. `exclude()` is `NOT EXISTS`.
 
 Related sets: `await user.posts`, `.filter()`, `.count()`, and `.insert({...})`, where the
 key is filled in. Many-to-many sets also have `post.tags.add(tag, ...)`, `.remove()`,
-`.clear()` and `.set([...])`.
+`.clear()` and `.set([...])`. An options object as the last argument of `add()` (or
+the second argument of `set()`) gives other fields of the new join rows:
+`post.tags.add(tag, { throughDefaults: { position: 1 } })`. Existing links keep their
+values.
 
 ### Prepared queries
 
@@ -238,6 +241,19 @@ Writes run when they are called and return a `Promise`:
   `null` with `doNothing`). `insertMany(rows, ...)` is the bulk version. A field left
   out gets its `@client_default` (filled natively, as in Python), else the database
   default; an explicit value, also `null`, wins.
+* `{ onConflict: [...], where: cond }` picks a partial unique index:
+  `ON CONFLICT (...) WHERE cond`. The condition must match the index predicate
+  without parameters (`Task.deletedAt.isNull()`, a boolean column).
+* `insertMany(rows, { copy: true })` loads the rows with Postgres `COPY` (binary) and
+  gives the row count. A duplicate key stops the whole load. A field must be set in
+  every row or in none. `onConflict`, `batchSize` and SQLite are rejected.
+* `getOrInsert(lookup, { defaults })` gives `[row, created]`: the row that matches
+  `lookup`, or a new row of `lookup` and `defaults`. The insert is
+  `ON CONFLICT (lookup) DO NOTHING`, so concurrent calls give one row. The lookup
+  fields must be the fields of one unique constraint; a `null` lookup value throws.
+* `insertMany` splits the rows so that no statement has more parameters than the
+  database accepts (65,535 on Postgres, 32,766 on SQLite). `{ batchSize: n }` sets a
+  lower number of rows for each statement. All the statements run in one transaction.
 * `qs.update({...}, { returning })` gives a count, or the rows when `returning` is set.
 * `qs.delete()`.
 * `updateMany(rows, { batchSize, returning })` does a bulk update by primary key with

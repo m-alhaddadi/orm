@@ -330,8 +330,11 @@ impl Engine {
     /// With `conflict` (unique field names) rows hitting that constraint update the
     /// `update` fields from the new row and apply the `set` assignments (JSON list of
     /// `{"field", "value"}` IR, parameters in `params`), or are skipped if `update` is
-    /// None.
-    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![]))]
+    /// None. `conflict_where` (condition IR, parameters in `params`) is the predicate of a
+    /// partial unique index.
+    /// Rows beyond the parameter limit, or beyond `batch_size`, go to further statements
+    /// in one transaction (inside `tx` when given).
+    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![], batch_size = None, conflict_where = None))]
     #[allow(clippy::too_many_arguments)]
     fn insert<'py>(
         &self,
@@ -346,27 +349,54 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
         db: Option<Bound<'py, PyAny>>,
         allowed: Vec<String>,
+        batch_size: Option<usize>,
+        conflict_where: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
             Some(json) => serde_json::from_str(json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
             None => vec![],
         };
+        let filter: Option<ir::Expr> = match conflict_where {
+            Some(json) => Some(serde_json::from_str(json).map_err(|e| query_err(format!("invalid condition IR: {e}")))?),
+            None => None,
+        };
         let conflict = conflict.map(|target| match update {
-            Some(update) => Conflict::Update { target, update, set },
-            None => Conflict::Nothing { target },
+            Some(update) => Conflict::Update { target, filter, update, set },
+            None => Conflict::Nothing { target, filter },
         });
         let values = convert_rows(&self.schema, model, &fields, rows, true)?;
-        let plan = exec::plan_insert(&self.schema, self.target, model, &fields, values, conflict, &PyParams(&params))
-            .map_err(engine_err)?;
+        let plans =
+            exec::plan_inserts(&self.schema, self.target, model, &fields, values, conflict, &PyParams(&params), batch_size)
+                .map_err(engine_err)?;
         let target = self.target;
         let conn = self.conn(tx);
+        let own_tx = tx.is_none();
         let classes = self.classes.clone();
         let db = db.map(Bound::unbind);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let out = exec::run(conn.as_ref(), target, plan).await.map_err(engine_err)?;
+            let out = exec::run_inserts(conn.as_ref(), target, plans, own_tx).await.map_err(engine_err)?;
             Python::attach(|py| outcome_to_py(py, out, &classes, db, None))
         })
+    }
+
+    /// Bulk load with Postgres `COPY` (`insert_many(rows, copy=True)`); returns the number
+    /// of rows written. `rows` are sequences aligned with `fields`.
+    #[pyo3(signature = (model, fields, rows, tx = None, allowed = vec![]))]
+    fn copy_insert<'py>(
+        &self,
+        py: Python<'py>,
+        model: &str,
+        fields: Vec<String>,
+        rows: &Bound<'py, PyList>,
+        tx: Option<&Bound<'py, Transaction>>,
+        allowed: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
+        let values = convert_rows(&self.schema, model, &fields, rows, true)?;
+        let copy = exec::plan_copy(&self.schema, self.target, model, &fields, values).map_err(engine_err)?;
+        let conn = self.conn(tx);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { exec::run_copy(conn.as_ref(), copy).await.map_err(engine_err) })
     }
 
     /// Attach local values to an existing shared-key parent.

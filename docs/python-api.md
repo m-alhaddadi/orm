@@ -180,6 +180,7 @@ await User.objects.filter(User.profile.role == Role.admin)  # EXISTS, like any r
 # Many-to-many (`tags Tag[] @relation(through: PostTag)`)
 await post.tags                                     # list[Tag]
 await post.tags.add(news, rust)                     # inserts PostTag rows (existing links are kept)
+await post.tags.add(news, through_defaults={"position": 1})  # other fields of the new PostTag rows
 await post.tags.remove(news)                        # deletes them; returns how many
 await post.tags.set([news, py])                     # exactly these
 await post.tags.clear()
@@ -199,8 +200,10 @@ await Tag.objects.prefetch_related(Tag.posts.author)
 * `post.tags` is a `ManyRelatedSet`: a query set over the post's tags (filter, order,
   count, ...) that reads prefetched rows when unchanged, like `user.posts`. `add()`,
   `remove()`, `set()` take instances or keys. Changing the links drops the prefetched
-  rows. The join model stays an ordinary model for anything else (extra columns,
-  bulk inserts: `await PostTag.objects.insert_many(...)`).
+  rows. `add()` and `set()` take `through_defaults={...}`: values of the join model's
+  other fields in the new join rows. Existing links keep their values, and the link's
+  key fields can't be set this way. The join model stays an ordinary model for
+  anything else (bulk inserts: `await PostTag.objects.insert_many(...)`).
 * Prefetching selects the join row's key next to each tag, so a tag linked to two posts
   comes back once per post. `Prefetch(Post.tags, Tag.objects...[:3])` slices per post.
 
@@ -515,7 +518,7 @@ constructed. Every write is a statement you await, named after its SQL:
 ```python
 # INSERT ... RETURNING: the instance comes back with id, defaults, timestamps
 alice = await User.objects.insert(email="a@x.io", name="Alice")
-posts = await Post.objects.insert_many([          # one statement for all rows
+posts = await Post.objects.insert_many([          # one statement per batch
     {"author": alice, "title": "Hi", "body": "..."},
     {"author_id": alice.id, "title": "Yo", "body": "...", "views": 3},
 ])
@@ -527,6 +530,9 @@ maybe = await User.objects.insert(email="a@x.io", name="Al").on_conflict(User.em
 await User.objects.insert_many(rows).on_conflict(User.email).do_update(User.name)
 # ... with expressions: the existing row is `Post.<col>`, the proposed one `excluded(Post.<col>)`
 await Post.objects.insert_many(rows).on_conflict(Post.slug).do_update(views=Post.views + excluded(Post.views))
+
+# Read, or insert when missing: (row, created). The lookup is one unique constraint.
+user, created = await User.objects.get_or_insert(email="a@x.io", defaults={"name": "Al"})
 
 # UPDATE / DELETE over a query: set-based, returns the row count
 await Post.objects.filter(Post.author.name == "Alice").update(views=Post.views + 1)
@@ -549,6 +555,32 @@ await post.refresh()
   required fields raise before any SQL runs. Fields left out get their
   `@client_default`, else the column's database default (`DEFAULT` in the VALUES
   list), and `RETURNING` reads them back.
+* `insert_many(rows)` splits the rows so that no statement has more parameters than
+  the database accepts (65,535 on Postgres, 32,766 on SQLite).
+  `insert_many(rows, batch_size=n)` sets a lower number of rows for each statement.
+  All the statements run in one transaction (or in the current one).
+* `insert_many(rows, copy=True)` loads the rows with Postgres
+  `COPY ... FROM STDIN (FORMAT binary)`, for large imports. `await` gives the row
+  count, not instances. It is one statement: a duplicate key stops the whole load and
+  no row is written. Client defaults fill values first; a field must be set in every
+  row or in none, because COPY has no per-row `DEFAULT`. `on_conflict()`,
+  `batch_size`, SQLite, composed models, models with native write behavior and fields
+  that write through an SQL template (other than enums) raise.
+  `bench/copy_insert.py` compares it with `insert_many(rows)`: 200,000 posts in 1.6 s
+  against 3.2 s (measured once on a loaded machine; the batched insert also builds
+  the instances).
+* `on_conflict(*columns, where=cond)` picks a partial unique index:
+  `.on_conflict(Task.shop, Task.task_type, where=Task.deleted_at.is_null())` gives
+  `ON CONFLICT (shop, task_type) WHERE deleted_at IS NULL`. Postgres uses the
+  condition to find the index, so it must match the index predicate without
+  parameters (`is_null()`, a boolean column); a compared value is a parameter and
+  Postgres cannot match it.
+* `get_or_insert(defaults=..., **lookup)` reads the row that matches `lookup`.
+  When there is none, it inserts `lookup` and `defaults` with
+  `ON CONFLICT (lookup) DO NOTHING`, and reads again when a concurrent insert wins.
+  So concurrent calls give one row, and exactly one call gets `created=True`.
+  The lookup fields must be the fields of one unique constraint; Postgres raises
+  otherwise. A `None` lookup value raises, because `NULL` never conflicts.
 * `do_update()` with no columns overwrites the fields you passed except the conflict
   columns, so `created_at` isn't reset to `now()`. Pass columns to choose them.
 * `do_update(*columns, **values)`: `columns` take the proposed values, `values` are

@@ -50,7 +50,7 @@ from .protection import allow_writes
 from .query import ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet
 from .cte import Cte, CteColumn
 from .select import Row, Select
-from .write import Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update, UpdateMany
+from .write import CopyInsert, Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update, UpdateMany
 
 __all__ = [
     "debug",
@@ -77,6 +77,7 @@ __all__ = [
     "Row",
     "InsertOne",
     "InsertMany",
+    "CopyInsert",
     "OnConflictOne",
     "OnConflictMany",
     "Update",

@@ -61,7 +61,7 @@ async fn exercise(url: &str, dialect: Dialect) {
     // Upsert: the proposed row gets a new client default too.
     let first = text(rows.cell(1, 1, types[1]).unwrap());
     let statement = insert(&["id"], vec![vec![Some(Value::Uuid(Some(explicit.parse().unwrap())))]],
-        Some(Conflict::Update { target: vec!["id".into()], update: vec!["token".into()], set: vec![] }));
+        Some(Conflict::Update { target: vec!["id".into()], filter: None, update: vec!["token".into()], set: vec![] }));
     let Outcome::Rows { rows, .. } = exec::run(conn.as_ref(), target, statement).await.unwrap() else { panic!() };
     assert_eq!(rows.len(), 1);
     assert_ne!(text(rows.cell(0, 1, types[1]).unwrap()), first);

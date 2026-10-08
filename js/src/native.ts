@@ -101,7 +101,10 @@ export interface NativeEngine {
     params: unknown[],
     tx: NativeTransaction | null,
     allowed?: readonly string[],
+    batchSize?: number | null,
+    conflictWhere?: string | null,
   ): Promise<unknown>;
+  copyInsert(model: string, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<number>;
   attach(model: string, parentId: unknown, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<unknown>;
   updateMany(
     model: string,

@@ -830,7 +830,7 @@ pub struct Lock {
     pub skip_locked: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Assignment {
     pub field: String,
     pub value: Expr,
