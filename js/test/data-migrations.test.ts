@@ -233,3 +233,16 @@ test("npx orm migrate needs no schema file and skips applied data steps", () => 
   assert.equal(done.status, 0, done.stderr);
   assert.deepEqual(done.stdout.trim().split("\n"), ["Applied 0003_new"]);
 });
+
+test("npx orm migrate with a data step and no database is a usage error", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orm-data-cli-"));
+  const schema = join(dir, "schema.prisma");
+  const migrations = new Migrations(join(dir, "migrations"), schema);
+  writeFileSync(schema, V1);
+  migrations.make();
+  dataMigration(migrations, "0002_step", "data.ts", "export async function run() {}\n");
+  const env = { ...process.env, ORM_DATABASE_URL: "" };
+  const done = spawnSync(process.execPath, [CLI, "--schema", "schema.prisma", "--dir", "migrations", "migrate"], { cwd: dir, env, encoding: "utf8" });
+  assert.equal(done.status, 2, done.stderr);
+  assert.ok(done.stderr.includes("no database"), done.stderr);
+});

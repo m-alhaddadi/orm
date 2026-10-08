@@ -1000,7 +1000,7 @@ Rust took these from ~2.3 / ~4.3 ms, below the Phase 0 prototype's 2.5 / 4.7 ms
    `IF NOT EXISTS` DDL). Evolving databases use migrations: see [`schema.md`](schema.md).
    An existing database is adopted with `await orm.migrations.pull(db)` (its schema file),
    `Migrator.baseline()` and `Migrator.drift()`
-   (see [`schema.md`](schema.md#adopting-a-live-database-pull-baseline-drift)).
+   (see [`schema.md`](schema.md#pull-baseline-and-drift-a-live-database-under-migrations)).
    A migration may hold a `data.py` with `async def run(db)`, run by `Migrator.upgrade()`
    and `python -m orm migrate` in the migration's transaction
    (see [`schema.md`](schema.md#data-migrations)).

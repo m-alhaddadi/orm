@@ -110,6 +110,7 @@ already does.
 | `posts: Post[] @relation(via: Post.author_id)` | `posts Post[]` | native |
 | two relations between the same models | `@relation("name", ...)` on both sides | native |
 | `deferrable: deferred` | `@relation(..., deferrable: deferred)` | ours |
+| foreign-key name | `@relation(..., map: "fk_name")` | native |
 
 ### Model attributes
 
@@ -335,9 +336,9 @@ The migrator stays ours, in Rust (`core/src/migrate/`), and reads only our IR, s
 handles triggers, checks, exclusions and functions like any other object. Prisma's
 engine code is a reference, not a dependency:
 
-* Live-database introspection (drift detection, adopting an existing database) is to
-  be written against `pg_catalog`, including `pg_trigger`, `pg_proc`, `pg_constraint`
-  and `pg_policy`. `schema-engine/sql-schema-describer/src/postgres.rs` in
+* Live-database introspection (`orm pull`, drift detection) is ours too, in
+  `engine/src/introspect.rs`: it reads `pg_catalog`, including `pg_trigger` and
+  `pg_proc`. `schema-engine/sql-schema-describer/src/postgres.rs` in
   `prisma/prisma-engines` (Apache-2.0) shows the catalog queries, but the crate itself
   depends on Prisma's `psl` and `quaint`, does not read triggers, and keeps only the
   names of check constraints.

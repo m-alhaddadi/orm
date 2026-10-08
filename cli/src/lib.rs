@@ -26,7 +26,7 @@
 //!
 //! Output goes to the process's stdout and stderr. Exit codes: 0 success, 1 failure
 //! (an invalid schema, a migration error, a database error, `makemigrations --check`
-//! finding changes), 2 bad usage.
+//! finding changes, `drift` finding differences), 2 bad usage.
 
 use std::path::{Path, PathBuf};
 
@@ -78,7 +78,7 @@ const COMMANDS: &str = "  identities [--rename Old=New] [--restore Model]\n     
   showmigrations                           list migrations and whether they are applied
   pull [-o FILE] [--force]                 write the schema file from the live database
   baseline                                 make the first migration if there is none and mark
-                                           it applied without running it (after pull)
+                                           it applied; it does not run (after pull)
   drift                                    compare the database with the last migration's
                                            snapshot; exit 1 if they differ
 

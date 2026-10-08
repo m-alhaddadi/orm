@@ -13,10 +13,11 @@ the newest ``snapshot.json``, so it needs no database. The SQL is plain DDL and 
 edited before it is applied. Applying and reverting (``engine/src/migrate.rs``) records
 each migration with a checksum in the ``orm_migrations`` table and refuses to continue
 if an applied file changed. Both are the same Rust code the ``orm`` command line and the
-TypeScript package run, so every tool writes and applies the same files.
+TypeScript package run, so every tool writes and applies the same files. A migration
+may also hold a data step (``data.py`` or ``data.ts``), which only its own host runs.
 
-Adopting a live database: :func:`pull` writes its schema file, :meth:`Migrator.baseline`
-marks the first migration as applied without running it, and :meth:`Migrator.drift`
+A live database under migrations: :func:`pull` writes its schema file, :meth:`Migrator.baseline`
+marks the first migration as applied (it does not run it), and :meth:`Migrator.drift`
 compares the database with the newest migration's snapshot.
 
 From the command line: ``python -m orm makemigrations / migrate / rollback /
@@ -318,7 +319,7 @@ class Migrator:
         return Drift(migration, [Step(*step) for step in steps], gaps)
 
     async def baseline(self) -> Migration:
-        """Marks the first migration as applied without running it, for a database that
+        """Marks the first migration as applied and does not run it, for a database that
         already has the schema (after :func:`pull`). Writes the first migration from the
         schema when the directory has none. Fails once any migration is applied."""
         if not self.migrations.all():

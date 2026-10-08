@@ -14,7 +14,7 @@ unsupported trigger/index features fail validation. Generated/computed columns
 remain out of scope.
 
 Future work: reduce migrations from rebuilding every managed table to rebuilding
-only affected tables, and add introspection/drift detection. Current migrations
+only affected tables. `orm pull` and drift detection read SQLite too. Current migrations
 preserve rename hints and AUTOINCREMENT counters, validate foreign keys, roll back
 failures and reject unmanaged indexes/triggers before dropping tables. SQLite
 snapshots are version 2, PostgreSQL snapshots stay version 1, and cross-dialect

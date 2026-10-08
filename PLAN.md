@@ -337,8 +337,7 @@ in [docs/schema.md](docs/schema.md#sqlite).
 
 ### Later
 
-More databases (a dialect + a driver each), introspection / drift
-detection. Unscheduled improvements are listed in [`ROADMAP.md`](ROADMAP.md).
+More databases (a dialect + a driver each). Unscheduled improvements are listed in [`ROADMAP.md`](ROADMAP.md).
 
 ---
 

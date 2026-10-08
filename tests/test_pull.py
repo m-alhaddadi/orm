@@ -270,13 +270,15 @@ async def test_drift_after_an_enum_value_recreates_the_columns(tmp_path):
 
 async def test_pull_without_create_writes_the_schema(tmp_path):
     db = await fresh("CREATE TABLE t (id bigint PRIMARY KEY);")
+    # roles are global to the server: one per test database
+    role = f"orm_pull_reader_{PULL_DB}"
     try:
         await db.execute(
-            "DROP ROLE IF EXISTS orm_pull_reader; CREATE ROLE orm_pull_reader LOGIN PASSWORD 'r';"
-            f"REVOKE CREATE ON DATABASE \"{PULL_DB}\" FROM PUBLIC; GRANT USAGE ON SCHEMA public TO orm_pull_reader;"
-            "GRANT SELECT ON ALL TABLES IN SCHEMA public TO orm_pull_reader"
+            f"DROP ROLE IF EXISTS {role}; CREATE ROLE {role} LOGIN PASSWORD 'r';"
+            f"REVOKE CREATE ON DATABASE \"{PULL_DB}\" FROM PUBLIC; GRANT USAGE ON SCHEMA public TO {role};"
+            f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO {role}"
         )
-        url = urlunsplit(_url._replace(path="/" + PULL_DB, netloc=f"orm_pull_reader:r@{_url.hostname}:{_url.port}"))
+        url = urlunsplit(_url._replace(path="/" + PULL_DB, netloc=f"{role}:r@{_url.netloc.rsplit('@', 1)[-1]}"))
         reader = await orm.connect(url, max_connections=1, default=False, registry=Registry())
         try:
             pulled = await pull(reader)
@@ -286,7 +288,7 @@ async def test_pull_without_create_writes_the_schema(tmp_path):
         assert any(g.startswith("the schema was not checked against the database") for g in pulled.gaps)
 
         # baseline marks the migration; a drift check it cannot run is a warning
-        await db.execute("GRANT CREATE ON SCHEMA public TO orm_pull_reader")
+        await db.execute(f"GRANT CREATE ON SCHEMA public TO {role}")
         pulled.write(tmp_path / "schema.prisma")
         env = {**os.environ, "ORM_DATABASE_URL": url}
         done = subprocess.run(
@@ -298,7 +300,7 @@ async def test_pull_without_create_writes_the_schema(tmp_path):
     finally:
         await db.execute(
             f"GRANT CREATE ON DATABASE \"{PULL_DB}\" TO PUBLIC; DROP TABLE IF EXISTS orm_migrations;"
-            "DROP OWNED BY orm_pull_reader; DROP ROLE orm_pull_reader"
+            f"DROP OWNED BY {role}; DROP ROLE {role}"
         )
         await db.close()
 

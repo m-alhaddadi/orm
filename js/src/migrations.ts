@@ -1,7 +1,8 @@
 /**
  * Migrations: generated from the schema file, stored as SQL, applied in order. The same
  * files and bookkeeping as the Python package (`orm_migrations`, SHA-256 checksums of
- * `up.sql`), so either can manage a database.
+ * `up.sql`), so either can manage a database; a migration with a `data.py` needs Python,
+ * one with a `data.ts` needs this package.
  *
  * ```
  * migrations/
@@ -17,8 +18,8 @@
  * continue if an applied file changed. Both are the Rust code the `orm` command line and
  * the Python package run too.
  *
- * Adopting a live database: `pull()` writes its schema file, `Migrator.baseline()` marks
- * the first migration as applied without running it, and `Migrator.drift()` compares
+ * A live database under migrations: `pull()` writes its schema file, `Migrator.baseline()` marks
+ * the first migration as applied (it does not run it), and `Migrator.drift()` compares
  * the database with the newest migration's snapshot.
  */
 
@@ -299,7 +300,7 @@ export class Migrator {
     return JSON.parse(await wait(() => this.db.engine.migrationDrift(this.dir))) as Drift;
   }
 
-  /** Marks the first migration as applied without running it, for a database that
+  /** Marks the first migration as applied and does not run it, for a database that
    * already has the schema (after `pull()`). Writes the first migration from the schema
    * when the directory has none. Fails once any migration is applied. */
   async baseline(): Promise<Migration> {
