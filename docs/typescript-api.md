@@ -256,6 +256,12 @@ when it throws. The current transaction follows the async call chain through
 `AsyncLocalStorage`, so queries inside it need no handle. Nested calls are savepoints.
 A transaction that is never finished is rolled back when it is garbage-collected.
 
+`await db.onCommit(fn)` calls `fn()` after the outermost transaction on `db` commits, and awaits a promise result.
+A rollback drops the callback. A rolled-back savepoint drops only the callbacks registered inside it.
+Outside a transaction, `fn()` runs at once.
+Callbacks run in registration order, outside the transaction.
+An error in a callback rejects the `transaction()` promise, and the later callbacks do not run; the transaction is already committed.
+
 ### Protected writes
 
 `@@protected_write` is an application-level check in the ORM. It does not protect the database.

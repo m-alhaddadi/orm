@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any
@@ -20,6 +21,8 @@ _default: Database | None = None
 _current_tx: ContextVar[tuple[Database, _native.Transaction] | None] = ContextVar(
     "orm_current_tx", default=None
 )
+# For each database with an open transaction: the on_commit callbacks of the innermost one.
+_callbacks: ContextVar[dict[Database, list[Callable[[], Any]]]] = ContextVar("orm_on_commit", default={})
 
 
 class Database:
@@ -84,16 +87,49 @@ class Database:
         Queries on this database inside the block (in this task, and in tasks it starts)
         run in the transaction. Nested blocks use savepoints.
         """
+        outer = self._tx() is None
         tx = await self._engine.begin(self._tx())
         token = _current_tx.set((self, tx))
+        callbacks, cb_token = self._collect_callbacks()
         try:
             yield
         except BaseException:
+            _callbacks.reset(cb_token)
             _current_tx.reset(token)
             await tx.rollback()
             raise
+        _callbacks.reset(cb_token)
         _current_tx.reset(token)
         await tx.commit()
+        await self._after_commit(callbacks, outer)
+
+    def _collect_callbacks(self) -> tuple[list[Callable[[], Any]], Any]:
+        callbacks: list[Callable[[], Any]] = []
+        return callbacks, _callbacks.set({**_callbacks.get(), self: callbacks})
+
+    async def _after_commit(self, callbacks: list[Callable[[], Any]], outer: bool) -> None:
+        """A released savepoint hands its callbacks to the enclosing transaction."""
+        if not outer:
+            _callbacks.get()[self].extend(callbacks)
+            return
+        for fn in callbacks:
+            result = fn()
+            if inspect.isawaitable(result):
+                await result
+
+    async def on_commit(self, fn: Callable[[], Awaitable[Any] | Any]) -> None:
+        """Call ``fn()`` after the outermost transaction on this database commits; a
+        rollback drops it (a rolled-back savepoint drops only the callbacks registered
+        inside it). Outside a transaction, ``fn()`` runs at once. An awaitable result is
+        awaited. Callbacks run in order, outside the transaction; an error in one goes to
+        the caller of ``transaction()`` and the later ones do not run."""
+        callbacks = _callbacks.get().get(self)
+        if callbacks is not None and self._tx() is not None:
+            callbacks.append(fn)
+            return
+        result = fn()
+        if inspect.isawaitable(result):
+            await result
 
     async def lock(self, key: int | str, exclusive: bool = True, *, nowait: bool = False) -> bool:
         """Take an advisory lock on ``key`` until the transaction ends: a lock on a

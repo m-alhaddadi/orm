@@ -13,6 +13,8 @@ let defaultDb: Database | undefined;
 
 /** The innermost open transaction of the current async context, and its database. */
 const current = new AsyncLocalStorage<{ readonly db: Database; readonly tx: NativeTransaction }>();
+/** For each database with an open transaction: the onCommit callbacks of the innermost one. */
+const callbacks = new AsyncLocalStorage<ReadonlyMap<Database, (() => unknown)[]>>();
 
 export interface LockOptions {
   /** A shared lock (any number of shared holders, but no exclusive one). */
@@ -53,16 +55,47 @@ export class Database {
    * run in the transaction. Nested calls use savepoints. Gives what `fn` gives.
    */
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    const outer = this.tx() === null;
     const tx = await wait(() => this.engine.begin(this.tx()));
+    const mine: (() => unknown)[] = [];
+    const scoped = new Map(callbacks.getStore() ?? []).set(this, mine);
     let result: T;
     try {
-      result = await current.run({ db: this, tx }, fn);
+      result = await current.run({ db: this, tx }, () => callbacks.run(scoped, fn));
     } catch (e) {
       await wait(() => tx.rollback());
       throw e;
     }
     await wait(() => tx.commit());
+    await this.afterCommit(mine, outer);
     return result;
+  }
+
+  /** A released savepoint hands its callbacks to the enclosing transaction. */
+  private async afterCommit(mine: readonly (() => unknown)[], outer: boolean): Promise<void> {
+    if (!outer) {
+      callbacks.getStore()!.get(this)!.push(...mine);
+      return;
+    }
+    for (const fn of mine) {
+      await fn();
+    }
+  }
+
+  /**
+   * Calls `fn()` after the outermost transaction on this database commits; a rollback
+   * drops it (a rolled-back savepoint drops only the callbacks registered inside it).
+   * Outside a transaction, `fn()` runs at once. A promise result is awaited. Callbacks
+   * run in order, outside the transaction; an error in one goes to the caller of
+   * `transaction()` and the later ones do not run.
+   */
+  async onCommit(fn: () => unknown): Promise<void> {
+    const mine = callbacks.getStore()?.get(this);
+    if (mine !== undefined && this.tx() !== null) {
+      mine.push(fn);
+      return;
+    }
+    await fn();
   }
 
   /**

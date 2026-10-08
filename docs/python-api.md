@@ -594,6 +594,18 @@ async with db.transaction():          # commit on success, rollback on exception
 The current transaction lives in a `ContextVar`, so queries inside the block use it
 without passing it around. Tasks started inside the block inherit it.
 
+```python
+async with db.transaction():
+    order = await Order.objects.insert(...)
+    await db.on_commit(lambda: send_receipt.delay(order.id))   # after COMMIT only
+```
+
+`await db.on_commit(fn)` calls `fn()` after the outermost transaction on `db` commits, and awaits the result when it is awaitable.
+A rollback drops the callback. A rolled-back savepoint drops only the callbacks registered inside it.
+Outside a transaction, `fn()` runs at once.
+Callbacks run in registration order, outside the transaction.
+An error in a callback goes to the caller of `transaction()`, and the later callbacks do not run; the transaction is already committed.
+
 ### Protected writes
 
 `@@protected_write` is an application-level check in the ORM. It does not protect the database.
