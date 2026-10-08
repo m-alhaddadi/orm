@@ -1456,6 +1456,16 @@ export class RelatedSet<M extends ModelSpec, L extends string = never> extends Q
   }
 }
 
+/** Options of a many-to-many `add()` / `set()`. */
+export interface AddOptions {
+  /** Values of other fields of the new join rows (`{ position: 1 }`). */
+  readonly throughDefaults?: Readonly<Record<string, unknown>>;
+}
+
+function isPlainObject(x: unknown): boolean {
+  return x !== null && typeof x === "object" && Object.getPrototypeOf(x) === Object.prototype;
+}
+
 /**
  * `post.tags`: the rows a many-to-many relation links to one instance: a query set over
  * the related model (through the join model) that also changes the links: `add()`,
@@ -1534,8 +1544,18 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     }
   }
 
-  /** Links the given instances (or keys); links that exist are left alone. */
-  async add(...objs: readonly (M["data"] | In<M["pk"]>)[]): Promise<void> {
+  /**
+   * Links the given instances (or keys); links that exist are left alone. An options
+   * object as the last argument sets other fields of the new join rows:
+   * `post.tags.add(tag, { throughDefaults: { position: 1 } })`.
+   */
+  add(...objs: readonly (M["data"] | In<M["pk"]>)[]): Promise<void>;
+  add(...args: readonly [...(M["data"] | In<M["pk"]>)[], AddOptions]): Promise<void>;
+  async add(...args: readonly unknown[]): Promise<void> {
+    const last = args.at(-1);
+    const options = isPlainObject(last) ? (last as AddOptions) : undefined;
+    const objs = options === undefined ? args : args.slice(0, -1);
+    const extra = this.throughDefaults(options?.throughDefaults);
     const keys = this.targetKeys(objs);
     if (!keys.length) {
       return;
@@ -1545,11 +1565,26 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     const have = (await this.links().filter(col.in(keys as never) as never).all()) as Record<string, unknown>[];
     const known = new Set(have.map((r) => String(r[col.field.name])));
     const source = join.fieldByIr.get(this.relation.through!.source)!.name;
-    const rows = keys.filter((k) => !known.has(String(k))).map((k) => ({ [source]: this.key(), [col.field.name]: k }));
+    const rows = keys.filter((k) => !known.has(String(k))).map((k) => ({ ...extra, [source]: this.key(), [col.field.name]: k }));
     if (rows.length) {
       await this.links().insertMany(rows as never);
     }
     this.forget();
+  }
+
+  private throughDefaults(values: Readonly<Record<string, unknown>> | undefined): Record<string, unknown> {
+    const join = this.through;
+    const keys = new Set([this.relation.through!.source, this.relation.through!.target].map((ir) => join.fieldByIr.get(ir)!.name));
+    for (const [name, rel] of join.relations) {
+      if (rel.kind === "belongsTo" && (rel.from === this.relation.through!.source || rel.from === this.relation.through!.target)) {
+        keys.add(name);
+      }
+    }
+    const bad = Object.keys(values ?? {}).filter((k) => keys.has(k)).sort();
+    if (bad.length) {
+      throw new TypeError(`throughDefaults can't set the link's key ${bad.join(", ")}`);
+    }
+    return { ...values };
   }
 
   /** Unlinks the given instances (or keys); gives the number of links removed. */
@@ -1570,11 +1605,13 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     return n;
   }
 
-  /** Makes the given instances (or keys) exactly the linked ones. */
-  async set(objs: readonly (M["data"] | In<M["pk"]>)[]): Promise<void> {
+  /** Makes the given instances (or keys) exactly the linked ones; `throughDefaults` sets
+   * other fields of the new join rows. */
+  async set(objs: readonly (M["data"] | In<M["pk"]>)[], options?: AddOptions): Promise<void> {
+    this.throughDefaults(options?.throughDefaults);
     const keys = this.targetKeys(objs);
     await this.links().filter(this.targetColumn().notIn(keys as never) as never).delete();
-    await this.add(...(keys as never[]));
+    await this.add(...(keys as never[]), { throughDefaults: options?.throughDefaults ?? {} });
   }
 
   /** Inserts a related row and links it, in one transaction. */

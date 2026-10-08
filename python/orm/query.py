@@ -27,7 +27,7 @@ from .expr import (
     not_,
 )
 from . import pagination
-from .fields import HasMany, ManyToMany
+from .fields import BelongsTo, HasMany, ManyToMany
 from .pagination import Page
 from .protection import allowed_writes
 from . import debug
@@ -1073,17 +1073,32 @@ class ManyRelatedSet(QuerySet[M]):
         # prefetched rows no longer match the links
         self._instance.__dict__.pop(self._relation.name, None)
 
-    async def add(self, *objs: Any) -> None:
-        """Link the given instances (or keys); links that exist are left alone."""
+    async def add(self, *objs: Any, through_defaults: Mapping[str, Any] | None = None) -> None:
+        """Link the given instances (or keys); links that exist are left alone.
+        ``through_defaults`` sets other fields of the new join rows
+        (``post.tags.add(tag, through_defaults={"position": 1})``)."""
+        extra = self._through_defaults(through_defaults)
         keys = self._target_keys(objs)
         if not keys:
             return
         col = self._target_col()
         have = set(await self._links().filter(col.in_(keys)).select(col).scalars())
-        rows = [{self._relation.source: self._key, self._relation.target_field: k} for k in keys if k not in have]
+        link = {self._relation.source: self._key}
+        rows = [{**extra, **link, self._relation.target_field: k} for k in keys if k not in have]
         if rows:
             await self._links().insert_many(rows)
         self._forget()
+
+    def _through_defaults(self, values: Mapping[str, Any] | None) -> dict[str, Any]:
+        join = self._relation.through
+        keys = {self._relation.source, self._relation.target_field}
+        for rel in join._meta.relations.values():
+            if isinstance(rel, BelongsTo) and rel.via in keys:
+                keys.add(rel.name)
+        bad = sorted(keys & set(values or ()))
+        if bad:
+            raise TypeError(f"through_defaults can't set the link's key {', '.join(bad)}")
+        return dict(values or {})
 
     async def remove(self, *objs: Any) -> int:
         """Unlink the given instances (or keys); returns the number of links removed."""
@@ -1100,12 +1115,14 @@ class ManyRelatedSet(QuerySet[M]):
         self._forget()
         return n
 
-    async def set(self, objs: Iterable[Any]) -> None:
-        """Make the given instances (or keys) exactly the linked ones."""
+    async def set(self, objs: Iterable[Any], *, through_defaults: Mapping[str, Any] | None = None) -> None:
+        """Make the given instances (or keys) exactly the linked ones;
+        ``through_defaults`` sets other fields of the new join rows."""
+        self._through_defaults(through_defaults)
         keys = self._target_keys(objs)
         col = self._target_col()
         await self._links().filter(col.not_in(keys)).delete()
-        await self.add(*keys)
+        await self.add(*keys, through_defaults=through_defaults)
 
     async def insert(self, **values: Any) -> M:  # type: ignore[override]
         """Insert a related row and link it, in one transaction."""

@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime, timezone
 
 import pytest
-from blog.models import Comment, Post, Profile, Tag, User
+from blog.models import Comment, Post, PostTag, Profile, Tag, User
 
 import orm
 from conftest import DATABASE_URL
@@ -138,3 +138,30 @@ async def test_get_or_insert_checks_the_lookup(clean):
         await User.objects.get_or_insert(defaults={"name": "A"})
     with pytest.raises(orm.DatabaseError, match="no unique or exclusion constraint"):
         await User.objects.get_or_insert(name="A", defaults={"email": "a@x.io"})
+
+
+# -- many-to-many add() with through_defaults -------------------------------------------------
+
+
+async def test_add_with_through_defaults(clean):
+    alice = await User.objects.insert(email="a@x.io", name="A")
+    post = await Post.objects.insert(author=alice, title="t", body="b")
+    t1, t2, t3 = await Tag.objects.insert_many([{"name": "a"}, {"name": "b"}, {"name": "c"}])
+    await post.tags.add(t1, t2, through_defaults={"position": 1})
+    # An existing link keeps its values.
+    await post.tags.add(t2, t3, through_defaults={"position": 2})
+    links = await PostTag.objects.filter(PostTag.post_id == post.id).order_by(PostTag.tag_id)
+    assert [(link.tag_id, link.position) for link in links] == [(t1.id, 1), (t2.id, 1), (t3.id, 2)]
+    await post.tags.set([t1, t3, (t4 := await Tag.objects.insert(name="d"))], through_defaults={"position": 3})
+    links = await PostTag.objects.filter(PostTag.post_id == post.id).order_by(PostTag.tag_id)
+    assert [(link.tag_id, link.position) for link in links] == [(t1.id, 1), (t3.id, 2), (t4.id, 3)]
+
+
+async def test_through_defaults_cannot_set_the_link_keys(clean):
+    alice = await User.objects.insert(email="a@x.io", name="A")
+    post = await Post.objects.insert(author=alice, title="t", body="b")
+    tag = await Tag.objects.insert(name="a")
+    for key in ("tag_id", "post_id", "post"):
+        with pytest.raises(TypeError, match="link's key"):
+            await post.tags.add(tag, through_defaults={key: 1})
+    assert await PostTag.objects.count() == 0

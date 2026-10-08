@@ -163,7 +163,10 @@ separate calls are independent. `exclude()` is `NOT EXISTS`.
 
 Related sets: `await user.posts`, `.filter()`, `.count()`, and `.insert({...})`, where the
 key is filled in. Many-to-many sets also have `post.tags.add(tag, ...)`, `.remove()`,
-`.clear()` and `.set([...])`.
+`.clear()` and `.set([...])`. An options object as the last argument of `add()` (or
+the second argument of `set()`) gives other fields of the new join rows:
+`post.tags.add(tag, { throughDefaults: { position: 1 } })`. Existing links keep their
+values.
 
 ### Prepared queries
 

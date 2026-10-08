@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { DatabaseError, IntegrityError, connect, getDatabase } from "../src/index.js";
-import { Comment, Post, Profile, Tag, User } from "./blog/models.js";
+import { Comment, Post, PostTag, Profile, Tag, User } from "./blog/models.js";
 import { DATABASE_URL, useDatabase } from "./helpers.js";
 
 useDatabase();
@@ -126,4 +126,41 @@ test("getOrInsert checks the lookup", async () => {
   await assert.rejects(Comment.objects.getOrInsert({ authorId: null }, { defaults: { body: "x", postId: 1n } }), /NULL never conflicts/);
   await assert.rejects(User.objects.getOrInsert({}, { defaults: { name: "A" } }), /unique constraint/);
   await assert.rejects(User.objects.getOrInsert({ name: "A" }, { defaults: { email: "a@x.io" } }), /no unique or exclusion constraint/);
+});
+
+// -- many-to-many add() with throughDefaults ------------------------------------------------
+
+test("add with throughDefaults", async () => {
+  const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+  const post = await Post.objects.insert({ author: alice, title: "t", body: "b" });
+  const [t1, t2, t3] = (await Tag.objects.insertMany([{ name: "a" }, { name: "b" }, { name: "c" }])) as [Tag, Tag, Tag];
+  await post.tags.add(t1, t2, { throughDefaults: { position: 1 } });
+  // An existing link keeps its values.
+  await post.tags.add(t2, t3, { throughDefaults: { position: 2 } });
+  const links = async () =>
+    (await PostTag.objects.filter(PostTag.postId.eq(post.id)).orderBy(PostTag.tagId)).map((l) => [l.tagId, l.position]);
+  assert.deepEqual(await links(), [
+    [t1.id, 1],
+    [t2.id, 1],
+    [t3.id, 2],
+  ]);
+  const t4 = await Tag.objects.insert({ name: "d" });
+  await post.tags.set([t1, t3, t4], { throughDefaults: { position: 3 } });
+  assert.deepEqual(await links(), [
+    [t1.id, 1],
+    [t3.id, 2],
+    [t4.id, 3],
+  ]);
+  await post.tags.add(t2);
+  assert.equal((await PostTag.objects.get(PostTag.tagId.eq(t2.id))).position, null);
+});
+
+test("throughDefaults cannot set the link keys", async () => {
+  const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+  const post = await Post.objects.insert({ author: alice, title: "t", body: "b" });
+  const tag = await Tag.objects.insert({ name: "a" });
+  for (const key of ["tagId", "postId", "post"]) {
+    await assert.rejects(post.tags.add(tag, { throughDefaults: { [key]: 1 } }), /link's key/);
+  }
+  assert.equal(await PostTag.objects.count(), 0);
 });

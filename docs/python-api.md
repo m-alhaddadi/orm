@@ -180,6 +180,7 @@ await User.objects.filter(User.profile.role == Role.admin)  # EXISTS, like any r
 # Many-to-many (`tags Tag[] @relation(through: PostTag)`)
 await post.tags                                     # list[Tag]
 await post.tags.add(news, rust)                     # inserts PostTag rows (existing links are kept)
+await post.tags.add(news, through_defaults={"position": 1})  # other fields of the new PostTag rows
 await post.tags.remove(news)                        # deletes them; returns how many
 await post.tags.set([news, py])                     # exactly these
 await post.tags.clear()
@@ -199,8 +200,10 @@ await Tag.objects.prefetch_related(Tag.posts.author)
 * `post.tags` is a `ManyRelatedSet`: a query set over the post's tags (filter, order,
   count, ...) that reads prefetched rows when unchanged, like `user.posts`. `add()`,
   `remove()`, `set()` take instances or keys. Changing the links drops the prefetched
-  rows. The join model stays an ordinary model for anything else (extra columns,
-  bulk inserts: `await PostTag.objects.insert_many(...)`).
+  rows. `add()` and `set()` take `through_defaults={...}`: values of the join model's
+  other fields in the new join rows. Existing links keep their values, and the link's
+  key fields can't be set this way. The join model stays an ordinary model for
+  anything else (bulk inserts: `await PostTag.objects.insert_many(...)`).
 * Prefetching selects the join row's key next to each tag, so a tag linked to two posts
   comes back once per post. `Prefetch(Post.tags, Tag.objects...[:3])` slices per post.
 

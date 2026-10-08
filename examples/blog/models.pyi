@@ -320,6 +320,7 @@ class PostTag(Model):
     id: f.BigInt[int]
     post_id: f.BigInt[int]
     tag_id: f.BigInt[int]
+    position: f.Integer[int | None]
 
     post: f.BelongsTo[Post, _PostPath]
     tag: f.BelongsTo[Tag, _TagPath]
@@ -334,6 +335,7 @@ class _PostTagPath(RelationPath[PostTag]):
     id: ColumnRef[int]
     post_id: ColumnRef[int]
     tag_id: ColumnRef[int]
+    position: ColumnRef[int | None]
     post: _PostPath
     tag: _TagPath
 
@@ -345,6 +347,7 @@ class PostTagInsert(TypedDict):
     # One of tag_id / tag is required (checked at runtime).
     tag_id: NotRequired[int]
     tag: NotRequired[Tag]
+    position: NotRequired[int | None]
 
 class PostTagUpdate(TypedDict, total=False):
     id: int | Expression[int]
@@ -352,6 +355,7 @@ class PostTagUpdate(TypedDict, total=False):
     post: Post
     tag_id: int | Expression[int]
     tag: Tag
+    position: int | None | Expression[int | None]
 
 class PostTagUpdateRow(TypedDict, total=False):
     id: Required[int]
@@ -359,6 +363,7 @@ class PostTagUpdateRow(TypedDict, total=False):
     post: Post
     tag_id: int
     tag: Tag
+    position: int | None
 
 class PostTagQuerySet(QuerySet[PostTag]):
     def insert(self, **values: Unpack[PostTagInsert]) -> InsertOne[PostTag]: ...  # type: ignore[override]
