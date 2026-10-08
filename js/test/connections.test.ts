@@ -247,9 +247,9 @@ for (const dialect of ['postgres', 'sqlite']) {
     try {
       const [s1, s2] = await Shop.objects.using(sdb).insertMany([{ name: 'one' }, { name: 'two' }]);
       const orders = Order.objects.using(sdb);
-      const [, , o3] = await orders.insertMany([{ shopId: s1.id, total: 10 }, { shopId: s1.id, total: 20 }, { shopId: s2.id, total: 30 }]);
+      const [o1, , o3] = await orders.insertMany([{ shopId: s1.id, total: 10 }, { shopId: s1.id, total: 20 }, { shopId: s2.id, total: 30 }]);
       for (const read of [() => orders.all(), () => orders.count(), () => Shop.objects.using(sdb).filter(Shop.orders.total.gt(25)).count()]) {
-        await assert.rejects(read(), /scope\.shop/);
+        await assert.rejects(read(), /default filter of Order reads scope\.shop/);
       }
       assert.equal(await orders.withoutDefaults().count(), 3);
       await scope({ shop: s1.id }, async () => {
@@ -258,6 +258,13 @@ for (const dialect of ['postgres', 'sqlite']) {
         assert.deepEqual((await orders.filter(Order.total.gt(param('min'))).prepare().all({ min: 15 })).map((o: any) => o.total), [20]);
         assert.equal(await Shop.objects.using(sdb).filter(Shop.orders.total.gt(25)).count(), 0);
         await scope({ shop: s2.id }, async () => assert.deepEqual((await orders.all()).map((o: any) => o.total), [30]));
+        // A plain function that gives a query set (a thenable) still runs in the scope.
+        assert.deepEqual((await scope({ shop: s2.id }, (() => orders) as never) as any[]).map((o: any) => o.total), [30]);
+        // Every path that plans a statement reads the scope.
+        assert.match(orders.sql(), /s6_js_orders/);
+        assert.match(orders.filter(Order.total.gt(param('t'))).prepare().sql({ t: 1 }), /s6_js_orders/);
+        assert.match(orders.select({ total: Order.total }).sql(), /s6_js_orders/);
+        assert.equal(orders.filter(Order.id.eq(o1.id)).prepareUpdate({ total: 11 }).unique, true);
         assert.equal(await orders.update({ total: 0 }), 2);
         assert.equal(await orders.updateMany([{ id: o3.id, total: 99 }]), 0);
         assert.equal(await orders.filter(Order.id.eq(o3.id)).delete(), 0);

@@ -620,8 +620,10 @@ class QuerySet(Generic[M]):
     def sql(self) -> str:
         """The SELECT this query set runs, with parameters inlined (for debugging)."""
         params: list[Any] = []
+        from .db import _with_scope
+
         ir = self._select_ir("select", params)
-        sql: str = self._native().sql(json.dumps(ir), params)
+        sql: str = self._native().sql(*_with_scope(json.dumps(ir), params))
         return sql
 
     # -- execution -----------------------------------------------------------------------
@@ -883,9 +885,9 @@ class Prepared(Generic[M]):
         if qs._lock is not None:
             qs._check_lock()
         db = resolve(qs._db)
-        if debug._scope.get() is not None:
-            debug.record("run:" + c.json, lambda: str(qs._native().statement(c.json, params)))
         op, params = _with_scope(c.json, params)
+        if debug._scope.get() is not None:
+            debug.record("run:" + c.json, lambda: str(qs._native().statement(op, params)))
         return db._reader().run(op, params, db._tx(), None, qs._db, allowed_writes())
 
     def __call__(self, **values: Any) -> Awaitable[list[M]]:
@@ -915,8 +917,10 @@ class Prepared(Generic[M]):
 
     def sql(self, **values: Any) -> str:
         """The SELECT for these values, parameters inlined (for debugging)."""
+        from .db import _with_scope
+
         c = self._statement("select")
-        sql: str = self._qs._native().sql(c.json, c.bind(values, self._names))
+        sql: str = self._qs._native().sql(*_with_scope(c.json, c.bind(values, self._names)))
         return sql
 
     @property

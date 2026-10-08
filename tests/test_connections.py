@@ -7,6 +7,7 @@ import pytest
 
 import orm
 from orm import _native
+from orm.hooks import prepare_update
 from blog.models import User
 
 SQLITE = 'datasource db { provider = "sqlite" }\nmodel Item {\n  id Int @id @default(autoincrement())\n}\n'
@@ -307,7 +308,7 @@ async def test_scope_values_in_default_filters_are_closed_by_default(db, dialect
             [{"shop_id": s1.id, "total": 10}, {"shop_id": s1.id, "total": 20}, {"shop_id": s2.id, "total": 30}])
         for read in (lambda: orders.all(), lambda: orders.count(), lambda: orders.filter(Order.total > 0).exists(),
                      lambda: Shop.objects.using(sdb).filter(Shop.orders.total > 25).count()):
-            with pytest.raises(orm.QueryError, match=r"scope\.shop"):
+            with pytest.raises(orm.QueryError, match=r"default filter of Order reads scope\.shop"):
                 await read()
         assert await orders.without_defaults().count() == 3
         with orm.scope(shop=s1.id):
@@ -320,6 +321,13 @@ async def test_scope_values_in_default_filters_are_closed_by_default(db, dialect
             assert len(await shop.orders) == 2
             with orm.scope(shop=s2.id):
                 assert [o.total for o in await orders.all()] == [30]
+            # Every path that plans a statement reads the scope.
+            assert "s6_orders" in orders.sql()
+            assert "s6_orders" in orders.filter(Order.total > orm.param("t")).prepare().sql(t=1)
+            assert "s6_orders" in orders.select(Order.total).sql()
+            assert prepare_update(orders.filter(Order.id == o1.id), {"total": 11}).unique
+            with orm.debug.n_plus_one():
+                assert (await orders.filter(Order.id == orm.param("i")).prepare().get(i=o1.id)).total == 10
             assert await orders.update(total=0) == 2
             assert await orders.update_many([{"id": o3.id, "total": 99}]) == 0
             assert await orders.filter(Order.id == o3.id).delete() == 0

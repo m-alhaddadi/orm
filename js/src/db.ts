@@ -104,7 +104,7 @@ export class Database {
       primary: root.base.withSettings(["app.tenant"], value),
       replicas: root.replicas.map((r) => r.withSettings(["app.tenant"], value)),
     };
-    return tenants.run(new Map(tenants.getStore() ?? []).set(root, engines), fn);
+    return tenants.run(new Map(tenants.getStore() ?? []).set(root, engines), async () => await fn());
   }
 
   /** @internal */
@@ -327,7 +327,8 @@ export function getDatabase(): Database {
  * replace outer ones. Gives what `fn` gives.
  */
 export function scope<T>(values: Readonly<Record<string, unknown>>, fn: () => Promise<T>): Promise<T> {
-  return scopeValues.run({ ...scopeValues.getStore(), ...values }, fn);
+  // `await` inside: a returned thenable (a query set) must run while the values are set.
+  return scopeValues.run({ ...scopeValues.getStore(), ...values }, async () => await fn());
 }
 
 /** @internal `json` (a statement's IR, or with `key` a list wrapped under it) with the

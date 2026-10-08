@@ -261,8 +261,10 @@ class Select(Generic[Unpack[Ts]]):
     def sql(self) -> str:
         """The SELECT this runs, with parameters inlined (for debugging)."""
         params: list[Any] = []
+        from .db import _with_scope
+
         ir = self._ir(params)
-        sql: str = self._qs._native().sql(json.dumps(ir), params)
+        sql: str = self._qs._native().sql(*_with_scope(json.dumps(ir), params))
         return sql
 
     # -- execution ------------------------------------------------------------------------

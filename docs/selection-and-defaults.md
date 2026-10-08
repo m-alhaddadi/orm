@@ -123,9 +123,12 @@ await scope({ shop: shop.id }, async () => { const orders = await Order.objects.
 
 * The frontend sends the scope values as parameters of each statement; the value is bound with the type of the column it is compared with.
 * Closed by default: a read, count, exists, update, delete or `update_many` on a model whose default filter reads `scope.shop` raises `QueryError` when no enclosing `scope()` sets `shop`. Relation hops, prefetches and joined targets of that model check it too.
+  The error names each model whose default filter reads the value.
+* `sql()`, prepared queries and `prepare_update()` / `prepareUpdate()` read the scope as the query does.
 * `without_defaults()` / `withoutDefaults()` skips the filter and the check.
 * Inner `scope()` values replace outer ones.
 * Inserts do not read the scope: set `shop_id` yourself.
+  A composed model reads its new or changed rows back by key, without the default filter.
 * An awaited query set keeps its rows; awaiting it again under another scope gives the first rows.
 * For a check in the database as well, use Postgres row-level security with `db.tenant(id)` (see the API docs).
 
