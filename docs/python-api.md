@@ -114,6 +114,7 @@ wrong thing.
 | `filter((User.email == x) \| (User.posts.views > 10))` | users without posts still match on email | `email = x OR EXISTS (…)` |
 | `filter(User.posts.comments.body.contains("hi"))` | nested hops | nested `EXISTS` |
 | `filter(Post.author.email == x)` | to-one hops | `EXISTS` on the PK (planned as a semi-join) |
+| `filter(Post.author == alice)` | the post's key is alice's key | `author_id = $1`, no join |
 
 This matches what Django returns for multi-valued relations: one `filter()` call means
 the same related row, separate calls are independent, and negation means "none". It
@@ -124,6 +125,12 @@ doesn't allow `JOIN`.
 
 `NOT` doesn't group into a subquery: `filter(User.posts.a & ~User.posts.b)` means "a
 post with a, and no post with b", as in Django.
+
+A `BelongsTo` relation compares with an instance of its target:
+`Post.author == alice` is `Post.author_id == alice.id` (the column the relation
+references), and `Post.author == None` is `IS NULL`. `Comment.post.author == bob`
+reaches `posts` but not `users`. Other relation kinds, an instance of another model
+and an instance whose key is `None` raise.
 
 ### Loading related objects
 

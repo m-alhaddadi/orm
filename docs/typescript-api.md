@@ -150,6 +150,12 @@ The semantics are Django's, with no duplicate rows. A to-many hop becomes a corr
 `EXISTS`. Conditions in one `filter()` call must hold for the same related row, while
 separate calls are independent. `exclude()` is `NOT EXISTS`.
 
+A `belongsTo` relation compares with an instance of its target:
+`Post.author.eq(alice)` is `Post.authorId.eq(alice.id)` (no join), `.ne(alice)` the
+opposite, and `.eq(null)` is `IS NULL`. The types allow `eq` / `ne` only on to-one
+relations and only with the target's row type. At runtime, other relation kinds, other
+objects and an instance without a key throw `TypeError`.
+
 ### Loading related objects
 
 * `selectRelated(Comment.post.author, Comment.author)` follows to-one relations with

@@ -1280,6 +1280,9 @@ export interface PathState {
   /** TypeScript relation names from the root. */
   readonly names: readonly string[];
   readonly target: string;
+  /** A path that ends in a `belongsTo` relation: its foreign key column, and how to read
+   * the referenced key of a target instance. */
+  readonly belongsTo?: { readonly key: Column<unknown, string>; readonly read: (o: object) => unknown };
 }
 
 export class RelationPath<M extends ModelSpec, S extends string, H extends readonly Hop[]> {
@@ -1288,10 +1291,40 @@ export class RelationPath<M extends ModelSpec, S extends string, H extends reado
   /** @internal */
   declare readonly [PATH]: PathState;
 
+  /**
+   * `Post.author.eq(alice)` is `Post.authorId.eq(alice.id)`: it compares the foreign key
+   * column, so the related table is not joined. `.eq(null)` is `IS NULL`. Only a
+   * `belongsTo` relation compares with an instance.
+   */
+  eq(this: RelationPath<M, S, ToOne>, value: M["row"] | null): Condition<S, {}> {
+    return compareRelation(this, value, false);
+  }
+
+  /** `Post.author.ne(alice)` is `Post.authorId.ne(alice.id)`; `.ne(null)` is `IS NOT NULL`. */
+  ne(this: RelationPath<M, S, ToOne>, value: M["row"] | null): Condition<S, {}> {
+    return compareRelation(this, value, true);
+  }
+
   toString(): string {
     const s = this[PATH];
     return [s.root.name, ...s.names].join(".");
   }
+}
+
+/** Hops that end in a to-one relation. */
+type ToOne = readonly [...Hop[], Hop<string, "one" | "opt">];
+
+function compareRelation(path: RelationPath<ModelSpec, string, readonly Hop[]>, value: unknown, neg: boolean): Condition<any, any> {
+  const s = path[PATH];
+  if (!s.belongsTo) {
+    throw new TypeError(`${String(path)} is not a belongsTo relation; only a belongsTo relation compares with an instance (compare a key column instead)`);
+  }
+  if (value === null) return new IsNull(s.belongsTo.key, neg);
+  const key = s.belongsTo.read(value as object);
+  if (key === null || key === undefined) {
+    throw new TypeError(`${String(path)} can't compare with an instance whose key is ${String(key)}`);
+  }
+  return new Comparison(neg ? "ne" : "eq", s.belongsTo.key, wrap(key));
 }
 
 /** Where NULLs go in an ordering. */

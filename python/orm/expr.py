@@ -1167,6 +1167,39 @@ class RelationPath(Generic[M]):
     def __repr__(self) -> str:
         return ".".join((self._root.__name__, *self._path))
 
+    # ``Post.author == alice`` compares the foreign key column ``Post.author_id``, so
+    # the related table is never joined.
+
+    def __eq__(self, other: M | None) -> Condition:  # type: ignore[override]
+        return self._compare(other, neg=False)
+
+    def __ne__(self, other: M | None) -> Condition:  # type: ignore[override]
+        return self._compare(other, neg=True)
+
+    __hash__ = object.__hash__
+
+    def _compare(self, other: Any, *, neg: bool) -> Condition:
+        from .fields import BelongsTo
+
+        owner: type[Model] = self._root
+        for name in self._path[:-1]:
+            owner = owner._meta.relations[name].target
+        rel = owner._meta.relations[self._path[-1]]
+        if not isinstance(rel, BelongsTo):
+            raise TypeError(
+                f"{self!r} is a {type(rel).__name__} relation; only a BelongsTo relation "
+                "compares with an instance (compare a key column instead)"
+            )
+        column: ColumnRef[Any] = ColumnRef(self._root, self._path[:-1], owner._meta.fields[rel.via])
+        if other is None:
+            return IsNull(column, neg=neg)
+        if not isinstance(other, self._target):
+            raise TypeError(f"{self!r} compares with a {self._target.__name__}, not {other!r}")
+        key = other._field_value(rel.to)
+        if key is None:
+            raise ValueError(f"{self!r} can't compare with {other!r}: its {rel.to} is None")
+        return Comparison("ne" if neg else "eq", column, _wrap(key))
+
     __bool__ = _bool_misuse
 
 

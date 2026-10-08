@@ -454,6 +454,25 @@ test("refresh with a row lock", async () => {
   }
 });
 
+test("relation equals instance", async () => {
+  const { alice, bob, carol, a1, a2, b1 } = await seed();
+  const qs = Post.objects.filter(Post.author.eq(alice)).orderBy(Post.id);
+  assert.equal(qs.sql(), Post.objects.filter(Post.authorId.eq(alice.id)).orderBy(Post.id).sql());
+  assert.ok(!qs.sql().includes(" JOIN "));
+  assert.deepEqual((await qs.all()).map((p) => p.id), [a1.id, a2.id]);
+  assert.deepEqual((await Post.objects.filter(Post.author.ne(alice)).all()).map((p) => p.id), [b1.id]);
+  assert.equal(await Post.objects.filter(Post.author.eq(carol)).count(), 0);
+  assert.match(Post.objects.filter(Post.author.eq(null)).sql(), /IS NULL/);
+  assert.match(Post.objects.filter(Post.author.ne(null)).sql(), /IS NOT NULL/);
+  const nested = Comment.objects.filter(Comment.post.author.eq(bob)).orderBy(Comment.id);
+  assert.ok(!nested.sql().includes('"users"')); // reaches posts, not users
+  const expected = await Comment.objects.filter(Comment.postId.eq(b1.id)).orderBy(Comment.id).all();
+  assert.deepEqual((await nested.all()).map((c) => c.id), expected.map((c) => c.id));
+  assert.throws(() => (User.posts as unknown as { eq(v: unknown): unknown }).eq(a1), /not a belongsTo relation/);
+  assert.throws(() => Post.author.eq(a1 as never), /compares with a User instance/);
+  assert.throws(() => Post.author.eq({ id: 1n } as never), /compares with a User instance/);
+});
+
 test("advisory locks", async () => {
   const db = getDatabase();
   const other = await otherDatabase();

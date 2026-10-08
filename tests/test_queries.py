@@ -783,6 +783,33 @@ async def test_refresh_lock(clean):
         await bob.refresh()
 
 
+async def test_relation_equals_instance(clean):
+    alice, bob, carol, (a1, a2, b1) = await seed()
+    qs = Post.objects.filter(Post.author == alice).order_by(Post.id)
+    assert qs.sql() == Post.objects.filter(Post.author_id == alice.id).order_by(Post.id).sql()
+    assert " JOIN " not in qs.sql()
+    assert [p.id for p in await qs] == [a1.id, a2.id]
+    assert [p.id for p in await Post.objects.filter(Post.author != alice)] == [b1.id]
+    assert await Post.objects.filter(Post.author == carol).count() == 0
+    assert "IS NULL" in Post.objects.filter(Post.author == None).sql()  # noqa: E711
+    assert "IS NOT NULL" in Post.objects.filter(Post.author != None).sql()  # noqa: E711
+    comment = await Comment.objects.insert(post=b1, author=alice, body="hi")
+    nested = Comment.objects.filter(Comment.post.author == bob)
+    assert '"users"' not in nested.sql()  # reaches posts, not users
+    expected = await Comment.objects.filter(Comment.post_id == b1.id).order_by(Comment.id)
+    assert comment in expected
+    assert await nested.order_by(Comment.id) == expected
+    with pytest.raises(TypeError, match="HasMany"):
+        User.posts == a1  # noqa: B015
+    with pytest.raises(TypeError, match="compares with a User"):
+        Post.author == a1  # noqa: B015
+    unsaved = User.__new__(User)
+    unsaved.__dict__["id"] = None
+    with pytest.raises(ValueError, match="id is None"):
+        Post.author == unsaved  # noqa: B015
+    assert {Post.author: 1}  # paths stay hashable
+
+
 async def test_advisory_locks(clean):
     db = orm.get_database()
     with pytest.raises(orm.TransactionRequired):

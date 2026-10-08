@@ -244,12 +244,14 @@ export class ModelMeta implements Source {
       });
     }
     const registry = this.registry;
+    const owner = this;
     for (const r of this.relations.values()) {
       Object.defineProperty(proto, r.name, {
         get(this: RelationPath<ModelSpec, string, never>) {
           const s = this[PATH];
           const p = Object.create(registry.get(r.target).pathProto) as Record<PropertyKey, unknown>;
-          p[PATH] = { root: s.root, path: [...s.path, r.ir], names: [...s.names, r.name], target: r.target } satisfies PathState;
+          const state: PathState = { root: s.root, path: [...s.path, r.ir], names: [...s.names, r.name], target: r.target };
+          p[PATH] = r.kind === "belongsTo" ? { ...state, belongsTo: belongsToKey(owner, s, r) } : state;
           return p;
         },
         enumerable: true,
@@ -449,6 +451,20 @@ export function registerQueries(
   makeQuerySet = qs;
   relatedSet = rs;
   manyRelatedSet = ms;
+}
+
+/** The foreign key column of `r` at path `s`, and how to read the key it references. */
+function belongsToKey(owner: ModelMeta, s: PathState, r: RelationMeta): NonNullable<PathState["belongsTo"]> {
+  const f = owner.fieldByIr.get(r.from)!;
+  const key = new Column(s.root, s.path, f, [s.root.name, ...s.names, f.name].join("."));
+  const read = (o: object): unknown => {
+    const target = owner.registry.get(r.target);
+    if (metaOf(o as Row) !== target) {
+      throw new TypeError(`${[s.root.name, ...s.names, r.name].join(".")} compares with a ${r.target} instance`);
+    }
+    return fieldValue(o, target.fieldByIr.get(r.to)!.name);
+  };
+  return { key, read };
 }
 
 // -- instance methods ---------------------------------------------------------------------------
