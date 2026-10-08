@@ -380,3 +380,16 @@ fn enum_types_are_created_altered_and_dropped() {
     assert!(all[0].starts_with("DO $orm$\nBEGIN\n    CREATE TYPE \"status\""), "{}", all[0]);
     assert_eq!(drop_all(&v1).unwrap().last().unwrap(), "DROP TYPE IF EXISTS \"status\" CASCADE");
 }
+
+#[test]
+fn relation_map_names_the_foreign_key() {
+    let source = "model User {\n  id BigInt @id\n  posts Post[]\n}\n\nmodel Post {\n  id BigInt @id\n  author_id BigInt\n  author User @relation(fields: [author_id], references: [id], map: \"post_author_fk\")\n}\n";
+    let (_, s) = crate::dsl::compile(source, None).and_then(crate::dsl::check).unwrap();
+    let snap = snapshot(&s).unwrap();
+    let post = snap.tables.iter().find(|t| t.name == "post").unwrap();
+    assert_eq!(post.foreign_keys[0].name, "post_author_fk");
+    let pulled = pull::pull(&snap, &[]);
+    assert!(pulled.schema.contains("map: \"post_author_fk\""), "{}", pulled.schema);
+    let (_, again) = crate::dsl::compile(&pulled.schema, None).and_then(crate::dsl::check).unwrap();
+    assert_eq!(snapshot(&again).unwrap(), snap);
+}

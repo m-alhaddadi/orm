@@ -11,12 +11,25 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+import "./index.js"; // loads the modules in their order
+import { hasDataSteps, migrateCommand } from "./migrations.js";
 import { native } from "./native.js";
 
 /** Runs the command line; gives the exit code. Output goes to stdout / stderr. */
 export function main(argv: readonly string[]): Promise<number> {
   const addon = native();
   if (typeof addon.cli !== "function") throw new Error("CLI unavailable; install @orm/native-tooling and set ORM_PROFILE=tooling");
+  const found = addon.cliMigrateArgs([...argv]);
+  if (found !== null) {
+    const [schema, dir, url, target] = found;
+    // data.ts runs in TypeScript, so this migrator applies the directory
+    if (url && hasDataSteps(dir!)) {
+      return migrateCommand(schema!, dir!, url, target ?? null).catch((e: unknown) => {
+        process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`);
+        return 1;
+      });
+    }
+  }
   return addon.cli([...argv]);
 }
 

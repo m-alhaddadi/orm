@@ -339,6 +339,9 @@ pub struct RelationIr {
     pub on_update: Option<OnDelete>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub deferrable: Option<Deferrable>,
+    /// The foreign key's database name (`map:`); default `<table>_<column>_fkey`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fk_name: Option<String>,
     /// Many-to-many through a join model.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub through: Option<ThroughIr>,

@@ -369,7 +369,8 @@ posts    Post[]                                                         // to-ma
 To-one relations name their key field in `fields:` and the target field in
 `references:`, and create the foreign key. Their options are `onDelete:` / `onUpdate:`
 (`Cascade`, `SetNull`, `SetDefault`, `Restrict`, `NoAction`; the default is the
-database's, no action) and `deferrable: immediate | deferred`. The relation is
+database's, no action), `deferrable: immediate | deferred`, and `map: "name"`, the
+foreign key's name (default `<table>_<column>_fkey`). The relation is
 optional (`User?`) exactly when the key field is nullable; the compiler checks this.
 A to-many relation (`Post[]`) is paired with the to-one relation on the other model.
 When two models have more than one relation between them, name both sides:
@@ -550,11 +551,14 @@ TypeScript: see [`typescript-api.md`](typescript-api.md).
 ```bash
 python -m orm makemigrations [name]          # migrations/NNNN_name/{up.sql,down.sql,snapshot.json}
 python -m orm makemigrations --check         # exit 1 if the schema changed without a migration (CI)
-python -m orm makemigrations --empty data    # an empty migration for hand-written SQL
+python -m orm makemigrations --empty data    # an empty migration for hand-written SQL or a data step
 python -m orm sqlmigrate 2 [--down]
 python -m orm migrate [target]               # apply pending migrations
 python -m orm rollback [--steps N | --to 0002_x | --to zero]
 python -m orm showmigrations
+python -m orm pull [-o schema.prisma] [--force]   # the schema file from a live database
+python -m orm baseline                       # mark the first migration applied (after pull)
+python -m orm drift                          # exit 1 if the database differs from the last snapshot
 ```
 
 There is one command line, written in Rust (`cli/`): `python -m orm`, `npx orm` and the
@@ -573,7 +577,8 @@ repository's `pyproject.toml` points at the blog example; its first migration is
 
 From Python: `Migrations("migrations", "schema.prisma")` (or a `Registry`) has
 `.plan()`, `.make(name)` and `.all()`. `Migrator(db, migrations)` has `.upgrade()`,
-`.downgrade()` and `.status()`.
+`.downgrade()`, `.status()`, `.baseline()` and `.drift()`; `await orm.migrations.pull(db)`
+reads a live database.
 
 ### What the generator does
 
@@ -614,6 +619,81 @@ recorded in the database is missing from the directory, or if two migrations sha
 number. `create_tables()` / `drop_tables()` remain as development helpers (idempotent
 DDL of the whole schema; drop with `CASCADE`).
 
+### Data migrations
+
+A migration folder may hold a data step next to `up.sql`: `data.py` with
+`async def run(db)`, or `data.ts` with `export async function run(db)`.
+
+```python
+# migrations/0002_slug/data.py
+async def run(db):
+    await db.execute("UPDATE author SET slug = lower(name)")
+```
+
+The step runs after `up.sql`, in the same transaction and under the same advisory lock,
+before the migration's `orm_migrations` row. Queries on `db` inside it, and ORM queries
+on that database, go into that transaction, so they see the new columns. An error rolls
+back the SQL, the data changes and the row. `makemigrations --empty name` gives a folder
+for a step without schema changes.
+
+* Python applies `data.py`: `Migrator.upgrade()`, or `python -m orm migrate`, which then
+  runs through `Migrator` instead of the Rust runner. It imports the data modules
+  before it connects, so the models they import are in the default registry.
+* TypeScript applies `data.ts` the same way: `Migrator.upgrade()` or `npx orm migrate`
+  (Node strips the types of a `.ts` file, by default in current versions; Bun runs it).
+* Each tool refuses the other's file, and the standalone `orm` binary refuses both,
+  before it applies anything.
+* `rollback` runs `down.sql` only; a data step has no down step.
+* The checksum covers `up.sql` only, so a change to a data step after it ran is not
+  detected.
+
+### Adopting a live database: pull, baseline, drift
+
+`orm pull` reads the database the URL names and writes the schema file (`--schema`, or
+`-o FILE`; `--force` overwrites one). Postgres is read from `pg_catalog` for the current
+schema, SQLite from `sqlite_master` and its `PRAGMA`s. It reads tables, columns,
+defaults, comments, primary keys, unique, check, exclusion and foreign-key constraints,
+indexes, enum types, extensions, SQL functions and triggers. Database names are kept:
+an index or constraint whose name differs from the generated one gets `name:` / `map:`,
+and a foreign key gets `@relation(..., map: "name")`. Model names are the tables in
+PascalCase with `@@map`, a relation field is its key column without `_id`, and the other
+side is `<table>_set` (or `<table>` for a one-to-one).
+
+Then `pull` checks its own result: it creates the pulled schema in a shadow and compares
+it with the database. It prints `The schema reproduces the database.`, or the steps a
+migration from the schema would still run. What the schema language cannot say is left
+out, printed, and listed at the end of the file as `// gap:` lines:
+
+* rules (`CREATE RULE`), views, row-level security policies, domains, composite and
+  range types, partitioned tables, generated columns, column collations;
+* tables with a composite primary key or none, composite foreign keys, columns of a type
+  without a schema type (`tstzrange`, `interval`, ...);
+* a `serial` column becomes an identity column (`@default(autoincrement())`), so drift
+  reports `drop default` and `make ... an identity column` for it;
+* a primary key not named `<table>_pkey`; `GENERATED ALWAYS` identities (read as
+  `BY DEFAULT`); constraint triggers and triggers that call a function of another schema;
+* on SQLite: triggers, and column types other than the storage class (`INTEGER`,
+  `REAL`, `TEXT`).
+
+`orm baseline` writes the first migration from the schema when the directory has none,
+and records it in `orm_migrations` without running it, so the next `makemigrations`
+holds only new changes. It fails if the database already has an applied migration, and
+warns when the database differs from the migration.
+
+`orm drift` compares the database with the snapshot of the newest migration and exits 1
+when they differ, printing the steps that would bring the database back to the
+snapshot. Rules, views and the other gaps above are listed as not compared.
+
+Postgres prints expressions in its own form (`CHECK ((views >= 0))`,
+`'x'::character varying`, `role = ANY (ARRAY[...])`), so the snapshot is never compared
+as text. Drift and `pull` run the snapshot's DDL in a shadow (Postgres: a schema
+`orm_shadow` in a transaction that is rolled back; SQLite: an in-memory database), read
+the shadow back the same way as the database, and compare the two. The live schema is
+re-created in a second shadow too, and an object both shadows agree on counts as equal,
+because Postgres does not always print a parsed expression back the same way. So drift
+needs the right to create a schema, and the extensions the snapshot uses must be
+installed.
+
 ### Why not SeaORM's or Refinery's tooling
 
 `sea-orm-migration` and Refinery are runners for hand-written migrations. Refinery
@@ -626,7 +706,6 @@ dependency) is the natural base. `sea-schema` introspection fits drift detection
 ## Not done yet
 
 * TypeScript generation and the JS binding.
-* Introspection of a live database (drift detection, adopting an existing schema).
 * `CREATE INDEX CONCURRENTLY` / non-transactional migrations.
 * Generated columns, views, domains, row-level security, partitioning, multiple
   database schemas, composite keys (primary and foreign).

@@ -43,6 +43,11 @@ export interface SessionLockOptions {
 /** Statements a replica may answer (the IR starts with its `op`). */
 const READ = /^\{"op":"(select|count|exists)"/;
 
+/** @internal Runs `fn` with `tx` as the current transaction of `db`; does not end it. */
+export function inTransaction<T>(db: Database, tx: NativeTransaction, fn: () => Promise<T>): Promise<T> {
+  return current.run({ db, tx }, fn);
+}
+
 /** A connection pool. Created by {@link connect}. */
 export class Database {
   private turn = 0;

@@ -960,6 +960,7 @@ fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap
             on_delete: None,
             on_update: None,
             deferrable: None,
+            fk_name: None,
             through: None,
         });
     };
@@ -986,6 +987,7 @@ fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap
         None => None,
     };
     let deferrable = deferrable(&mut n)?;
+    let fk_name = n.str("map")?;
     n.finish()?;
     Ok(RelationIr {
         name: member.name.clone(),
@@ -997,6 +999,7 @@ fn relation(m: &ModelDecl, member: &Member, fields: &[FieldIr], models: &HashMap
         on_delete,
         on_update,
         deferrable,
+        fk_name,
         through: None,
     })
 }
@@ -1081,6 +1084,7 @@ fn many_to_many(
         on_delete: None,
         on_update: None,
         deferrable: None,
+        fk_name: None,
         through: Some(ThroughIr { model: join.to_owned(), source: src.clone(), target: dst.clone() }),
     })
 }

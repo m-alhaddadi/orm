@@ -14,6 +14,9 @@
 //!   migrate [target]
 //!   rollback [--steps N | --to <migration>|zero]
 //!   showmigrations
+//!   pull [-o FILE] [--force]
+//!   baseline
+//!   drift
 //! ```
 //!
 //! The schema file and the migrations directory come from `--schema` / `--dir`, else
@@ -28,6 +31,7 @@
 use std::path::{Path, PathBuf};
 
 use orm_core::{codegen, dsl, migrate as files};
+use orm_engine::introspect;
 use orm_engine::migrate::{self, Down};
 
 /// Which program is running the CLI: it decides the name in the help, which
@@ -72,6 +76,11 @@ const COMMANDS: &str = "  identities [--rename Old=New] [--restore Model]\n     
   rollback [--steps N | --to <migration>|zero]
                                            revert applied migrations (default: the last one)
   showmigrations                           list migrations and whether they are applied
+  pull [-o FILE] [--force]                 write the schema file from the live database
+  baseline                                 make the first migration if there is none and mark
+                                           it applied without running it (after pull)
+  drift                                    compare the database with the last migration's
+                                           snapshot; exit 1 if they differ
 
 The schema and migrations directory come from --schema / --dir, else from [tool.orm]
 in pyproject.toml or \"orm\" in package.json, else schema.prisma and migrations/.
@@ -107,7 +116,7 @@ struct Args {
     options: Vec<(String, Option<String>)>,
 }
 
-const FLAGS: [&str; 5] = ["--empty", "--check", "--down", "-h", "--help"];
+const FLAGS: [&str; 6] = ["--empty", "--check", "--down", "--force", "-h", "--help"];
 const VALUED: [&str; 11] = ["--schema", "--dir", "--url", "-o", "--out", "--import", "--name", "--steps", "--to", "--rename", "--restore"];
 
 impl Args {
@@ -202,6 +211,23 @@ fn write(path: &Path, text: &str) -> Result<()> {
         std::fs::create_dir_all(parent).map_err(|e| failed(format!("{}: {e}", parent.display())))?;
     }
     std::fs::write(path, text).map_err(|e| failed(format!("{}: {e}", path.display())))
+}
+
+/// For a `migrate` command line: the schema file, the migrations directory, the database
+/// URL and the target, as [`run`] resolves them; `None` for anything else. The Python
+/// and Node hosts use it to apply migrations with a data step themselves.
+pub fn migrate_args(argv: &[String], host: Host) -> Option<(PathBuf, PathBuf, Option<String>, Option<String>)> {
+    let args = Args::parse(argv).ok()?;
+    if args.positional.first().map(String::as_str) != Some("migrate") || args.flag("-h") || args.flag("--help") {
+        return None;
+    }
+    args.allow("migrate", &[], 1).ok()?;
+    let cfg = config(host);
+    let schema = PathBuf::from(args.opt(&["--schema"]).or(cfg.schema.as_deref()).unwrap_or("schema.prisma"));
+    let dir = PathBuf::from(args.opt(&["--dir"]).or(cfg.migrations.as_deref()).unwrap_or("migrations"));
+    let env = std::env::var("ORM_DATABASE_URL").ok().filter(|u| !u.is_empty());
+    let url = args.opt(&["--url"]).map(String::from).or(env);
+    Some((schema, dir, url, args.arg(0).map(String::from)))
 }
 
 /// Runs the command line `argv` (without the program name) and gives the exit code.
@@ -326,13 +352,20 @@ async fn command(argv: &[String], host: Host) -> Result<i32> {
             let m = migrate::find(&dir, name)?;
             print!("{}", if args.flag("--down") { m.down_sql()? } else { m.up_sql()? });
         }
-        "migrate" | "rollback" | "showmigrations" => {
+        "migrate" | "rollback" | "showmigrations" | "pull" | "baseline" | "drift" => {
             match command {
                 "migrate" => args.allow(command, &[], 1)?,
                 "rollback" => args.allow(command, &["--steps", "--to"], 0)?,
+                "pull" => args.allow(command, &["-o", "--out", "--force"], 0)?,
                 _ => args.allow(command, &[], 0)?,
             }
-            return database(command, &args, &dir).await;
+            if command == "pull" {
+                let out = args.opt(&["-o", "--out"]).map(PathBuf::from).unwrap_or_else(|| schema.clone());
+                if out.exists() && !args.flag("--force") {
+                    return Err(Failure::Setup(format!("{} exists; pass --force to overwrite it, or -o FILE", out.display())));
+                }
+            }
+            return database(command, &args, &dir, &schema).await;
         }
         other => return Err(Failure::Usage(format!("unknown command {other}"))),
     }
@@ -455,7 +488,19 @@ fn module_paths(from: &Path, shared: &Path) -> Result<(String, String)> {
     Ok((relative.to_string_lossy().into_owned(), import))
 }
 
-async fn database(command: &str, args: &Args, dir: &Path) -> Result<i32> {
+fn print_steps(steps: &[files::Step]) {
+    for s in steps {
+        println!("  - {}", s.summary);
+    }
+}
+
+fn print_gaps(gaps: &[String]) {
+    for g in gaps {
+        println!("  gap: {g}");
+    }
+}
+
+async fn database(command: &str, args: &Args, dir: &Path, schema: &Path) -> Result<i32> {
     let env = std::env::var("ORM_DATABASE_URL").ok().filter(|u| !u.is_empty());
     let Some(url) = args.opt(&["--url"]).map(String::from).or(env) else {
         return Err(Failure::Setup("no database; pass --url or set ORM_DATABASE_URL".into()));
@@ -487,6 +532,56 @@ async fn database(command: &str, args: &Args, dir: &Path) -> Result<i32> {
                 if done.is_empty() {
                     println!("Nothing to revert.");
                 }
+            }
+            "pull" => {
+                let out = args.opt(&["-o", "--out"]).map(PathBuf::from).unwrap_or_else(|| schema.to_path_buf());
+                let pulled = introspect::pull(&*driver).await?;
+                write(&out, &pulled.schema)?;
+                println!("wrote {}", out.display());
+                if pulled.steps.is_empty() {
+                    println!("The schema reproduces the database.");
+                } else {
+                    println!("The schema differs from the database; a migration from it would:");
+                    print_steps(&pulled.steps);
+                }
+                if !pulled.gaps.is_empty() {
+                    println!("Not reproduced:");
+                    print_gaps(&pulled.gaps);
+                }
+            }
+            "baseline" => {
+                let (_, compiled) = load(schema)?;
+                let applied = migrate::applied_names(&*driver).await?;
+                if !applied.is_empty() {
+                    return Err(failed(format!("the database already has applied migrations ({}); baseline only marks the first", applied.join(", "))));
+                }
+                if files::files::list(dir).map_err(failed)?.is_empty() {
+                    if let Some((folder, _)) = files::files::make(dir, &compiled, None, false).map_err(failed)? {
+                        println!("Created {}", folder.path.display());
+                    }
+                }
+                let m = migrate::baseline(&*driver, dir).await?;
+                println!("Marked {} as applied", m.name);
+                let found = introspect::drift(&*driver, dir).await?;
+                if !found.steps.is_empty() {
+                    println!("warning: the database differs from {}; a migration to it would:", m.name);
+                    print_steps(&found.steps);
+                }
+            }
+            "drift" => {
+                let found = introspect::drift(&*driver, dir).await?;
+                let against = found.migration.as_deref().unwrap_or("an empty migrations directory");
+                if found.steps.is_empty() {
+                    println!("No drift from {against}.");
+                } else {
+                    println!("The database differs from {against}; a migration to it would:");
+                    print_steps(&found.steps);
+                }
+                if !found.gaps.is_empty() {
+                    println!("Not compared:");
+                    print_gaps(&found.gaps);
+                }
+                return Ok(if found.steps.is_empty() { 0 } else { 1 });
             }
             _ => {
                 for s in migrate::status(&*driver, dir).await? {

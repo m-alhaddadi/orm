@@ -99,6 +99,7 @@ fn relation(name: &str, target: &str, key: &str, foreign_key: bool) -> RelationI
         on_delete: foreign_key.then_some(OnDelete::Cascade),
         on_update: None,
         deferrable: None,
+        fk_name: None,
         through: None,
     }
 }

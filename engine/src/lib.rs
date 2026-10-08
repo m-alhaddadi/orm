@@ -10,6 +10,7 @@ pub mod advisory;
 pub mod db;
 pub mod error;
 pub mod exec;
+pub mod introspect;
 pub mod migrate;
 pub mod params;
 pub mod plan;

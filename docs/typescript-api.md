@@ -369,9 +369,16 @@ Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,
 `npx orm` is the one `orm` command line (Rust, `cli/`), run through the addon: the same
 program as `python -m orm` and the standalone `orm` binary, with the same commands
 (`check`, `generate`, `makemigrations [--check]`, `sqlmigrate`, `migrate`, `rollback`,
-`showmigrations`; see [`schema.md`](schema.md#migrations)). Under `npx`, `generate` writes
-TypeScript and `package.json`'s `"orm"` key is read first. `Migrations` and `Migrator`
-are the programmatic API; they call the same Rust migrator (`engine/src/migrate.rs`).
+`showmigrations`, `pull`, `baseline`, `drift`; see [`schema.md`](schema.md#migrations)).
+Under `npx`, `generate` writes TypeScript and `package.json`'s `"orm"` key is read first.
+`Migrations` and `Migrator` are the programmatic API; they call the same Rust migrator
+(`engine/src/migrate.rs`). `await pull(db)` reads a live database into a `Pulled`
+(`schema`, `gaps`, `differences`, `write(path)`), `migrator.baseline()` marks the first
+migration applied without running it, and `migrator.drift()` gives the `Drift`
+(`migration`, `steps`, `gaps`) between the database and the newest snapshot
+(see [`schema.md`](schema.md#adopting-a-live-database-pull-baseline-drift)). A migration
+may hold a `data.ts` with `export async function run(db)`, run by `migrator.upgrade()` and
+`npx orm migrate` in the migration's transaction (see [`schema.md`](schema.md#data-migrations)).
 
 ## Decisions
 

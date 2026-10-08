@@ -11,6 +11,7 @@ pub mod diff;
 pub mod files;
 pub mod model;
 pub mod pg;
+pub mod pull;
 pub mod sqlite;
 
 use serde::Serialize;
@@ -20,7 +21,7 @@ pub use model::DbSchema;
 
 use crate::schema::{Result, Schema};
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct Step {
     pub summary: String,
     pub sql: String,
@@ -97,6 +98,16 @@ pub fn create_all(schema: &Schema) -> Result<Vec<String>> {
     if current.dialect == crate::dialect::Dialect::Sqlite { return Ok(sqlite::create_all(&current, true)); }
     let ops = diff::diff(&DbSchema::default(), &current, &Default::default());
     Ok(ops.iter().map(|op| pg::render(op, true)).collect())
+}
+
+/// The DDL that creates `db` in an empty Postgres schema, without its extensions (they
+/// belong to the database, not the schema). Drift detection runs it in a shadow schema.
+pub fn create_statements(db: &DbSchema) -> Vec<String> {
+    diff::diff(&DbSchema::default(), db, &Default::default())
+        .iter()
+        .filter(|op| !matches!(op, Op::CreateExtension(_)))
+        .map(|op| pg::render(op, false))
+        .collect()
 }
 
 /// Drops every table, enum type and generated function of the schema (`IF EXISTS ... CASCADE`);

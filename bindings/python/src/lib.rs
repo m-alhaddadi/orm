@@ -547,6 +547,63 @@ impl Engine {
         })
     }
 
+    /// The live database as a schema file: `(schema, gaps, [(summary, sql)])`, the steps
+    /// being what a migration from the schema would still change (see `orm_engine::introspect`).
+    fn pull_schema<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let p = orm_engine::introspect::pull(&*driver).await.map_err(engine_err)?;
+            Ok((p.schema, p.gaps, p.steps.into_iter().map(|s| (s.summary, s.sql)).collect::<Vec<_>>()))
+        })
+    }
+
+    /// The live database against the newest snapshot of `dir`:
+    /// `(migration, [(summary, sql)], gaps)`.
+    fn migration_drift<'py>(&self, py: Python<'py>, dir: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let d = orm_engine::introspect::drift(&*driver, &dir).await.map_err(engine_err)?;
+            Ok((d.migration, d.steps.into_iter().map(|s| (s.summary, s.sql)).collect::<Vec<_>>(), d.gaps))
+        })
+    }
+
+    /// Records the first migration of `dir` as applied without running it; its name.
+    fn migrate_baseline<'py>(&self, py: Python<'py>, dir: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(engine_migrate::baseline(&*driver, &dir).await.map_err(engine_err)?.name)
+        })
+    }
+
+    /// The migrations `migrate_up` would apply: `[(name, path)]`.
+    #[pyo3(signature = (dir, target = None))]
+    fn migration_pending<'py>(&self, py: Python<'py>, dir: PathBuf, target: Option<String>) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let todo = engine_migrate::pending(&*driver, &dir, target.as_deref()).await.map_err(engine_err)?;
+            Ok(todo.into_iter().map(|m| (m.name, m.path)).collect::<Vec<_>>())
+        })
+    }
+
+    /// Starts applying one migration: its transaction, with the lock taken and `up.sql`
+    /// run; None when another migrator applied it meanwhile.
+    fn migration_begin<'py>(&self, py: Python<'py>, name: String, path: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let m = engine_migrate::Migration { name, path };
+            let tx = engine_migrate::begin_apply(&*driver, &m).await.map_err(engine_err)?;
+            Ok(tx.map(|inner| Transaction { inner }))
+        })
+    }
+
+    /// Records the migration in `tx` (from `migration_begin`) and commits.
+    fn migration_finish<'py>(&self, py: Python<'py>, tx: &Bound<'py, Transaction>, name: String, path: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let inner = tx.get().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            engine_migrate::finish_apply(&*inner, &engine_migrate::Migration { name, path }).await.map_err(engine_err)
+        })
+    }
+
     /// Reverts the last `steps` migrations, or every one after `target`; the names reverted.
     #[pyo3(signature = (dir, steps = 1, target = None))]
     fn migrate_down<'py>(
@@ -660,6 +717,14 @@ fn cli(py: Python<'_>, argv: Vec<String>) -> i32 {
     py.detach(|| orm_cli::run_blocking(&argv, orm_cli::Host::Python))
 }
 
+/// For `python -m orm migrate`: `(schema, dir, url, target)` as the CLI resolves them,
+/// or None for any other command line.
+#[cfg(feature = "cli")]
+#[pyfunction]
+fn cli_migrate_args(argv: Vec<String>) -> Option<(PathBuf, PathBuf, Option<String>, Option<String>)> {
+    orm_cli::migrate_args(&argv, orm_cli::Host::Python)
+}
+
 /// Migration folders of `dir` in order: `[(name, path)]`.
 #[pyfunction]
 fn list_migrations(dir: PathBuf) -> PyResult<Vec<(String, PathBuf)>> {
@@ -715,6 +780,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generate_python, m)?)?;
     #[cfg(feature = "cli")]
     m.add_function(wrap_pyfunction!(cli, m)?)?;
+    #[cfg(feature = "cli")]
+    m.add_function(wrap_pyfunction!(cli_migrate_args, m)?)?;
     m.add_function(wrap_pyfunction!(list_migrations, m)?)?;
     m.add_function(wrap_pyfunction!(find_migration, m)?)?;
     m.add_class::<PySchema>()?;
