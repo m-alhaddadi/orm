@@ -9,7 +9,7 @@ expressions over model attributes, Django-style managers on top::
 """
 
 from . import debug, fields
-from .db import Database, connect, get_database
+from .db import Database, connect, get_database, scope
 from .errors import (
     DatabaseError,
     DoesNotExist,
@@ -30,6 +30,10 @@ from .expr import (
     ColumnRef,
     Condition,
     Expression,
+    Case,
+    JsonPath,
+    TsQuery,
+    TsVector,
     Func,
     Ordering,
     RelationPath,
@@ -51,7 +55,7 @@ from .protection import allow_writes
 from .query import ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet
 from .cte import Cte, CteColumn
 from .select import Row, Select
-from .write import Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update, UpdateMany
+from .write import CopyInsert, Delete, InsertMany, InsertOne, OnConflictMany, OnConflictOne, Returning, Update, UpdateMany
 
 __all__ = [
     "debug",
@@ -62,6 +66,7 @@ __all__ = [
     "loads",
     "Database",
     "connect",
+    "scope",
     "get_database",
     "Model",
     "registry",
@@ -77,6 +82,7 @@ __all__ = [
     "Row",
     "InsertOne",
     "InsertMany",
+    "CopyInsert",
     "OnConflictOne",
     "OnConflictMany",
     "Update",
@@ -96,6 +102,10 @@ __all__ = [
     "exists",
     "outer",
     "func",
+    "Case",
+    "JsonPath",
+    "TsQuery",
+    "TsVector",
     "Func",
     "Window",
     "WindowDef",

@@ -338,7 +338,9 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
         .unwrap();
         writeln!(
             body,
-            "    def insert_many(self, rows: Iterable[{name}Insert]) -> InsertMany[{name}]: ...  # type: ignore[override]"
+            "    @overload  # type: ignore[override]\n    def insert_many(self, rows: Iterable[{name}Insert], *, batch_size: int | None = None, \
+             copy: Literal[False] = False) -> InsertMany[{name}]: ...\n    @overload\n    def insert_many(self, rows: Iterable[{name}Insert], \
+             *, copy: Literal[True]) -> CopyInsert[{name}]: ..."
         )
         .unwrap();
         writeln!(
@@ -380,11 +382,10 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
     if !en.is_empty() {
         writeln!(pyi, "from enum import {}", en.join(", ")).unwrap();
     }
-    let literal = schema.models.iter().flat_map(|m| m.fields()).any(|f| f.hints.get("python").is_some_and(|h| h.starts_with("Literal[")));
+    // `Literal` and `overload` type `insert_many(..., copy=True)`.
     let typing = format!(
-        "{}ClassVar, {}NotRequired, Required, TypedDict",
+        "{}ClassVar, Literal, NotRequired, Required, TypedDict, overload",
         if used.contains("Any") { "Any, " } else { "" },
-        if literal { "Literal, " } else { "" },
     );
     writeln!(pyi, "from typing import {typing}").unwrap();
     if used.contains("UUID") {
@@ -393,7 +394,7 @@ pub fn generate(ir: &SchemaIr, schema: &Schema, source: &str) -> Result<Generate
 
     pyi.push_str(
         "\nfrom typing_extensions import Unpack\n\n\
-         from orm import ColumnRef, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update, UpdateMany\n\
+         from orm import ColumnRef, CopyInsert, Expression, InsertMany, InsertOne, Model, QuerySet, RelationPath, Update, UpdateMany\n\
          from orm import fields as f\n\n",
     );
     #[cfg(feature = "file-storage")]

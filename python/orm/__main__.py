@@ -5,9 +5,12 @@
     python -m orm generate [-o models.py]           # models.py + models.pyi from the schema
     python -m orm makemigrations [name] [--empty] [--check]
     python -m orm sqlmigrate <migration> [--down]
-    python -m orm migrate [target]
+    python -m orm migrate [target]                  # runs data.py steps through Migrator
     python -m orm rollback [--steps N | --to <migration>|zero]
     python -m orm showmigrations
+    python -m orm pull [-o schema.prisma] [--force]
+    python -m orm baseline
+    python -m orm drift
 
 The schema file and migrations directory come from ``--schema`` / ``--dir`` or from
 ``[tool.orm]`` in ``pyproject.toml`` (``schema = "schema.prisma"``,
@@ -28,7 +31,22 @@ def main(argv: list[str] | None = None) -> int:
     sys.stderr.flush()
     if not hasattr(_native, "cli"):
         raise RuntimeError("CLI is unavailable in this runtime profile; install orm[tooling] and set ORM_PROFILE=tooling")
-    return _native.cli(sys.argv[1:] if argv is None else list(argv))
+    args = sys.argv[1:] if argv is None else list(argv)
+    found = _native.cli_migrate_args(args)
+    if found is not None:
+        schema, directory, url, target = found
+        from .migrations import has_data_steps, migrate_command
+
+        if url and has_data_steps(directory):
+            # data.py runs in Python, so this migrator applies the directory
+            import asyncio
+
+            try:
+                return asyncio.run(migrate_command(schema, directory, url, target))
+            except Exception as e:  # the CLI reports errors, not tracebacks
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+    return _native.cli(args)
 
 
 if __name__ == "__main__":

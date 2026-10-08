@@ -1,0 +1,3 @@
+[lint]
+# ORM None and boolean comparisons build query expressions.
+extend-ignore = ["E711", "E712"]

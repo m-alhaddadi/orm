@@ -99,9 +99,9 @@ fn update_many_plan<'py>(
         .into_iter()
         .map(|r| r.into_iter().map(|v| v.expect("no DEFAULT in update_many")).collect())
         .collect();
-    let filters: Vec<ir::Expr> =
-        serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
-    exec::plan_update_many(schema, target, model, fields, values, &filters, &PyParams(params), returning, batch_size, without_defaults)
+    let (filters, scope) = orm_engine::params::scoped_filters(filters_json).map_err(engine_err)?;
+    let params = orm_engine::params::Scoped { params: &PyParams(params), scope: &scope };
+    exec::plan_update_many(schema, target, model, fields, values, &filters, &params, returning, batch_size, without_defaults)
         .map_err(engine_err)
 }
 
@@ -119,7 +119,7 @@ impl PySchema {
     #[pyo3(signature = (schema_json, classes = None))]
     fn new(py: Python<'_>, schema_json: &str, classes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut ir: ir::SchemaIr =
-            serde_json::from_str(schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+            ir::SchemaIr::from_json(schema_json).map_err(schema_err)?;
         orm_core::behavior::prepare(&mut ir, Some("python")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         db::require_dialect(inner.dialect).map_err(db_err)?;
@@ -131,7 +131,9 @@ impl PySchema {
     }
 
     /// Converts and plans a single-row insert without SQL or I/O (`orm.hooks.prepare_insert`).
-    fn validate_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>) -> PyResult<()> {
+    /// `allowed`: the write protection check runs here too, before a caller's own I/O.
+    fn validate_insert(&self, model: &str, fields: Vec<String>, rows: &Bound<'_, PyList>, allowed: Vec<String>) -> PyResult<()> {
+        protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
         let values = convert_rows(&self.inner, model, &fields, rows, true)?;
         exec::plan_insert(&self.inner, Target::new(self.inner.dialect), model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
         Ok(())
@@ -139,8 +141,11 @@ impl PySchema {
 
     /// Plans an update without SQL or I/O; true when its filters pin one row by a
     /// non-null primary key or unique field (`orm.hooks.prepare_update`).
-    fn unique_row_update(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<bool> {
+    fn unique_row_update(&self, op_json: &str, params: Vec<Bound<'_, PyAny>>, allowed: Vec<String>) -> PyResult<bool> {
         let op = parse_op(op_json).map_err(engine_err)?;
+        if let Operation::Update(ir::Update { model, .. }) = &op {
+            protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
+        }
         plan::unique_row_update(&self.inner, Target::new(self.inner.dialect), &op, &PyParams(&params)).map_err(engine_err)
     }
 
@@ -239,6 +244,20 @@ impl Transaction {
     }
 }
 
+/// A held session advisory lock (`db.lock(..., session=True)`).
+#[pyclass(frozen, module = "orm._native")]
+struct SessionLock {
+    inner: Arc<dyn db::SessionLock>,
+}
+
+#[pymethods]
+impl SessionLock {
+    fn release<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let lock = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { lock.release().await.map_err(db_err) })
+    }
+}
+
 #[pyclass(frozen, module = "orm._native")]
 struct Engine {
     driver: Arc<dyn Driver>,
@@ -311,8 +330,11 @@ impl Engine {
     /// With `conflict` (unique field names) rows hitting that constraint update the
     /// `update` fields from the new row and apply the `set` assignments (JSON list of
     /// `{"field", "value"}` IR, parameters in `params`), or are skipped if `update` is
-    /// None.
-    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![]))]
+    /// None. `conflict_where` (condition IR, parameters in `params`) is the predicate of a
+    /// partial unique index.
+    /// Rows beyond the parameter limit, or beyond `batch_size`, go to further statements
+    /// in one transaction (inside `tx` when given).
+    #[pyo3(signature = (model, fields, rows, conflict = None, update = None, set = None, params = vec![], tx = None, db = None, allowed = vec![], batch_size = None, conflict_where = None))]
     #[allow(clippy::too_many_arguments)]
     fn insert<'py>(
         &self,
@@ -327,27 +349,54 @@ impl Engine {
         tx: Option<&Bound<'py, Transaction>>,
         db: Option<Bound<'py, PyAny>>,
         allowed: Vec<String>,
+        batch_size: Option<usize>,
+        conflict_where: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
             Some(json) => serde_json::from_str(json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
             None => vec![],
         };
+        let filter: Option<ir::Expr> = match conflict_where {
+            Some(json) => Some(serde_json::from_str(json).map_err(|e| query_err(format!("invalid condition IR: {e}")))?),
+            None => None,
+        };
         let conflict = conflict.map(|target| match update {
-            Some(update) => Conflict::Update { target, update, set },
-            None => Conflict::Nothing { target },
+            Some(update) => Conflict::Update { target, filter, update, set },
+            None => Conflict::Nothing { target, filter },
         });
         let values = convert_rows(&self.schema, model, &fields, rows, true)?;
-        let plan = exec::plan_insert(&self.schema, self.target, model, &fields, values, conflict, &PyParams(&params))
-            .map_err(engine_err)?;
+        let plans =
+            exec::plan_inserts(&self.schema, self.target, model, &fields, values, conflict, &PyParams(&params), batch_size)
+                .map_err(engine_err)?;
         let target = self.target;
         let conn = self.conn(tx);
+        let own_tx = tx.is_none();
         let classes = self.classes.clone();
         let db = db.map(Bound::unbind);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let out = exec::run(conn.as_ref(), target, plan).await.map_err(engine_err)?;
+            let out = exec::run_inserts(conn.as_ref(), target, plans, own_tx).await.map_err(engine_err)?;
             Python::attach(|py| outcome_to_py(py, out, &classes, db, None))
         })
+    }
+
+    /// Bulk load with Postgres `COPY` (`insert_many(rows, copy=True)`); returns the number
+    /// of rows written. `rows` are sequences aligned with `fields`.
+    #[pyo3(signature = (model, fields, rows, tx = None, allowed = vec![]))]
+    fn copy_insert<'py>(
+        &self,
+        py: Python<'py>,
+        model: &str,
+        fields: Vec<String>,
+        rows: &Bound<'py, PyList>,
+        tx: Option<&Bound<'py, Transaction>>,
+        allowed: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
+        let values = convert_rows(&self.schema, model, &fields, rows, true)?;
+        let copy = exec::plan_copy(&self.schema, self.target, model, &fields, values).map_err(engine_err)?;
+        let conn = self.conn(tx);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { exec::run_copy(conn.as_ref(), copy).await.map_err(engine_err) })
     }
 
     /// Attach local values to an existing shared-key parent.
@@ -424,6 +473,27 @@ impl Engine {
         let conn = self.conn(Some(tx));
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             conn.advisory_lock(key, exclusive, nowait).await.map_err(db_err)
+        })
+    }
+
+    /// This engine on the same pool, with `set_config(name, value, true)` for each
+    /// setting at the start of every transaction (statements outside one get their own).
+    fn with_settings(&self, names: Vec<String>, values: Vec<String>) -> Engine {
+        let driver: Arc<dyn Driver> = Arc::new(db::WithSettings::new(self.driver.clone(), names.into_iter().zip(values).collect()));
+        Engine { driver, target: self.target, schema: self.schema.clone(), classes: self.classes.clone() }
+    }
+
+    /// Session advisory lock on a pinned connection; `None` when it is not taken.
+    #[pyo3(signature = (key, name, exclusive, nowait, timeout_ms = None))]
+    fn session_lock<'py>(
+        &self, py: Python<'py>, key: i64, name: Option<&[u8]>,
+        exclusive: bool, nowait: bool, timeout_ms: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = name.map(orm_engine::advisory::key).unwrap_or(key);
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let lock = driver.session_lock(key, exclusive, nowait, timeout_ms).await.map_err(db_err)?;
+            Ok(lock.map(|inner| SessionLock { inner }))
         })
     }
 
@@ -507,6 +577,63 @@ impl Engine {
         })
     }
 
+    /// The live database as a schema file: `(schema, gaps, [(summary, sql)])`, the steps
+    /// being what a migration from the schema would still change (see `orm_engine::introspect`).
+    fn pull_schema<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let p = orm_engine::introspect::pull(&*driver).await.map_err(engine_err)?;
+            Ok((p.schema, p.gaps, p.steps.into_iter().map(|s| (s.summary, s.sql)).collect::<Vec<_>>()))
+        })
+    }
+
+    /// The live database against the newest snapshot of `dir`:
+    /// `(migration, [(summary, sql)], gaps)`.
+    fn migration_drift<'py>(&self, py: Python<'py>, dir: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let d = orm_engine::introspect::drift(&*driver, &dir).await.map_err(engine_err)?;
+            Ok((d.migration, d.steps.into_iter().map(|s| (s.summary, s.sql)).collect::<Vec<_>>(), d.gaps))
+        })
+    }
+
+    /// Records the first migration of `dir` as applied without running it; its name.
+    fn migrate_baseline<'py>(&self, py: Python<'py>, dir: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(engine_migrate::baseline(&*driver, &dir).await.map_err(engine_err)?.name)
+        })
+    }
+
+    /// The migrations `migrate_up` would apply: `[(name, path)]`.
+    #[pyo3(signature = (dir, target = None))]
+    fn migration_pending<'py>(&self, py: Python<'py>, dir: PathBuf, target: Option<String>) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let todo = engine_migrate::pending(&*driver, &dir, target.as_deref()).await.map_err(engine_err)?;
+            Ok(todo.into_iter().map(|m| (m.name, m.path)).collect::<Vec<_>>())
+        })
+    }
+
+    /// Starts applying one migration: its transaction, with the lock taken and `up.sql`
+    /// run; None when another migrator applied it meanwhile.
+    fn migration_begin<'py>(&self, py: Python<'py>, name: String, path: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let driver = self.driver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let m = engine_migrate::Migration { name, path };
+            let tx = engine_migrate::begin_apply(&*driver, &m).await.map_err(engine_err)?;
+            Ok(tx.map(|inner| Transaction { inner }))
+        })
+    }
+
+    /// Records the migration in `tx` (from `migration_begin`) and commits.
+    fn migration_finish<'py>(&self, py: Python<'py>, tx: &Bound<'py, Transaction>, name: String, path: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+        let inner = tx.get().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            engine_migrate::finish_apply(&*inner, &engine_migrate::Migration { name, path }).await.map_err(engine_err)
+        })
+    }
+
     /// Reverts the last `steps` migrations, or every one after `target`; the names reverted.
     #[pyo3(signature = (dir, steps = 1, target = None))]
     fn migrate_down<'py>(
@@ -569,7 +696,7 @@ fn outcome_to_py(
 #[pyfunction]
 #[pyo3(signature = (schema_json, context_json = None))]
 fn prepare_schema(schema_json: &str, context_json: Option<&str>) -> PyResult<String> {
-    let mut ir: ir::SchemaIr = serde_json::from_str(schema_json).map_err(|e| schema_err(e.to_string()))?;
+    let mut ir = ir::SchemaIr::from_json(schema_json).map_err(schema_err)?;
     if let Some(context) = context_json {
         let context = serde_json::from_str(context).map_err(|e| schema_err(format!("invalid definition context: {e}")))?;
         ir = orm_core::behavior::merge_definition(context, ir).map_err(schema_err)?;
@@ -618,6 +745,14 @@ fn generate_python(path: &str) -> PyResult<(String, String)> {
 #[pyfunction]
 fn cli(py: Python<'_>, argv: Vec<String>) -> i32 {
     py.detach(|| orm_cli::run_blocking(&argv, orm_cli::Host::Python))
+}
+
+/// For `python -m orm migrate`: `(schema, dir, url, target)` as the CLI resolves them,
+/// or None for any other command line.
+#[cfg(feature = "cli")]
+#[pyfunction]
+fn cli_migrate_args(argv: Vec<String>) -> Option<(PathBuf, PathBuf, Option<String>, Option<String>)> {
+    orm_cli::migrate_args(&argv, orm_cli::Host::Python)
 }
 
 /// Migration folders of `dir` in order: `[(name, path)]`.
@@ -675,11 +810,14 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generate_python, m)?)?;
     #[cfg(feature = "cli")]
     m.add_function(wrap_pyfunction!(cli, m)?)?;
+    #[cfg(feature = "cli")]
+    m.add_function(wrap_pyfunction!(cli_migrate_args, m)?)?;
     m.add_function(wrap_pyfunction!(list_migrations, m)?)?;
     m.add_function(wrap_pyfunction!(find_migration, m)?)?;
     m.add_class::<PySchema>()?;
     m.add_class::<Engine>()?;
     m.add_class::<Transaction>()?;
+    m.add_class::<SessionLock>()?;
     m.add("DEFAULT", Py::new(py, DefaultMarker)?)?;
     m.add("DatabaseError", py.get_type::<errors::DatabaseError>())?;
     m.add("IntegrityError", py.get_type::<errors::IntegrityError>())?;

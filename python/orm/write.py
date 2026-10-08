@@ -20,10 +20,10 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Generator, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeVar
 
 from . import _native
-from .expr import ColumnRef, Expression, IRContext
+from .expr import ColumnRef, ConditionLike, Expression, IRContext, Ordering, as_condition
 from .errors import QueryError
 from .fields import BelongsTo
 
@@ -37,6 +37,7 @@ M = TypeVar("M", bound="Model")
 __all__ = [
     "InsertOne",
     "InsertMany",
+    "CopyInsert",
     "OnConflictOne",
     "OnConflictMany",
     "Update",
@@ -86,6 +87,26 @@ def prepare_rows(
     fields = [n for n in meta.field_names if any(n in v for v in normalized)]
     aligned = [[v.get(n, _native.DEFAULT) for n in fields] for v in normalized]
     return fields, aligned, provided
+
+
+def lookup_values(model: type[Model], values: Mapping[str, Any]) -> dict[str, Any]:
+    """``get_or_insert``'s lookup by field name: plain, non-null values; a to-one
+    relation (``author=user``) gives its key field."""
+    meta = model._meta
+    out: dict[str, Any] = {}
+    for key, value in values.items():
+        if isinstance(value, Expression):
+            raise TypeError(f"{meta.name}.{key}: get_or_insert takes plain values, not expressions")
+        if isinstance(rel := meta.relations.get(key), BelongsTo):
+            key, value = rel.via, (None if value is None else _key_of(value, rel.to))
+        elif key not in meta.input_fields:
+            raise TypeError(f"{meta.name} has no field {key!r}")
+        if value is None:
+            raise ValueError(f"get_or_insert: {meta.name}.{key} is None; NULL never conflicts, so the row is not unique")
+        out[key] = value
+    if not out:
+        raise TypeError("get_or_insert() needs the fields of a unique constraint")
+    return out
 
 
 def prepare_update_rows(model: type[Model], rows: Iterable[Mapping[str, Any]]) -> tuple[list[str], list[list[Any]]]:
@@ -139,6 +160,8 @@ def assignments(model: type[Model], values: Mapping[str, Any], ctx: IRContext) -
             name, value = rel.via, (None if value is None else _key_of(value, rel.to))
         if name not in meta.input_fields:
             raise TypeError(f"{meta.name} has no field {name!r}")
+        if isinstance(value, Ordering):
+            raise TypeError(f"{name}={value!r} is an ordering, for order_by(); write 0 - {value.expr!r} to negate a value")
         node = value._ir(ctx) if isinstance(value, Expression) else ctx.param(value)
         out.append({"field": name, "value": node})
     return out
@@ -154,7 +177,7 @@ def _field_names(model: type[Model], columns: tuple[ColumnRef[Any], ...], what: 
 
 
 class _Insert:
-    __slots__ = ("_qs", "_fields", "_rows", "_provided", "_conflict", "_update", "_set", "_used")
+    __slots__ = ("_qs", "_fields", "_rows", "_provided", "_conflict", "_where", "_update", "_set", "_batch_size", "_used")
 
     def __init__(
         self,
@@ -165,14 +188,20 @@ class _Insert:
         conflict: list[str] | None = None,
         update: list[str] | None = None,
         set_: tuple[list[dict[str, Any]], list[Any]] | None = None,
+        batch_size: int | None = None,
+        where: dict[str, Any] | None = None,
     ) -> None:
+        if batch_size is not None and batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
         self._qs = qs
         self._fields = fields
         self._rows = rows
         self._provided = provided
         self._conflict = conflict
+        self._where = where  # partial unique index predicate (IR), parameters in `_set`
         self._update = update
         self._set = set_  # DO UPDATE assignments (IR) and their parameters
+        self._batch_size = batch_size
         self._used = False
 
     def _derive(
@@ -181,9 +210,10 @@ class _Insert:
         conflict: list[str],
         update: list[str] | None,
         set_: tuple[list[dict[str, Any]], list[Any]] | None = None,
+        where: dict[str, Any] | None = None,
     ) -> Any:
         self._used = True
-        return cls(self._qs, self._fields, self._rows, self._provided, conflict, update, set_)
+        return cls(self._qs, self._fields, self._rows, self._provided, conflict, update, set_, self._batch_size, where)
 
     async def _execute(self) -> list[Any]:
         from .db import resolve
@@ -193,7 +223,8 @@ class _Insert:
         model = self._qs.model
         db = resolve(self._qs._db)
         objs: list[Any] = await db._insert(
-            model._meta.name, self._fields, self._rows, self._conflict, self._update, self._set, self._qs._db
+            model._meta.name, self._fields, self._rows, self._conflict, self._update, self._set, self._qs._db,
+            self._batch_size, self._where,
         )
         return objs
 
@@ -206,7 +237,8 @@ class _Insert:
         if self._conflict is not None:
             names = [*(self._update or ()), *(a["field"] + "=..." for a in (self._set or ([], []))[0])]
             action = "do_nothing()" if self._update is None else f"do_update({', '.join(names)})"
-            clause = f" on_conflict({', '.join(self._conflict)}).{action}"
+            where = " where=..." if self._where is not None else ""
+            clause = f" on_conflict({', '.join(self._conflict)}{where}).{action}"
         return f"<{type(self).__name__} {self._qs.model.__name__} x{len(self._rows)}{clause}>"
 
 
@@ -215,9 +247,10 @@ class InsertOne(_Insert, Generic[R]):
 
     __slots__ = ()
 
-    def on_conflict(self, *columns: ColumnRef[Any]) -> OnConflictOne[R]:
-        """Handle rows that violate the unique constraint on ``columns``."""
-        return OnConflictOne(self, _field_names(self._qs.model, columns, "on_conflict"))
+    def on_conflict(self, *columns: ColumnRef[Any], where: ConditionLike | None = None) -> OnConflictOne[R]:
+        """Handle rows that violate the unique constraint on ``columns``. ``where`` is the
+        predicate of a partial unique index (``ON CONFLICT (...) WHERE ...``)."""
+        return OnConflictOne(self, _field_names(self._qs.model, columns, "on_conflict"), where)
 
     def __await__(self) -> Generator[Any, None, R]:
         self._used = True
@@ -230,28 +263,76 @@ class InsertOne(_Insert, Generic[R]):
 
 class InsertMany(_Insert, Generic[M]):
     """``await`` gives the inserted instances, in input order (rows skipped by
-    ``do_nothing()`` are left out)."""
+    ``do_nothing()`` are left out). Rows beyond the parameter limit, or beyond
+    ``batch_size``, go to further statements in one transaction."""
 
     __slots__ = ()
 
-    def on_conflict(self, *columns: ColumnRef[Any]) -> OnConflictMany[M]:
-        """Handle rows that violate the unique constraint on ``columns``."""
-        return OnConflictMany(self, _field_names(self._qs.model, columns, "on_conflict"))
+    def on_conflict(self, *columns: ColumnRef[Any], where: ConditionLike | None = None) -> OnConflictMany[M]:
+        """Handle rows that violate the unique constraint on ``columns``. ``where`` is the
+        predicate of a partial unique index (``ON CONFLICT (...) WHERE ...``)."""
+        return OnConflictMany(self, _field_names(self._qs.model, columns, "on_conflict"), where)
 
     def __await__(self) -> Generator[Any, None, list[M]]:
         self._used = True
         return self._execute().__await__()
 
 
-class _OnConflict:
-    __slots__ = ("_insert", "_target")
+class CopyInsert(Generic[M]):
+    """``insert_many(rows, copy=True)``: a Postgres ``COPY``. ``await`` gives the number
+    of rows written; there is no ``RETURNING``, so no instances."""
 
-    def __init__(self, insert: _Insert, target: list[str]) -> None:
+    __slots__ = ("_qs", "_fields", "_rows", "_used")
+
+    def __init__(self, qs: QuerySet[M], fields: list[str], rows: list[list[Any]]) -> None:
+        self._qs = qs
+        self._fields = fields
+        self._rows = rows
+        self._used = False
+
+    def on_conflict(self, *columns: ColumnRef[Any], where: ConditionLike | None = None) -> NoReturn:
+        self._used = True
+        raise TypeError("insert_many(copy=True) can't be combined with on_conflict(); COPY stops at the first conflict")
+
+    async def _count(self) -> int:
+        from .db import resolve
+
+        if not self._rows:
+            return 0
+        n: int = await resolve(self._qs._db)._copy(self._qs.model._meta.name, self._fields, self._rows)
+        return n
+
+    def __await__(self) -> Generator[Any, None, int]:
+        self._used = True
+        return self._count().__await__()
+
+    def __del__(self) -> None:
+        if not getattr(self, "_used", True):
+            warnings.warn(f"{self!r} was never awaited, so nothing was inserted", RuntimeWarning, stacklevel=2)
+
+    def __repr__(self) -> str:
+        return f"<CopyInsert {self._qs.model.__name__} x{len(self._rows)}>"
+
+
+class _OnConflict:
+    __slots__ = ("_insert", "_target", "_where")
+
+    def __init__(self, insert: _Insert, target: list[str], where: ConditionLike | None = None) -> None:
         if not target:
             raise TypeError("on_conflict() needs the column(s) of a unique constraint")
         insert._used = True
         self._insert = insert
         self._target = target
+        self._where = None if where is None else as_condition(where)
+
+    def _where_ir(self, params: list[Any]) -> dict[str, Any] | None:
+        model = self._insert._qs.model
+        return None if self._where is None else self._where._ir(IRContext(model, params))
+
+    def _do_nothing(self, cls: type[Any]) -> Any:
+        params: list[Any] = []
+        where = self._where_ir(params)
+        return self._insert._derive(cls, self._target, None, None if where is None else ([], params), where)
 
     def _do_update(self, cls: type[Any], columns: tuple[ColumnRef[Any], ...], values: dict[str, Any]) -> Any:
         model = self._insert._qs.model
@@ -261,14 +342,15 @@ class _OnConflict:
             pk = model._meta.pk.name
             ins = self._insert
             update = [f for f in ins._fields if f in ins._provided and f not in self._target and f != pk]
-        set_ = None
+        params: list[Any] = []
+        where = self._where_ir(params)
+        set_: tuple[list[dict[str, Any]], list[Any]] | None = None if where is None else ([], params)
         if values:
-            params: list[Any] = []
             set_ = (assignments(model, values, IRContext(model, params)), params)
             overlap = set(update) & {a["field"] for a in set_[0]}
             if overlap:
                 raise TypeError(f"do_update() sets {', '.join(sorted(overlap))} twice")
-        return self._insert._derive(cls, self._target, update, set_)
+        return self._insert._derive(cls, self._target, update, set_, where)
 
 
 class OnConflictOne(_OnConflict, Generic[R]):
@@ -283,7 +365,7 @@ class OnConflictOne(_OnConflict, Generic[R]):
 
     def do_nothing(self) -> InsertOne[R | None]:
         """``ON CONFLICT DO NOTHING``: keep the existing row; ``await`` gives ``None``."""
-        return self._insert._derive(InsertOne, self._target, None)  # type: ignore[no-any-return]
+        return self._do_nothing(InsertOne)  # type: ignore[no-any-return]
 
 
 class OnConflictMany(_OnConflict, Generic[M]):
@@ -298,7 +380,7 @@ class OnConflictMany(_OnConflict, Generic[M]):
 
     def do_nothing(self) -> InsertMany[M]:
         """``ON CONFLICT DO NOTHING``: skip conflicting rows."""
-        return self._insert._derive(InsertMany, self._target, None)  # type: ignore[no-any-return]
+        return self._do_nothing(InsertMany)  # type: ignore[no-any-return]
 
 
 # -- UPDATE / DELETE -----------------------------------------------------------------------

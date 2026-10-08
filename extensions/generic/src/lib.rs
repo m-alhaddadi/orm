@@ -44,9 +44,26 @@ fn field_form(ir: &mut SchemaIr, d: &Declaration, targets: &[String]) -> Result<
         Some("Generic?") => true,
         _ => return Err(error(d, "must be on a field of type Generic or Generic?")),
     };
+    // Proxy and composition passes ran first; a model they made with this field holds the placeholder.
+    let keeps = |model: &str| ir.models.iter().any(|m| m.name == model && m.fields.iter().any(|f| f.name == name));
+    let copy = ir.behavior.proxy_models.iter().filter(|p| p.storage_owner == d.model).map(|p| &p.model)
+        .chain(ir.behavior.owner_links.iter().filter(|l| l.parent == d.model).map(|l| &l.child))
+        .find(|m| keeps(m));
+    if let Some(copy) = copy {
+        return Err(error(d, format!("{}.{name}: {copy} keeps the Generic field; exclude it there or use @@generic.relation with explicit type and key fields", d.model)));
+    }
     let mut created = vec![];
     for (argument, suffix) in [("type", "type"), ("key", "id")] {
-        if !d.arguments.contains_key(argument) { created.push((argument, format!("{name}_{suffix}"))); }
+        match d.arguments.get(argument).and_then(|v| v.as_str()) {
+            None => created.push((argument, format!("{name}_{suffix}"))),
+            Some(existing) => {
+                let model = ir.models.iter().find(|m| m.name == d.model).ok_or_else(|| error(d, "unknown source model"))?;
+                if model.fields.iter().find(|f| f.name == existing).is_some_and(|f| f.nullable != nullable) {
+                    let mark = if nullable { "Generic?" } else { "Generic" };
+                    return Err(error(d, format!("{argument} field {existing} must match the nullability of {mark}")));
+                }
+            }
+        }
     }
     let mut keys = vec![];
     for target in targets {
@@ -76,10 +93,10 @@ fn field_form(ir: &mut SchemaIr, d: &Declaration, targets: &[String]) -> Result<
                 f.enum_name = Some("ContentType".into());
                 f
             } else {
-                let mut f = keys[0].clone();
-                (f.name, f.column) = (field.clone(), field.clone());
-                (f.primary_key, f.auto_increment, f.unique, f.index, f.default_now) = (false, false, false, false, false);
-                (f.default, f.default_sql, f.check, f.renamed_from, f.comment) = (None, None, None, None, None);
+                // Only the storage encoding of the target key; never its identity, defaults or hints.
+                let key = &keys[0];
+                let mut f = FieldIr::plain(field, key.ty);
+                (f.db_type, f.max_length, f.read_sql, f.write_sql, f.requires) = (key.db_type.clone(), key.max_length, key.read_sql.clone(), key.write_sql.clone(), key.requires.clone());
                 f
             };
             f.nullable = nullable;
@@ -331,5 +348,87 @@ mod tests {
         second.field = Some("owner".into());
         ir.behavior.declarations.insert(1, second);
         assert!(prepare(&mut ir).unwrap_err().contains("more than one generic relation to Post; name one with relation:"));
+    }
+    #[test]
+    fn named_pair_fields_match_the_nullability_of_the_generic_field() {
+        let mut ir = field_schema(serde_json::json!({"type": "content_type", "key": "object_id"}), serde_json::json!({}));
+        ir.models[2].fields.splice(1..1, schema().models[2].fields.drain(1..));
+        ir.behavior.storage = None;
+        orm_contracts::extension::capture_storage(&mut ir).unwrap();
+        ir.behavior.declarations[0].field_type = Some("Generic".into());
+        let error = prepare(&mut ir).unwrap_err();
+        assert!(error.contains("type field content_type must match the nullability of Generic"), "{error}");
+    }
+    #[test]
+    fn the_key_field_takes_only_the_storage_encoding_of_the_target_key() {
+        let mut ir = field_schema(serde_json::json!({}), serde_json::json!({}));
+        for model in &mut ir.models[..2] {
+            let pk = &mut model.fields[0];
+            pk.auto_increment = true;
+            pk.default_sql = Some("1".into());
+            pk.client_default = Some(orm_contracts::ir::ClientDefaultIr::Call(orm_contracts::ir::ClientCall::Uuid7));
+            pk.hints.insert("python".into(), "int".into());
+            pk.max_length = Some(9);
+            (pk.db_type, pk.write_sql, pk.requires) = (Some("citext".into()), Some("lower(?)".into()), vec!["citext".into()]);
+        }
+        prepare(&mut ir).unwrap();
+        let key = &ir.models[2].fields[2];
+        assert_eq!(key.name, "target_id");
+        assert!(!key.auto_increment && key.default_sql.is_none() && key.client_default.is_none() && key.hints.is_empty());
+        assert_eq!((key.ty, key.max_length, key.nullable), (ColType::Int, Some(9), true));
+        assert_eq!((key.db_type.as_deref(), key.write_sql.as_deref(), key.requires.as_slice()), (Some("citext"), Some("lower(?)"), ["citext".to_string()].as_slice()));
+    }
+    #[test]
+    fn a_generic_field_kept_by_a_proxy_or_composed_child_names_the_explicit_form() {
+        // `copy` is the model that the proxy or composition pass made from Tag; `keep` says whether it kept `target`.
+        let with = |copy: &str, keep: bool, link: fn(&mut SchemaIr, &str)| {
+            let mut ir = field_schema(serde_json::json!({}), serde_json::json!({}));
+            let mut model: orm_contracts::ir::ModelIr = serde_json::from_value(serde_json::to_value(&ir.models[2]).unwrap()).unwrap();
+            model.name = copy.into();
+            model.fields.retain(|f| keep || f.name != "target");
+            ir.models.push(model);
+            link(&mut ir, copy);
+            prepare(&mut ir)
+        };
+        let proxy: fn(&mut SchemaIr, &str) = |ir, m| ir.behavior.proxy_models.push(orm_contracts::extension::ProxyModel { model: m.into(), parent: "Tag".into(), storage_owner: "Tag".into(), ..Default::default() });
+        let child: fn(&mut SchemaIr, &str) = |ir, m| ir.behavior.owner_links.push(orm_contracts::extension::OwnerLink { child: m.into(), parent: "Tag".into(), child_key: "id".into(), parent_key: "id".into() });
+        for (copy, link) in [("NotedTag", proxy), ("Child", child)] {
+            let error = with(copy, true, link).unwrap_err();
+            assert!(error.contains(&format!("Tag.target: {copy} keeps the Generic field; exclude it there or use @@generic.relation")), "{error}");
+        }
+        // A proxy that does not select the field copies no placeholder.
+        with("NotedTag", false, proxy).unwrap();
+    }
+    #[test]
+    fn an_existing_pair_index_is_not_repeated() {
+        let mut ir = field_schema(serde_json::json!({}), serde_json::json!({}));
+        let mine = || serde_json::from_value::<Vec<IndexIr>>(serde_json::json!([{"columns":[{"field":"target_type"},{"field":"target_id"}], "name": "mine"}])).unwrap();
+        ir.models[2].indexes = mine();
+        ir.behavior.storage.as_mut().unwrap().models[2].indexes = mine();
+        prepare(&mut ir).unwrap();
+        for model in [&ir.models[2], &ir.behavior.storage.as_ref().unwrap().models[2]] {
+            assert_eq!(model.indexes.iter().map(|i| i.name.as_deref()).collect::<Vec<_>>(), [Some("mine")]);
+        }
+    }
+    #[test]
+    fn created_fields_collide_with_relations_and_columns() {
+        let mut ir = field_schema(serde_json::json!({}), serde_json::json!({}));
+        ir.models[2].relations = serde_json::from_value(serde_json::json!([{"name":"target_type","kind":"one","target":"Post","from":"note","to":"id"}])).unwrap();
+        assert!(prepare(&mut ir).unwrap_err().contains("the created type field collides"));
+        let mut ir = field_schema(serde_json::json!({}), serde_json::json!({}));
+        for model in std::iter::once(&mut ir.models[2]).chain(ir.behavior.storage.as_mut().unwrap().models.get_mut(2)) { model.fields[2].column = "target_id".into(); }
+        assert!(prepare(&mut ir).unwrap_err().contains("the created key field collides"));
+    }
+    #[test]
+    fn a_reverse_field_ignores_relations_without_its_model_in_their_targets() {
+        let mut ir = field_schema(serde_json::json!({}), serde_json::json!({}));
+        ir.models[2].fields.push(serde_json::from_value(serde_json::json!({"name":"owner","column":"owner","type":"int","nullable":true})).unwrap());
+        ir.behavior.storage.as_mut().unwrap().models[2].fields.push(serde_json::from_value(serde_json::json!({"name":"owner","column":"owner","type":"int","nullable":true})).unwrap());
+        let mut second = ir.behavior.declarations[0].clone();
+        second.field = Some("owner".into());
+        second.arguments.insert("targets".into(), serde_json::json!(["Photo"]));
+        ir.behavior.declarations.insert(1, second);
+        prepare(&mut ir).unwrap();
+        assert_eq!(ir.behavior.generic_reverse[0].relation, "target");
     }
 }

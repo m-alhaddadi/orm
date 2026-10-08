@@ -84,6 +84,8 @@ class ModelMeta:
         self.soft_delete: str | None = None
         # The `@locking.version` field name: instance writes check it.
         self.version_field: str | None = None
+        # Fields that a proxy declares non-null over a nullable stored column.
+        self.narrowed: frozenset[str] = frozenset()
 
     def pk_ref(self) -> ColumnRef[Any]:
         return ColumnRef(self.model, (), self.pk)
@@ -257,6 +259,8 @@ class Registry:
             behavior = prepared.get("behavior", {})
             meta.soft_delete = next((d["field"] for d in behavior.get("soft_delete", ()) if d["model"] == meta.name), None)
             meta.version_field = next((d["field"] for d in behavior.get("versions", ()) if d["model"] == meta.name), None)
+            proxy: dict[str, Any] = next((p for p in prepared.get("behavior", {}).get("proxy_models", ()) if p["model"] == meta.name), {})
+            meta.narrowed = frozenset(f["field"] for f in proxy.get("fields", ()) if f.get("non_null"))
             meta.field_names = tuple(fields)
             pk_ir = next(f for f in ir["fields"] if f.get("primary_key"))
             meta.attach_fields = (

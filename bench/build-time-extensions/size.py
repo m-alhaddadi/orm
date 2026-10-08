@@ -6,6 +6,8 @@ Mach-O only (macOS `nm`). Each `__text` symbol is sized by the distance to the n
 symbol and charged to the first orm crate it names, so monomorphized serde code
 counts against the orm type it decodes. `orm_core::ir` and `orm_contracts::ir` are
 one key, because the IR moved between the two crates.
+Only Rust v0 symbols are parsed, and only roughly: backrefs and `s<n>_` disambiguators
+can misname a key, and legacy `_ZN` symbols and the last symbol are not counted.
 """
 import collections
 import re

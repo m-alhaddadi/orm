@@ -213,6 +213,22 @@ impl Js {
         call!(napi_set_property(self.0, obj, key, v))
     }
 
+    /// `obj[name] = v` as a read-only property that `Object.keys`, `JSON.stringify` and
+    /// `assert.deepEqual` do not see.
+    pub fn define_hidden(self, obj: V, name: &str, v: V) -> napi::Result<()> {
+        let desc = sys::napi_property_descriptor {
+            utf8name: ptr::null(),
+            name: self.str(name)?,
+            method: None,
+            getter: None,
+            setter: None,
+            value: v,
+            attributes: sys::PropertyAttributes::default,
+            data: ptr::null_mut(),
+        };
+        call!(napi_define_properties(self.0, obj, 1, &desc))
+    }
+
     /// `new ctor(arg)`.
     pub fn construct(self, ctor: V, arg: V) -> napi::Result<V> {
         let mut out = ptr::null_mut();

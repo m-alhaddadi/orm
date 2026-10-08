@@ -180,6 +180,7 @@ await User.objects.filter(User.profile.role == Role.admin)  # EXISTS, like any r
 # Many-to-many (`tags Tag[] @relation(through: PostTag)`)
 await post.tags                                     # list[Tag]
 await post.tags.add(news, rust)                     # inserts PostTag rows (existing links are kept)
+await post.tags.add(news, through_defaults={"position": 1})  # other fields of the new PostTag rows
 await post.tags.remove(news)                        # deletes them; returns how many
 await post.tags.set([news, py])                     # exactly these
 await post.tags.clear()
@@ -199,8 +200,10 @@ await Tag.objects.prefetch_related(Tag.posts.author)
 * `post.tags` is a `ManyRelatedSet`: a query set over the post's tags (filter, order,
   count, ...) that reads prefetched rows when unchanged, like `user.posts`. `add()`,
   `remove()`, `set()` take instances or keys. Changing the links drops the prefetched
-  rows. The join model stays an ordinary model for anything else (extra columns,
-  bulk inserts: `await PostTag.objects.insert_many(...)`).
+  rows. `add()` and `set()` take `through_defaults={...}`: values of the join model's
+  other fields in the new join rows. Existing links keep their values, and the link's
+  key fields can't be set this way. The join model stays an ordinary model for
+  anything else (bulk inserts: `await PostTag.objects.insert_many(...)`).
 * Prefetching selects the join row's key next to each tag, so a tag linked to two posts
   comes back once per post. `Prefetch(Post.tags, Tag.objects...[:3])` slices per post.
 
@@ -235,6 +238,50 @@ await Profile.objects.select(func.unnest(Profile.links))                # one ro
   text, and an index out of range gives `None`. `func.unnest(...)` returns one row per
   element, so it is valid only as a `select()` column. SQLite has no array columns.
 
+### JSON columns
+
+```python
+await Doc.objects.filter(Doc.meta["author"]["name"] == "Ann")       # meta -> 'author' -> 'name' = '"Ann"'
+await Doc.objects.filter(Doc.meta["n"] > 3)                         # jsonb ordering: numbers compare as numbers
+await Doc.objects.filter(Doc.meta["tags"][0].as_text() == "x")      # ->> : text, no JSON quotes
+await Doc.objects.filter(Doc.meta["name"].as_text().icontains("an"))
+await Doc.objects.filter(Doc.meta.json_contains({"kind": "post"}))  # meta @> '{"kind": "post"}'
+Doc.meta.json_contained_by(value) / Doc.meta.has_key("tags")        # <@ / ?
+await Doc.objects.filter(...).update(meta=Doc.meta.json_merge({"seen": True}))   # meta || '{...}'
+```
+
+* A path step is a string key or a 0-based integer index. The value is `jsonb`, so a
+  comparison binds the other side as JSON: `== "x"` is the JSON string `"x"`, `== 5` the
+  number. `as_text()` ends a path and reads the value as text (`->>`).
+* On an array column, `col[1]` stays SQL's 1-based element access; a string key on a
+  column that is not `Json` is a `TypeError`.
+* `json_contains`, `json_contained_by` and `has_key` work on the column and on a path,
+  and use a GIN index on the column (`@@index([meta], type: Gin)`).
+* `json_merge(value)` is `||`: objects merge one level deep (the keys of `value` win);
+  arrays join.
+* PostgreSQL only: on SQLite these are a `QueryError`.
+
+### Full-text search
+
+```python
+vector = func.to_tsvector("english", Post.body)
+await Post.objects.filter(vector.matches("running dogs"))        # @@ plainto_tsquery('english', ...)
+query = func.websearch_to_tsquery("english", '"quick fox" -lazy')
+await Post.objects.filter(vector.matches(query)).order_by(func.ts_rank(vector, query).desc())
+func.to_tsquery("english", "cat & !dog") / func.plainto_tsquery("english", text)
+```
+
+* The first argument `"english"` names the text search configuration; without it the
+  server's `default_text_search_config` applies. It is written into the SQL as
+  `'english'::regconfig` (it must be a name), so the expression matches an expression
+  index in every plan, also a prepared statement's generic plan.
+* `vector.matches("text")` with a plain string uses `plainto_tsquery` with the vector's
+  configuration.
+* Index the same expression with a GIN index in the schema:
+  `@@index([sql("to_tsvector('english', body)")], type: Gin)`.
+* `ts_rank` is a `float`. A tsvector or tsquery itself can't be a `select()` column.
+* PostgreSQL only: on SQLite these are a `QueryError`.
+
 ### Big tables: batches
 
 ```python
@@ -257,7 +304,9 @@ page = await qs.paginate(first=20, after=page.next_cursor)       # the next page
 page = await qs.paginate(last=20, before=page.previous_cursor)   # the previous page
 ```
 
-`paginate()` reads one page by keyset, like `batches()`, so deep pages stay fast and rows added between pages do not repeat others.
+`paginate()` reads one page by keyset, like `batches()`, so rows added between pages do not repeat others.
+A deep page stays fast when an index matches the order and its first column is NOT NULL: the page then starts with a plain bound on that column.
+With a nullable first column there is no such bound, and Postgres reads the index from its start to the cursor.
 The order is `order_by()`, else the schema default order, else the primary key.
 The primary key is added as the last order column when no column of the order is unique.
 `select_related`, `prefetch_related`, `only()` and query defaults apply to each page.
@@ -268,6 +317,8 @@ The primary key is added as the last order column when no column of the order is
 * A nullable order column needs `nulls=`: `Post.rank.desc(nulls="last")`.
 * A cursor is opaque base64 of the order values and a fingerprint of the order. A cursor from another order or model is a `QueryError`.
 * A cursor is not signed. A client can change it to start at any position of the same order, so do not use it for access control.
+* A damaged or edited cursor is `QueryError("invalid cursor")`; a cursor that is not a string is a `TypeError`.
+* A cursor holds positions, not filters: it stays valid after a filter change and starts at the same position.
 * There is no total count; call `count()` for it.
 
 ### Prepared queries
@@ -364,6 +415,22 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
   COUNT(*) FROM posts WHERE posts.author_id = users.id)`. So two aggregates over different
   relations never multiply each other, unlike Django's JOIN-based `annotate(Count(...),
   Count(...))`, and they work in `filter()` too.
+* **Filtered aggregates**: every aggregate takes `filter=cond`, which is
+  `FILTER (WHERE cond)`: the aggregate reads only the rows where `cond` holds. Several
+  conditional counts fit in one grouped query:
+
+  ```python
+  await Post.objects.select(
+      Post.author_id,
+      func.count(filter=Post.published),
+      func.sum(Post.views, filter=Post.created_at > last_week),
+  ).group_by(Post.author_id)
+  await User.objects.select(User, func.count(User.posts, filter=User.posts.published))
+  ```
+
+  Over a relation, the filter applies inside the correlated subquery; it must read the
+  same relation path as the aggregate. With `.over(...)` the filter comes before `OVER`.
+  SQLite supports `FILTER` since 3.30 (the bundled SQLite is newer).
 * **String concatenation** has two forms with different `NULL` rules:
   `func.concat(a, " ", b)` is `CONCAT(...)` and reads a `NULL` part as an empty string;
   `a.concat(b)` is `a || b` and is `NULL` when either side is `NULL`.
@@ -375,6 +442,22 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
   `group_by` or `distinct`. `select_related` / `prefetch_related` don't combine with
   `select()`.
 * A condition is a boolean column once labelled: `select(User.name, (User.id > 3).label("big"))`.
+* **`CASE`** is `func.case((cond, value), ..., default=v)`: the value of the first true
+  condition, else `default` (`None` without one). It is a value like any other, in
+  `select()`, `filter()`, `order_by()`, `update()` and `do_update()`:
+
+  ```python
+  heat = func.case((Post.views >= 50, "hot"), (Post.views >= 20, "warm"), default="cold")
+  await Post.objects.filter(heat == "hot")
+  # Django's Sum(Case(When(published=True, then=1), default=0)):
+  await Post.objects.select(Post.author_id, func.sum(func.case((Post.published, 1), default=0))).group_by(Post.author_id)
+  await Post.objects.update(views=func.case((Post.views > 100, 100), default=Post.views))
+  ```
+
+  Plain values bind with the type the context expects (the updated field, the other side
+  of a comparison), else with the type of the first branch that is not a plain value.
+  With only plain values, a float or `Decimal` among integers makes the result a float or
+  `Decimal`.
 
 ## Subqueries: `exists()`, scalar values, `outer()`
 
@@ -511,7 +594,7 @@ constructed. Every write is a statement you await, named after its SQL:
 ```python
 # INSERT ... RETURNING: the instance comes back with id, defaults, timestamps
 alice = await User.objects.insert(email="a@x.io", name="Alice")
-posts = await Post.objects.insert_many([          # one statement for all rows
+posts = await Post.objects.insert_many([          # one statement per batch
     {"author": alice, "title": "Hi", "body": "..."},
     {"author_id": alice.id, "title": "Yo", "body": "...", "views": 3},
 ])
@@ -523,6 +606,9 @@ maybe = await User.objects.insert(email="a@x.io", name="Al").on_conflict(User.em
 await User.objects.insert_many(rows).on_conflict(User.email).do_update(User.name)
 # ... with expressions: the existing row is `Post.<col>`, the proposed one `excluded(Post.<col>)`
 await Post.objects.insert_many(rows).on_conflict(Post.slug).do_update(views=Post.views + excluded(Post.views))
+
+# Read, or insert when missing: (row, created). The lookup is one unique constraint.
+user, created = await User.objects.get_or_insert(email="a@x.io", defaults={"name": "Al"})
 
 # UPDATE / DELETE over a query: set-based, returns the row count
 await Post.objects.filter(Post.author.name == "Alice").update(views=Post.views + 1)
@@ -545,6 +631,32 @@ await post.refresh()
   required fields raise before any SQL runs. Fields left out get their
   `@client_default`, else the column's database default (`DEFAULT` in the VALUES
   list), and `RETURNING` reads them back.
+* `insert_many(rows)` splits the rows so that no statement has more parameters than
+  the database accepts (65,535 on Postgres, 32,766 on SQLite).
+  `insert_many(rows, batch_size=n)` sets a lower number of rows for each statement.
+  All the statements run in one transaction (or in the current one).
+* `insert_many(rows, copy=True)` loads the rows with Postgres
+  `COPY ... FROM STDIN (FORMAT binary)`, for large imports. `await` gives the row
+  count, not instances. It is one statement: a duplicate key stops the whole load and
+  no row is written. Client defaults fill values first; a field must be set in every
+  row or in none, because COPY has no per-row `DEFAULT`. `on_conflict()`,
+  `batch_size`, SQLite, composed models, models with native write behavior and fields
+  that write through an SQL template (other than enums) raise.
+  `bench/copy_insert.py` compares it with `insert_many(rows)`: 200,000 posts in 1.6 s
+  against 3.2 s (measured once on a loaded machine; the batched insert also builds
+  the instances).
+* `on_conflict(*columns, where=cond)` picks a partial unique index:
+  `.on_conflict(Task.shop, Task.task_type, where=Task.deleted_at.is_null())` gives
+  `ON CONFLICT (shop, task_type) WHERE deleted_at IS NULL`. Postgres uses the
+  condition to find the index, so it must match the index predicate without
+  parameters (`is_null()`, a boolean column); a compared value is a parameter and
+  Postgres cannot match it.
+* `get_or_insert(defaults=..., **lookup)` reads the row that matches `lookup`.
+  When there is none, it inserts `lookup` and `defaults` with
+  `ON CONFLICT (lookup) DO NOTHING`, and reads again when a concurrent insert wins.
+  So concurrent calls give one row, and exactly one call gets `created=True`.
+  The lookup fields must be the fields of one unique constraint; Postgres raises
+  otherwise. A `None` lookup value raises, because `NULL` never conflicts.
 * `do_update()` with no columns overwrites the fields you passed except the conflict
   columns, so `created_at` isn't reset to `now()`. Pass columns to choose them.
 * `do_update(*columns, **values)`: `columns` take the proposed values, `values` are
@@ -599,6 +711,18 @@ async with db.transaction():          # commit on success, rollback on exception
 The current transaction lives in a `ContextVar`, so queries inside the block use it
 without passing it around. Tasks started inside the block inherit it.
 
+```python
+async with db.transaction():
+    order = await Order.objects.insert(...)
+    await db.on_commit(lambda: send_receipt.delay(order.id))   # after COMMIT only
+```
+
+`await db.on_commit(fn)` calls `fn()` after the outermost transaction on `db` commits, and awaits the result when it is awaitable.
+A rollback drops the callback. A rolled-back savepoint drops only the callbacks registered inside it.
+Outside a transaction, `fn()` runs at once.
+Callbacks run in registration order, outside the transaction.
+An error in a callback goes to the caller of `transaction()`, and the later callbacks do not run; the transaction is already committed.
+
 ### Protected writes
 
 `@@protected_write` is an application-level check in the ORM. It does not protect the database.
@@ -617,6 +741,10 @@ Every ORM write to a `@@protected_write` model fails outside `orm.allow_writes(.
 The check is on the table that the SQL writes, so `post.tags.add()` needs `allow_writes(PostTag)` when `PostTag` is protected.
 The scope is a `ContextVar`, like the transaction: tasks started inside it get it.
 A nested scope adds its models to the outer ones. `allow_writes` starts no transaction.
+A query set is lazy, so the scope applies where the write is awaited, not where it is built:
+`u = qs.update(...)` inside the scope and `await u` outside it raises `WriteProtected`.
+Do not `yield` inside `allow_writes` in an async generator: when the consumer stops early, the scope stays open in the consumer task.
+`orm.hooks.prepare_insert` and `prepare_update` also check protection, so a file field uploads nothing for a rejected write.
 See `docs/schema.md`, "Protected writes".
 
 ### Locks
@@ -629,6 +757,9 @@ async with db.transaction():
     await Post.objects.lock(nowait=True).get(...)       # raises orm.LockNotAvailable if locked
     await db.lock("import:42")                          # advisory lock on a name, not a row
     got = await db.lock(42, exclusive=False, nowait=True)   # False instead of waiting
+
+async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction needed
+    await call_shopify(...)
 ```
 
 * `lock(exclusive=True, *, nowait=False, skip_locked=False)`: `exclusive` is
@@ -641,8 +772,48 @@ async with db.transaction():
 * `db.lock(key)` is a transaction-scoped Postgres advisory lock. Postgres keys are
   64-bit integers; a `str` key is hashed to one in Python (first 8 bytes of BLAKE2b,
   signed big-endian).
+* `async with db.lock(key, session=True, timeout=5):` is a session advisory lock: it
+  holds the lock for the block, with no transaction, so the block can make slow calls
+  (HTTP) without an open transaction. The lock pins one pool connection; queries in the
+  block use other connections. It waits at most `timeout` seconds (forever when `None`,
+  not at all with `nowait=True`) and raises `orm.LockNotAvailable` when another session
+  still holds the lock. The lock is released when the block ends, also on an error;
+  when the unlock fails or the task is cancelled, the connection is closed, so the
+  server releases the lock.
 * Optimistic locking (version columns) is not in the core.
   Select the `orm-locking` extension and mark the field `@locking.version`; see `schema-extensions.md`.
+
+### Read replicas
+
+```python
+db = await orm.connect(primary_url, replicas=[replica1_url, replica2_url])
+users = await User.objects.filter(...)                  # a replica, in turn
+fresh = await User.objects.using("primary").get(...)    # the primary
+```
+
+* Reads (`select`, `count`, `exists`, prepared queries) outside a transaction go to the next replica, in turn.
+* Writes, raw `db.execute`, migrations, and every statement inside `db.transaction()` go to the primary.
+* `db.primary` is a view of the database without its replicas; it shares the transactions of `db`.
+  `.using("primary")` is `.using(<the query set's database>.primary)`, resolved when it is called.
+* A replica can lag behind the primary. To read your own write, read in the same transaction or use `.using("primary")`.
+* No health checks or failover: an error on a replica goes to the caller.
+* `max_connections` applies to each pool. `db.close()` closes all of them.
+
+### Tenants and row-level security
+
+```python
+with db.tenant(shop.id):                 # a sync `with`: it does no I/O
+    orders = await Order.objects.all()    # RLS policies see current_setting('app.tenant')
+```
+
+* Every transaction on `db` in the block first runs `SELECT set_config('app.tenant', '<id>', true)`, the same as `SET LOCAL app.tenant = ...`, with the value bound as a parameter.
+* A statement outside a transaction runs in a transaction of its own: `BEGIN`, `set_config`, the statement, `COMMIT`. That is four round trips instead of one (estimated); put many statements in one `db.transaction()`.
+* A transaction that is already open keeps its setting. Savepoints use the setting of their transaction.
+* The setting ends with each transaction, so pooled connections keep no tenant.
+* Replicas get the same setting. Session locks (`session=True`) do not.
+* The policy must read the setting, for example `USING (shop_id::text = current_setting('app.tenant', true))`. The ORM does not create policies. A superuser and the table owner bypass RLS unless the table has `FORCE ROW LEVEL SECURITY`.
+* SQLite raises `QueryError`.
+* `orm.scope(shop=...)` is the application-side filter (see `docs/selection-and-defaults.md`, "Scope values").
 
 ### Finding N+1 queries: `orm.debug`
 
@@ -658,10 +829,14 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
 ```
 
 * The scope counts its queries by statement shape: the query without its values.
-  Tasks started in the scope count too.
+  Tasks started in the scope count too, and so do the queries of an inner scope.
+  An inner scope cannot raise the threshold of an outer scope; the outer scope also counts the inner queries.
+  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `in_bulk()`) count as one query.
+* The call site is the line that awaits the query (`await qs`, `await p.customers.all()`).
+  A query that `asyncio.gather()` or `create_task()` runs reports the line that started the event loop.
 * When the block ends, a shape that ran more than `threshold` times (default 5) raises `orm.debug.NPlusOne` with `fail=True`, or gives an `orm.debug.NPlusOneWarning`.
   The exception and the `with ... as report` value carry the report: each shape, its SQL, its count, the call site of its first query and the fix.
-* The fix is `select_related(...)` for a repeated `load_x()`, and `prefetch_related(...)` for a repeated to-many query (`await post.comments`).
+* The fix is `select_related(...)` for a repeated `load_x()`, and `prefetch_related(...)` for a repeated unchanged to-many or many-to-many query (`await post.comments`, `await post.tags`).
 * The call site and the SQL text are captured only inside the scope.
   Outside it, each query pays one `ContextVar` read (about 15 ns, measured).
 * In a test suite, add `pytest_plugins = ["orm.testing"]` to `conftest.py`.
@@ -729,6 +904,12 @@ Rust took these from ~2.3 / ~4.3 ms, below the Phase 0 prototype's 2.5 / 4.7 ms
    `using()`.
 8. `db.create_tables()` / `drop_tables()` stay as a development helper (idempotent
    `IF NOT EXISTS` DDL). Evolving databases use migrations: see [`schema.md`](schema.md).
+   An existing database is adopted with `await orm.migrations.pull(db)` (its schema file),
+   `Migrator.baseline()` and `Migrator.drift()`
+   (see [`schema.md`](schema.md#adopting-a-live-database-pull-baseline-drift)).
+   A migration may hold a `data.py` with `async def run(db)`, run by `Migrator.upgrade()`
+   and `python -m orm migrate` in the migration's transaction
+   (see [`schema.md`](schema.md#data-migrations)).
 9. **Async only**, no sync API (see `PLAN.md`, Decisions).
 
 ## Drivers and dialects

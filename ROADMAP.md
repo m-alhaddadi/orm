@@ -100,9 +100,6 @@ query model, not only in the TS surface.
   connect: [{ id }], connectOrCreate: ... } } })`, and `update` with `set` /
   `disconnect` / `delete` / `upsert` on relations. One transaction, ordered by FK
   dependencies, multi-row `INSERT ... RETURNING` per level.
-* **Cursor pagination** *(also Python)*: `cursor: { id }` + `take` (negative to page
-  backwards) as a keyset `WHERE (k1, k2) > ($1, $2)` on the `orderBy` columns, not
-  `OFFSET`. The batched `iterate()` already does this internally.
 * **Typed raw SQL**: an `` sql`...` `` tagged template that parameterises
   interpolations, accepts columns / tables / expressions as fragments, and can be
   used inside the builder or run on its own with a declared row type

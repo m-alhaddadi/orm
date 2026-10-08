@@ -390,3 +390,49 @@ def test_array_element_and_unnest():
         Post.objects.select(Post.title[1]).sql()  # type: ignore[index]
     with pytest.raises(TypeError, match="not iterable"):
         list(Profile.links)
+
+
+def test_case_expression():
+    sql = Post.objects.select(Post.author_id, func.sum(func.case((Post.published, 1), default=0)).label("n")).group_by(Post.author_id).sql()
+    assert sql == (
+        'SELECT "posts"."author_id", CAST(SUM(CASE WHEN "posts"."published" = TRUE THEN 1 ELSE 0 END) AS BIGINT) '
+        'FROM "posts" GROUP BY "posts"."author_id"'
+    )
+    heat = func.case((Post.views > 100, "hot"), (Post.views > 10, "warm"), default="cold")
+    assert where(Post.objects.filter(heat == "hot")) == (
+        '(CASE WHEN "posts"."views" > 100 THEN \'hot\' WHEN "posts"."views" > 10 THEN \'warm\' ELSE \'cold\' END) = \'hot\''
+    )
+    assert Post.objects.order_by(func.case((Post.published, 0), default=1)).sql().endswith(
+        'ORDER BY CASE WHEN "posts"."published" = TRUE THEN 0 ELSE 1 END ASC'
+    )
+    # without a default: ELSE NULL; a to-many path in a condition is an EXISTS
+    assert where(User.objects.filter(func.case((User.posts.views > 3, User.name)) == "x")) == (
+        'EXISTS(SELECT 1 FROM "posts" AS "t1" WHERE "t1"."author_id" = "users"."id" '
+        'AND (CASE WHEN "t1"."views" > 3 THEN "users"."name" END) = \'x\')'
+    )
+    with pytest.raises(TypeError, match="at least one"):
+        func.case(default=1)
+    with pytest.raises(TypeError, match="tuples"):
+        func.case(Post.published)  # type: ignore[arg-type]
+
+
+def test_aggregate_filter():
+    sql = Post.objects.select(
+        Post.author_id, func.count(filter=Post.published), func.sum(Post.views, filter=Post.views > 10)
+    ).group_by(Post.author_id).sql()
+    assert sql == (
+        'SELECT "posts"."author_id", COUNT(*) FILTER (WHERE "posts"."published" = TRUE), '
+        'CAST(SUM("posts"."views") FILTER (WHERE "posts"."views" > 10) AS BIGINT) FROM "posts" GROUP BY "posts"."author_id"'
+    )
+    # over a relation, the filter is planned inside the correlated subquery
+    assert User.objects.select(User.id, func.count(User.posts, filter=User.posts.published)).sql() == (
+        'SELECT "users"."id", (SELECT COUNT(*) FILTER (WHERE "a1"."published" = TRUE) FROM "posts" AS "a1" '
+        'WHERE "a1"."author_id" = "users"."id") FROM "users"'
+    )
+    assert 'COUNT(*) FILTER (WHERE "a1"."views" > 3) FROM "posts" AS "a1"' in User.objects.select(func.count(filter=User.posts.views > 3)).sql()
+    # before OVER in a window
+    assert 'SUM("posts"."views") FILTER (WHERE "posts"."published" = TRUE) OVER (PARTITION BY "posts"."author_id")' in (
+        Post.objects.select(func.sum(Post.views, filter=Post.published).over(partition_by=Post.author_id)).sql()
+    )
+    with pytest.raises(QueryError, match="one relation path"):
+        User.objects.select(func.count(User.posts, filter=User.comments.body == "x")).sql()

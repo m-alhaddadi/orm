@@ -27,7 +27,7 @@ use crate::error::{query_err, Error, Result};
 use crate::params::Params;
 use orm_core::ir::{
     ArithOp, Assignment, CmpOp, ColType, Count, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Nulls, Operation, Order, ParamRef,
-    Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType,
+    JsonKey, Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType, When,
 };
 use orm_core::dialect::{Capabilities, Dialect, Target};
 use orm_core::schema::{Model, Schema};
@@ -219,6 +219,10 @@ const WINDOW_FUNCS: [&str; 11] = [
     "last_value", "nth_value",
 ];
 
+/// Full-text search functions (PostgreSQL only); all but `ts_rank` take an optional
+/// text search configuration first.
+const SEARCH_FUNCS: [&str; 5] = ["to_tsvector", "to_tsquery", "plainto_tsquery", "websearch_to_tsquery", "ts_rank"];
+
 fn is_aggregate(name: &str) -> bool {
     AGGREGATES.contains(&name)
 }
@@ -227,10 +231,10 @@ fn is_aggregate(name: &str) -> bool {
 /// window).
 fn has_local_aggregate(e: &Expr) -> bool {
     match e {
-        Expr::Func { name, args, rel, .. } => {
+        Expr::Func { name, args, rel, filter, .. } => {
             let mut paths = vec![];
             let mut has_not = false;
-            for a in args {
+            for a in args.iter().chain(filter.as_deref()) {
                 col_paths_all(a, &mut paths, &mut has_not);
             }
             (is_aggregate(name) && rel.is_none() && paths.iter().all(|p| p.is_empty()))
@@ -239,8 +243,14 @@ fn has_local_aggregate(e: &Expr) -> bool {
         Expr::Cmp { l, r, .. } | Expr::Arith { l, r, .. } => has_local_aggregate(l) || has_local_aggregate(r),
         Expr::And { items } | Expr::Or { items } => items.iter().any(has_local_aggregate),
         Expr::Not { item } | Expr::IsNull { item, .. } => has_local_aggregate(item),
+        Expr::Case { whens, default } => case_parts(whens, default).any(has_local_aggregate),
         _ => false,
     }
+}
+
+/// The conditions, values and default of a `CASE`.
+fn case_parts<'e>(whens: &'e [When], default: &'e Option<Box<Expr>>) -> impl Iterator<Item = &'e Expr> {
+    whens.iter().flat_map(|w| [&w.cond, &w.value]).chain(default.as_deref())
 }
 
 /// Whether `e` contains a window function (outside subqueries).
@@ -254,6 +264,7 @@ fn has_window(e: &Expr) -> bool {
         Expr::Not { item } | Expr::IsNull { item, .. } | Expr::Like { item, .. } | Expr::InSelect { item, .. } => {
             has_window(item)
         }
+        Expr::Case { whens, default } => case_parts(whens, default).any(has_window),
         _ => false,
     }
 }
@@ -261,8 +272,8 @@ fn has_window(e: &Expr) -> bool {
 /// Like `col_paths`, but also inside aggregates.
 fn col_paths_all<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
     match e {
-        Expr::Func { args, .. } => {
-            for a in args {
+        Expr::Func { args, filter, .. } => {
+            for a in args.iter().chain(filter.as_deref()) {
                 col_paths_all(a, out, has_not);
             }
         }
@@ -277,6 +288,7 @@ fn col_paths<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
     match e {
         Expr::Col { path, .. } => out.push(path),
         Expr::Param { .. }
+        | Expr::Scope { .. }
         | Expr::Const { .. }
         | Expr::Excluded { .. }
         | Expr::Text { .. }
@@ -322,7 +334,12 @@ fn col_paths<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
                 col_paths(v, out, has_not);
             }
         }
-        Expr::IsNull { item, .. } => col_paths(item, out, has_not),
+        Expr::IsNull { item, .. } | Expr::JsonPath { item, .. } => col_paths(item, out, has_not),
+        Expr::Case { whens, default } => {
+            for part in case_parts(whens, default) {
+                col_paths(part, out, has_not);
+            }
+        }
         Expr::Like { item, pattern, .. } => {
             col_paths(item, out, has_not);
             col_paths(pattern, out, has_not);
@@ -479,6 +496,13 @@ impl<'s> Planner<'s> {
     }
 
     pub fn plan(schema: &'s Schema, target: Target, op: &Operation, params: &'s dyn Params) -> Result<Plan> {
+        if op.scope().is_empty() {
+            return Planner::plan_op(schema, target, op, params);
+        }
+        Planner::plan_op(schema, target, op, &crate::params::Scoped { params, scope: op.scope() })
+    }
+
+    fn plan_op(schema: &'s Schema, target: Target, op: &Operation, params: &'s dyn Params) -> Result<Plan> {
         Ok(match op {
             Operation::Select(q) => Plan::Select(plan_select(schema, target, q, params)?),
             Operation::Count(q) | Operation::Exists(q) => {
@@ -924,12 +948,16 @@ impl<'s> Planner<'s> {
     fn leaf(&mut self, e: &Expr) -> Result<SExpr> {
         Ok(match e {
             Expr::Cmp { op, l, r } => {
-                if self.target.dialect == Dialect::Sqlite && matches!(op, CmpOp::Contains | CmpOp::ContainedBy | CmpOp::Overlaps) {
-                    return Err(Error::query("sqlite does not support PostgreSQL containment or overlap operators"));
+                if self.target.dialect == Dialect::Sqlite && matches!(op, CmpOp::Match) {
+                    return Err(Error::query("full-text search needs PostgreSQL"));
+                }
+                if self.target.dialect == Dialect::Sqlite && matches!(op, CmpOp::Contains | CmpOp::ContainedBy | CmpOp::Overlaps | CmpOp::HasKey) {
+                    return Err(Error::query("sqlite does not support PostgreSQL containment, overlap or JSON key operators"));
                 }
                 let hint = self.hint_of(l).or(self.hint_of(r));
                 let l = self.value(l, hint)?;
-                let r = self.value(r, hint)?;
+                // The key of `?` is text, whatever the JSON column's type.
+                let r = self.value(r, if matches!(op, CmpOp::HasKey) { Hint::ty(ColType::Text) } else { hint })?;
                 match op {
                     CmpOp::Eq => l.eq(r),
                     CmpOp::Ne => l.ne(r),
@@ -940,6 +968,8 @@ impl<'s> Planner<'s> {
                     CmpOp::Contains => SExpr::cust_with_exprs("$1 @> $2", [l, r]),
                     CmpOp::ContainedBy => SExpr::cust_with_exprs("$1 <@ $2", [l, r]),
                     CmpOp::Overlaps => SExpr::cust_with_exprs("$1 && $2", [l, r]),
+                    CmpOp::HasKey => SExpr::cust_with_exprs("$1 ? $2", [l, r]),
+                    CmpOp::Match => SExpr::cust_with_exprs("$1 @@ $2", [l, r]),
                 }
             }
             Expr::In { item, values, neg } => {
@@ -1002,6 +1032,16 @@ impl<'s> Planner<'s> {
     // -- value expressions --------------------------------------------------------------
 
     /// `i`, checked against the parameter list.
+    /// The parameter of `scope.<name>`; without one, the statement fails (closed by default).
+    fn scope_param(&self, name: &str) -> Result<usize> {
+        match self.params.scope(name) {
+            Some(i) => self.param(i),
+            None => Err(Error::query(format!(
+                "a default filter reads scope.{name}, which is not set: run the query inside `scope({name}=...)`, or use without_defaults()"
+            ))),
+        }
+    }
+
     fn param(&self, i: usize) -> Result<usize> {
         if i < self.params.len() {
             Ok(i)
@@ -1077,7 +1117,7 @@ impl<'s> Planner<'s> {
             }
             // Arithmetic results are plain values: no write_sql cast.
             Expr::Arith { l, r, .. } => Hint { ty: self.hint_of(l).or(self.hint_of(r)).ty, field: None },
-            Expr::Func { .. } | Expr::Subquery { .. } | Expr::Window { .. } => {
+            Expr::Func { .. } | Expr::Subquery { .. } | Expr::Window { .. } | Expr::Case { .. } | Expr::JsonPath { .. } => {
                 Hint { ty: self.expr_type(e).ok(), field: None }
             }
             _ => Hint::default(),
@@ -1090,7 +1130,7 @@ impl<'s> Planner<'s> {
         if let Some(scope) = self.scopes.iter().rev().chain(self.joins.iter().map(|(s, _)| s)).find(|s| s.path == path) {
             if scope.model < self.schema.models.len() {
                 let model = self.model(scope.model);
-                return crate::ownership::column(self.schema, model, &alias, model.field(name).map_err(query_err)?);
+                return crate::ownership::column_at(self.schema, model, &alias, model.field_pos(name).map_err(query_err)?);
             }
         }
         Ok(col(&alias, &column))
@@ -1131,6 +1171,7 @@ impl<'s> Planner<'s> {
                 self.resolve(path, name)?
             },
             Expr::Param { i } => bind(self.params.value(self.param(*i)?, hint.ty)?, hint.field),
+            Expr::Scope { name } => bind(self.params.value(self.scope_param(name)?, hint.ty)?, hint.field),
             Expr::Const { value } => SExpr::val(*value),
             Expr::Int { value } => SExpr::cust(value.to_string()),
             Expr::Text { value } => bind(sea_query::Value::from(value.clone()), hint.field),
@@ -1157,13 +1198,23 @@ impl<'s> Planner<'s> {
                 SExpr::SubQuery(None, Box::new(self.subselect(select, false)?.into()))
             }
             Expr::Window { func, base, partition_by, order_by, frame } => {
-                self.window(func, base.as_deref(), partition_by, order_by, frame)?
+                // Postgres rejects a set-returning function in a window.
+                let unnest = std::mem::replace(&mut self.allow_unnest, false);
+                let e = self.window(func, base.as_deref(), partition_by, order_by, frame);
+                self.allow_unnest = unnest;
+                e?
             }
-            Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
+            Expr::Func { name, args, rel, distinct, filter } => self.func(name, args, rel.as_deref(), *distinct, filter.as_deref())?,
+            Expr::Case { whens, default } => self.case(whens, default.as_deref(), hint)?,
+            Expr::JsonPath { item, path, text } => self.json_path(item, path, *text)?,
             Expr::Arith { op, l, r } => {
+                if matches!(op, ArithOp::JsonMerge) && self.target.dialect == Dialect::Sqlite {
+                    return Err(Error::query("sqlite does not support the JSON || merge"));
+                }
                 let inner = self.hint_of(l).or(self.hint_of(r));
                 let hint = match op {
                     ArithOp::Concat => Hint { ty: Some(ValueType::scalar(ColType::Text)), field: None },
+                    ArithOp::JsonMerge => Hint { ty: Some(ValueType::scalar(ColType::Json)), field: None },
                     _ => Hint { ty: inner.ty.or(hint.ty), field: None },
                 };
                 let l = self.value(l, hint)?;
@@ -1173,11 +1224,109 @@ impl<'s> Planner<'s> {
                     ArithOp::Sub => l.sub(r),
                     ArithOp::Mul => l.mul(r),
                     ArithOp::Div => l.div(r),
-                    ArithOp::Concat => template(self.target.dialect, "$1 || $2", vec![l, r]),
+                    ArithOp::Concat | ArithOp::JsonMerge => template(self.target.dialect, "$1 || $2", vec![l, r]),
                 }
             }
             cond => self.cond(cond)?,
         })
+    }
+
+    /// A full-text search function. A configuration (`Expr::Text`) is written into the SQL
+    /// as `'english'::regconfig`, so the call matches an expression index in every plan.
+    fn search_call(&mut self, name: &str, args: &[Expr]) -> Result<SExpr> {
+        if self.target.dialect == Dialect::Sqlite {
+            return Err(Error::query("full-text search needs PostgreSQL"));
+        }
+        let rank = name == "ts_rank";
+        let (config, rest) = match args {
+            [Expr::Text { value }, rest @ ..] if !rank && rest.len() == 1 => {
+                let mut parts = value.split('.');
+                let ident = |p: &str| p.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !(value.split('.').count() <= 2 && parts.all(ident)) {
+                    return Err(Error::query(format!("{value:?} is not a text search configuration name")));
+                }
+                (format!("'{value}'::regconfig, "), rest)
+            }
+            _ => (String::new(), args),
+        };
+        if rest.len() != if rank { 2 } else { 1 } {
+            return Err(Error::query(format!("wrong arguments for {name}()")));
+        }
+        let hint = if rank { Hint::default() } else { Hint::ty(ColType::Text) };
+        let planned = rest.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>()?;
+        let slots = (1..=planned.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+        Ok(template(self.target.dialect, format!("{}({config}{slots})", name.to_uppercase()), planned))
+    }
+
+    /// `<item> -> 'a' -> 0 ...` (`->>` for the last step with `text`): keys bind as text,
+    /// indexes are written into the SQL.
+    fn json_path(&mut self, item: &Expr, path: &[JsonKey], text: bool) -> Result<SExpr> {
+        if self.target.dialect == Dialect::Sqlite {
+            return Err(Error::query("sqlite does not support JSON paths"));
+        }
+        if path.is_empty() {
+            return Err(Error::query("a JSON path needs at least one key or index"));
+        }
+        if self.expr_type(item)? != ValueType::scalar(ColType::Json) {
+            return Err(Error::query("a JSON path needs a Json column"));
+        }
+        let mut exprs = vec![self.value(item, Hint::default())?];
+        let mut sql = String::from("$1");
+        for (k, key) in path.iter().enumerate() {
+            let op = if text && k + 1 == path.len() { "->>" } else { "->" };
+            let base = if k == 0 { sql } else { format!("({sql})") };
+            sql = match key {
+                JsonKey::Index(i) => format!("{base} {op} {i}"),
+                JsonKey::Key(s) => {
+                    exprs.push(SExpr::val(s.clone()));
+                    format!("{base} {op} ${}", exprs.len())
+                }
+            };
+        }
+        Ok(template(self.target.dialect, sql, exprs))
+    }
+
+    /// `CASE WHEN ... THEN ... ELSE ... END`. Plain values bind with the type the context
+    /// expects (an assigned field, the other side of a comparison), else the case's own.
+    fn case(&mut self, whens: &[When], default: Option<&Expr>, hint: Hint<'s>) -> Result<SExpr> {
+        if whens.is_empty() {
+            return Err(Error::query("case() needs at least one (condition, value) branch"));
+        }
+        let hint = Hint { ty: hint.ty.or_else(|| self.case_type(whens, default)), field: hint.field };
+        let mut parts = vec![];
+        let mut sql = String::from("CASE");
+        for w in whens {
+            parts.push(self.cond(&w.cond)?);
+            parts.push(self.value(&w.value, hint)?);
+            sql += &format!(" WHEN ${} THEN ${}", parts.len() - 1, parts.len());
+        }
+        if let Some(d) = default {
+            parts.push(self.value(d, hint)?);
+            sql += &format!(" ELSE ${}", parts.len());
+        }
+        sql += " END";
+        Ok(template(self.target.dialect, sql, parts))
+    }
+
+    /// The type of a `CASE`: of its first value that is not a plain value, else the
+    /// widest of its plain values (a float or decimal among integers wins).
+    fn case_type(&self, whens: &[When], default: Option<&Expr>) -> Option<ValueType> {
+        let values = || whens.iter().map(|w| &w.value).chain(default);
+        if let Some(t) = values().filter(|v| !matches!(v, Expr::Param { .. })).find_map(|v| self.expr_type(v).ok()) {
+            return Some(t);
+        }
+        let mut found: Option<ValueType> = None;
+        for v in values() {
+            let Expr::Param { i } = v else { continue };
+            let Some(t) = self.params.value(*i, None).ok().and_then(|v| crate::params::type_of(&v)) else { continue };
+            found = match found.map(|f| f.ty) {
+                None => Some(t),
+                Some(ColType::Int | ColType::BigInt) if matches!(t.ty, ColType::Float | ColType::Decimal) => Some(t),
+                _ => found,
+            };
+        }
+        found
     }
 
     // -- functions ----------------------------------------------------------------------
@@ -1198,7 +1347,14 @@ impl<'s> Planner<'s> {
             Expr::Text { .. } => scalar(ColType::Text),
             Expr::Subquery { select } => self.child(select)?.expr_type(Self::one_column(select, "as_scalar()")?)?,
             Expr::Window { func, .. } => self.expr_type(func)?,
+            Expr::Case { whens, default } => match self.case_type(whens, default.as_deref()) {
+                Some(t) => t,
+                None => return Err(Error::query("case() needs a value whose type is known: a column, an expression or a non-null value")),
+            },
             Expr::Arith { op: ArithOp::Concat, .. } => scalar(ColType::Text),
+            Expr::Arith { op: ArithOp::JsonMerge, .. } => scalar(ColType::Json),
+            Expr::JsonPath { text: true, .. } => scalar(ColType::Text),
+            Expr::JsonPath { .. } => scalar(ColType::Json),
             Expr::Arith { l, r, .. } => match self.expr_type(l) {
                 Ok(t) => t,
                 Err(_) => self.expr_type(r)?,
@@ -1226,6 +1382,10 @@ impl<'s> Planner<'s> {
                         _ => return Err(Error::query(format!("{} needs an array", if name == "element" { "an index" } else { "unnest()" }))),
                     },
                     "now" => scalar(ColType::DateTime),
+                    "ts_rank" => scalar(ColType::Float),
+                    "to_tsvector" | "to_tsquery" | "plainto_tsquery" | "websearch_to_tsquery" => {
+                        return Err(Error::query(format!("{name}() is a tsvector or tsquery: it can't be a select() column")))
+                    }
                     // SUM of integers is cast to bigint (see `func`).
                     "sum" => match first()? {
                         t if matches!(t.ty, ColType::Int | ColType::BigInt) => scalar(ColType::BigInt),
@@ -1244,7 +1404,7 @@ impl<'s> Planner<'s> {
             | Expr::Const { .. }
             | Expr::InSelect { .. }
             | Expr::Exists { .. } => scalar(ColType::Bool),
-            Expr::Param { .. } => {
+            Expr::Param { .. } | Expr::Scope { .. } => {
                 return Err(Error::query("select() takes columns and expressions, not plain values"))
             }
             Expr::Excluded { .. } => return Err(Error::query("excluded() is only valid in do_update()")),
@@ -1255,37 +1415,35 @@ impl<'s> Planner<'s> {
     /// the current scope is computed per row, in a correlated subquery over those
     /// relations: `func.count(User.posts)` is `(SELECT COUNT(*) FROM posts WHERE
     /// posts.author_id = users.id)`, never a JOIN that would multiply rows.
-    fn func(&mut self, name: &str, args: &[Expr], rel: Option<&[String]>, distinct: bool) -> Result<SExpr> {
+    fn func(&mut self, name: &str, args: &[Expr], rel: Option<&[String]>, distinct: bool, filter: Option<&Expr>) -> Result<SExpr> {
         if WINDOW_FUNCS.contains(&name) {
             return Err(Error::query(format!("{name}() is a window function: add .over(...)")));
         }
-        if !is_aggregate(name) && !SCALAR_FUNCS.contains(&name) {
+        if !is_aggregate(name) && !SCALAR_FUNCS.contains(&name) && !SEARCH_FUNCS.contains(&name) {
             return Err(Error::query(format!("unknown function {name}()")));
         }
         if is_aggregate(name) {
             let base = self.scope().path.clone();
             let mut paths = vec![];
             let mut has_not = false;
-            for a in args {
+            for a in args.iter().chain(filter) {
                 col_paths_all(a, &mut paths, &mut has_not);
             }
-            let below: Vec<&[String]> = match rel {
-                Some(r) => vec![r],
-                None => paths.into_iter().filter(|p| p.len() > base.len() && p.starts_with(&base)).collect(),
-            };
+            let below: Vec<&[String]> =
+                rel.into_iter().chain(paths.into_iter().filter(|p| p.len() > base.len() && p.starts_with(&base))).collect();
             if let Some(path) = below.first().map(|p| p.to_vec()) {
                 if below.iter().any(|p| *p != path.as_slice()) {
                     return Err(Error::query(format!(
                         "{name}() over relations needs all its columns on one relation path"
                     )));
                 }
-                return self.aggregate_subquery(name, args, &path, rel.is_some(), distinct);
+                return self.aggregate_subquery(name, args, &path, rel.is_some(), distinct, filter);
             }
             if rel.is_none() && args.is_empty() && name != "count" {
                 return Err(Error::query(format!("{name}() needs an argument")));
             }
         }
-        self.call(name, args, distinct)
+        self.call(name, args, distinct, filter)
     }
 
     /// `<func> OVER (PARTITION BY ... ORDER BY ... <frame>)`, over this query's rows.
@@ -1304,13 +1462,13 @@ impl<'s> Planner<'s> {
                     .into(),
             ));
         }
-        let Expr::Func { name, args, rel, distinct } = func else {
+        let Expr::Func { name, args, rel, distinct, filter } = func else {
             return Err(Error::query("over() applies to a function"));
         };
         if rel.is_some() || !(is_aggregate(name) || WINDOW_FUNCS.contains(&name.as_str())) {
             return Err(Error::query(format!("{name}() can't be used as a window function")));
         }
-        let (call, cast) = self.call_parts(name, args, *distinct)?;
+        let (call, cast) = self.call_parts(name, args, *distinct, filter.as_deref())?;
         let mut exprs = vec![call];
         let mut clauses = vec![];
         if let Some(b) = base {
@@ -1360,8 +1518,8 @@ impl<'s> Planner<'s> {
     }
 
     /// The SQL call itself, arguments planned in the current scope.
-    fn call(&mut self, name: &str, args: &[Expr], distinct: bool) -> Result<SExpr> {
-        let (e, cast) = self.call_parts(name, args, distinct)?;
+    fn call(&mut self, name: &str, args: &[Expr], distinct: bool, filter: Option<&Expr>) -> Result<SExpr> {
+        let (e, cast) = self.call_parts(name, args, distinct, filter)?;
         Ok(match cast {
             Some(ty) => template(self.target.dialect, format!("CAST($1 AS {ty})"), vec![e]),
             None => e,
@@ -1369,19 +1527,35 @@ impl<'s> Planner<'s> {
     }
 
     /// The call, and the type its result is cast to (outside a window's `OVER`).
-    fn call_parts(&mut self, name: &str, args: &[Expr], distinct: bool) -> Result<(SExpr, Option<&'static str>)> {
+    fn call_parts(&mut self, name: &str, args: &[Expr], distinct: bool, filter: Option<&Expr>) -> Result<(SExpr, Option<&'static str>)> {
+        if filter.is_some() && !is_aggregate(name) {
+            return Err(Error::query(format!("{name}() is not an aggregate: only aggregates take a filter")));
+        }
         if self.target.dialect == Dialect::Sqlite && name == "cardinality" {
             return Err(Error::query("sqlite does not support cardinality()"));
         }
-        if self.target.dialect == Dialect::Sqlite && matches!(name, "element" | "unnest") {
-            return Err(Error::query("sqlite does not support array element access or unnest()"));
+        // Below these bounds SQLite and Postgres give different results.
+        let below = |i: usize, min: i64| matches!(args.get(i), Some(Expr::Int { value }) if *value < min);
+        if name == "substr" && (below(1, 1) || below(2, 0)) {
+            return Err(Error::query("substr() takes a start of at least 1 and a length of at least 0"));
+        }
+        if SEARCH_FUNCS.contains(&name) {
+            if filter.is_some() {
+                return Err(Error::query(format!("{name}() is not an aggregate: only aggregates take a filter")));
+            }
+            return Ok((self.search_call(name, args)?, (name == "ts_rank").then_some("DOUBLE PRECISION")));
         }
         if name == "unnest" && !self.allow_unnest {
             return Err(Error::query("unnest() returns several rows: it can only be a select() column"));
         }
         let hint = args.first().map(|a| self.hint_of(a)).unwrap_or_default();
         let hint = Hint { ty: if TEXT_FUNCS.contains(&name) { Some(ValueType::scalar(ColType::Text)) } else { hint.ty }, field: None };
-        let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>()?;
+        // Postgres rejects a set-returning function inside an aggregate or `COALESCE`.
+        let unnest = self.allow_unnest;
+        self.allow_unnest &= !(is_aggregate(name) || name == "coalesce");
+        let planned = args.iter().map(|a| self.value(a, hint)).collect::<Result<Vec<_>>>();
+        self.allow_unnest = unnest;
+        let planned = planned?;
         let d = if distinct { "DISTINCT " } else { "" };
         let n = planned.len();
         let dialect = self.target.dialect;
@@ -1443,6 +1617,13 @@ impl<'s> Planner<'s> {
             "nth_value" if n == 2 => call("NTH_VALUE", planned)?,
             _ => return Err(Error::query(format!("wrong arguments for {name}()"))),
         };
+        let e = match filter {
+            Some(f) => {
+                let f = self.cond(f)?;
+                template(dialect, "$1 FILTER (WHERE $2)", vec![e, f])
+            }
+            None => e,
+        };
         Ok((e, cast))
     }
 
@@ -1454,6 +1635,7 @@ impl<'s> Planner<'s> {
         path: &[String],
         count_rows: bool,
         distinct: bool,
+        filter: Option<&Expr>,
     ) -> Result<SExpr> {
         let base = self.scope().path.clone();
         let hops = &path[base.len()..];
@@ -1466,7 +1648,7 @@ impl<'s> Planner<'s> {
             self.scopes.push(Scope { path: path[..base.len() + k + 1].to_vec(), model: target, alias: alias.clone() });
             outer = (alias, target);
         }
-        let agg = if count_rows && args.is_empty() { self.call("count", &[], false) } else { self.call(name, args, distinct) };
+        let agg = if count_rows && args.is_empty() { self.call("count", &[], false, filter) } else { self.call(name, args, distinct, filter) };
         self.scopes.truncate(pushed);
         sub.expr(agg?);
         Ok(SExpr::SubQuery(None, Box::new(sub.into())))
@@ -1809,8 +1991,6 @@ impl<'s> Planner<'s> {
         }).collect() }))
     }
 
-    /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
-    /// columns.
     /// `q` with the root and joined query defaults; borrowed when no default applies.
     #[cfg(feature = "query-defaults")]
     fn with_query_defaults<'q>(&self, q: &'q Select) -> Result<std::borrow::Cow<'q, Select>> {
@@ -1833,6 +2013,8 @@ impl<'s> Planner<'s> {
         Ok(q)
     }
 
+    /// A SELECT of instances (with `select_related` and `prefetch`) or of `select(...)`
+    /// columns.
     fn build_select(&mut self, q: &Select) -> Result<SelectPlan> {
         #[cfg(feature = "query-defaults")]
         let defaulted = self.with_query_defaults(q)?;
@@ -2312,13 +2494,16 @@ fn no_lock(q: &Select, what: &str) -> Result<()> {
 }
 
 /// What an insert does with rows that hit a unique constraint.
+///
+/// The optional condition is `ON CONFLICT (<fields>) WHERE <condition>`: the predicate of
+/// a partial unique index, which the database needs to pick that index.
 pub enum OnConflict {
     /// `ON CONFLICT (<fields>) DO NOTHING`: such rows are skipped (and not returned).
-    Nothing(Vec<String>),
+    Nothing(Vec<String>, Option<Expr>),
     /// `ON CONFLICT (<fields>) DO UPDATE SET <col> = EXCLUDED.<col>, ..., <field> = <expr>, ...`.
     /// The expressions see the existing row as the model's columns and the proposed
     /// row as `EXCLUDED`; their parameters are the ones passed to `plan_insert`.
-    Update(Vec<String>, Vec<String>, Vec<Assignment>),
+    Update(Vec<String>, Option<Expr>, Vec<String>, Vec<Assignment>),
 }
 
 /// `INSERT INTO <table> (<fields>) VALUES ... [ON CONFLICT ...] RETURNING <all columns>`.
@@ -2403,13 +2588,23 @@ pub fn plan_insert(
                 })
                 .collect()
         };
+        let index_where = |filter: Option<Expr>| -> Result<Option<SExpr>> {
+            let Some(filter) = filter else { return Ok(None) };
+            let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
+            Ok(Some(planner.cond(&filter)?))
+        };
         let clause = match oc {
-            OnConflict::Nothing(conflict) => sea_query::OnConflict::columns(columns(&conflict)?).do_nothing().to_owned(),
-            OnConflict::Update(conflict, update, set) => {
+            OnConflict::Nothing(conflict, filter) => {
+                let mut clause = sea_query::OnConflict::columns(columns(&conflict)?);
+                clause.target_and_where_option(index_where(filter)?);
+                clause.do_nothing().to_owned()
+            }
+            OnConflict::Update(conflict, filter, update, set) => {
                 if update.is_empty() && set.is_empty() {
                     return Err(Error::query("on_conflict(...).do_update() has no columns to update"));
                 }
                 let mut clause = sea_query::OnConflict::columns(columns(&conflict)?);
+                clause.target_and_where_option(index_where(filter)?);
                 clause.update_columns(columns(&update)?);
                 let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
                 planner.allow_excluded = true;

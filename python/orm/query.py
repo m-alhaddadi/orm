@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Unpack, overload
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Unpack, overload
 
 from ._cache import cached
 from .errors import QueryError, TransactionRequired
@@ -27,11 +27,11 @@ from .expr import (
     not_,
 )
 from . import pagination
-from .fields import HasMany, ManyToMany
+from .fields import BelongsTo, HasMany, ManyToMany
 from .pagination import Page
 from .protection import allowed_writes
 from . import debug
-from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, prepare_rows, assignments
+from .write import CopyInsert, Delete, InsertMany, InsertOne, Update, UpdateMany, assignments, lookup_values, prepare_rows
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -55,6 +55,8 @@ __all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prefetch", "Prepared"]
 
 # Ids per query in in_bulk(), well below Postgres' 65535 parameters.
 IN_BULK_CHUNK = 10_000
+# get_or_insert: rounds of read, then insert, before a concurrent delete wins.
+GET_OR_INSERT_ROUNDS = 3
 
 
 class Prefetch(Generic[M]):
@@ -351,7 +353,15 @@ class QuerySet(Generic[M]):
             raise ValueError("lock() takes nowait or skip_locked, not both")
         return self._clone(_lock={"exclusive": exclusive, "nowait": nowait, "skip_locked": skip_locked})
 
-    def using(self, db: Database | None) -> Self:
+    def using(self, db: Database | Literal["primary"] | None) -> Self:
+        """Run on ``db``; ``"primary"`` sends reads of this query set to the primary of
+        its database (the default one, resolved now), not to a replica."""
+        if isinstance(db, str):
+            if db != "primary":
+                raise ValueError(f'using() takes a Database or "primary", got {db!r}')
+            from .db import resolve
+
+            db = resolve(self._db).primary
         return self._clone(_db=db)
 
     # -- CTEs -------------------------------------------------------------------------------
@@ -478,9 +488,12 @@ class QuerySet(Generic[M]):
             raise QueryError("batches() can't be used on a sliced query set")
         pk = self._model._meta.pk_ref()
         last: Any = None
+        seen: set[str] = set()
         while True:
             page = self if last is None else self.filter(pk > last)
-            objs = await page.order_by(pk)[:size]._fetch()
+            # No `yield` inside: the loop scope must not reach the consumer's queries.
+            with debug.internal_loop(seen):
+                objs = await page.order_by(pk)[:size]._fetch()
             if objs:
                 yield objs
             if len(objs) < size:
@@ -684,7 +697,7 @@ class QuerySet(Generic[M]):
         qs = self._clone(_model_helpers=helpers)
         cursor = after if forward else before
         if cursor is not None:
-            qs = qs.filter(pagination.after(order, pagination.decode_cursor(cursor, fp, keys)))
+            qs = qs.filter(pagination.after(self._model, order, pagination.decode_cursor(self._model, cursor, fp, keys)))
         rows = await qs.order_by(*order)[: size + 1]._fetch()
         more = len(rows) > size
         rows = rows[:size] if forward else rows[:size][::-1]
@@ -749,8 +762,11 @@ class QuerySet(Generic[M]):
             return {o._field_value(name): o for o in await self._clone(_model_helpers=(*self._model_helpers, name))._fetch()}
         keys = list(dict.fromkeys(ids))
         out: dict[Any, M] = {}
+        seen: set[str] = set()
         for i in range(0, len(keys), IN_BULK_CHUNK):
-            for o in await self.filter(col.in_(keys[i : i + IN_BULK_CHUNK]))._clone(_model_helpers=(*self._model_helpers, name))._fetch():
+            with debug.internal_loop(seen):
+                chunk = await self.filter(col.in_(keys[i : i + IN_BULK_CHUNK]))._clone(_model_helpers=(*self._model_helpers, name))._fetch()
+            for o in chunk:
                 out[o._field_value(name)] = o
         return out
 
@@ -811,16 +827,59 @@ class QuerySet(Generic[M]):
         fields, rows, provided = prepare_rows(self._model, [values])
         return InsertOne(self, fields, rows, provided)
 
+    async def get_or_insert(self, defaults: Mapping[str, Any] | None = None, **lookup: Any) -> tuple[M, bool]:
+        """The row matching ``lookup``, or a new row of ``lookup`` and ``defaults``:
+        ``(row, created)``::
+
+            user, created = await User.objects.get_or_insert(email="a@b.c", defaults={"name": "A"})
+
+        ``lookup`` names the fields of one unique constraint (the database checks this).
+        Safe under concurrency: the insert is ``ON CONFLICT (lookup) DO NOTHING``, and a
+        row that a concurrent insert wins is read back."""
+        key = lookup_values(self._model, lookup)
+        fields = self._model._meta.fields
+        cols: list[ColumnRef[Any]] = [ColumnRef(self._model, (), fields[name]) for name in key]
+        values = {**(defaults or {}), **lookup}
+        for _ in range(GET_OR_INSERT_ROUNDS):
+            try:
+                return await self.get(*(c == key[c._field.name] for c in cols)), False
+            except self._model.DoesNotExist:
+                pass
+            row: M | None = await self.insert(**values).on_conflict(*cols).do_nothing()
+            if row is not None:
+                return row, True
+        raise QueryError(
+            f"get_or_insert: a {self._model.__name__} row matching the lookup was deleted "
+            f"concurrently {GET_OR_INSERT_ROUNDS} times"
+        )
+
     async def attach(self, parent_id: Any, values: Mapping[str, Any]) -> M:
         """Attach local child values to an existing parent without altering it."""
         from .composition import attach
 
         return await attach(self, parent_id, values)
 
-    def insert_many(self, rows: Iterable[Mapping[str, Any]]) -> InsertMany[M]:
-        """``INSERT`` many rows with one statement; ``await`` gives the new instances."""
+    @overload
+    def insert_many(
+        self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: Literal[False] = False
+    ) -> InsertMany[M]: ...
+    @overload
+    def insert_many(self, rows: Iterable[Mapping[str, Any]], *, copy: Literal[True]) -> CopyInsert[M]: ...
+    def insert_many(
+        self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: bool = False
+    ) -> InsertMany[M] | CopyInsert[M]:
+        """``INSERT`` many rows; ``await`` gives the new instances. One statement per
+        ``batch_size`` rows (by default as many as fit in the parameter limit), all in
+        one transaction.
+
+        ``copy=True`` loads the rows with Postgres ``COPY`` instead, for large imports:
+        ``await`` gives the row count, and ``on_conflict()`` is not available."""
         fields, aligned, provided = prepare_rows(self._model, rows)
-        return InsertMany(self, fields, aligned, provided)
+        if copy:
+            if batch_size is not None:
+                raise TypeError("insert_many(copy=True) takes no batch_size: COPY is one statement")
+            return CopyInsert(self, fields, aligned)
+        return InsertMany(self, fields, aligned, provided, batch_size=batch_size)
 
     def __repr__(self) -> str:
         parts = [f"filter{f!r}" for f in self._filters]
@@ -890,7 +949,7 @@ class Prepared(Generic[M]):
     def _start(self, kind: str, values: Mapping[str, Any]) -> Awaitable[Any]:
         """Starts the statement; the engine's awaitable comes back as is, without a
         coroutine around it."""
-        from .db import resolve
+        from .db import _with_scope, resolve
 
         c = self._statement(kind)
         params = c.bind(values, self._names)
@@ -900,7 +959,8 @@ class Prepared(Generic[M]):
         db = resolve(qs._db)
         if debug._scope.get() is not None:
             debug.record("run:" + c.json, lambda: str(qs._native().statement(c.json, params)))
-        return db._engine.run(c.json, params, db._tx(), None, qs._db, allowed_writes())
+        op, params = _with_scope(c.json, params)
+        return db._reader().run(op, params, db._tx(), None, qs._db, allowed_writes())
 
     def __call__(self, **values: Any) -> Awaitable[list[M]]:
         """The rows, like awaiting the query set."""
@@ -987,10 +1047,23 @@ class RelatedSet(QuerySet[M]):
         """Insert a related row pointing at this instance."""
         return super().insert(**values, **self._link())
 
-    def insert_many(self, rows: Iterable[Mapping[str, Any]]) -> InsertMany[M]:
+    @overload
+    def insert_many(
+        self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: Literal[False] = False
+    ) -> InsertMany[M]: ...
+    @overload
+    def insert_many(self, rows: Iterable[Mapping[str, Any]], *, copy: Literal[True]) -> CopyInsert[M]: ...
+    def insert_many(
+        self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: bool = False
+    ) -> InsertMany[M] | CopyInsert[M]:
         """Insert related rows pointing at this instance."""
         link = self._link()
-        return super().insert_many({**r, **link} for r in rows)
+        linked = ({**r, **link} for r in rows)
+        if copy:
+            if batch_size is not None:
+                raise TypeError("insert_many(copy=True) takes no batch_size: COPY is one statement")
+            return super().insert_many(linked, copy=True)
+        return super().insert_many(linked, batch_size=batch_size)
 
     def _link(self) -> dict[str, Any]:
         return {self._relation.via: self._instance._field_value(self._relation.from_)}
@@ -1039,6 +1112,9 @@ class ManyRelatedSet(QuerySet[M]):
         pristine = len(self._filters) == 1 and not self._order and self._limit is None and self._offset is None
         if rows is not None and pristine and not self._prefetch and not self._related:
             return list(rows)
+        if debug._scope.get() is not None and pristine:
+            with debug.relation_load(self._relation.model.__name__, self._relation.name, "prefetch_related"):
+                return await super()._fetch()
         return await super()._fetch()
 
     # -- links ------------------------------------------------------------------------------
@@ -1072,17 +1148,32 @@ class ManyRelatedSet(QuerySet[M]):
         # prefetched rows no longer match the links
         self._instance.__dict__.pop(self._relation.name, None)
 
-    async def add(self, *objs: Any) -> None:
-        """Link the given instances (or keys); links that exist are left alone."""
+    async def add(self, *objs: Any, through_defaults: Mapping[str, Any] | None = None) -> None:
+        """Link the given instances (or keys); links that exist are left alone.
+        ``through_defaults`` sets other fields of the new join rows
+        (``post.tags.add(tag, through_defaults={"position": 1})``)."""
+        extra = self._through_defaults(through_defaults)
         keys = self._target_keys(objs)
         if not keys:
             return
         col = self._target_col()
         have = set(await self._links().filter(col.in_(keys)).select(col).scalars())
-        rows = [{self._relation.source: self._key, self._relation.target_field: k} for k in keys if k not in have]
+        link = {self._relation.source: self._key}
+        rows = [{**extra, **link, self._relation.target_field: k} for k in keys if k not in have]
         if rows:
             await self._links().insert_many(rows)
         self._forget()
+
+    def _through_defaults(self, values: Mapping[str, Any] | None) -> dict[str, Any]:
+        join = self._relation.through
+        keys = {self._relation.source, self._relation.target_field}
+        for rel in join._meta.relations.values():
+            if isinstance(rel, BelongsTo) and rel.via in keys:
+                keys.add(rel.name)
+        bad = sorted(keys & set(values or ()))
+        if bad:
+            raise TypeError(f"through_defaults can't set the link's key {', '.join(bad)}")
+        return dict(values or {})
 
     async def remove(self, *objs: Any) -> int:
         """Unlink the given instances (or keys); returns the number of links removed."""
@@ -1099,12 +1190,14 @@ class ManyRelatedSet(QuerySet[M]):
         self._forget()
         return n
 
-    async def set(self, objs: Iterable[Any]) -> None:
-        """Make the given instances (or keys) exactly the linked ones."""
+    async def set(self, objs: Iterable[Any], *, through_defaults: Mapping[str, Any] | None = None) -> None:
+        """Make the given instances (or keys) exactly the linked ones;
+        ``through_defaults`` sets other fields of the new join rows."""
+        self._through_defaults(through_defaults)
         keys = self._target_keys(objs)
         col = self._target_col()
         await self._links().filter(col.not_in(keys)).delete()
-        await self.add(*keys)
+        await self.add(*keys, through_defaults=through_defaults)
 
     async def insert(self, **values: Any) -> M:  # type: ignore[override]
         """Insert a related row and link it, in one transaction."""
@@ -1116,7 +1209,15 @@ class ManyRelatedSet(QuerySet[M]):
             await self.add(obj)
         return obj
 
-    def insert_many(self, rows: Iterable[Mapping[str, Any]]) -> InsertMany[M]:
+    async def get_or_insert(self, defaults: Mapping[str, Any] | None = None, **lookup: Any) -> tuple[M, bool]:
+        raise TypeError(
+            f"{self._relation.model.__name__}.{self._relation.name}.get_or_insert() isn't supported; "
+            f"use {self._model.__name__}.objects.get_or_insert(), then add()"
+        )
+
+    def insert_many(  # type: ignore[override]
+        self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None, copy: bool = False
+    ) -> InsertMany[M]:
         raise TypeError(
             f"{self._relation.model.__name__}.{self._relation.name}.insert_many() isn't supported; "
             f"insert the rows, then link them with add()"

@@ -5,6 +5,8 @@
 //! the value is compared with or assigned to, so the binding converts it by that column
 //! type: the same `3` becomes an `int4` for an `Int` column and an `int8` for a `BigInt`.
 
+use std::collections::BTreeMap;
+
 use sea_query::{ArrayType, Value};
 
 use crate::error::{Error, Result};
@@ -27,6 +29,49 @@ pub trait Params {
 
     /// Parameter `i` as a row count (`LIMIT` / `OFFSET`). `i` is in range.
     fn count(&self, i: usize) -> Result<u64>;
+
+    /// The parameter that holds the `scope.<name>` value, if the statement has one.
+    fn scope(&self, _name: &str) -> Option<usize> {
+        None
+    }
+}
+
+/// `params` with the statement's `scope.<name>` parameter indexes.
+pub struct Scoped<'a> {
+    pub params: &'a dyn Params,
+    pub scope: &'a BTreeMap<String, usize>,
+}
+
+impl Params for Scoped<'_> {
+    fn len(&self) -> usize {
+        self.params.len()
+    }
+    fn value(&self, i: usize, ty: Option<ValueType>) -> Result<Value> {
+        self.params.value(i, ty)
+    }
+    fn text(&self, i: usize) -> Result<String> {
+        self.params.text(i)
+    }
+    fn count(&self, i: usize) -> Result<u64> {
+        self.params.count(i)
+    }
+    fn scope(&self, name: &str) -> Option<usize> {
+        self.scope.get(name).copied()
+    }
+}
+
+/// `update_many` filters: a list of expressions, or `{"filters": [...], "scope": {...}}`.
+pub fn scoped_filters(json: &str) -> Result<(Vec<orm_core::ir::Expr>, BTreeMap<String, usize>)> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Filters {
+        List(Vec<orm_core::ir::Expr>),
+        Scoped { filters: Vec<orm_core::ir::Expr>, scope: BTreeMap<String, usize> },
+    }
+    match serde_json::from_str(json).map_err(|e| Error::query(format!("invalid filter IR: {e}")))? {
+        Filters::List(filters) => Ok((filters, BTreeMap::new())),
+        Filters::Scoped { filters, scope } => Ok((filters, scope)),
+    }
 }
 
 /// No parameters.
@@ -85,4 +130,23 @@ pub fn null_of(ty: Option<ValueType>) -> Value {
         Some(t) => scalar_null(t.ty),
         None => Value::String(None),
     }
+}
+
+/// The column type of a bound value, for an untyped literal whose type decides an
+/// expression's type (`CASE` with only plain values).
+pub fn type_of(v: &Value) -> Option<ValueType> {
+    let ty = match v {
+        Value::Bool(_) => ColType::Bool,
+        Value::Int(_) => ColType::Int,
+        Value::BigInt(_) => ColType::BigInt,
+        Value::Double(_) => ColType::Float,
+        Value::String(_) => ColType::Text,
+        Value::ChronoDateTimeWithTimeZone(_) => ColType::DateTime,
+        Value::ChronoDate(_) => ColType::Date,
+        Value::Uuid(_) => ColType::Uuid,
+        Value::Json(_) => ColType::Json,
+        Value::BigDecimal(_) => ColType::Decimal,
+        _ => return None,
+    };
+    Some(ValueType::scalar(ty))
 }

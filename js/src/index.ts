@@ -21,6 +21,10 @@ export {
   Column,
   Condition,
   Expression,
+  Case,
+  JsonPath,
+  type TsQuery,
+  type TsVector,
   Func,
   Ordering,
   ParamRef,
@@ -44,12 +48,12 @@ export { ModelMeta, Registry, define, load, loads, registry } from "./model.js";
 export type { Instance, ModelClass, Row, SchemaIR, SoftDeletable } from "./model.js";
 export { ManyRelatedSet, Prefetch, Prepared, QuerySet, RelatedSet } from "./query.js";
 export type { Page, PageOptions } from "./pagination.js";
-export type { DoNothing, DoUpdate, FieldOrder, LoadOf, LockOptions, PreparedInsert, PreparedUpdate, Simplify } from "./query.js";
+export type { AddOptions, BatchOptions, CopyOptions, DoNothing, DoUpdate, FieldOrder, LoadOf, LockOptions, PreparedInsert, PreparedUpdate, Simplify } from "./query.js";
 export { Select } from "./select.js";
 export { Cte, CteColumn } from "./cte.js";
 export type { CteSelf } from "./cte.js";
-export { Database, connect, getDatabase } from "./db.js";
-export type { ConnectOptions } from "./db.js";
+export { Database, connect, getDatabase, scope } from "./db.js";
+export type { ConnectOptions, SessionLockOptions } from "./db.js";
 export {
   DatabaseError,
   DoesNotExist,
@@ -67,5 +71,5 @@ export {
 } from "./errors.js";
 export { allowWrites } from "./protection.js";
 export * as debug from "./debug.js";
-export { Migration, MigrationError, Migrations, Migrator } from "./migrations.js";
-export type { Plan, Status, Step, SchemaSource } from "./migrations.js";
+export { Migration, MigrationError, Migrations, Migrator, Pulled, pull } from "./migrations.js";
+export type { Drift, Plan, Status, Step, SchemaSource } from "./migrations.js";

@@ -209,6 +209,43 @@ fn sqlite_rebuild_copies_from_the_current_name_when_the_hint_is_kept() {
     assert!(undo.contains("INSERT INTO \"__orm_new_users\" (\"id\", \"email\") SELECT \"id\", \"mail\" FROM \"members\""), "{undo}");
 }
 
+/// `kept_rename_hints`, then a new column and a new table hinted from names that still exist.
+#[test]
+fn a_hint_whose_name_still_exists_copies_nothing() {
+    for dialect in ["postgres", "sqlite"] {
+        let (p2, _) = kept_rename_hints(dialect);
+        let mut ir = blog(vec![json!({"name": "title2", "column": "title2", "type": "text", "nullable": true, "renamed_from": "title"})], json!({}));
+        ir["dialect"] = json!(dialect);
+        ir["models"][0]["table"] = json!("members");
+        ir["models"][0]["renamed_from"] = json!("users");
+        ir["models"][0]["fields"][1]["column"] = json!("mail");
+        ir["models"][0]["fields"][1]["renamed_from"] = json!("email");
+        ir["models"].as_array_mut().unwrap().push(json!({"name": "Archive", "table": "archive", "renamed_from": "members", "fields": [id()]}));
+        let v3 = schema(ir);
+        let p3 = super::plan(&v3, &p2.snapshot).unwrap();
+        let up = sql(&p3.up).join("\n");
+        if dialect == "postgres" {
+            assert!(!up.contains("RENAME"), "{up}");
+        } else {
+            assert!(up.contains("INSERT INTO \"__orm_new_posts\" (\"id\", \"author_id\", \"title\", \"title2\") SELECT \"id\", \"author_id\", \"title\", NULL FROM \"posts\""), "{up}");
+            assert!(!up.contains("INSERT INTO \"__orm_new_archive\""), "{up}");
+        }
+    }
+}
+
+#[test]
+fn two_hints_for_one_old_name_are_an_error() {
+    let mut ir = blog(vec![json!({"name": "t2", "column": "t2", "type": "string", "nullable": true, "renamed_from": "title"})], json!({}));
+    ir["models"][1]["fields"][1]["renamed_from"] = json!("title");
+    ir["models"][1]["fields"][1]["column"] = json!("t1");
+    let error = super::plan(&schema(ir), &DbSchema::default()).unwrap_err();
+    assert!(error.contains("posts: columns \"t1\" and \"t2\" both have the rename hint \"title\"") || error.contains("posts: columns \"t2\" and \"t1\""), "{error}");
+    let mut ir = blog(vec![], json!({}));
+    ir["models"][0]["renamed_from"] = json!("old");
+    ir["models"][1]["renamed_from"] = json!("old");
+    assert!(super::plan(&schema(ir), &DbSchema::default()).unwrap_err().contains("both have the rename hint \"old\""));
+}
+
 #[test]
 fn sqlite_rebuild_creates_triggers_after_every_table_has_its_name() {
     let s = schema(json!({"dialect": "sqlite", "models": [
@@ -353,4 +390,17 @@ fn enum_types_are_created_altered_and_dropped() {
     let all = create_all(&v1).unwrap();
     assert!(all[0].starts_with("DO $orm$\nBEGIN\n    CREATE TYPE \"status\""), "{}", all[0]);
     assert_eq!(drop_all(&v1).unwrap().last().unwrap(), "DROP TYPE IF EXISTS \"status\" CASCADE");
+}
+
+#[test]
+fn relation_map_names_the_foreign_key() {
+    let source = "model User {\n  id BigInt @id\n  posts Post[]\n}\n\nmodel Post {\n  id BigInt @id\n  author_id BigInt\n  author User @relation(fields: [author_id], references: [id], map: \"post_author_fk\")\n}\n";
+    let (_, s) = crate::dsl::compile(source, None).and_then(crate::dsl::check).unwrap();
+    let snap = snapshot(&s).unwrap();
+    let post = snap.tables.iter().find(|t| t.name == "post").unwrap();
+    assert_eq!(post.foreign_keys[0].name, "post_author_fk");
+    let pulled = pull::pull(&snap, &[]);
+    assert!(pulled.schema.contains("map: \"post_author_fk\""), "{}", pulled.schema);
+    let (_, again) = crate::dsl::compile(&pulled.schema, None).and_then(crate::dsl::check).unwrap();
+    assert_eq!(snapshot(&again).unwrap(), snap);
 }

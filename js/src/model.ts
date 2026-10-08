@@ -117,6 +117,8 @@ export class ModelMeta implements Source {
   softDelete: FieldMeta | undefined;
   /** The `@locking.version` field: instance writes check it; set once by `define()`. */
   versionField: FieldMeta | undefined;
+  /** IR names of fields that a proxy declares non-null over a nullable stored column. */
+  narrowed: ReadonlySet<string> = new Set();
   readonly fields = new Map<string, FieldMeta>();
   readonly fieldByIr = new Map<string, FieldMeta>();
   readonly fieldList: FieldMeta[] = [];
@@ -731,6 +733,8 @@ export function define(
         undelete: { value: instanceUndelete, writable: true },
       });
     }
+    const proxy = ((ir.behavior as { proxy_models?: { model: string; fields?: { field: string; non_null?: boolean }[] }[] } | undefined)?.proxy_models ?? []).find((p) => p.model === m.name);
+    meta.narrowed = new Set((proxy?.fields ?? []).filter((f) => f.non_null).map((f) => f.field));
     const computed = new Set(((ir.behavior as { result_fields?: { model: string; field: string }[] } | undefined)?.result_fields ?? []).filter((f) => f.model === m.name).map((f) => f.field));
     if (computed.size) {
       meta.inputFieldList = meta.fieldList.filter((f) => !computed.has(f.ir));

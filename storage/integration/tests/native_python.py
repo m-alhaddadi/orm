@@ -136,5 +136,37 @@ class NativeFileTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.storage.deletes, 0)
         self.assertEqual(b''.join([chunk async for chunk in self.storage.open(nested.operation.references['file'])]), b'savepoint')
 
+    async def test_a_protected_file_write_reads_its_scope_at_the_await(self):
+        ir = json.loads(orm._native.compile_schema('model FileReport08 {\n id Int @id\n file Json?\n @@protected_write\n}', None))
+        ir['dialect'] = 'sqlite'
+        ir['behavior'] = {'schema_contract': 1, 'field_adapters': [{'model': 'FileReport08', 'field': 'file', 'adapter': 'file-storage.reference.v1'}], 'file_fields': [{'model': 'FileReport08', 'field': 'file', 'storage': 'reports', 'reference_contract': 1}]}
+        reg = orm.Registry()
+        Protected = orm.define(ir, registry=reg)['FileReport08']
+        install_model(Protected, {'file': FileField('file', 'reports', True)}, self.registry)
+        db = await orm.connect('sqlite://:memory:', registry=reg, default=False)
+        try:
+            await db.create_tables()
+            objects = Protected.objects.using(db)
+            # Built inside the scope, awaited outside it: rejected before the upload.
+            with orm.allow_writes(Protected):
+                insert = objects.insert(id=1, file=Upload(b'x'))
+                update = objects.filter(Protected.id == 1).update(file=Upload(b'y'))
+            for statement in [insert, update]:
+                with self.assertRaises(orm.WriteProtected):
+                    await statement
+            self.assertEqual(self.storage.uploads, 0)
+            # Built outside the scope, awaited inside it: written, like a write without a file.
+            insert = objects.insert(id=1, file=Upload(b'x'))
+            update = objects.filter(Protected.id == 1).update(file=Upload(b'y'))
+            with orm.allow_writes(Protected):
+                await insert
+                await update
+            self.assertEqual(self.storage.uploads, 2)
+            # Invalid values still fail when the statement is built.
+            with self.assertRaises((ValueError, TypeError)):
+                objects.insert(id='invalid integer', file=Upload(b'z'))
+        finally:
+            await db.close()
+
 if __name__ == '__main__':
     unittest.main()

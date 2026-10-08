@@ -1,7 +1,7 @@
 // `@@query.defaults` from the schema language to a query; needs a query-defaults artifact.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { connect, loads, NotLoaded, Registry } from '../../../js/dist/src/index.js';
+import { connect, loads, NotLoaded, Registry, scope } from '../../../js/dist/src/index.js';
 import { native } from '../../../js/dist/src/native.js';
 
 const fixture = readFileSync(new URL('../fixtures/schema.prisma', import.meta.url), 'utf8');
@@ -9,7 +9,7 @@ assert.ok(JSON.parse(native().nativeArtifact()).capabilities.includes('query-def
 
 async function run(provider, url) {
   const registry = new Registry();
-  const { Policy } = loads(fixture.replace('"sqlite"', `"${provider}"`), { registry });
+  const { Policy, Scoped } = loads(fixture.replace('"sqlite"', `"${provider}"`), { registry });
   const db = await connect(url, { registry, default: false });
   await db.dropTables();
   await db.createTables();
@@ -23,6 +23,9 @@ async function run(provider, url) {
     const full = await Policy.objects.using(db).withoutDefaults().get(Policy.name.eq('hidden'));
     assert.equal(full.bio, 'large');
     assert.equal(full.active, false);
+    await Scoped.objects.using(db).insertMany([{ shopId: 1 }, { shopId: 2 }]);
+    await assert.rejects(Scoped.objects.using(db).count(), /scope\.shop/);
+    await scope({ shop: 2 }, async () => assert.deepEqual((await Scoped.objects.using(db)).map((r) => r.shopId), [2]));
   } finally {
     await db.dropTables();
     await db.close();

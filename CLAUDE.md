@@ -6,6 +6,13 @@
   requests unless asked for one.
 - Before committing, run the checks below and keep them green.
 
+## Tests
+
+- Always prefer bulk database actions in tests and fixtures to reduce database
+  round trips: batch inserts with `insert_many()` / `insertMany()`, and use bulk
+  updates or deletes where applicable. Use individual operations when their
+  behavior is what the test verifies or later operations depend on earlier results.
+
 ## Checks
 
 ```bash

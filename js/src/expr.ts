@@ -18,7 +18,7 @@
 
 import { Decimal } from "./decimal.js";
 import { QueryError } from "./errors.js";
-import type { FieldMeta, Hop, In, ModelSpec } from "./meta.js";
+import type { FieldMeta, Hop, In, JsonValue, ModelSpec } from "./meta.js";
 
 export type IR = { [key: string]: unknown };
 
@@ -309,12 +309,66 @@ export abstract class Expression<T, S extends string = never, P = {}> extends No
     return new Func("element", [this, new Int(index)]);
   }
 
+  // JSON -------------------------------------------------------------------------------------
+
+  /** JSON columns: the value under each key or 0-based array index in turn
+   * (`meta.get("tags", 0)` is `meta -> 'tags' -> 0`), `null` when absent. It compares as
+   * JSON; `.asText()` reads it as text. PostgreSQL only. */
+  get(this: Expression<JsonValue | null, S, P>, ...path: readonly (string | number)[]): JsonPath<S, P> {
+    if (!path.length) {
+      throw new TypeError("get() needs at least one key or index");
+    }
+    return this instanceof JsonPath ? this.extend(path) : new JsonPath(this, path, false);
+  }
+
+  /** JSON: the value contains `value` at the top level (`col @> value`). PostgreSQL only. */
+  jsonContains(this: Expression<JsonValue | null, S, P>, value: JsonValue): Condition<S, P> {
+    return new Comparison("contains", this, new Literal(value));
+  }
+
+  /** JSON: `value` contains the value (`col <@ value`). PostgreSQL only. */
+  jsonContainedBy(this: Expression<JsonValue | null, S, P>, value: JsonValue): Condition<S, P> {
+    return new Comparison("contained_by", this, new Literal(value));
+  }
+
+  /** JSON: the object has the top-level key `key`, or the array the string element
+   * (`col ? key`). PostgreSQL only. */
+  hasKey(this: Expression<JsonValue | null, S, P>, key: string): Condition<S, P> {
+    if (typeof key !== "string") {
+      throw new TypeError(`hasKey() takes a string, got ${typeof key}`);
+    }
+    return new Comparison("has_key", this, new Literal(key));
+  }
+
+  /** JSON: `col || value`, the objects merged (the keys of `value` win) or the arrays
+   * joined: `update({ meta: Post.meta.jsonMerge({ seen: true }) })`. PostgreSQL only. */
+  jsonMerge<S2 extends string = never, P2 = {}>(
+    this: Expression<JsonValue | null, S, P>,
+    value: JsonValue | Expression<JsonValue | null, S2, P2>,
+  ): Expression<JsonValue, S | S2, P & P2> {
+    return new Arith("json_merge", this, value instanceof Node ? value : new Literal(value)) as never;
+  }
+
+  // Full-text search ---------------------------------------------------------------------------
+
+  /** `vector @@ query`: the document matches the search. A plain string is
+   * `plainto_tsquery(<config of the vector>, query)`. PostgreSQL only. */
+  matches<S2 extends string = never, P2 = {}>(this: Expression<TsVector, S, P>, query: string | Expression<TsQuery, S2, P2>): Condition<S | S2, P & P2> {
+    if (typeof query === "string") {
+      const config = this instanceof Func && this.name === "to_tsvector" && this.args.length === 2 ? this.args[0]! : undefined;
+      query = new Func("plainto_tsquery", config === undefined ? [new Literal(query)] : [config, new Literal(query)]);
+    }
+    return new Comparison("match", this, query) as never;
+  }
+
   // Strings ----------------------------------------------------------------------------------
 
   /** `this || other`: `null` when either side is `null`. {@link Functions.concat}
    * reads `null` as an empty string instead. */
-  concat<S2 extends string = never, P2 = {}>(this: Expression<string | null, S, P>, other: Operand<string, S2, P2>): Expression<string, S | S2, P & P2> {
-    return new Arith("concat", this, wrap(other)) as never;
+  concat<U extends string | null, S2 extends string = never, P2 = {}>(this: Expression<U, S, P>, other: string | Expression<string, S2, P2>): Expression<string | Extract<U, null>, S | S2, P & P2>;
+  concat<S2 extends string = never, P2 = {}>(this: Expression<string | null, S, P>, other: Operand<string, S2, P2>): Expression<string | null, S | S2, P & P2>;
+  concat(other: unknown): unknown {
+    return new Arith("concat", this, wrap(other));
   }
 
   // Arithmetic -------------------------------------------------------------------------------
@@ -616,9 +670,14 @@ export class Func<T, S extends string = never, P = {}> extends Expression<T, S, 
     readonly args: readonly Node[] = [],
     readonly rel: RelationPath<ModelSpec, string, readonly Hop[]> | undefined = undefined,
     readonly distinct = false,
+    filter: unknown = undefined,
   ) {
     super();
+    this.filter = filter === undefined ? undefined : asCondition(filter);
   }
+
+  /** @internal `FILTER (WHERE ...)` of an aggregate. */
+  readonly filter: Node | undefined;
 
   ir(ctx: IRContext): IR {
     const ir: IR = { t: "func", name: this.name, args: this.args.map((a) => a.ir(ctx)) };
@@ -630,6 +689,9 @@ export class Func<T, S extends string = never, P = {}> extends Expression<T, S, 
     }
     if (this.distinct) {
       ir["distinct"] = true;
+    }
+    if (this.filter) {
+      ir["filter"] = this.filter.ir(ctx);
     }
     return ir;
   }
@@ -670,6 +732,97 @@ export class Func<T, S extends string = never, P = {}> extends Expression<T, S, 
     return new Window(this, undefined, many(spec.partitionBy), orderings(spec.orderBy), frameIr(spec));
   }
 }
+
+/** `Post.meta.get("a", "b")`: a `jsonb` value inside a JSON column. */
+export class JsonPath<S extends string = never, P = {}> extends Expression<JsonValue | null, S, P> {
+  constructor(
+    readonly item: Node,
+    readonly path: readonly (string | number)[],
+    readonly text: boolean,
+  ) {
+    super();
+    for (const key of path) {
+      if (typeof key !== "string" && !Number.isSafeInteger(key)) {
+        throw new TypeError(`JSON path steps are string keys or integer indexes, got ${String(key)}`);
+      }
+    }
+  }
+
+  /** @internal */
+  extend(path: readonly (string | number)[]): JsonPath<S, P> {
+    if (this.text) {
+      throw new TypeError("asText() ends a JSON path");
+    }
+    return new JsonPath(this.item, [...this.path, ...path], false);
+  }
+
+  /** The value as text (the last step is `->>`): a JSON string without quotes, so `like`,
+   * `contains` and string functions work on it. */
+  asText(): Expression<string | null, S, P> {
+    return new JsonPath(this.item, this.path, true) as never;
+  }
+
+  ir(ctx: IRContext): IR {
+    const ir: IR = { t: "json_path", item: this.item.ir(ctx), path: [...this.path] };
+    if (this.text) {
+      ir["text"] = true;
+    }
+    return ir;
+  }
+}
+
+/** `func.case([cond, value], ..., { default })`: `CASE WHEN ... END`. */
+export class Case<T, S extends string = never, P = {}> extends Expression<T, S, P> {
+  readonly whens: readonly (readonly [Node, Node])[];
+  readonly fallback: Node | undefined;
+
+  constructor(branches: readonly unknown[], fallback: unknown) {
+    super();
+    if (!branches.length) {
+      throw new TypeError("case() needs at least one [condition, value] branch");
+    }
+    this.whens = branches.map((b) => {
+      if (!Array.isArray(b) || b.length !== 2) {
+        throw new TypeError(`case() branches are [condition, value] pairs, got ${String(b)}`);
+      }
+      return [asCondition(b[0]), wrap(b[1])] as const;
+    });
+    this.fallback = fallback === undefined ? undefined : wrap(fallback);
+  }
+
+  ir(ctx: IRContext): IR {
+    const ir: IR = { t: "case", whens: this.whens.map(([c, v]) => ({ cond: c.ir(ctx), value: v.ir(ctx) })) };
+    if (this.fallback !== undefined) {
+      ir["default"] = this.fallback.ir(ctx);
+    }
+    return ir;
+  }
+}
+
+/** One `[condition, value]` branch of {@link Functions.case}. The condition is `unknown`
+ * here so it gives no contextual type (that would widen its scope to `string`);
+ * {@link CaseOf} checks it. */
+export type CaseBranch = readonly [unknown, unknown];
+/** The `Case` of these branches, or `never` when a condition is not a boolean expression. */
+type CaseOf<Br extends CaseBranch, T, S extends string, P> = [Exclude<Br[0], Expression<boolean | null, string, unknown>>] extends [never]
+  ? Case<T, S, P>
+  : never;
+/** The options of {@link Functions.case}: the value when no condition holds. */
+export type CaseDefault = { readonly default: unknown };
+/** The value type of a branch value: an expression's type, or a plain value's widened type. */
+type CaseValue<V> = V extends Expression<infer T, string, unknown>
+  ? T
+  : V extends number
+    ? number
+    : V extends string
+      ? string
+      : V extends boolean
+        ? boolean
+        : V;
+type ScopeOfNode<V> = V extends Expression<unknown, infer S, unknown> ? S : never;
+type ParamsOfNode<V> = V extends Expression<unknown, string, infer P> ? P : {};
+type CaseScope<B extends CaseBranch> = B extends unknown ? ScopeOfNode<B[0]> | ScopeOfNode<B[1]> : never;
+type CaseParams<B extends CaseBranch> = UnionToIntersection<B extends unknown ? ParamsOfNode<B[0]> & ParamsOfNode<B[1]> : never>;
 
 /** A window-only function (`rowNumber()`, `lag()`, ...): usable only with `.over()`. */
 export class WindowFunc<T, S extends string = never, P = {}> {
@@ -818,6 +971,40 @@ class Int extends Expression<number, never, {}> {
 }
 
 type Num = number | bigint | Decimal;
+/** The type of a `tsvector` expression (`func.toTsvector`): only for typing. */
+export interface TsVector {
+  readonly "~tsvector": true;
+}
+/** The type of a `tsquery` expression (`func.toTsquery`, ...): only for typing. */
+export interface TsQuery {
+  readonly "~tsquery": true;
+}
+
+/** A text search configuration (`'english'::regconfig`), written into the SQL so the
+ * expression matches an expression index. */
+class Config extends Expression<never, never, {}> {
+  constructor(readonly value: string) {
+    super();
+    if (typeof value !== "string") {
+      throw new TypeError(`a text search configuration is a name, got ${typeof value}`);
+    }
+  }
+
+  ir(): IR {
+    return { t: "text", value: this.value };
+  }
+}
+
+type SearchArgs<S extends string, P> = [text: string | Expression<string | null, S, P>] | [config: string, text: string | Expression<string | null, S, P>];
+function search(args: readonly unknown[]): Node[] {
+  return args.length === 2 ? [new Config(args[0] as string), wrap(args[1])] : [wrap(args[0])];
+}
+/** Options of an aggregate: `DISTINCT`, and `FILTER (WHERE filter)` (only the rows
+ * where `filter` holds). */
+export interface AggregateOptions<S extends string, P> {
+  readonly distinct?: boolean;
+  readonly filter?: Expression<boolean | null, S, P>;
+}
 type AnyExpr<T, S extends string, P> = Expression<T, S, P>;
 /** `SUM` of integers is a `bigint` (cast so); of floats a number; of decimals a Decimal. */
 type SumOf<T> = [NonNullable<T>] extends [number | bigint] ? (number extends NonNullable<T> ? number | bigint : bigint) : NonNullable<T>;
@@ -833,36 +1020,49 @@ class Functions {
   /** `COUNT(*)` without argument, `COUNT(expr)` (non-null values), or the rows of a
    * relation: `func.count(User.posts)`. */
   count(): Func<bigint>;
-  count<S extends string, P>(
+  count<S2 extends string, P2>(options: AggregateOptions<S2, P2>): Func<bigint, Exclude<S2, Many>, P2>;
+  count<S extends string, P, S2 extends string = never, P2 = {}>(
     what: Expression<unknown, S, P> | RelationPath<ModelSpec, S, readonly Hop[]>,
-    options?: { readonly distinct?: boolean },
-  ): Func<bigint, Exclude<S, Many>, P>;
-  count(what?: unknown, options?: { readonly distinct?: boolean }): Func<bigint, string, unknown> {
-    if (what instanceof RelationPath) {
-      return new Func("count", [], what);
+    options?: AggregateOptions<S2, P2>,
+  ): Func<bigint, Exclude<S | S2, Many>, P & P2>;
+  count(what?: unknown, options?: AggregateOptions<string, unknown>): Func<bigint, string, unknown> {
+    if (what !== undefined && !(what instanceof Node) && !(what instanceof RelationPath)) {
+      return this.count(undefined as never, what as AggregateOptions<string, unknown>) as never;
     }
-    return new Func("count", what === undefined ? [] : [wrap(what)], undefined, options?.distinct ?? false) as never;
+    if (what instanceof RelationPath) {
+      return new Func("count", [], what, false, options?.filter);
+    }
+    return new Func("count", what === undefined ? [] : [wrap(what)], undefined, options?.distinct ?? false, options?.filter) as never;
   }
 
   /** `SUM`; integer sums come back as `bigint` (cast to bigint). */
-  sum<T extends Num | null, S extends string, P>(expr: AnyExpr<T, S, P>, options?: { readonly distinct?: boolean }): Func<SumOf<T> | null, Exclude<S, Many>, P> {
-    return new Func("sum", [expr], undefined, options?.distinct ?? false);
+  sum<T extends Num | null, S extends string, P, S2 extends string = never, P2 = {}>(
+    expr: AnyExpr<T, S, P>,
+    options?: AggregateOptions<S2, P2>,
+  ): Func<SumOf<T> | null, Exclude<S | S2, Many>, P & P2> {
+    return new Func("sum", [expr], undefined, options?.distinct ?? false, options?.filter);
   }
 
   /** `AVG`: a number, or a `Decimal` for decimal columns (exact). */
-  avg<T extends Num | null, S extends string, P>(
+  avg<T extends Num | null, S extends string, P, S2 extends string = never, P2 = {}>(
     expr: AnyExpr<T, S, P>,
-    options?: { readonly distinct?: boolean },
-  ): Func<([NonNullable<T>] extends [Decimal] ? Decimal : number) | null, Exclude<S, Many>, P> {
-    return new Func("avg", [expr], undefined, options?.distinct ?? false);
+    options?: AggregateOptions<S2, P2>,
+  ): Func<([NonNullable<T>] extends [Decimal] ? Decimal : number) | null, Exclude<S | S2, Many>, P & P2> {
+    return new Func("avg", [expr], undefined, options?.distinct ?? false, options?.filter);
   }
 
-  min<T, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T | null, Exclude<S, Many>, P> {
-    return new Func("min", [expr]);
+  min<T, S extends string, P, S2 extends string = never, P2 = {}>(
+    expr: AnyExpr<T, S, P>,
+    options?: { readonly filter?: Expression<boolean | null, S2, P2> },
+  ): Func<T | null, Exclude<S | S2, Many>, P & P2> {
+    return new Func("min", [expr], undefined, false, options?.filter);
   }
 
-  max<T, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T | null, Exclude<S, Many>, P> {
-    return new Func("max", [expr]);
+  max<T, S extends string, P, S2 extends string = never, P2 = {}>(
+    expr: AnyExpr<T, S, P>,
+    options?: { readonly filter?: Expression<boolean | null, S2, P2> },
+  ): Func<T | null, Exclude<S | S2, Many>, P & P2> {
+    return new Func("max", [expr], undefined, false, options?.filter);
   }
 
   lower<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>): Func<T, S, P> {
@@ -920,7 +1120,7 @@ class Functions {
     return new Func("replace", [expr, wrap(old), wrap(replacement)]);
   }
 
-  /** The characters from the 1-based `start`, `length` of them (default: all). */
+  /** The characters from the 1-based `start` (at least 1), `length` of them (at least 0; default: all). */
   substr<T extends string | null, S extends string, P>(expr: AnyExpr<T, S, P>, start: number, length?: number): Func<T, S, P> {
     return new Func("substr", length === undefined ? [expr, new Int(start)] : [expr, new Int(start), new Int(length)]);
   }
@@ -948,6 +1148,62 @@ class Functions {
 
   now(): Func<Date> {
     return new Func("now");
+  }
+
+  // Full-text search, PostgreSQL only. An optional first argument names the text search
+  // configuration ("english"); without it the server's default applies.
+
+  /** `to_tsvector([config,] document)`: the document's normalized words. Index it with
+   * `@@index([sql("to_tsvector('english', title)")], type: Gin)`. */
+  toTsvector<S extends string = never, P = {}>(...args: SearchArgs<S, P>): Func<TsVector, S, P> {
+    return new Func("to_tsvector", search(args));
+  }
+
+  /** `to_tsquery([config,] query)`: a query in tsquery syntax (`"cat & !dog"`). */
+  toTsquery<S extends string = never, P = {}>(...args: SearchArgs<S, P>): Func<TsQuery, S, P> {
+    return new Func("to_tsquery", search(args));
+  }
+
+  /** `plainto_tsquery([config,] text)`: every word of plain text. */
+  plaintoTsquery<S extends string = never, P = {}>(...args: SearchArgs<S, P>): Func<TsQuery, S, P> {
+    return new Func("plainto_tsquery", search(args));
+  }
+
+  /** `websearch_to_tsquery([config,] text)`: search-engine syntax (`"cat -dog"`, `or`,
+   * quoted phrases). */
+  websearchToTsquery<S extends string = never, P = {}>(...args: SearchArgs<S, P>): Func<TsQuery, S, P> {
+    return new Func("websearch_to_tsquery", search(args));
+  }
+
+  /** `ts_rank(vector, query)`: how well the document matches, for `orderBy`. */
+  tsRank<S extends string, P, S2 extends string = never, P2 = {}>(vector: Expression<TsVector, S, P>, query: Expression<TsQuery, S2, P2>): Func<number, S | S2, P & P2> {
+    return new Func("ts_rank", [vector, query]);
+  }
+
+  /**
+   * `CASE WHEN cond THEN value ... ELSE default END`: the value of the first true
+   * condition, else `default` (`null` when not given).
+   *
+   * ```ts
+   * func.case([Post.views.gt(100), "hot"], [Post.views.gt(10), "warm"], { default: "cold" })
+   * func.sum(func.case([Post.published, 1], { default: 0 }))
+   * ```
+   */
+  case<const B extends readonly CaseBranch[]>(...branches: B): CaseOf<B[number], CaseValue<B[number][1]> | null, CaseScope<B[number]>, CaseParams<B[number]>>;
+  case<const A extends readonly [...CaseBranch[], CaseDefault]>(
+    ...args: A
+  ): CaseOf<
+    Extract<A[number], CaseBranch>,
+    CaseValue<Extract<A[number], CaseBranch>[1]> | CaseValue<Extract<A[number], CaseDefault>["default"]>,
+    CaseScope<Extract<A[number], CaseBranch>> | ScopeOfNode<Extract<A[number], CaseDefault>["default"]>,
+    CaseParams<Extract<A[number], CaseBranch>> & ParamsOfNode<Extract<A[number], CaseDefault>["default"]>
+  >;
+  case(...args: unknown[]): Case<unknown, string, unknown> {
+    const last = args[args.length - 1];
+    if (last !== undefined && !Array.isArray(last) && !(last instanceof Node) && typeof last === "object" && last !== null) {
+      return new Case(args.slice(0, -1), (last as { default?: unknown }).default);
+    }
+    return new Case(args, undefined);
   }
 
   // Window functions: only valid with .over(...).

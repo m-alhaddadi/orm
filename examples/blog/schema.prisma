@@ -85,6 +85,7 @@ model PostTag {
   id      BigInt @id @default(autoincrement())
   post_id BigInt
   tag_id  BigInt
+  position Int?  // set by post.tags.add(..., through_defaults={"position": n})
   post    Post   @relation(fields: [post_id], references: [id], onDelete: Cascade)
   tag     Tag    @relation(fields: [tag_id], references: [id], onDelete: Cascade)
 

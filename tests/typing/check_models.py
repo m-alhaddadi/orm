@@ -8,6 +8,7 @@ from typing import Any, assert_type
 from blog.models import Comment, Post, PostInsert, PostQuerySet, Priority, Profile, Role, Tag, User, UserQuerySet
 
 from orm import (
+    Case,
     ColumnRef,
     Expression,
     Func,
@@ -19,6 +20,7 @@ from orm import (
     Prepared,
     RelatedSet,
     Row,
+    TsVector,
     Window,
     WindowDef,
     excluded,
@@ -57,6 +59,10 @@ async def check() -> None:
     if c is not None:
         assert_type(c.author, User | None)
     assert_type(await User.objects.count(), int)
+    assert_type(await User.objects.insert_many([{"email": "a", "name": "A"}], batch_size=10), list[User])
+    assert_type(await User.objects.insert_many([{"email": "a", "name": "A"}], copy=True), int)
+    assert_type(await User.objects.get_or_insert(email="a", defaults={"name": "A"}), tuple[User, bool])
+    await User.objects.insert(email="a", name="A").on_conflict(User.email, where=User.name == "A").do_nothing()
     async for p in Post.objects.order_by(Post.created_at.desc())[:10]:
         assert_type(p, Post)
     assert_type(-Post.created_at, Ordering)
@@ -148,8 +154,21 @@ async def check() -> None:
     assert_type(func.unnest(Profile.links), Func[str])
     assert_type(func.concat(Post.title, " ", Post.views), Func[str])
     assert_type(Post.title.concat("!"), Expression[str])
+    assert_type(Profile.links[1].concat("!"), Expression[str | None])
+    assert_type(Post.title.concat(Profile.links[1]), Expression[str | None])
     assert_type(func.strpos(Post.title, "x"), Func[int])
+    assert_type(func.strpos(Post.title, Profile.links[1]), Func[int])
+    assert_type(func.replace(Post.title, Profile.links[1], Profile.links[1]), Func[str])
     Post.views.concat("!")  # E: concatenation takes strings
+    assert_type(func.case((Post.published, 1), default=0), Case[int])
+    assert_type(func.case((Post.views > 3, Post.title)), Case[str | None])
+    assert_type(await Post.objects.select(func.case((Post.published, Post.views), default=0)).scalar(), int | None)
+    assert_type(func.count(filter=Post.published), Func[int])
+    assert_type(func.sum(Post.views, filter=Post.views > 3), Func[int | None])
+    assert_type(func.to_tsvector("english", Post.title), Func[TsVector])
+    assert_type(func.ts_rank(func.to_tsvector(Post.title), func.plainto_tsquery("dog")), Func[float])
+    assert_type(func.to_tsvector(Post.title).matches("dog"), Condition)
+    Post.title.matches("dog")  # E: matches() needs a tsvector
     assert_type(alice.profile, Profile | None)
     assert_type(post.tags, ManyRelatedSet[Tag])
     assert_type(await post.tags, list[Tag])

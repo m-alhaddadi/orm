@@ -141,7 +141,8 @@ const back = await Post.objects.orderBy("-createdAt").paginate({ last: 20, befor
 The rules are the same as Python's `paginate()` (see [`python-api.md`](python-api.md)).
 A nullable order column needs `{ nulls }`: `Post.rank.desc({ nulls: "last" })`.
 A cursor from Python works in TypeScript for the same schema and order, and the other way.
-A `Date` keeps milliseconds only. On Postgres, a `DateTime` order column with two values in one millisecond can skip or repeat rows: store such timestamps at millisecond precision, or order by another column.
+A `Date` holds milliseconds. A `DateTime` value read from the database keeps its microseconds in a hidden property, so its cursor and `filter(Post.createdAt.eq(row.createdAt))` find the exact row. `new Date(row.createdAt)` drops them.
+`{ first, before: null }` and `{ last, after: null }` are accepted, as in Python.
 
 ### Relation filters
 
@@ -163,7 +164,10 @@ separate calls are independent. `exclude()` is `NOT EXISTS`.
 
 Related sets: `await user.posts`, `.filter()`, `.count()`, and `.insert({...})`, where the
 key is filled in. Many-to-many sets also have `post.tags.add(tag, ...)`, `.remove()`,
-`.clear()` and `.set([...])`.
+`.clear()` and `.set([...])`. An options object as the last argument of `add()` (or
+the second argument of `set()`) gives other fields of the new join rows:
+`post.tags.add(tag, { throughDefaults: { position: 1 } })`. Existing links keep their
+values.
 
 ### Prepared queries
 
@@ -184,6 +188,23 @@ replace substr strpos` plus the window functions. `func.concat(a, " ", b)` reads
 part as an empty string; `a.concat(b)` (`a || b`) is `null` when either side is `null`.
 `Profile.links.element(1)` is SQL's 1-based element access (`null` out of range), and
 `func.unnest(...)` is valid only as a `select()` column; SQLite has no array columns.
+`func.case([cond, value], ..., { default })` is `CASE WHEN ... END`: the value of the
+first true condition, else `default` (`null` without one). It works in `select()`,
+`filter()`, `orderBy()` and `update()`, for example
+`func.sum(func.case([Post.published, 1], { default: 0 }))` for a conditional count.
+Aggregates take `{ filter: cond }` (`FILTER (WHERE cond)`), for example
+`func.count({ filter: Post.published })` or
+`func.count(User.posts, { filter: User.posts.published })`.
+JSON columns: `Doc.meta.get("author", "name").eq("Ann")` (`meta -> 'author' -> 'name'`,
+compared as JSON), `.asText()` for the last step as text (`->>`),
+`Doc.meta.jsonContains({ kind: "post" })` (`@>`), `.jsonContainedBy(...)` (`<@`),
+`.hasKey("tags")` (`?`) and `update({ meta: Doc.meta.jsonMerge({ seen: true }) })` (`||`).
+Keys are strings, indexes 0-based integers. PostgreSQL only.
+Full-text search (PostgreSQL only): `func.toTsvector("english", Post.body).matches("running dogs")`
+(`@@`, a plain string is `plainto_tsquery` with the vector's configuration),
+`func.toTsquery`, `func.plaintoTsquery`, `func.websearchToTsquery` and `func.tsRank(vector, query)`.
+The configuration is written into the SQL as `'english'::regconfig`, so it matches a GIN
+index on the same expression: `@@index([sql("to_tsvector('english', body)")], type: Gin)`.
 The result types follow the SQL: `count` is a `bigint`, `sum(Int)` is `number | null`,
 `sum(Decimal)` is `Decimal | null`, and `avg` is `number | null`. A column read through a
 nullable relation becomes nullable.
@@ -237,6 +258,19 @@ Writes run when they are called and return a `Promise`:
   `null` with `doNothing`). `insertMany(rows, ...)` is the bulk version. A field left
   out gets its `@client_default` (filled natively, as in Python), else the database
   default; an explicit value, also `null`, wins.
+* `{ onConflict: [...], where: cond }` picks a partial unique index:
+  `ON CONFLICT (...) WHERE cond`. The condition must match the index predicate
+  without parameters (`Task.deletedAt.isNull()`, a boolean column).
+* `insertMany(rows, { copy: true })` loads the rows with Postgres `COPY` (binary) and
+  gives the row count. A duplicate key stops the whole load. A field must be set in
+  every row or in none. `onConflict`, `batchSize` and SQLite are rejected.
+* `getOrInsert(lookup, { defaults })` gives `[row, created]`: the row that matches
+  `lookup`, or a new row of `lookup` and `defaults`. The insert is
+  `ON CONFLICT (lookup) DO NOTHING`, so concurrent calls give one row. The lookup
+  fields must be the fields of one unique constraint; a `null` lookup value throws.
+* `insertMany` splits the rows so that no statement has more parameters than the
+  database accepts (65,535 on Postgres, 32,766 on SQLite). `{ batchSize: n }` sets a
+  lower number of rows for each statement. All the statements run in one transaction.
 * `qs.update({...}, { returning })` gives a count, or the rows when `returning` is set.
 * `qs.delete()`.
 * `updateMany(rows, { batchSize, returning })` does a bulk update by primary key with
@@ -261,6 +295,12 @@ when it throws. The current transaction follows the async call chain through
 `AsyncLocalStorage`, so queries inside it need no handle. Nested calls are savepoints.
 A transaction that is never finished is rolled back when it is garbage-collected.
 
+`await db.onCommit(fn)` calls `fn()` after the outermost transaction on `db` commits, and awaits a promise result.
+A rollback drops the callback. A rolled-back savepoint drops only the callbacks registered inside it.
+Outside a transaction, `fn()` runs at once.
+Callbacks run in registration order, outside the transaction.
+An error in a callback rejects the `transaction()` promise, and the later callbacks do not run; the transaction is already committed.
+
 ### Protected writes
 
 `@@protected_write` is an application-level check in the ORM. It does not protect the database.
@@ -277,6 +317,9 @@ Every ORM write to a `@@protected_write` model fails outside `allowWrites(models
 The check is on the table that the SQL writes, so `post.tags.add()` needs `allowWrites([PostTag], ...)` when `PostTag` is protected.
 The scope follows the async call chain through `AsyncLocalStorage`, like the transaction: work started inside `fn` gets it.
 A nested call adds its models to the outer ones. `allowWrites` starts no transaction and gives what `fn` gives.
+A write reads the scope when it is called, not when it is awaited (Python reads it at the `await`).
+`prepareInsert` and `prepareUpdate` also check protection, so a file field uploads nothing for a rejected write.
+Wrong arguments give a rejected promise with a `TypeError`.
 See `docs/schema.md`, "Protected writes".
 
 ### Locks
@@ -287,7 +330,31 @@ See `docs/schema.md`, "Protected writes".
   keys hash the way Python's do (BLAKE2b with an 8-byte digest), so both languages lock
   the same name.
 
-Both throw `TransactionRequired` when called outside a transaction.
+* `db.lock(key, { session: true, timeout: 5 }, async () => {...})` is a session advisory
+  lock: it holds the lock while the function runs, with no transaction, on a pool
+  connection of its own, and gives what the function gives. It waits at most `timeout`
+  seconds (no limit when absent, not at all with `nowait`) and throws `LockNotAvailable`
+  when another session still holds the lock. The lock is released when the function
+  settles; when the unlock fails, the connection is closed, so the server releases it.
+
+The transaction-scoped forms throw `TransactionRequired` when called outside a transaction.
+
+### Read replicas
+
+`connect(primaryUrl, { replicas: [replica1Url, replica2Url] })` sends reads (`select`, `count`, `exists`, prepared queries) outside a transaction to the next replica, in turn.
+Writes, raw `db.execute`, migrations, and every statement inside `db.transaction()` go to the primary.
+`db.primary` is a view of the database without its replicas; it shares the transactions of `db`.
+`qs.using("primary")` is `qs.using(<the query set's database>.primary)`, resolved when it is called.
+A replica can lag behind the primary: to read your own write, read in the same transaction or use `using("primary")`.
+There are no health checks or failover. `maxConnections` applies to each pool, and `db.close()` closes all of them.
+
+### Tenants and row-level security
+
+`await db.tenant(shop.id, async () => {...})` runs `SELECT set_config('app.tenant', '<id>', true)` (`SET LOCAL`) at the start of every transaction on `db` in the function, so RLS policies can read `current_setting('app.tenant', true)`.
+A statement outside a transaction runs in a transaction of its own (four round trips instead of one, estimated).
+A transaction that is already open keeps its setting, and the setting ends with each transaction.
+Replicas get the same setting. SQLite throws `QueryError`.
+`scope({ shop }, fn)` is the application-side filter (see `docs/selection-and-defaults.md`, "Scope values").
 
 ### Finding N+1 queries: `debug`
 
@@ -305,10 +372,12 @@ await debug.nPlusOne(async () => {
 ```
 
 * The scope counts the queries of `fn` by statement shape: the query without its values.
-  Work that `fn` starts counts too.
+  Work that `fn` starts counts too, and so do the queries of an inner scope.
+  An inner scope cannot raise the threshold of an outer scope; the outer scope also counts the inner queries.
+  The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `inBulk()`) count as one query.
 * When `fn` resolves, a shape that ran more than `threshold` times (default 5) throws `debug.NPlusOne` with `fail: true`, or emits an `NPlusOneWarning` process warning.
   `error.report` has each shape, its SQL, its count, the call site of its first query and the fix.
-* The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated to-many query (`post.comments.all()`).
+* The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated unchanged to-many or many-to-many query (`post.comments.all()`, `post.tags.all()`).
 * The call site and the SQL text are captured only inside the scope.
   Outside it, each query pays one `AsyncLocalStorage` read (about 2 ns, measured).
 * In tests, `await debug.expectNoNPlusOne(fn, { threshold })` throws `NPlusOne` when `fn` sends an N+1.
@@ -339,9 +408,16 @@ Errors map to classes with Python's names: `ORMError`, plus `DatabaseError`,
 `npx orm` is the one `orm` command line (Rust, `cli/`), run through the addon: the same
 program as `python -m orm` and the standalone `orm` binary, with the same commands
 (`check`, `generate`, `makemigrations [--check]`, `sqlmigrate`, `migrate`, `rollback`,
-`showmigrations`; see [`schema.md`](schema.md#migrations)). Under `npx`, `generate` writes
-TypeScript and `package.json`'s `"orm"` key is read first. `Migrations` and `Migrator`
-are the programmatic API; they call the same Rust migrator (`engine/src/migrate.rs`).
+`showmigrations`, `pull`, `baseline`, `drift`; see [`schema.md`](schema.md#migrations)).
+Under `npx`, `generate` writes TypeScript and `package.json`'s `"orm"` key is read first.
+`Migrations` and `Migrator` are the programmatic API; they call the same Rust migrator
+(`engine/src/migrate.rs`). `await pull(db)` reads a live database into a `Pulled`
+(`schema`, `gaps`, `differences`, `write(path)`), `migrator.baseline()` marks the first
+migration applied without running it, and `migrator.drift()` gives the `Drift`
+(`migration`, `steps`, `gaps`) between the database and the newest snapshot
+(see [`schema.md`](schema.md#adopting-a-live-database-pull-baseline-drift)). A migration
+may hold a `data.ts` with `export async function run(db)`, run by `migrator.upgrade()` and
+`npx orm migrate` in the migration's transaction (see [`schema.md`](schema.md#data-migrations)).
 
 ## Decisions
 

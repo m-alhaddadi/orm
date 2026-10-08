@@ -125,6 +125,52 @@ async def test_string_functions_and_concatenation(clean):
     ).first()
     assert row is not None and tuple(row) == ("b1", "b1", "b1", "B1", "1", 2)
     assert [p.title for p in await Post.objects.filter(Post.title.concat("!") == "a2!")] == ["a2"]
+    # A literal after a non-text column still binds as text.
+    assert await Post.objects.filter(Post.title == "b1").select(func.concat(Post.views, "!")).scalar() == "100!"
+
+
+async def test_case_expression(clean):
+    (alice, bob, carol), _ = await seed()
+    heat = func.case((Post.views >= 50, "hot"), (Post.views >= 20, "warm"), default="cold")
+    rows = await Post.objects.order_by(Post.title).select(Post.title, heat.label("heat"))
+    assert [tuple(r) for r in rows] == [("a1", "cold"), ("a2", "hot"), ("a3", "warm"), ("b1", "hot")]
+    # Several conditional counts in one grouped query (Django's Sum(Case(When(...)))).
+    counts = await Post.objects.order_by(Post.author_id).select(
+        Post.author_id,
+        func.sum(func.case((Post.views >= 50, 1), default=0)).label("hot"),
+        func.sum(func.case((Post.views < 50, Post.views), default=0)).label("rest"),
+    ).group_by(Post.author_id)
+    assert [tuple(r) for r in counts] == [(alice.id, 1, 25), (bob.id, 1, 0)]
+    assert await Post.objects.filter(heat == "hot").count() == 2
+    by_heat = await Post.objects.order_by(func.case((Post.views >= 50, 0), default=1), Post.title).select(Post.title).scalars()
+    assert by_heat == ["a2", "b1", "a1", "a3"]
+    # annotate: the model with a computed column
+    users = await User.objects.order_by(User.id).select(User, func.case((func.count(User.posts) > 1, "many"), default="few"))
+    assert [(u.name, n) for u, n in users] == [("Alice", "many"), ("Bob", "few"), ("Carol", "few")]
+    # in an update, values bind with the field's type
+    await Post.objects.update(views=func.case((Post.views >= 50, Post.views - 50), (Post.title == "a1", 1), default=Post.views))
+    views = {p.title: p.views for p in await Post.objects.all()}
+    assert views == {"a1": 1, "a2": 0, "a3": 20, "b1": 50}
+    # a float among integer values makes the case a float
+    assert await Post.objects.filter(Post.title == "a1").select(func.case((Post.published, 1), default=0.5)).scalar() == 0.5
+
+
+async def test_aggregate_filter(clean):
+    (alice, bob, carol), _ = await seed()
+    rows = await Post.objects.order_by(Post.author_id).select(
+        Post.author_id,
+        func.count().label("all"),
+        func.count(filter=Post.views >= 20).label("popular"),
+        func.sum(Post.views, filter=Post.views < 50).label("small"),
+        func.max(Post.title, filter=Post.views < 50).label("last_small"),
+    ).group_by(Post.author_id)
+    assert [tuple(r) for r in rows] == [(alice.id, 3, 2, 25, "a3"), (bob.id, 1, 1, None, None)]
+    users = await User.objects.order_by(User.id).select(User.name, func.count(User.posts, filter=User.posts.views > 10))
+    assert [tuple(u) for u in users] == [("Alice", 2), ("Bob", 1), ("Carol", 0)]
+    running = await Post.objects.order_by(Post.created_at).select(
+        Post.title, func.count(filter=Post.views >= 50).over(order_by=Post.created_at)
+    )
+    assert [tuple(r) for r in running] == [("b1", 1), ("a1", 1), ("a2", 2), ("a3", 2)]
 
 
 async def test_outer_through_relation_paths(clean):

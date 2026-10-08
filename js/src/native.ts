@@ -64,9 +64,13 @@ export interface NativeTransaction {
   rollback(): Promise<void>;
 }
 
+export interface NativeSessionLock {
+  release(): Promise<void>;
+}
+
 export interface NativeSchema {
-  validateInsert(model: string, fields: string[], rows: unknown[][]): void;
-  uniqueRowUpdate(opJson: string, params: unknown[]): boolean;
+  validateInsert(model: string, fields: string[], rows: unknown[][], allowed: readonly string[]): void;
+  uniqueRowUpdate(opJson: string, params: unknown[], allowed: readonly string[]): boolean;
   sql(opJson: string, params: unknown[]): string;
   statement(opJson: string, params: unknown[]): string;
   updateManySql(
@@ -97,7 +101,10 @@ export interface NativeEngine {
     params: unknown[],
     tx: NativeTransaction | null,
     allowed?: readonly string[],
+    batchSize?: number | null,
+    conflictWhere?: string | null,
   ): Promise<unknown>;
+  copyInsert(model: string, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<number>;
   attach(model: string, parentId: unknown, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<unknown>;
   updateMany(
     model: string,
@@ -113,12 +120,20 @@ export interface NativeEngine {
   ): Promise<unknown>;
   begin(tx: NativeTransaction | null): Promise<NativeTransaction>;
   advisoryLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, tx: NativeTransaction): Promise<boolean>;
+  withSettings(names: string[], values: string[]): NativeEngine;
+  sessionLock(key: string, name: Buffer | null, exclusive: boolean, nowait: boolean, timeoutMs: number | null): Promise<NativeSessionLock | null>;
   execute(sql: string, tx: NativeTransaction | null): Promise<number>;
   fetchText(sql: string, tx: NativeTransaction | null): Promise<(string | null)[][]>;
   executeScript(statements: string[], tx: NativeTransaction | null): Promise<void>;
   migrationStatus(dir: string): Promise<string>;
   migrateUp(dir: string, target: string | null): Promise<string[]>;
   migrateDown(dir: string, steps: number, target: string | null): Promise<string[]>;
+  pullSchema(): Promise<string>;
+  migrationDrift(dir: string): Promise<string>;
+  migrateBaseline(dir: string): Promise<string>;
+  migrationPending(dir: string, target: string | null): Promise<string[][]>;
+  migrationBegin(name: string, path: string): Promise<NativeTransaction | null>;
+  migrationFinish(tx: NativeTransaction, name: string, path: string): Promise<void>;
   createTables(): Promise<void>;
   dropTables(): Promise<void>;
   close(): Promise<void>;
@@ -135,6 +150,7 @@ interface Addon {
   generateTypescript(path: string, runtime?: string | null): string;
   setDecimalClass(ctor: unknown): void;
   cli(argv: string[]): Promise<number>;
+  cliMigrateArgs(argv: string[]): (string | null)[] | null;
   listMigrations(dir: string): string[][];
   findMigration(dir: string, name: string): string[];
 }

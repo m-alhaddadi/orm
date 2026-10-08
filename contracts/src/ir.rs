@@ -9,6 +9,8 @@
 //! functions and database extensions. None of it affects query planning except the
 //! per-column `read_sql` / `write_sql` templates extension types use.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 pub(crate) fn is_false(b: &bool) -> bool {
@@ -122,6 +124,23 @@ pub struct SchemaIr {
     /// Behavioral requirements are separate from the database extension catalog.
     #[serde(default, skip_serializing_if = "crate::extension::Requirements::is_empty")]
     pub behavior: crate::extension::Requirements,
+}
+
+impl SchemaIr {
+    /// Parse the IR that generated models embed; an older ORM can write fields this one rejects.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        serde_json::from_str(json).map_err(|e| format!("invalid schema IR: {e}; if another ORM version generated the models, regenerate them"))
+    }
+}
+
+#[cfg(test)]
+mod schema_json {
+    #[test]
+    fn an_ir_from_an_older_version_names_the_cure() {
+        let old = r#"{"models":[],"behavior":{"proxy_models":[{"model":"A","parent":"U","defaults":{}}]}}"#;
+        let error = super::SchemaIr::from_json(old).unwrap_err();
+        assert!(error.contains("unknown field `defaults`") && error.contains("regenerate them"), "{error}");
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -320,6 +339,9 @@ pub struct RelationIr {
     pub on_update: Option<OnDelete>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub deferrable: Option<Deferrable>,
+    /// The foreign key's database name (`map:`); default `<table>_<column>_fkey`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fk_name: Option<String>,
     /// Many-to-many through a join model.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub through: Option<ThroughIr>,
@@ -538,6 +560,10 @@ pub enum CmpOp {
     ContainedBy,
     /// Arrays: `l && r` (an element in common).
     Overlaps,
+    /// JSON: `l ? r`, the object has the key `r` (or the array the string element).
+    HasKey,
+    /// Full-text search: `l @@ r`, the tsvector `l` matches the tsquery `r`.
+    Match,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug)]
@@ -549,6 +575,8 @@ pub enum ArithOp {
     Div,
     /// `l || r`: string concatenation; NULL when either side is NULL.
     Concat,
+    /// `l || r` on `jsonb`: the objects merged (keys of `r` win), or the arrays joined.
+    JsonMerge,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -580,6 +608,23 @@ pub enum Expr {
         rel: Option<Vec<String>>,
         #[serde(default)]
         distinct: bool,
+        /// Aggregates: `FILTER (WHERE <filter>)`, the rows the aggregate reads.
+        #[serde(default)]
+        filter: Option<Box<Expr>>,
+    },
+    /// `CASE WHEN <cond> THEN <value> ... ELSE <default> END`; `ELSE NULL` without one.
+    Case {
+        whens: Vec<When>,
+        #[serde(default)]
+        default: Option<Box<Expr>>,
+    },
+    /// `<item> -> <key> -> ...`: a `jsonb` value inside a JSON column; with `text`, the
+    /// last step is `->>` and the value is text.
+    JsonPath {
+        item: Box<Expr>,
+        path: Vec<JsonKey>,
+        #[serde(default)]
+        text: bool,
     },
     /// `<item> [NOT] IN (SELECT <one column> ...)`.
     InSelect { item: Box<Expr>, select: Box<Select>, #[serde(default)] neg: bool },
@@ -587,6 +632,9 @@ pub enum Expr {
     Int { value: i64 },
     /// Bound schema-policy string literal.
     Text { value: String },
+    /// `scope.<name>` in a default filter: the value the frontend's `scope(...)` gives,
+    /// bound like a parameter. A statement without that value fails (closed by default).
+    Scope { name: String },
     /// A field of an enclosing query's root model (or CTE), `depth` queries up:
     /// `outer(User.id)` in a subquery of a `User` query. A `path` of to-one relations
     /// reaches a related row's field: `outer(Post.author.name)`.
@@ -616,6 +664,21 @@ pub enum Expr {
         #[serde(default)]
         frame: Option<Frame>,
     },
+}
+
+/// One `WHEN <cond> THEN <value>` branch of `Expr::Case`.
+#[derive(Deserialize, Debug, Clone)]
+pub struct When {
+    pub cond: Expr,
+    pub value: Expr,
+}
+
+/// One step of a JSON path: an object key or an array index.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum JsonKey {
+    Index(i64),
+    Key(String),
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -719,6 +782,9 @@ pub struct Select {
     /// Public model fields; helpers are selected separately by the planner.
     #[serde(default)]
     pub model_fields: Option<Vec<String>>,
+    /// The parameter index of each `scope.<name>` value (statement level only).
+    #[serde(default)]
+    pub scope: BTreeMap<String, usize>,
     #[serde(default)]
     pub model_helpers: Vec<String>,
     #[serde(default)]
@@ -802,7 +868,7 @@ pub struct Lock {
     pub skip_locked: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Assignment {
     pub field: String,
     pub value: Expr,
@@ -812,6 +878,9 @@ pub struct Assignment {
 pub struct Update {
     #[serde(default)]
     pub model_fields: Option<Vec<String>>,
+    /// The parameter index of each `scope.<name>` value.
+    #[serde(default)]
+    pub scope: BTreeMap<String, usize>,
     #[serde(default)]
     pub without_defaults: bool,
     pub model: String,
@@ -829,6 +898,9 @@ pub struct Update {
 pub struct Delete {
     #[serde(default)]
     pub model_fields: Option<Vec<String>>,
+    /// The parameter index of each `scope.<name>` value.
+    #[serde(default)]
+    pub scope: BTreeMap<String, usize>,
     #[serde(default)]
     pub without_defaults: bool,
     pub model: String,
@@ -852,6 +924,17 @@ pub enum Operation {
     Exists(Select),
     Update(Update),
     Delete(Delete),
+}
+
+impl Operation {
+    /// The parameter index of each `scope.<name>` value.
+    pub fn scope(&self) -> &BTreeMap<String, usize> {
+        match self {
+            Operation::Select(q) | Operation::Count(q) | Operation::Exists(q) => &q.scope,
+            Operation::Update(q) => &q.scope,
+            Operation::Delete(q) => &q.scope,
+        }
+    }
 }
 
 impl Provides {

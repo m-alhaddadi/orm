@@ -58,6 +58,18 @@ async def test_crud_relations_defaults_and_upserts(sqlite):
     assert registry.ir()["dialect"] == "sqlite"
 
 
+async def test_bulk_writes(sqlite):
+    db, m, _ = sqlite
+    Author = m["Author"]
+    with pytest.raises(orm.QueryError, match="needs Postgres"):
+        await Author.objects.using(db).insert_many([{"email": "a@x.io", "name": "A"}], copy=True)
+    # 32 766 parameters at most: 20 000 rows of two fields go to two statements.
+    rows = [{"email": f"u{i}@x.io", "name": f"U{i}"} for i in range(20_000)]
+    assert len(await Author.objects.using(db).insert_many(rows)) == 20_000
+    first, created = await Author.objects.using(db).get_or_insert(email="u0@x.io", defaults={"name": "x"})
+    assert not created and first.name == "U0"
+
+
 async def test_outer_through_a_relation_path(sqlite):
     db, m, _ = sqlite
     Author, Book = m["Author"], m["Book"]
@@ -165,6 +177,37 @@ async def test_string_functions_and_concatenation():
             ("c", None, "c", "c", "c", "c", "", 0),
         ]
         assert await Note.objects.using(db).filter(Note.title.concat("!") == "c!").count() == 1
+    finally:
+        await db.close()
+
+
+async def test_case_expression():
+    from orm import func
+    registry, m = models('datasource db { provider = "sqlite" }\nmodel Note {\n  id BigInt @id @default(autoincrement())\n  n Int\n}')
+    Note = m["Note"]
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    try:
+        await db.create_tables()
+        await Note.objects.using(db).insert_many([{"n": 1}, {"n": 5}, {"n": 10}])
+        size = func.case((Note.n >= 10, "big"), (Note.n >= 5, "mid"), default="small")
+        assert await Note.objects.using(db).order_by(Note.id).select(size).scalars() == ["small", "mid", "big"]
+        assert await Note.objects.using(db).select(func.sum(func.case((Note.n >= 5, 1), default=0))).scalar() == 2
+        await Note.objects.using(db).update(n=func.case((Note.n == 1, 100), default=Note.n))
+        assert await Note.objects.using(db).order_by(Note.id).select(Note.n).scalars() == [100, 5, 10]
+    finally:
+        await db.close()
+
+
+async def test_aggregate_filter():
+    from orm import func
+    registry, m = models('datasource db { provider = "sqlite" }\nmodel Note {\n  id BigInt @id @default(autoincrement())\n  n Int\n}')
+    Note = m["Note"]
+    db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+    try:
+        await db.create_tables()
+        await Note.objects.using(db).insert_many([{"n": 1}, {"n": 5}, {"n": 10}])
+        row = await Note.objects.using(db).select(func.count(filter=Note.n >= 5), func.sum(Note.n, filter=Note.n < 10)).one()
+        assert tuple(row) == (2, 6)
     finally:
         await db.close()
 

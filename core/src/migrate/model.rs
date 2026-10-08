@@ -554,7 +554,7 @@ impl Builder<'_> {
             let target = schema.model(schema.model_idx(&r.target)?);
             let column = m.field(&r.from)?.column.clone();
             table.foreign_keys.push(ForeignKey {
-                name: self.claim(object_name(&[&t, &column, "fkey"]), m)?,
+                name: self.claim(r.fk_name.clone().unwrap_or_else(|| object_name(&[&t, &column, "fkey"])), m)?,
                 columns: vec![column],
                 ref_table: target.table().to_owned(),
                 ref_columns: vec![target.field(&r.to)?.column.clone()],
@@ -714,11 +714,18 @@ pub fn build(schema: &Schema) -> Result<(DbSchema, Renames)> {
         if !tables.insert(table.name.clone()) {
             return Err(format!("two models use table {:?}", table.name));
         }
+        // One old name renames to one new name, as `diff::diff` does on every dialect.
         if let Some(old) = &m.ir.renamed_from {
+            if let Some((other, _)) = renames.tables.iter().find(|(_, o)| *o == old) {
+                return Err(format!("tables {other:?} and {:?} both have the rename hint {old:?}; keep it on one", table.name));
+            }
             renames.tables.insert(table.name.clone(), old.clone());
         }
         for f in m.fields() {
             if let Some(old) = &f.renamed_from {
+                if let Some(((_, other), _)) = renames.columns.iter().find(|((t, _), o)| *t == table.name && *o == old) {
+                    return Err(format!("{}: columns {other:?} and {:?} both have the rename hint {old:?}; keep it on one", table.name, f.column));
+                }
                 renames.columns.insert((table.name.clone(), f.column.clone()), old.clone());
             }
         }

@@ -251,11 +251,13 @@ pub fn field_types(schema: &Schema, model: &str, fields: &[String]) -> Result<Ve
     fields.iter().map(|f| m.field(f).map(|f| f.value_type())).collect::<std::result::Result<_, _>>().map_err(query_err)
 }
 
-/// What an insert does with rows hitting a unique constraint (field names; `set` is
-/// assignment IR whose parameters are the insert's `params`).
+/// What an insert does with rows hitting a unique constraint (field names; `filter`, the
+/// partial unique index's predicate, and `set` are IR whose parameters are the insert's
+/// `params`).
+#[derive(Clone)]
 pub enum Conflict {
-    Nothing { target: Vec<String> },
-    Update { target: Vec<String>, update: Vec<String>, set: Vec<ir::Assignment> },
+    Nothing { target: Vec<String>, filter: Option<ir::Expr> },
+    Update { target: Vec<String>, filter: Option<ir::Expr>, update: Vec<String>, set: Vec<ir::Assignment> },
 }
 
 /// `INSERT ... RETURNING` every column. `rows` hold a value per field (`None`: the
@@ -276,12 +278,167 @@ pub fn plan_insert(
     }
     let model_idx = schema.model_idx(model).map_err(query_err)?;
     let on_conflict = conflict.map(|c| match c {
-        Conflict::Nothing { target } => plan::OnConflict::Nothing(target),
-        Conflict::Update { target, update, set } => plan::OnConflict::Update(target, update, set),
+        Conflict::Nothing { target, filter } => plan::OnConflict::Nothing(target, filter),
+        Conflict::Update { target, filter, update, set } => plan::OnConflict::Update(target, filter, update, set),
     });
     let (stmt, types): (InsertStatement, _) =
         plan::plan_insert(schema, target, model, fields, rows, on_conflict, params)?;
     Ok(Plan::Insert(stmt, (model_idx, types)))
+}
+
+/// `insert_many`'s plans: [`plan_insert`] for each batch of rows. A batch holds as many
+/// rows as fit in the dialect's parameter limit (less the conflict clause's own
+/// parameters), or `batch_size` rows when that is smaller. Run them with [`run_inserts`].
+#[allow(clippy::too_many_arguments)]
+pub fn plan_inserts(
+    schema: &Schema,
+    target: Target,
+    model: &str,
+    fields: &[String],
+    rows: Vec<Vec<Option<Value>>>,
+    conflict: Option<Conflict>,
+    params: &dyn Params,
+    batch_size: Option<usize>,
+) -> Result<Vec<Plan>> {
+    if batch_size == Some(0) {
+        return Err(Error::query("batch_size must be at least 1"));
+    }
+    #[cfg(feature = "model-composition")]
+    if crate::composed::is_composed(schema, model)? {
+        return Ok(vec![plan_insert(schema, target, model, fields, rows, conflict, params)?]);
+    }
+    let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+    // Client defaults can add columns, so the row width is known only after them.
+    let (fields, mut rows) = crate::client_default::fill(m, fields, rows)?;
+    let mut chunk = target.caps.max_params.saturating_sub(params.len()) / fields.len().max(1);
+    if fields.is_empty() {
+        chunk = 1; // `DEFAULT VALUES` inserts one row
+    }
+    if let Some(n) = batch_size {
+        chunk = chunk.min(n);
+    }
+    let chunk = chunk.max(1);
+    if rows.len() <= chunk {
+        return Ok(vec![plan_insert(schema, target, model, &fields, rows, conflict, params)?]);
+    }
+    let mut plans = Vec::with_capacity(rows.len().div_ceil(chunk));
+    while !rows.is_empty() {
+        let rest = rows.split_off(chunk.min(rows.len()));
+        let conflict = conflict.clone();
+        plans.push(plan_insert(schema, target, model, &fields, std::mem::replace(&mut rows, rest), conflict, params)?);
+    }
+    Ok(plans)
+}
+
+/// Runs [`plan_inserts`]' plans, in a transaction of their own when there are several
+/// and `conn` isn't one already (`own_tx`). Gives the inserted rows in input order.
+pub async fn run_inserts(conn: &dyn Executor, target: Target, mut plans: Vec<Plan>, own_tx: bool) -> Result<Outcome> {
+    if plans.len() == 1 {
+        return run(conn, target, plans.pop().expect("one plan")).await;
+    }
+    let tx = if own_tx { Some(conn.begin().await?) } else { None };
+    let exec: &dyn Executor = match &tx {
+        Some(t) => t.as_ref(),
+        None => conn,
+    };
+    let mut parts = Vec::with_capacity(plans.len());
+    let mut returned = None;
+    let mut failed = None;
+    for plan in plans {
+        match run(exec, target, plan).await {
+            Ok(Outcome::Rows { model, rows, types, .. }) => {
+                returned = Some((model, types));
+                parts.push(rows);
+            }
+            Ok(_) => unreachable!("an insert plan returns rows"),
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    if let Some(t) = tx {
+        match failed {
+            None => t.commit().await?,
+            Some(_) => {
+                let _ = t.rollback().await;
+            }
+        }
+    }
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    let (model, types) = returned.expect("several plans");
+    Ok(Outcome::Rows { model, rows: Box::new(ChainedRows::new(parts)), types, shape: None })
+}
+
+/// A bulk load planned by [`plan_copy`]: run it with [`run_copy`].
+pub struct Copy {
+    table: String,
+    columns: Vec<String>,
+    rows: Vec<Vec<Value>>,
+}
+
+/// Plans `insert_many(rows, copy=True)`: Postgres `COPY ... FROM STDIN (FORMAT binary)`.
+/// `rows` are converted by [`field_types`] (`None`: the column's default); client
+/// defaults fill values first. COPY has no per-row `DEFAULT`, so a field must be set in
+/// every row or in none. COPY writes values as they are, so models whose writes run
+/// native code or SQL templates are rejected.
+pub fn plan_copy(schema: &Schema, target: Target, model: &str, fields: &[String], rows: Vec<Vec<Option<Value>>>) -> Result<Copy> {
+    if target.dialect != orm_core::dialect::Dialect::Postgres {
+        return Err(Error::query("insert_many(copy=True) needs Postgres"));
+    }
+    #[cfg(feature = "model-composition")]
+    if crate::composed::is_composed(schema, model)? {
+        return Err(Error::query("insert_many(copy=True) does not support composed models"));
+    }
+    let m = schema.model(schema.model_idx(model).map_err(query_err)?);
+    #[cfg(feature = "composition")]
+    {
+        crate::ownership::require_local_write(m)?;
+        if !matches!(m.native, orm_core::behavior::NativeModel::None) {
+            return Err(Error::query(format!("insert_many(copy=True): {} has native write behavior; use insert_many()", m.ir.name)));
+        }
+    }
+    let (fields, rows) = crate::client_default::fill(m, fields, rows)?;
+    #[cfg(feature = "file-storage")]
+    crate::file_storage::rows(m, &fields, &rows)?;
+    let mut columns = vec![];
+    let mut keep = vec![];
+    for (i, name) in fields.iter().enumerate() {
+        let f = m.field(name).map_err(query_err)?;
+        if f.write_sql.is_some() && f.enum_name.is_none() {
+            return Err(Error::query(format!("insert_many(copy=True): {}.{name} writes through SQL; use insert_many()", m.ir.name)));
+        }
+        let set = rows.iter().filter(|r| r.get(i).is_some_and(Option::is_some)).count();
+        if set == 0 {
+            continue; // the database default for every row
+        }
+        if set != rows.len() {
+            return Err(Error::query(format!(
+                "insert_many(copy=True): {}.{name} is set in some rows only; COPY has no per-row DEFAULT",
+                m.ir.name
+            )));
+        }
+        columns.push(f.column.clone());
+        keep.push(i);
+    }
+    if columns.is_empty() && !rows.is_empty() {
+        return Err(Error::query("insert_many(copy=True) needs at least one field"));
+    }
+    let rows = rows
+        .into_iter()
+        .map(|mut r| keep.iter().map(|&i| r[i].take().expect("checked above")).collect())
+        .collect();
+    Ok(Copy { table: m.table().to_owned(), columns, rows })
+}
+
+/// Runs a [`plan_copy`] load on `conn` (the pool or a transaction): the rows written.
+pub async fn run_copy(conn: &dyn Executor, copy: Copy) -> Result<u64> {
+    if copy.rows.is_empty() {
+        return Ok(0);
+    }
+    Ok(conn.copy_in(copy.table, copy.columns, copy.rows).await?)
 }
 
 /// `update_many`'s statements, SQL built: run them with [`run_update_many`].

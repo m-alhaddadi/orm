@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Func, QueryError, and, exists, excluded, func, or, outer } from "../src/index.js";
+import { Func, QueryError, Registry, and, exists, excluded, func, loads, or, outer } from "../src/index.js";
 import { Comment, Post, Profile, Tag, User } from "./blog/models.js";
 
 const Y = new Date("2026-10-01T00:00:00Z");
@@ -275,6 +275,52 @@ test("orderings place NULLs first or last", () => {
   assert.equal(reversed.descending, true);
   assert.equal(reversed.nulls, "last");
   assert.throws(() => Comment.authorId.desc({ nulls: "middle" as never }), /nulls is "first" or "last"/);
+});
+
+test("CASE SQL", () => {
+  const sql = Post.objects.select({ a: Post.authorId, n: func.sum(func.case([Post.published, 1], { default: 0 })) }).groupBy(Post.authorId).sql();
+  assert.equal(sql, 'SELECT "posts"."author_id", CAST(SUM(CASE WHEN "posts"."published" = TRUE THEN 1 ELSE 0 END) AS BIGINT) FROM "posts" GROUP BY "posts"."author_id"');
+  const heat = func.case([Post.views.gt(100), "hot"], [Post.views.gt(10), "warm"], { default: "cold" });
+  assert.equal(where(Post.objects.filter(heat.eq("hot"))), '(CASE WHEN "posts"."views" > 100 THEN \'hot\' WHEN "posts"."views" > 10 THEN \'warm\' ELSE \'cold\' END) = \'hot\'');
+  assert.ok(Post.objects.orderBy(func.case([Post.published, 0], { default: 1 })).sql().endsWith('ORDER BY CASE WHEN "posts"."published" = TRUE THEN 0 ELSE 1 END ASC'));
+  assert.equal(
+    where(User.objects.filter(func.case([User.posts.views.gt(3), User.name]).eq("x"))),
+    'EXISTS(SELECT 1 FROM "posts" AS "t1" WHERE "t1"."author_id" = "users"."id" AND (CASE WHEN "t1"."views" > 3 THEN "users"."name" END) = \'x\')',
+  );
+  assert.throws(() => (func.case as (...a: unknown[]) => unknown)({ default: 1 }), /at least one/);
+  assert.throws(() => (func.case as (...a: unknown[]) => unknown)(Post.published), /pairs/);
+});
+
+test("aggregate FILTER SQL", () => {
+  const sql = Post.objects.select({ a: Post.authorId, p: func.count({ filter: Post.published }), v: func.sum(Post.views, { filter: Post.views.gt(10) }) }).groupBy(Post.authorId).sql();
+  assert.equal(sql, 'SELECT "posts"."author_id", COUNT(*) FILTER (WHERE "posts"."published" = TRUE), CAST(SUM("posts"."views") FILTER (WHERE "posts"."views" > 10) AS BIGINT) FROM "posts" GROUP BY "posts"."author_id"');
+  assert.equal(
+    User.objects.select({ id: User.id, n: func.count(User.posts, { filter: User.posts.published }) }).sql(),
+    'SELECT "users"."id", (SELECT COUNT(*) FILTER (WHERE "a1"."published" = TRUE) FROM "posts" AS "a1" WHERE "a1"."author_id" = "users"."id") FROM "users"',
+  );
+  assert.ok(Post.objects.select({ s: func.sum(Post.views, { filter: Post.published }).over({ partitionBy: Post.authorId }) }).sql()
+    .includes('SUM("posts"."views") FILTER (WHERE "posts"."published" = TRUE) OVER (PARTITION BY "posts"."author_id")'));
+});
+
+test("JSON path, containment and merge SQL", () => {
+  const registry = new Registry();
+  const Doc = loads(`model Doc {\n id BigInt @id\n meta Json\n title String\n @@map("docs")\n}`, { registry })["Doc"] as any;
+  const w = (c: unknown) => where(Doc.objects.filter(c));
+  assert.equal(w(Doc.meta.get("author", "name").eq("Ann")), `(("docs"."meta" -> 'author') -> 'name') = '"Ann"'`);
+  assert.equal(w(Doc.meta.get("tags").get(0).asText().eq("x")), `(("docs"."meta" -> 'tags') ->> 0) = 'x'`);
+  assert.equal(w(Doc.meta.jsonContains({ kind: "post" })), `"docs"."meta" @> '{"kind":"post"}'`);
+  assert.equal(w(Doc.meta.hasKey("tags")), `"docs"."meta" ? 'tags'`);
+  assert.throws(() => Doc.meta.get("a").asText().get("b"), /ends a JSON path/);
+  assert.throws(() => Doc.meta.get(), /at least one/);
+});
+
+test("full-text search SQL", () => {
+  const vector = func.toTsvector("english", Post.title);
+  assert.equal(where(Post.objects.filter(vector.matches("running dogs"))), `TO_TSVECTOR('english'::regconfig, "posts"."title") @@ PLAINTO_TSQUERY('english'::regconfig, 'running dogs')`);
+  const query = func.websearchToTsquery("english", "fox -lazy");
+  assert.ok(Post.objects.orderBy(func.tsRank(vector, query).desc()).sql().includes(`ORDER BY CAST(TS_RANK(TO_TSVECTOR('english'::regconfig, "posts"."title"), WEBSEARCH_TO_TSQUERY('english'::regconfig, 'fox -lazy')) AS DOUBLE PRECISION) DESC`));
+  assert.equal(where(Post.objects.filter(func.toTsvector(Post.body).matches(func.toTsquery("cat & !dog")))), `TO_TSVECTOR("posts"."body") @@ TO_TSQUERY('cat & !dog')`);
+  assert.throws(() => Post.objects.filter(func.toTsvector("x'y", Post.title).matches("a")).sql(), /not a text search configuration/);
 });
 
 test("string functions and concatenation SQL", () => {

@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -194,27 +195,111 @@ async fn locked(
     }
 }
 
-/// Applies pending migrations up to and including `target` (default: all); gives the
-/// ones it applied.
-pub async fn upgrade(conn: &dyn Executor, dir: &Path, target: Option<&str>) -> Result<Vec<Migration>> {
+/// Files a migration may hold that run in a host language, not in this engine.
+pub const DATA_FILES: [&str; 2] = ["data.py", "data.ts"];
+
+impl Migration {
+    /// The data step (`data.py` / `data.ts`) of this migration, if it has one.
+    pub fn data_file(&self) -> Option<&'static str> {
+        DATA_FILES.into_iter().find(|f| self.path.join(f).is_file())
+    }
+}
+
+/// The migrations [`upgrade`] would apply, in order: pending ones up to and including
+/// `target` (default: all), after the same checks.
+pub async fn pending(conn: &dyn Executor, dir: &Path, target: Option<&str>) -> Result<Vec<Migration>> {
     let statuses = status(conn, dir).await?;
     verify(&statuses, &applied(conn).await?)?;
     let stop = target.map(|t| find(dir, t)).transpose()?.map(|m| m.name);
-    let mut done = vec![];
-    for s in statuses {
-        let m = s.migration;
-        if s.applied || stop.as_ref().is_some_and(|stop| m.name > *stop) {
-            continue;
+    Ok(statuses
+        .into_iter()
+        .filter(|s| !s.applied && stop.as_ref().is_none_or(|stop| s.migration.name <= *stop))
+        .map(|s| s.migration)
+        .collect())
+}
+
+/// Starts applying `m`: a migration transaction holding the migration lock, with
+/// `up.sql` run in it. `None` when another migrator applied `m` meanwhile. The caller
+/// runs the data step in the transaction, then [`finish_apply`] (or rolls back).
+pub async fn begin_apply(conn: &dyn Executor, m: &Migration) -> Result<Option<Arc<dyn Transaction>>> {
+    let up = m.up_sql()?;
+    let tx = conn.begin_migration().await?;
+    let run = async {
+        if conn.dialect() == Dialect::Postgres {
+            tx.batch(format!("SELECT pg_advisory_xact_lock({LOCK_ID})")).await?;
         }
-        let up = m.up_sql()?;
-        let record = format!("INSERT INTO {TABLE} (name, checksum) VALUES ({}, {})", lit(&m.name), lit(&checksum(&up)));
-        // skipped if another migrator applied it meanwhile
-        let ran = locked(conn, |now| (!now.contains_key(&m.name)).then_some([up, record])).await?;
-        if ran {
+        if applied(&*tx).await?.contains_key(&m.name) {
+            return Ok(false);
+        }
+        tx.batch(up).await?;
+        Ok::<_, Error>(true)
+    };
+    match run.await {
+        Ok(true) => Ok(Some(tx)),
+        Ok(false) => {
+            let _ = Transaction::rollback(&*tx).await;
+            Ok(None)
+        }
+        Err(e) => {
+            let _ = Transaction::rollback(&*tx).await;
+            Err(e)
+        }
+    }
+}
+
+/// Records `m` in the transaction of [`begin_apply`] and commits; rolls back on error.
+pub async fn finish_apply(tx: &dyn Transaction, m: &Migration) -> Result<()> {
+    let record = format!("INSERT INTO {TABLE} (name, checksum) VALUES ({}, {})", lit(&m.name), lit(&m.checksum()?));
+    match tx.batch(record).await {
+        Ok(_) => Ok(tx.commit().await?),
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e.into())
+        }
+    }
+}
+
+/// Applies pending migrations up to and including `target` (default: all); gives the
+/// ones it applied. A migration with a data step (`data.py`, `data.ts`) is refused
+/// before anything runs: the Python or TypeScript migrator applies it.
+pub async fn upgrade(conn: &dyn Executor, dir: &Path, target: Option<&str>) -> Result<Vec<Migration>> {
+    let todo = pending(conn, dir, target).await?;
+    if let Some((m, file)) = todo.iter().find_map(|m| m.data_file().map(|f| (m, f))) {
+        let tool = if file == "data.py" { "python -m orm migrate (or Migrator.upgrade())" } else { "npx orm migrate (or Migrator.upgrade())" };
+        return Err(Error::Migration(format!("{} has a data step ({file}); apply it with {tool}", m.name)));
+    }
+    let mut done = vec![];
+    for m in todo {
+        if let Some(tx) = begin_apply(conn, &m).await? {
+            finish_apply(&*tx, &m).await?;
             done.push(m);
         }
     }
     Ok(done)
+}
+
+/// The names of the applied migrations, in order.
+pub async fn applied_names(conn: &dyn Executor) -> Result<Vec<String>> {
+    ensure_table(conn).await?;
+    Ok(applied(conn).await?.into_keys().collect())
+}
+
+/// Records the first migration of `dir` as applied without running it, for a database
+/// that already has its schema (`orm pull`). Refused once any migration is applied.
+pub async fn baseline(conn: &dyn Executor, dir: &Path) -> Result<Migration> {
+    let first = list(dir)?.into_iter().next().ok_or_else(|| Error::Migration(format!("no migration in {}", dir.display())))?;
+    ensure_table(conn).await?;
+    let record = format!("INSERT INTO {TABLE} (name, checksum) VALUES ({}, {})", lit(&first.name), lit(&first.checksum()?));
+    let mut applied = vec![];
+    let ran = locked(conn, |now| {
+        applied = now.keys().cloned().collect();
+        now.is_empty().then(|| ["SELECT 1".to_owned(), record])
+    })
+    .await?;
+    if !ran {
+        return Err(Error::Migration(format!("the database already has applied migrations ({}); baseline only marks the first", applied.join(", "))));
+    }
+    Ok(first)
 }
 
 /// Reverts applied migrations, newest first; gives the ones it reverted.

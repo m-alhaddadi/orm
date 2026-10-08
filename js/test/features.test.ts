@@ -116,6 +116,33 @@ test("outer() through relation paths", async () => {
   assert.deepEqual(bodies, [{ body: "c1", email: "alice@example.com" }, { body: "c2", email: "alice@example.com" }, { body: "c3", email: "bob@example.com" }]);
 });
 
+test("CASE expressions", async () => {
+  const { alice, bob } = await seed();
+  const heat = func.case([Post.views.gte(50), "hot"], [Post.views.gte(20), "warm"], { default: "cold" });
+  assert.deepEqual(await Post.objects.orderBy(Post.title).select({ t: Post.title, h: heat }).all(), [
+    { t: "a1", h: "cold" }, { t: "a2", h: "hot" }, { t: "a3", h: "warm" }, { t: "b1", h: "hot" },
+  ]);
+  const counts = await Post.objects.orderBy(Post.authorId).select({
+    a: Post.authorId, hot: func.sum(func.case([Post.views.gte(50), 1], { default: 0 })), rest: func.sum(func.case([Post.views.lt(50), Post.views], { default: 0 })),
+  }).groupBy(Post.authorId).all();
+  assert.deepEqual(counts, [{ a: alice.id, hot: 1n, rest: 25n }, { a: bob.id, hot: 1n, rest: 0n }]);
+  assert.equal(await Post.objects.filter(heat.eq("hot")).count(), 2);
+  await Post.objects.update({ views: func.case([Post.views.gte(50), Post.views.sub(50)], [Post.title.eq("a1"), 1], { default: Post.views }) });
+  const views = Object.fromEntries((await Post.objects.all()).map((p) => [p.title, p.views]));
+  assert.deepEqual(views, { a1: 1, a2: 0, a3: 20, b1: 50 });
+});
+
+test("aggregate FILTER", async () => {
+  const { alice, bob } = await seed();
+  const rows = await Post.objects.orderBy(Post.authorId).select({
+    a: Post.authorId, all: func.count(), popular: func.count({ filter: Post.views.gte(20) }),
+    small: func.sum(Post.views, { filter: Post.views.lt(50) }), last: func.max(Post.title, { filter: Post.views.lt(50) }),
+  }).groupBy(Post.authorId).all();
+  assert.deepEqual(rows, [{ a: alice.id, all: 3n, popular: 2n, small: 25n, last: "a3" }, { a: bob.id, all: 1n, popular: 1n, small: null, last: null }]);
+  const users = await User.objects.orderBy(User.id).select({ n: User.name, c: func.count(User.posts, { filter: User.posts.views.gt(10) }) }).all();
+  assert.deepEqual(users, [{ n: "Alice", c: 2n }, { n: "Bob", c: 1n }, { n: "Carol", c: 0n }]);
+});
+
 test("outer() errors", () => {
   assert.throws(() => (User.objects.filter(exists(Post.objects.filter(Post.authorId.eq(User.id as never)))) as never as { sql(): string }).sql(), /use outer\(User.id\)/);
   assert.throws(() => (User.objects.filter(User.id.eq(outer(User.id))) as never as { sql(): string }).sql(), /not a column of an enclosing query/);

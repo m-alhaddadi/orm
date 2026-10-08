@@ -279,9 +279,9 @@ fn update_many_plan(
         .into_iter()
         .map(|r| r.into_iter().map(|v| v.expect("no defaults in update_many")).collect())
         .collect();
-    let filters: Vec<ir::Expr> =
-        serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
+    let (filters, scope) = orm_engine::params::scoped_filters(filters_json).map_err(engine_err)?;
     let p = params(env, params_)?;
+    let p = orm_engine::params::Scoped { params: &p, scope: &scope };
     exec::plan_update_many(schema, target, model, fields, values, &filters, &p, returning, batch_size.map(|n| n as usize), without_defaults)
         .map_err(engine_err)
 }
@@ -296,9 +296,11 @@ pub struct JsSchema {
 
 #[napi]
 impl JsSchema {
-    /// Converts and plans a single-row insert without SQL or I/O (`prepareInsert`).
+    /// Converts and plans a single-row insert without SQL or I/O (`prepareInsert`); the
+    /// write protection check runs here too, before a caller's own I/O.
     #[napi]
-    pub fn validate_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>) -> napi::Result<()> {
+    pub fn validate_insert(&self, env: &Env, model: String, fields: Vec<String>, rows: Unknown<'_>, allowed: Vec<String>) -> napi::Result<()> {
+        protect::ensure_writable(&self.inner, &model, &allowed).map_err(engine_err)?;
         let values = convert_rows(env, &self.inner, &model, &fields, rows, true)?;
         exec::plan_insert(&self.inner, Target::new(self.inner.dialect), &model, &fields, values, None, &orm_engine::NoParams).map_err(engine_err)?;
         Ok(())
@@ -307,8 +309,11 @@ impl JsSchema {
     /// Plans an update without SQL or I/O; true when its filters pin one row by a
     /// non-null primary key or unique field (`prepareUpdate`).
     #[napi]
-    pub fn unique_row_update(&self, env: &Env, op_json: String, params_: Unknown<'_>) -> napi::Result<bool> {
+    pub fn unique_row_update(&self, env: &Env, op_json: String, params_: Unknown<'_>, allowed: Vec<String>) -> napi::Result<bool> {
         let op = parse_op(&op_json).map_err(engine_err)?;
+        if let ir::Operation::Update(ir::Update { model, .. }) = &op {
+            protect::ensure_writable(&self.inner, model, &allowed).map_err(engine_err)?;
+        }
         let p = params(env, params_)?;
         plan::unique_row_update(&self.inner, Target::new(self.inner.dialect), &op, &p).map_err(engine_err)
     }
@@ -316,7 +321,7 @@ impl JsSchema {
     #[napi(constructor)]
     pub fn new(schema_json: String) -> napi::Result<Self> {
         let mut ir: ir::SchemaIr =
-            serde_json::from_str(&schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+            ir::SchemaIr::from_json(&schema_json).map_err(schema_err)?;
         orm_core::behavior::prepare(&mut ir, Some("typescript")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         db::require_dialect(inner.dialect).map_err(|e| schema_err(e.to_string()))?;
@@ -428,6 +433,21 @@ impl Transaction {
     }
 }
 
+/// A held session advisory lock (`db.lock(key, { session: true }, fn)`).
+#[napi]
+pub struct SessionLock {
+    inner: Arc<dyn db::SessionLock>,
+}
+
+#[napi]
+impl SessionLock {
+    #[napi]
+    pub fn release<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
+        let lock = self.inner.clone();
+        env.spawn_future(async move { lock.release().await.map_err(|e| tagged(db_kind(&e), e)) })
+    }
+}
+
 // -- engine ---------------------------------------------------------------------------------------
 
 #[napi]
@@ -489,7 +509,9 @@ impl Engine {
     /// `conflict` (unique field names) rows hitting that constraint update the `update`
     /// fields from the new row and apply the `set` assignments (JSON list of
     /// `{"field", "value"}` IR, parameters in `params`), or are skipped if `update` is
-    /// null.
+    /// null. `conflictWhere` (condition IR, parameters in `params`) is the predicate of a
+    /// partial unique index. Rows beyond the parameter limit, or beyond `batchSize`, go to further
+    /// statements in one transaction (inside `tx` when given).
     #[napi(ts_return_type = "Promise<unknown>")]
     #[allow(clippy::too_many_arguments)]
     pub fn insert<'env>(
@@ -504,27 +526,53 @@ impl Engine {
         params_: Unknown<'_>,
         tx: Option<&Transaction>,
         allowed: Option<Vec<String>>,
+        batch_size: Option<u32>,
+        conflict_where: Option<String>,
     ) -> napi::Result<PromiseRaw<'env, Raw>> {
         protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
         let set: Vec<ir::Assignment> = match set {
             Some(json) => serde_json::from_str(&json).map_err(|e| query_err(format!("invalid assignment IR: {e}")))?,
             None => vec![],
         };
+        let filter: Option<ir::Expr> = match conflict_where {
+            Some(json) => Some(serde_json::from_str(&json).map_err(|e| query_err(format!("invalid condition IR: {e}")))?),
+            None => None,
+        };
         let conflict = conflict.map(|target| match update {
-            Some(update) => Conflict::Update { target, update, set },
-            None => Conflict::Nothing { target },
+            Some(update) => Conflict::Update { target, filter, update, set },
+            None => Conflict::Nothing { target, filter },
         });
         let values = convert_rows(env, &self.schema, &model, &fields, rows, true)?;
         let p = params(env, params_)?;
-        let plan =
-            exec::plan_insert(&self.schema, self.target, &model, &fields, values, conflict, &p).map_err(engine_err)?;
+        let plans = exec::plan_inserts(&self.schema, self.target, &model, &fields, values, conflict, &p, batch_size.map(|n| n as usize))
+            .map_err(engine_err)?;
         let target = self.target;
         let conn = self.conn(tx);
+        let own_tx = tx.is_none();
         let schema = self.schema.clone();
         env.spawn_future_with_callback(
-            async move { exec::run(conn.as_ref(), target, plan).await.map_err(engine_err) },
+            async move { exec::run_inserts(conn.as_ref(), target, plans, own_tx).await.map_err(engine_err) },
             move |env, out| outcome_js(env, &schema, out),
         )
+    }
+
+    /// Bulk load with Postgres `COPY` (`insertMany(rows, { copy: true })`); the promise
+    /// gives the number of rows written. `rows` are arrays aligned with `fields`.
+    #[napi]
+    pub fn copy_insert<'env>(
+        &self,
+        env: &'env Env,
+        model: String,
+        fields: Vec<String>,
+        rows: Unknown<'_>,
+        tx: Option<&Transaction>,
+        allowed: Option<Vec<String>>,
+    ) -> napi::Result<PromiseRaw<'env, f64>> {
+        protect::ensure_writable(&self.schema, &model, allowed.as_deref().unwrap_or_default()).map_err(engine_err)?;
+        let values = convert_rows(env, &self.schema, &model, &fields, rows, true)?;
+        let copy = exec::plan_copy(&self.schema, self.target, &model, &fields, values).map_err(engine_err)?;
+        let conn = self.conn(tx);
+        env.spawn_future(async move { exec::run_copy(conn.as_ref(), copy).await.map(|n| n as f64).map_err(engine_err) })
     }
 
     /// Updates each row (an array aligned with `fields`, the primary key first) to its
@@ -584,6 +632,32 @@ impl Engine {
         let conn = self.conn(Some(tx));
         env.spawn_future(async move {
             conn.advisory_lock(key, exclusive, nowait).await.map_err(|e| tagged(db_kind(&e), e))
+        })
+    }
+
+    /// This engine on the same pool, with `set_config(name, value, true)` for each
+    /// setting at the start of every transaction (statements outside one get their own).
+    #[napi]
+    pub fn with_settings(&self, names: Vec<String>, values: Vec<String>) -> Engine {
+        let driver: Arc<dyn Driver> = Arc::new(db::WithSettings::new(self.driver.clone(), names.into_iter().zip(values).collect()));
+        Engine { driver, target: self.target, schema: self.schema.clone() }
+    }
+
+    /// Session advisory lock on a pinned connection; `null` when it is not taken.
+    #[napi]
+    pub fn session_lock<'env>(
+        &self, env: &'env Env, key: String, name: Option<napi::bindgen_prelude::Buffer>,
+        exclusive: bool, nowait: bool, timeout_ms: Option<u32>,
+    ) -> napi::Result<PromiseRaw<'env, Option<SessionLock>>> {
+        let key = match name {
+            Some(name) => orm_engine::advisory::key(&name),
+            None => key.parse::<i64>().map_err(|_| tagged("TypeError", "lock key must fit in 64 bits"))?,
+        };
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let lock = driver.session_lock(key, exclusive, nowait, timeout_ms.map(u64::from)).await
+                .map_err(|e| tagged(db_kind(&e), e))?;
+            Ok(lock.map(|inner| SessionLock { inner }))
         })
     }
 
@@ -654,6 +728,66 @@ impl Engine {
         env.spawn_future(async move {
             let done = engine_migrate::upgrade(&*driver, Path::new(&dir), target.as_deref()).await.map_err(engine_err)?;
             Ok(done.into_iter().map(|m| m.name).collect())
+        })
+    }
+
+    /// The live database as a schema file: JSON `{schema, gaps, steps: [{summary, sql}]}`
+    /// (see `orm_engine::introspect::pull`).
+    #[napi]
+    pub fn pull_schema<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, String>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let p = orm_engine::introspect::pull(&*driver).await.map_err(engine_err)?;
+            Ok(serde_json::json!({"schema": p.schema, "gaps": p.gaps, "steps": p.steps}).to_string())
+        })
+    }
+
+    /// The live database against the newest snapshot of `dir`: JSON
+    /// `{migration, steps: [{summary, sql}], gaps}`.
+    #[napi]
+    pub fn migration_drift<'env>(&self, env: &'env Env, dir: String) -> napi::Result<PromiseRaw<'env, String>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let d = orm_engine::introspect::drift(&*driver, Path::new(&dir)).await.map_err(engine_err)?;
+            Ok(serde_json::json!({"migration": d.migration, "steps": d.steps, "gaps": d.gaps}).to_string())
+        })
+    }
+
+    /// Records the first migration of `dir` as applied without running it; its name.
+    #[napi]
+    pub fn migrate_baseline<'env>(&self, env: &'env Env, dir: String) -> napi::Result<PromiseRaw<'env, String>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move { Ok(engine_migrate::baseline(&*driver, Path::new(&dir)).await.map_err(engine_err)?.name) })
+    }
+
+    /// The migrations `migrateUp` would apply: `[[name, path]]`.
+    #[napi]
+    pub fn migration_pending<'env>(&self, env: &'env Env, dir: String, target: Option<String>) -> napi::Result<PromiseRaw<'env, Vec<Vec<String>>>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let todo = engine_migrate::pending(&*driver, Path::new(&dir), target.as_deref()).await.map_err(engine_err)?;
+            Ok(todo.into_iter().map(|m| vec![m.name, m.path.to_string_lossy().into_owned()]).collect())
+        })
+    }
+
+    /// Starts applying one migration: its transaction, with the lock taken and `up.sql`
+    /// run; null when another migrator applied it meanwhile.
+    #[napi]
+    pub fn migration_begin<'env>(&self, env: &'env Env, name: String, path: String) -> napi::Result<PromiseRaw<'env, Option<Transaction>>> {
+        let driver = self.driver.clone();
+        env.spawn_future(async move {
+            let m = engine_migrate::Migration { name, path: path.into() };
+            let tx = engine_migrate::begin_apply(&*driver, &m).await.map_err(engine_err)?;
+            Ok(tx.map(|inner| Transaction { inner }))
+        })
+    }
+
+    /// Records the migration in `tx` (from `migrationBegin`) and commits.
+    #[napi]
+    pub fn migration_finish<'env>(&self, env: &'env Env, tx: &Transaction, name: String, path: String) -> napi::Result<PromiseRaw<'env, ()>> {
+        let inner = tx.inner.clone();
+        env.spawn_future(async move {
+            engine_migrate::finish_apply(&*inner, &engine_migrate::Migration { name, path: path.into() }).await.map_err(engine_err)
         })
     }
 
@@ -738,7 +872,7 @@ impl Engine {
 /// from, for error messages and `import` resolution.
 #[napi]
 pub fn prepare_schema(schema_json: String, context_json: Option<String>) -> napi::Result<String> {
-    let mut ir: ir::SchemaIr = serde_json::from_str(&schema_json).map_err(|e| schema_err(e.to_string()))?;
+    let mut ir = ir::SchemaIr::from_json(&schema_json).map_err(schema_err)?;
     if let Some(context) = context_json {
         let context = serde_json::from_str(&context).map_err(|e| schema_err(format!("invalid definition context: {e}")))?;
         ir = orm_core::behavior::merge_definition(context, ir).map_err(schema_err)?;
@@ -765,6 +899,16 @@ pub fn compile_schema(source: String, path: Option<String>) -> napi::Result<Stri
 #[napi]
 pub fn cli<'env>(env: &'env Env, argv: Vec<String>) -> napi::Result<PromiseRaw<'env, i32>> {
     env.spawn_future(async move { Ok(orm_cli::run(&argv, orm_cli::Host::Node).await) })
+}
+
+/// For `npx orm migrate`: `[schema, dir, url, target]` as the CLI resolves them (null
+/// entries for a missing URL or target), or null for any other command line.
+#[cfg(feature = "cli")]
+#[napi]
+pub fn cli_migrate_args(argv: Vec<String>) -> Option<Vec<Option<String>>> {
+    orm_cli::migrate_args(&argv, orm_cli::Host::Node).map(|(schema, dir, url, target)| {
+        vec![Some(schema.to_string_lossy().into_owned()), Some(dir.to_string_lossy().into_owned()), url, target]
+    })
 }
 
 /// Migration folders of `dir` in order: `[[name, path]]`.

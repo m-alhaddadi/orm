@@ -37,10 +37,44 @@ export async function stringsAndArrays() {
   same<(typeof rows)[number], { first: string | null; link: string }>();
   const text = await Post.objects.select({ c: func.concat(Post.title, " ", Post.views), p: Post.title.concat("!"), i: func.strpos(Post.title, "x"), t: func.trim(Post.title) }).all();
   same<(typeof text)[number], { c: string; p: string; i: number; t: string }>();
+  const nullable = await Profile.objects.select({ a: Profile.links.element(1).concat("!"), b: func.unnest(Profile.links).concat(Profile.links.element(1)) }).all();
+  same<(typeof nullable)[number], { a: string | null; b: string | null }>();
   // @ts-expect-error concatenation takes strings
   Post.views.concat("!");
   // @ts-expect-error element access takes an array column
   Post.title.element(1);
+}
+
+export async function caseExpressions() {
+  const rows = await Post.objects.select({ h: func.case([Post.views.gt(3), "hot"], { default: "cold" }), t: func.case([Post.published, Post.title]), n: func.case([Post.published, Post.views], [Post.views.gt(1), 2], { default: 0 }) }).all();
+  same<(typeof rows)[number], { h: string; t: string | null; n: number }>();
+  // @ts-expect-error a branch is a [condition, value] pair
+  func.case(Post.published);
+}
+
+export async function aggregateFilters() {
+  const rows = await Post.objects.select({ c: func.count({ filter: Post.published }), s: func.sum(Post.views, { filter: Post.views.gt(3) }), m: func.max(Post.title, { filter: Post.published }) }).all();
+  same<(typeof rows)[number], { c: bigint; s: number | bigint | null; m: string | null }>();
+  // @ts-expect-error the filter is a condition
+  func.count({ filter: Post.views });
+}
+
+export function json(meta: import("../../src/index.js").Column<JsonValue, "Post">) {
+  same<ReturnType<typeof meta.get>, import("../../src/index.js").JsonPath<"Post", {}>>();
+  same<ReturnType<ReturnType<typeof meta.get>["asText"]>, import("../../src/index.js").Expression<string | null, "Post", {}>>();
+  void meta.jsonContains({ a: [1] }).and(meta.hasKey("a"));
+  void Post.objects.update({ views: 1 });
+  // @ts-expect-error JSON paths need a JSON value
+  Post.views.get("a");
+}
+
+export async function fullTextSearch() {
+  const vector = func.toTsvector("english", Post.title);
+  same<typeof vector, import("../../src/index.js").Func<import("../../src/index.js").TsVector, "Post", {}>>();
+  const rows = await Post.objects.filter(vector.matches("dog")).select({ r: func.tsRank(vector, func.plaintoTsquery("dog")) }).all();
+  same<(typeof rows)[number], { r: number }>();
+  // @ts-expect-error matches() needs a tsvector
+  Post.title.matches("dog");
 }
 
 export async function filters() {
@@ -119,6 +153,15 @@ export async function writes() {
   await post.update({ title: "x", views: Post.views.mul(2) });
   await Post.objects.updateMany([{ id: 1, title: "x" }]);
   await post.tags.add(tag, 3n);
+  await post.tags.add(tag, { throughDefaults: { position: 1 } });
+  const batched = await User.objects.insertMany([{ email: "a", name: "A" }], { batchSize: 10 });
+  same<typeof batched, User[]>();
+  const copied = await User.objects.insertMany([{ email: "a", name: "A" }], { copy: true });
+  same<typeof copied, number>();
+  const [got, created] = await User.objects.getOrInsert({ email: "a" }, { defaults: { name: "A" } });
+  same<typeof got, User>();
+  same<typeof created, boolean>();
+  await User.objects.insert({ email: "a", name: "A" }, { onConflict: User.email, where: User.name.isNull(), doNothing: true });
   // @ts-expect-error a required field is missing
   User.objects.insert({ email: "a" });
   // @ts-expect-error an unknown field

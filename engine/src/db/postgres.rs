@@ -22,9 +22,10 @@ use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Object, Pool, Rec
 use sea_query::{ArrayType, Value};
 use tokio::sync::Mutex;
 use tokio_postgres::types::{to_sql_checked, FromSql, IsNull, Kind, ToSql, Type};
+use tokio_postgres::binary_copy::BinaryCopyInWriter;
 use tokio_postgres::{NoTls, Row, SimpleQueryMessage, Statement};
 
-use super::{numeric, BoxFuture, Cell, DbError, DbResult, Driver, ErrorKind, Executor, RowSet, Transaction};
+use super::{numeric, BoxFuture, Cell, DbError, DbResult, Driver, ErrorKind, Executor, RowSet, SessionLock, Transaction};
 use orm_core::ir::{ColType, ValueType};
 
 const STATEMENT_CACHE_MAX: usize = 512;
@@ -185,6 +186,28 @@ async fn query_text(c: &ClientWrapper, sql: &str) -> DbResult<Vec<Vec<Option<Str
             _ => None,
         })
         .collect())
+}
+
+fn quote(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+/// Binary `COPY ... FROM STDIN`. The column types come from the server, so enums,
+/// `json` and arrays encode as the columns expect.
+async fn copy_in(c: &ClientWrapper, table: &str, columns: &[String], rows: &[Vec<Value>]) -> DbResult<u64> {
+    let cols = columns.iter().map(|c| quote(c)).collect::<Vec<_>>().join(", ");
+    let table = quote(table);
+    let probe = c.prepare(&format!("SELECT {cols} FROM {table} LIMIT 0")).await.map_err(pg_err)?;
+    let types: Vec<Type> = probe.columns().iter().map(|c| c.type_().clone()).collect();
+    let sink = c.copy_in(&format!("COPY {table} ({cols}) FROM STDIN (FORMAT binary)")).await.map_err(pg_err)?;
+    let writer = BinaryCopyInWriter::new(sink, &types);
+    let mut writer = std::pin::pin!(writer);
+    for row in rows {
+        let params: Vec<Param<'_>> = row.iter().map(Param).collect();
+        let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        writer.as_mut().write(&refs).await.map_err(pg_err)?;
+    }
+    writer.finish().await.map_err(pg_err)
 }
 
 // -- rows --------------------------------------------------------------------------------
@@ -352,6 +375,10 @@ impl Executor for PgDriver {
         Box::pin(async move { let c = get_client(&self.pool).await?; query_text(&c, &sql).await })
     }
 
+    fn copy_in(&self, table: String, columns: Vec<String>, rows: Vec<Vec<Value>>) -> BoxFuture<'_, DbResult<u64>> {
+        Box::pin(async move { let c = get_client(&self.pool).await?; copy_in(&c, &table, &columns, &rows).await })
+    }
+
     fn begin(&self) -> BoxFuture<'_, DbResult<Arc<dyn Transaction>>> {
         Box::pin(async move {
             let client = get_client(&self.pool).await?;
@@ -371,6 +398,65 @@ impl Executor for PgDriver {
 impl Driver for PgDriver {
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { self.pool.close() })
+    }
+
+    fn session_lock(
+        &self, key: i64, exclusive: bool, nowait: bool, timeout_ms: Option<u64>,
+    ) -> BoxFuture<'_, DbResult<Option<Arc<dyn SessionLock>>>> {
+        Box::pin(async move {
+            // `lock_timeout = 0` means no timeout in Postgres.
+            let nowait = nowait || timeout_ms == Some(0);
+            let mut session = Session { client: Some(get_client(&self.pool).await?), finished: false };
+            let client = session.client.as_ref().expect("just taken");
+            // `SET LOCAL` in a transaction of its own: the lock outlives the COMMIT, the
+            // timeout does not stay on the pooled connection.
+            let timeout = match timeout_ms { Some(ms) if !nowait => format!("SET LOCAL lock_timeout = {ms}; "), _ => String::new() };
+            let sql = format!("BEGIN; {timeout}{}; COMMIT", crate::advisory::session_sql(key, exclusive, nowait));
+            let taken = match simple(client, &sql).await {
+                Ok(messages) => !nowait || messages.iter().any(|m| matches!(m,
+                    SimpleQueryMessage::Row(r) if r.get(0) == Some("true"))),
+                Err(e) => {
+                    client.batch_execute("ROLLBACK").await.map_err(pg_err)?;
+                    if e.kind != ErrorKind::LockNotAvailable {
+                        session.finished = true;
+                        return Err(e);
+                    }
+                    false
+                }
+            };
+            session.finished = true;
+            if !taken {
+                return Ok(None);
+            }
+            session.finished = false;
+            let lock: Arc<dyn SessionLock> = Arc::new(PgSessionLock {
+                session: Mutex::new(session),
+                unlock: crate::advisory::unlock_sql(key, exclusive),
+            });
+            Ok(Some(lock))
+        })
+    }
+}
+
+/// The pinned connection of a session advisory lock. Unless the unlock succeeds, the
+/// connection closes instead of going back to the pool.
+struct PgSessionLock {
+    session: Mutex<Session>,
+    unlock: String,
+}
+
+impl SessionLock for PgSessionLock {
+    fn release(&self) -> BoxFuture<'_, DbResult<()>> {
+        Box::pin(async move {
+            let mut session = self.session.lock().await;
+            let Some(client) = session.client.take() else { return Ok(()) };
+            session.finished = true;
+            let result = client.batch_execute(&self.unlock).await.map_err(pg_err);
+            if result.is_err() {
+                drop(Object::take(client));
+            }
+            result
+        })
     }
 }
 
@@ -458,6 +544,12 @@ impl Executor for PgTx {
 
     fn query_text(&self, sql: String) -> BoxFuture<'_, DbResult<Vec<Vec<Option<String>>>>> {
         Box::pin(async move { self.with(|c| Box::pin(async move { query_text(c, &sql).await })).await })
+    }
+
+    fn copy_in(&self, table: String, columns: Vec<String>, rows: Vec<Vec<Value>>) -> BoxFuture<'_, DbResult<u64>> {
+        Box::pin(async move {
+            self.with(|c| Box::pin(async move { copy_in(c, &table, &columns, &rows).await })).await
+        })
     }
 
     fn begin(&self) -> BoxFuture<'_, DbResult<Arc<dyn Transaction>>> {

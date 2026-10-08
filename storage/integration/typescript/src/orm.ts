@@ -38,7 +38,8 @@ export function installQueries(meta: HostModel, adapter: ModelAdapter): void {
       ? new Reference({ v: 1, storage: adapter.fields.get(name)!.storage, key: "preflight" }).toJSON() : value]));
   }
   class FileQuerySet extends Base {
-    override insert(values: Values, options?: unknown): Promise<unknown> {
+    // async: a rejected write, also a protected one, gives a rejected promise and never a throw.
+    override async insert(values: Values, options?: unknown): Promise<unknown> {
       values = normalize(values, true);
       if (!Object.values(values).some(value => value instanceof Upload)) return super.insert(values, options);
       if (options !== undefined) throw new FileFieldError("Upload is unsupported in conflict writes");
@@ -54,7 +55,7 @@ export function installQueries(meta: HostModel, adapter: ModelAdapter): void {
     override insertMany(rows: readonly Values[], options?: unknown): Promise<unknown> {
       return super.insertMany(rows.map(row => normalize(row)), options);
     }
-    override update(values: Values, options?: { readonly returning?: boolean }): Promise<unknown> {
+    override async update(values: Values, options?: { readonly returning?: boolean }): Promise<unknown> {
       values = normalize(values, true);
       if (!Object.values(values).some(value => value instanceof Upload)) return super.update(values, options);
       const prepared = this.prepareUpdate(placeholders(values));
