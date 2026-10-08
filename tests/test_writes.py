@@ -1,10 +1,11 @@
 """Bulk writes: insert_many batches, partial-index upserts, get_or_insert, many-to-many
 links with extra fields, COPY."""
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
-from blog.models import Comment, Post, Tag, User
+from blog.models import Comment, Post, Profile, Tag, User
 
 import orm
 from conftest import DATABASE_URL
@@ -104,3 +105,36 @@ async def test_on_conflict_where_reads_own_columns_only(anon_index):
     # Postgres refuses a relation path (a subquery) in an index predicate.
     with pytest.raises(orm.DatabaseError, match="subquery in index predicate"):
         await Comment.objects.insert(post_id=1, body="x").on_conflict(Comment.post_id, where=Comment.post.title == "t").do_nothing()
+
+
+# -- get_or_insert ------------------------------------------------------------------------------
+
+
+async def test_get_or_insert(clean):
+    user, created = await User.objects.get_or_insert(email="a@x.io", defaults={"name": "A"})
+    assert created and user.name == "A"
+    again, created = await User.objects.get_or_insert(email="a@x.io", defaults={"name": "Other"})
+    assert not created and again.id == user.id and again.name == "A"
+    # A to-one relation gives its key field.
+    profile, created = await Profile.objects.get_or_insert(user=user)
+    assert created and profile.user_id == user.id
+    same, created = await Profile.objects.get_or_insert(user=user)
+    assert not created and same.id == profile.id
+
+
+async def test_get_or_insert_is_safe_under_concurrency(clean):
+    results = await asyncio.gather(
+        *(User.objects.get_or_insert(email="race@x.io", defaults={"name": f"U{i}"}) for i in range(20))
+    )
+    assert sum(created for _, created in results) == 1
+    assert len({u.id for u, _ in results}) == 1
+    assert await User.objects.count() == 1
+
+
+async def test_get_or_insert_checks_the_lookup(clean):
+    with pytest.raises(ValueError, match="NULL never conflicts"):
+        await Comment.objects.get_or_insert(author_id=None, defaults={"body": "x", "post_id": 1})
+    with pytest.raises(TypeError, match="unique constraint"):
+        await User.objects.get_or_insert(defaults={"name": "A"})
+    with pytest.raises(orm.DatabaseError, match="no unique or exclusion constraint"):
+        await User.objects.get_or_insert(name="A", defaults={"email": "a@x.io"})

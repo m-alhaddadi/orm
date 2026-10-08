@@ -38,7 +38,7 @@ import { NotLoaded, QueryError, TransactionRequired } from "./errors.js";
 import type { Hop, HopKind, In, ModelSpec, RelationMeta } from "./meta.js";
 import { DB, fieldValue, RELATED, registerQueries, type Instance, type ModelClass, type ModelMeta } from "./model.js";
 import { call, wait, type NativeReturned, type NativeSelect } from "./native.js";
-import { assignments, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
+import { assignments, lookupValues, prepareRows, prepareUpdateRows, prepareAttach } from "./write.js";
 import { after, decodeCursor, encodeCursor, fingerprint, keyset, type Page, type PageOptions } from "./pagination.js";
 import { allowedWrites } from "./protection.js";
 import { active as debugging, record, relationLoad } from "./debug.js";
@@ -49,6 +49,8 @@ import type { Select, SelectItems, SelectRow, ItemsParams, ItemsOuter } from "./
 
 /** Ids per query in `inBulk()`, well below Postgres' 65535 parameters. */
 const IN_BULK_CHUNK = 10_000;
+// getOrInsert: rounds of read, then insert, before a concurrent delete wins.
+const GET_OR_INSERT_ROUNDS = 3;
 
 export type UnionToIntersection<U> = (U extends unknown ? (x: U) => void : never) extends (x: infer I) => void ? I : never;
 /** Flattens an intersection for readable hovers. */
@@ -1123,6 +1125,29 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     return rows[0] ?? null;
   }
 
+  /**
+   * The row matching `lookup`, or a new row of `lookup` and `defaults`: `[row, created]`.
+   * `lookup` names the fields of one unique constraint (the database checks this). Safe
+   * under concurrency: the insert is `ON CONFLICT (lookup) DO NOTHING`, and a row that a
+   * concurrent insert wins is read back.
+   */
+  async getOrInsert(lookup: Partial<M["insert"]>, options?: { readonly defaults?: Partial<M["insert"]> }): Promise<[M["row"], boolean]> {
+    const key = lookupValues(this.meta, lookup);
+    const cols = [...key.keys()].map((f) => this.meta.column(this.meta.fieldByIr.get(f)!));
+    const values = { ...options?.defaults, ...lookup } as M["insert"];
+    for (let round = 0; round < GET_OR_INSERT_ROUNDS; round++) {
+      const found = await this.filter(...(cols.map((c) => c.eq(key.get(c.field.ir) as never)) as never[])).limit(2).fetch();
+      if (found.length) {
+        return [one(this.meta, found) as M["row"], false];
+      }
+      const row = await this.insert(values, { onConflict: cols as never, doNothing: true });
+      if (row !== null) {
+        return [row, true];
+      }
+    }
+    throw new QueryError(`getOrInsert: a ${this.meta.name} row matching the lookup was deleted concurrently ${GET_OR_INSERT_ROUNDS} times`);
+  }
+
   /** Attaches local child values to an existing parent, without a change to the parent.
    * Only composed child models accept it. */
   async attach(parentId: In<M["pk"]>, values: M extends { readonly attach: infer A extends object } ? A : never): Promise<M["row"]> {
@@ -1566,6 +1591,11 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
       }
       return obj ?? null;
     });
+  }
+
+  /** Not supported: `getOrInsert()` on the model's query set, then `add()`. */
+  override getOrInsert(): never {
+    throw new TypeError(`${this.relation.name}.getOrInsert() isn't supported; use ${this.meta.name}.objects.getOrInsert(), then add()`);
   }
 
   /** Not supported: insert the rows, then link them with `add()`. */

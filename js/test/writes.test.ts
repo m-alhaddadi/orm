@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { DatabaseError, IntegrityError, connect, getDatabase } from "../src/index.js";
-import { Comment, Post, Tag, User } from "./blog/models.js";
+import { Comment, Post, Profile, Tag, User } from "./blog/models.js";
 import { DATABASE_URL, useDatabase } from "./helpers.js";
 
 useDatabase();
@@ -94,3 +94,36 @@ test("onConflict where picks a partial unique index", () =>
     ]);
     assert.equal(await Comment.objects.count(), 3);
   }));
+
+// -- getOrInsert ----------------------------------------------------------------------------------
+
+test("getOrInsert", async () => {
+  const [user, created] = await User.objects.getOrInsert({ email: "a@x.io" }, { defaults: { name: "A" } });
+  assert.ok(created);
+  assert.equal(user.name, "A");
+  const [again, created2] = await User.objects.getOrInsert({ email: "a@x.io" }, { defaults: { name: "Other" } });
+  assert.ok(!created2);
+  assert.equal(again.id, user.id);
+  assert.equal(again.name, "A");
+  const [profile, made] = await Profile.objects.getOrInsert({ user });
+  assert.ok(made);
+  assert.equal(profile.userId, user.id);
+  const [same, made2] = await Profile.objects.getOrInsert({ user });
+  assert.ok(!made2);
+  assert.equal(same.id, profile.id);
+});
+
+test("getOrInsert is safe under concurrency", async () => {
+  const results = await Promise.all(
+    Array.from({ length: 20 }, (_, i) => User.objects.getOrInsert({ email: "race@x.io" }, { defaults: { name: `U${i}` } })),
+  );
+  assert.equal(results.filter(([, created]) => created).length, 1);
+  assert.equal(new Set(results.map(([u]) => u.id)).size, 1);
+  assert.equal(await User.objects.count(), 1);
+});
+
+test("getOrInsert checks the lookup", async () => {
+  await assert.rejects(Comment.objects.getOrInsert({ authorId: null }, { defaults: { body: "x", postId: 1n } }), /NULL never conflicts/);
+  await assert.rejects(User.objects.getOrInsert({}, { defaults: { name: "A" } }), /unique constraint/);
+  await assert.rejects(User.objects.getOrInsert({ name: "A" }, { defaults: { email: "a@x.io" } }), /no unique or exclusion constraint/);
+});

@@ -31,7 +31,7 @@ from .fields import HasMany, ManyToMany
 from .pagination import Page
 from .protection import allowed_writes
 from . import debug
-from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, prepare_rows, assignments
+from .write import Delete, InsertMany, InsertOne, Update, UpdateMany, assignments, lookup_values, prepare_rows
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -55,6 +55,8 @@ __all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prefetch", "Prepared"]
 
 # Ids per query in in_bulk(), well below Postgres' 65535 parameters.
 IN_BULK_CHUNK = 10_000
+# get_or_insert: rounds of read, then insert, before a concurrent delete wins.
+GET_OR_INSERT_ROUNDS = 3
 
 
 class Prefetch(Generic[M]):
@@ -782,6 +784,32 @@ class QuerySet(Generic[M]):
         fields, rows, provided = prepare_rows(self._model, [values])
         return InsertOne(self, fields, rows, provided)
 
+    async def get_or_insert(self, defaults: Mapping[str, Any] | None = None, **lookup: Any) -> tuple[M, bool]:
+        """The row matching ``lookup``, or a new row of ``lookup`` and ``defaults``:
+        ``(row, created)``::
+
+            user, created = await User.objects.get_or_insert(email="a@b.c", defaults={"name": "A"})
+
+        ``lookup`` names the fields of one unique constraint (the database checks this).
+        Safe under concurrency: the insert is ``ON CONFLICT (lookup) DO NOTHING``, and a
+        row that a concurrent insert wins is read back."""
+        key = lookup_values(self._model, lookup)
+        fields = self._model._meta.fields
+        cols: list[ColumnRef[Any]] = [ColumnRef(self._model, (), fields[name]) for name in key]
+        values = {**(defaults or {}), **lookup}
+        for _ in range(GET_OR_INSERT_ROUNDS):
+            try:
+                return await self.get(*(c == key[c._field.name] for c in cols)), False
+            except self._model.DoesNotExist:
+                pass
+            row: M | None = await self.insert(**values).on_conflict(*cols).do_nothing()
+            if row is not None:
+                return row, True
+        raise QueryError(
+            f"get_or_insert: a {self._model.__name__} row matching the lookup was deleted "
+            f"concurrently {GET_OR_INSERT_ROUNDS} times"
+        )
+
     async def attach(self, parent_id: Any, values: Mapping[str, Any]) -> M:
         """Attach local child values to an existing parent without altering it."""
         from .composition import attach
@@ -1088,6 +1116,12 @@ class ManyRelatedSet(QuerySet[M]):
             obj: M = await QuerySet(self._model).using(db).insert(**values)
             await self.add(obj)
         return obj
+
+    async def get_or_insert(self, defaults: Mapping[str, Any] | None = None, **lookup: Any) -> tuple[M, bool]:
+        raise TypeError(
+            f"{self._relation.model.__name__}.{self._relation.name}.get_or_insert() isn't supported; "
+            f"use {self._model.__name__}.objects.get_or_insert(), then add()"
+        )
 
     def insert_many(self, rows: Iterable[Mapping[str, Any]], *, batch_size: int | None = None) -> InsertMany[M]:
         raise TypeError(

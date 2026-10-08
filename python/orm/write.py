@@ -88,6 +88,26 @@ def prepare_rows(
     return fields, aligned, provided
 
 
+def lookup_values(model: type[Model], values: Mapping[str, Any]) -> dict[str, Any]:
+    """``get_or_insert``'s lookup by field name: plain, non-null values; a to-one
+    relation (``author=user``) gives its key field."""
+    meta = model._meta
+    out: dict[str, Any] = {}
+    for key, value in values.items():
+        if isinstance(value, Expression):
+            raise TypeError(f"{meta.name}.{key}: get_or_insert takes plain values, not expressions")
+        if isinstance(rel := meta.relations.get(key), BelongsTo):
+            key, value = rel.via, (None if value is None else _key_of(value, rel.to))
+        elif key not in meta.input_fields:
+            raise TypeError(f"{meta.name} has no field {key!r}")
+        if value is None:
+            raise ValueError(f"get_or_insert: {meta.name}.{key} is None; NULL never conflicts, so the row is not unique")
+        out[key] = value
+    if not out:
+        raise TypeError("get_or_insert() needs the fields of a unique constraint")
+    return out
+
+
 def prepare_update_rows(model: type[Model], rows: Iterable[Mapping[str, Any]]) -> tuple[list[str], list[list[Any]]]:
     """Validates ``update_many`` rows: each has the primary key and the same fields,
     plain values only, no primary key twice. Returns (fields, rows) with the primary key

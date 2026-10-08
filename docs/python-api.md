@@ -524,6 +524,9 @@ await User.objects.insert_many(rows).on_conflict(User.email).do_update(User.name
 # ... with expressions: the existing row is `Post.<col>`, the proposed one `excluded(Post.<col>)`
 await Post.objects.insert_many(rows).on_conflict(Post.slug).do_update(views=Post.views + excluded(Post.views))
 
+# Read, or insert when missing: (row, created). The lookup is one unique constraint.
+user, created = await User.objects.get_or_insert(email="a@x.io", defaults={"name": "Al"})
+
 # UPDATE / DELETE over a query: set-based, returns the row count
 await Post.objects.filter(Post.author.name == "Alice").update(views=Post.views + 1)
 await Post.objects.filter(Post.views < 10).delete()
@@ -555,6 +558,12 @@ await post.refresh()
   condition to find the index, so it must match the index predicate without
   parameters (`is_null()`, a boolean column); a compared value is a parameter and
   Postgres cannot match it.
+* `get_or_insert(defaults=..., **lookup)` reads the row that matches `lookup`.
+  When there is none, it inserts `lookup` and `defaults` with
+  `ON CONFLICT (lookup) DO NOTHING`, and reads again when a concurrent insert wins.
+  So concurrent calls give one row, and exactly one call gets `created=True`.
+  The lookup fields must be the fields of one unique constraint; Postgres raises
+  otherwise. A `None` lookup value raises, because `NULL` never conflicts.
 * `do_update()` with no columns overwrites the fields you passed except the conflict
   columns, so `created_at` isn't reset to `now()`. Pass columns to choose them.
 * `do_update(*columns, **values)`: `columns` take the proposed values, `values` are
