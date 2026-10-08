@@ -160,6 +160,9 @@ model Employee {
 }
 '''
     registry = orm.Registry()
+    # The proxy shares the protection of its root, so it cannot declare its own.
+    with pytest.raises(orm.SchemaError, match="Draft: a proxy cannot declare @@protected_write; protect the root model Post"):
+        orm.loads(SOURCE.replace("  @@protected_write\n", "", 1) + 'model Draft {\n  @@proxy.of(Post)\n  @@protected_write\n}\n', registry=orm.Registry())
     models = orm.loads(source, registry=registry)
     Person, Employee = models["Person"], models["Employee"]
     db = await orm.connect("sqlite://:memory:", registry=registry, default=False)

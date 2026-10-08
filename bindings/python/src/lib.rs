@@ -119,7 +119,7 @@ impl PySchema {
     #[pyo3(signature = (schema_json, classes = None))]
     fn new(py: Python<'_>, schema_json: &str, classes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut ir: ir::SchemaIr =
-            serde_json::from_str(schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+            ir::SchemaIr::from_json(schema_json).map_err(schema_err)?;
         orm_core::behavior::prepare(&mut ir, Some("python")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         db::require_dialect(inner.dialect).map_err(db_err)?;
@@ -569,7 +569,7 @@ fn outcome_to_py(
 #[pyfunction]
 #[pyo3(signature = (schema_json, context_json = None))]
 fn prepare_schema(schema_json: &str, context_json: Option<&str>) -> PyResult<String> {
-    let mut ir: ir::SchemaIr = serde_json::from_str(schema_json).map_err(|e| schema_err(e.to_string()))?;
+    let mut ir = ir::SchemaIr::from_json(schema_json).map_err(schema_err)?;
     if let Some(context) = context_json {
         let context = serde_json::from_str(context).map_err(|e| schema_err(format!("invalid definition context: {e}")))?;
         ir = orm_core::behavior::merge_definition(context, ir).map_err(schema_err)?;

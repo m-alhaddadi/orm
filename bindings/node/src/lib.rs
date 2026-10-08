@@ -316,7 +316,7 @@ impl JsSchema {
     #[napi(constructor)]
     pub fn new(schema_json: String) -> napi::Result<Self> {
         let mut ir: ir::SchemaIr =
-            serde_json::from_str(&schema_json).map_err(|e| schema_err(format!("invalid schema IR: {e}")))?;
+            ir::SchemaIr::from_json(&schema_json).map_err(schema_err)?;
         orm_core::behavior::prepare(&mut ir, Some("typescript")).map_err(schema_err)?;
         let inner = schema::Schema::from_ir(ir).map_err(schema_err)?;
         db::require_dialect(inner.dialect).map_err(|e| schema_err(e.to_string()))?;
@@ -738,7 +738,7 @@ impl Engine {
 /// from, for error messages and `import` resolution.
 #[napi]
 pub fn prepare_schema(schema_json: String, context_json: Option<String>) -> napi::Result<String> {
-    let mut ir: ir::SchemaIr = serde_json::from_str(&schema_json).map_err(|e| schema_err(e.to_string()))?;
+    let mut ir = ir::SchemaIr::from_json(&schema_json).map_err(schema_err)?;
     if let Some(context) = context_json {
         let context = serde_json::from_str(&context).map_err(|e| schema_err(format!("invalid definition context: {e}")))?;
         ir = orm_core::behavior::merge_definition(context, ir).map_err(schema_err)?;

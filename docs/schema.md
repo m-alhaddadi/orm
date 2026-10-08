@@ -345,6 +345,10 @@ created DateTime @default(now())
 
 * `@client_default` takes a literal, `uuid()`, `uuid7()` or `now()`.
   A literal has the form of a `@default` literal: an enum member name, a list, or JSON text on a `Json` field.
+  `"null"` on a `Json` field is the JSON value null, like `@default("null")`.
+  A `Decimal` takes a number or text (`1.5` or `"1.5"`), and a `DateTime` takes an RFC 3339 timestamp with an offset.
+  An enum field takes the member name, not a string.
+* A field takes one client default; `@default(uuid())` counts as one.
 * `uuid()` and `uuid7()` fit a `String` field, also with `@db.Uuid`.
   `now()` fits a `DateTime` field, also with `@db.Date` (the UTC date).
 * `autoincrement()` and `dbgenerated(...)` fail, because only the database can make them.

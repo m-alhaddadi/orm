@@ -419,7 +419,8 @@ pub fn validate_declarations(ir: &SchemaIr, manifests: &[Manifest], language: Op
             return Err(fail(d, format!("{} does not support this language binding", m.id)));
         }
         if (d.field.is_some()) != (a.target == AttributeTarget::Field) {
-            return Err(fail(d, "invalid declaration target".into()));
+            let place = if a.target == AttributeTarget::Field { format!("a field attribute; write @{} on a field", d.attribute) } else { format!("a model attribute; write @@{} in the model block", d.attribute) };
+            return Err(fail(d, format!("invalid declaration target: it is {place}")));
         }
         // Only `value` arguments take null and objects, also inside a list.
         fn literal(v: &serde_json::Value) -> bool {
@@ -782,7 +783,8 @@ mod tests {
         ir.behavior.declarations[0].field = None;
         assert!(validate_declarations(&ir, std::slice::from_ref(&manifest), None).unwrap_err().contains("missing argument all"));
         manifest.attributes.pop();
-        assert!(validate_declarations(&ir, std::slice::from_ref(&manifest), None).unwrap_err().contains("invalid declaration target"));
+        let error = validate_declarations(&ir, std::slice::from_ref(&manifest), None).unwrap_err();
+        assert!(error.contains("invalid declaration target: it is a field attribute; write @app.trim on a field"), "{error}");
     }
 
     #[test]
