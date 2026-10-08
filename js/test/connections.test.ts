@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { connect, getDatabase, loads, param, Registry } from '../src/index.js';
+import { connect, define, getDatabase, loads, param, Registry, scope } from '../src/index.js';
+import { native } from '../src/native.js';
 import { User } from './blog/models.js';
 import { useDatabase, otherDatabase } from './helpers.js';
 
@@ -161,3 +162,110 @@ test('replicas answer reads outside a transaction; writes and transactions use t
     await routed.close();
   }
 });
+
+const NOTES = `datasource db { provider = "postgresql" }
+model Note {
+  id     Int    @id @default(autoincrement())
+  tenant String
+  body   String
+  @@map("s6_js_notes")
+}
+`;
+
+const RLS = `
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'orm_s6_app') THEN
+    CREATE ROLE orm_s6_app LOGIN PASSWORD 'app';
+  END IF;
+END $$;
+GRANT SELECT, INSERT, UPDATE, DELETE ON s6_js_notes TO orm_s6_app;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO orm_s6_app;
+ALTER TABLE s6_js_notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant ON s6_js_notes
+  USING (tenant = current_setting('app.tenant', true))
+  WITH CHECK (tenant = current_setting('app.tenant', true));
+`;
+
+test('db.tenant sets app.tenant in each transaction for row-level security', async () => {
+  const registry = new Registry();
+  const Note = loads(NOTES, { registry })['Note'] as any;
+  const url = getDatabase().url;
+  const admin = await connect(url, { registry, default: false, maxConnections: 1 });
+  await admin.dropTables();
+  await admin.createTables();
+  await admin.execute(RLS);
+  await Note.objects.using(admin).insertMany([{ tenant: 'a', body: '1' }, { tenant: 'b', body: '2' }]);
+  const app = await connect(`postgres://orm_s6_app:app@${url.split('@')[1]}`, { registry, default: false, maxConnections: 1 });
+  try {
+    assert.equal(await Note.objects.using(app).count(), 0);
+    await app.tenant('a', async () => {
+      assert.deepEqual((await Note.objects.using(app)).map((n: any) => n.body), ['1']);
+      await app.transaction(async () => {
+        assert.equal(await Note.objects.using(app).count(), 1);
+        await Note.objects.using(app).insert({ tenant: 'a', body: '3' });
+      });
+      await assert.rejects(Note.objects.using(app).insert({ tenant: 'b', body: 'x' }), /row-level security/);
+      await app.tenant(7, async () => assert.equal(await Note.objects.using(app).count(), 0));
+      await app.primary.transaction(async () => assert.equal(await Note.objects.using(app).count(), 2));
+    });
+    assert.equal(await Note.objects.using(admin).count(), 3);
+    assert.equal(await Note.objects.using(app).count(), 0);
+  } finally {
+    await app.close();
+    await admin.dropTables();
+    await admin.close();
+  }
+  const sqlite = await sqliteDb();
+  try {
+    assert.throws(() => sqlite.tenant('a', async () => {}), /row-level security/);
+  } finally {
+    await sqlite.close();
+  }
+});
+
+const queryDefaults = (JSON.parse(native().nativeArtifact()) as { capabilities?: string[] }).capabilities?.includes('query-defaults') ?? false;
+
+function scopedSchema(dialect: string) {
+  const field = (name: string, type = 'int', flags = {}) => ({ name, column: name, type, ...flags });
+  return { dialect, models: [
+    { name: 'Shop', table: 's6_js_shops', fields: [field('id', 'int', { primary_key: true, auto_increment: true }), field('name', 'string')],
+      relations: [{ name: 'orders', kind: 'many', target: 'Order', from: 'id', to: 'shop_id' }] },
+    { name: 'Order', table: 's6_js_orders', fields: [field('id', 'int', { primary_key: true, auto_increment: true }), field('shop_id'), field('total')],
+      relations: [{ name: 'shop', kind: 'one', target: 'Shop', from: 'shop_id', to: 'id', foreign_key: true, on_delete: 'cascade' }] },
+  ], behavior: { schema_contract: 1, query_defaults: [{ model: 'Order', filter: {
+    t: 'cmp', op: 'eq', l: { t: 'col', path: [], name: 'shop_id' }, r: { t: 'scope', name: 'shop' } } }] } };
+}
+
+for (const dialect of ['postgres', 'sqlite']) {
+  test(`scope values in default filters are closed by default (${dialect})`, { skip: !queryDefaults }, async () => {
+    const registry = new Registry();
+    const m = define(scopedSchema(dialect) as never, { registry });
+    const Shop = m['Shop'] as any, Order = m['Order'] as any;
+    const sdb = await connect(dialect === 'sqlite' ? 'sqlite://:memory:' : getDatabase().url, { registry, default: false, maxConnections: 2 });
+    await sdb.dropTables();
+    await sdb.createTables();
+    try {
+      const [s1, s2] = await Shop.objects.using(sdb).insertMany([{ name: 'one' }, { name: 'two' }]);
+      const orders = Order.objects.using(sdb);
+      const [, , o3] = await orders.insertMany([{ shopId: s1.id, total: 10 }, { shopId: s1.id, total: 20 }, { shopId: s2.id, total: 30 }]);
+      for (const read of [() => orders.all(), () => orders.count(), () => Shop.objects.using(sdb).filter(Shop.orders.total.gt(25)).count()]) {
+        await assert.rejects(read(), /scope\.shop/);
+      }
+      assert.equal(await orders.withoutDefaults().count(), 3);
+      await scope({ shop: s1.id }, async () => {
+        assert.deepEqual((await orders.all()).map((o: any) => o.total).sort(), [10, 20]);
+        assert.equal(await orders.count(), 2);
+        assert.deepEqual((await orders.filter(Order.total.gt(param('min'))).prepare().all({ min: 15 })).map((o: any) => o.total), [20]);
+        assert.equal(await Shop.objects.using(sdb).filter(Shop.orders.total.gt(25)).count(), 0);
+        await scope({ shop: s2.id }, async () => assert.deepEqual((await orders.all()).map((o: any) => o.total), [30]));
+        assert.equal(await orders.update({ total: 0 }), 2);
+        assert.equal(await orders.updateMany([{ id: o3.id, total: 99 }]), 0);
+        assert.equal(await orders.filter(Order.id.eq(o3.id)).delete(), 0);
+      });
+      assert.deepEqual((await orders.withoutDefaults().all()).map((o: any) => o.total).sort(), [0, 0, 30]);
+    } finally {
+      await sdb.dropTables();
+      await sdb.close();
+    }
+  });
+}

@@ -677,6 +677,22 @@ fresh = await User.objects.using("primary").get(...)    # the primary
 * No health checks or failover: an error on a replica goes to the caller.
 * `max_connections` applies to each pool. `db.close()` closes all of them.
 
+### Tenants and row-level security
+
+```python
+with db.tenant(shop.id):                 # a sync `with`: it does no I/O
+    orders = await Order.objects.all()    # RLS policies see current_setting('app.tenant')
+```
+
+* Every transaction on `db` in the block first runs `SELECT set_config('app.tenant', '<id>', true)`, the same as `SET LOCAL app.tenant = ...`, with the value bound as a parameter.
+* A statement outside a transaction runs in a transaction of its own: `BEGIN`, `set_config`, the statement, `COMMIT`. That is four round trips instead of one (estimated); put many statements in one `db.transaction()`.
+* A transaction that is already open keeps its setting. Savepoints use the setting of their transaction.
+* The setting ends with each transaction, so pooled connections keep no tenant.
+* Replicas get the same setting. Session locks (`session=True`) do not.
+* The policy must read the setting, for example `USING (shop_id::text = current_setting('app.tenant', true))`. The ORM does not create policies. A superuser and the table owner bypass RLS unless the table has `FORCE ROW LEVEL SECURITY`.
+* SQLite raises `QueryError`.
+* `orm.scope(shop=...)` is the application-side filter (see `docs/selection-and-defaults.md`, "Scope values").
+
 ### Finding N+1 queries: `orm.debug`
 
 The ORM never loads a relation by itself, so an N+1 comes from explicit code: a `load_x()` call or a query in a loop.

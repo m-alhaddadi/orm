@@ -9,6 +9,8 @@
 //! functions and database extensions. None of it affects query planning except the
 //! per-column `read_sql` / `write_sql` templates extension types use.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 pub(crate) fn is_false(b: &bool) -> bool {
@@ -587,6 +589,9 @@ pub enum Expr {
     Int { value: i64 },
     /// Bound schema-policy string literal.
     Text { value: String },
+    /// `scope.<name>` in a default filter: the value the frontend's `scope(...)` gives,
+    /// bound like a parameter. A statement without that value fails (closed by default).
+    Scope { name: String },
     /// A field of an enclosing query's root model (or CTE), `depth` queries up:
     /// `outer(User.id)` in a subquery of a `User` query. A `path` of to-one relations
     /// reaches a related row's field: `outer(Post.author.name)`.
@@ -719,6 +724,9 @@ pub struct Select {
     /// Public model fields; helpers are selected separately by the planner.
     #[serde(default)]
     pub model_fields: Option<Vec<String>>,
+    /// The parameter index of each `scope.<name>` value (statement level only).
+    #[serde(default)]
+    pub scope: BTreeMap<String, usize>,
     #[serde(default)]
     pub model_helpers: Vec<String>,
     #[serde(default)]
@@ -812,6 +820,9 @@ pub struct Assignment {
 pub struct Update {
     #[serde(default)]
     pub model_fields: Option<Vec<String>>,
+    /// The parameter index of each `scope.<name>` value.
+    #[serde(default)]
+    pub scope: BTreeMap<String, usize>,
     #[serde(default)]
     pub without_defaults: bool,
     pub model: String,
@@ -829,6 +840,9 @@ pub struct Update {
 pub struct Delete {
     #[serde(default)]
     pub model_fields: Option<Vec<String>>,
+    /// The parameter index of each `scope.<name>` value.
+    #[serde(default)]
+    pub scope: BTreeMap<String, usize>,
     #[serde(default)]
     pub without_defaults: bool,
     pub model: String,
@@ -849,6 +863,17 @@ pub enum Operation {
     Exists(Select),
     Update(Update),
     Delete(Delete),
+}
+
+impl Operation {
+    /// The parameter index of each `scope.<name>` value.
+    pub fn scope(&self) -> &BTreeMap<String, usize> {
+        match self {
+            Operation::Select(q) | Operation::Count(q) | Operation::Exists(q) => &q.scope,
+            Operation::Update(q) => &q.scope,
+            Operation::Delete(q) => &q.scope,
+        }
+    }
 }
 
 impl Provides {

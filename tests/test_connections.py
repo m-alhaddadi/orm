@@ -1,10 +1,12 @@
 """Commit callbacks, session advisory locks, read replicas and tenants."""
 import asyncio
+import json
 import time
 
 import pytest
 
 import orm
+from orm import _native
 from blog.models import User
 
 SQLITE = 'datasource db { provider = "sqlite" }\nmodel Item {\n  id Int @id @default(autoincrement())\n}\n'
@@ -201,3 +203,127 @@ async def test_using_primary_resolves_the_default_database(clean):
     finally:
         await routed.close()
         orm.db._default = db
+
+
+NOTES = """datasource db { provider = "postgresql" }
+model Note {
+  id     Int    @id @default(autoincrement())
+  tenant String
+  body   String
+  @@map("s6_notes")
+}
+"""
+
+RLS = """
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'orm_s6_app') THEN
+    CREATE ROLE orm_s6_app LOGIN PASSWORD 'app';
+  END IF;
+END $$;
+GRANT SELECT, INSERT, UPDATE, DELETE ON s6_notes TO orm_s6_app;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO orm_s6_app;
+ALTER TABLE s6_notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant ON s6_notes
+  USING (tenant = current_setting('app.tenant', true))
+  WITH CHECK (tenant = current_setting('app.tenant', true));
+"""
+
+
+async def test_tenant_sets_app_tenant_for_row_level_security(db):
+    registry = orm.Registry()
+    Note = orm.loads(NOTES, registry=registry)["Note"]
+    admin = await orm.connect(db.url, registry=registry, default=False, max_connections=1)
+    await admin.drop_tables()
+    await admin.create_tables()
+    await admin.execute(RLS)
+    await Note.objects.using(admin).insert_many([{"tenant": "a", "body": "1"}, {"tenant": "b", "body": "2"}])
+    app = await orm.connect("postgres://orm_s6_app:app@" + db.url.split("@", 1)[1], registry=registry, default=False, max_connections=1)
+    try:
+        assert await Note.objects.using(app).count() == 0  # no tenant: the policy hides every row
+        with app.tenant("a"):
+            assert [n.body for n in await Note.objects.using(app)] == ["1"]
+            async with app.transaction():
+                assert await Note.objects.using(app).count() == 1
+                await Note.objects.using(app).insert(tenant="a", body="3")
+            with pytest.raises(orm.DatabaseError, match="row-level security"):
+                await Note.objects.using(app).insert(tenant="b", body="x")
+            with app.tenant(7):
+                assert await Note.objects.using(app).count() == 0
+            async with app.primary.transaction():
+                assert await Note.objects.using(app).count() == 2
+        assert await Note.objects.using(admin).count() == 3
+        # SET LOCAL ends with its transaction: the pooled connection keeps no tenant.
+        assert await Note.objects.using(app).count() == 0
+    finally:
+        await app.close()
+        await admin.drop_tables()
+        await admin.close()
+    sqlite = await sqlite_db()
+    try:
+        with pytest.raises(orm.QueryError, match="row-level security"):
+            with sqlite.tenant("a"):
+                pass
+    finally:
+        await sqlite.close()
+
+
+QUERY_DEFAULTS = "query-defaults" in json.loads(_native.native_artifact()).get("capabilities", [])
+
+
+def scoped_schema(dialect):
+    def field(name, kind="int", **flags):
+        return {"name": name, "column": name, "type": kind, **flags}
+
+    return {
+        "dialect": dialect,
+        "models": [
+            {"name": "Shop", "table": "s6_shops", "fields": [
+                field("id", primary_key=True, auto_increment=True), field("name", "string"),
+            ], "relations": [{"name": "orders", "kind": "many", "target": "Order", "from": "id", "to": "shop_id"}]},
+            {"name": "Order", "table": "s6_orders", "fields": [
+                field("id", primary_key=True, auto_increment=True), field("shop_id"), field("total"),
+            ], "relations": [{"name": "shop", "kind": "one", "target": "Shop", "from": "shop_id", "to": "id",
+                              "foreign_key": True, "on_delete": "cascade"}]},
+        ],
+        "behavior": {"schema_contract": 1, "query_defaults": [{"model": "Order", "filter": {
+            "t": "cmp", "op": "eq", "l": {"t": "col", "path": [], "name": "shop_id"}, "r": {"t": "scope", "name": "shop"}}}]},
+    }
+
+
+@pytest.mark.skipif(not QUERY_DEFAULTS, reason="needs a query-defaults artifact")
+@pytest.mark.parametrize("dialect", ["postgres", "sqlite"])
+async def test_scope_values_in_default_filters_are_closed_by_default(db, dialect):
+    registry = orm.Registry()
+    m = orm.define(scoped_schema(dialect), registry=registry)
+    Shop, Order = m["Shop"], m["Order"]
+    url = "sqlite://:memory:" if dialect == "sqlite" else db.url
+    sdb = await orm.connect(url, registry=registry, default=False, max_connections=2)
+    await sdb.drop_tables()
+    await sdb.create_tables()
+    try:
+        s1, s2 = await Shop.objects.using(sdb).insert_many([{"name": "one"}, {"name": "two"}])
+        orders = Order.objects.using(sdb)
+        o1, o2, o3 = await orders.insert_many(
+            [{"shop_id": s1.id, "total": 10}, {"shop_id": s1.id, "total": 20}, {"shop_id": s2.id, "total": 30}])
+        for read in (lambda: orders.all(), lambda: orders.count(), lambda: orders.filter(Order.total > 0).exists(),
+                     lambda: Shop.objects.using(sdb).filter(Shop.orders.total > 25).count()):
+            with pytest.raises(orm.QueryError, match=r"scope\.shop"):
+                await read()
+        assert await orders.without_defaults().count() == 3
+        with orm.scope(shop=s1.id):
+            assert sorted(o.total for o in await orders.all()) == [10, 20]
+            assert await orders.count() == 2
+            assert [o.total for o in await orders.filter(Order.total > 15).prepare()()] == [20]
+            # A relation hop applies the scoped filter too.
+            assert await Shop.objects.using(sdb).filter(Shop.orders.total > 25).count() == 0
+            shop = await Shop.objects.using(sdb).prefetch_related(Shop.orders).get(Shop.id == s1.id)
+            assert len(await shop.orders) == 2
+            with orm.scope(shop=s2.id):
+                assert [o.total for o in await orders.all()] == [30]
+            assert await orders.update(total=0) == 2
+            assert await orders.update_many([{"id": o3.id, "total": 99}]) == 0
+            assert await orders.filter(Order.id == o3.id).delete() == 0
+        assert sorted(o.total for o in await orders.without_defaults()) == [0, 0, 30]
+    finally:
+        await sdb.drop_tables()
+        await sdb.close()

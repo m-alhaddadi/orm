@@ -306,6 +306,14 @@ Writes, raw `db.execute`, migrations, and every statement inside `db.transaction
 A replica can lag behind the primary: to read your own write, read in the same transaction or use `using("primary")`.
 There are no health checks or failover. `maxConnections` applies to each pool, and `db.close()` closes all of them.
 
+### Tenants and row-level security
+
+`await db.tenant(shop.id, async () => {...})` runs `SELECT set_config('app.tenant', '<id>', true)` (`SET LOCAL`) at the start of every transaction on `db` in the function, so RLS policies can read `current_setting('app.tenant', true)`.
+A statement outside a transaction runs in a transaction of its own (four round trips instead of one, estimated).
+A transaction that is already open keeps its setting, and the setting ends with each transaction.
+Replicas get the same setting. SQLite throws `QueryError`.
+`scope({ shop }, fn)` is the application-side filter (see `docs/selection-and-defaults.md`, "Scope values").
+
 ### Finding N+1 queries: `debug`
 
 The ORM never loads a relation by itself, so an N+1 comes from explicit code: a `loadX()` call or a query in a loop.

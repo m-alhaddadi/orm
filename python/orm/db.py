@@ -5,8 +5,8 @@ from __future__ import annotations
 import inspect
 import json
 import math
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from typing import Any, Literal, overload
 
@@ -15,7 +15,7 @@ from .errors import LockNotAvailable, NotConnected, QueryError, TransactionRequi
 from .protection import allowed_writes
 from .model import Registry, registry
 
-__all__ = ["Database", "connect", "get_database"]
+__all__ = ["Database", "connect", "get_database", "scope"]
 
 # Statements a replica may answer.
 _READS = frozenset({"select", "count", "exists"})
@@ -25,6 +25,10 @@ _default: Database | None = None
 _current_tx: ContextVar[tuple[Database, _native.Transaction] | None] = ContextVar(
     "orm_current_tx", default=None
 )
+# For each database in a `tenant()` block: its primary and replica engines with the tenant set.
+_tenants: ContextVar[dict[Database, tuple[_native.Engine, list[_native.Engine]]]] = ContextVar("orm_tenants", default={})
+# The `scope.<name>` values of default filters.
+_scope: ContextVar[dict[str, Any]] = ContextVar("orm_scope", default={})
 # For each database with an open transaction: the on_commit callbacks of the innermost one.
 _callbacks: ContextVar[dict[Database, list[Callable[[], Any]]]] = ContextVar("orm_on_commit", default={})
 
@@ -35,7 +39,7 @@ class Database:
     def __init__(
         self, engine: _native.Engine, url: str, registry: Registry = registry, replicas: Sequence[_native.Engine] = ()
     ) -> None:
-        self._engine = engine
+        self._base = engine
         self.url = url
         self._registry = registry
         self._replicas = list(replicas)
@@ -46,9 +50,15 @@ class Database:
     @property
     def primary(self) -> Database:
         """This database without its replicas: every statement goes to the primary."""
-        view = Database(self._engine, self.url, self._registry)
+        view = Database(self._base, self.url, self._registry)
         view._root = self._root
         return view
+
+    @property
+    def _engine(self) -> _native.Engine:
+        """The primary's engine, with the tenant of an enclosing `tenant()` block."""
+        tenant = _tenants.get().get(self._root)
+        return self._base if tenant is None else tenant[0]
 
     def _tx(self) -> _native.Transaction | None:
         cur = _current_tx.get()
@@ -58,14 +68,38 @@ class Database:
         """The engine for a read: the next replica outside a transaction, else the primary."""
         if not self._replicas or self._tx() is not None:
             return self._engine
-        self._turn = (self._turn + 1) % len(self._replicas)
-        return self._replicas[self._turn]
+        tenant = _tenants.get().get(self._root)
+        replicas = self._replicas if tenant is None else tenant[1]
+        self._turn = (self._turn + 1) % len(replicas)
+        return replicas[self._turn]
+
+    @contextmanager
+    def tenant(self, id: str | int) -> Iterator[None]:
+        """``with db.tenant(id):`` — every transaction on this database in the block first
+        runs ``SELECT set_config('app.tenant', <id>, true)`` (``SET LOCAL``), so Postgres
+        row-level security policies can read ``current_setting('app.tenant')``. A
+        statement outside a transaction runs in a transaction of its own. A transaction
+        that is already open keeps its setting. Tasks started in the block get it."""
+        if self.url.startswith("sqlite://"):
+            raise QueryError("db.tenant() sets a Postgres setting for row-level security; sqlite has none")
+        if isinstance(id, bool) or not isinstance(id, (str, int)):
+            raise TypeError(f"tenant id must be a str or an int, got {id!r}")
+        root, value = self._root, [str(id)]
+        engines = (
+            root._base.with_settings(["app.tenant"], value),
+            [r.with_settings(["app.tenant"], value) for r in root._replicas],
+        )
+        token = _tenants.set({**_tenants.get(), root: engines})
+        try:
+            yield
+        finally:
+            _tenants.reset(token)
 
     async def _run(
         self, ir: dict[str, Any], params: list[Any], row_cls: type | None = None, db: Database | None = None
     ) -> Any:
         """Runs a query; instances it builds get ``db`` to write back to (``using()``)."""
-        op = json.dumps(ir)
+        op, params = _with_scope(json.dumps(ir), params)
         if debug._scope.get() is not None:
             debug.record("run:" + op, lambda: self._registry.native().statement(op, params))
         engine = self._reader() if ir["op"] in _READS else self._engine
@@ -100,8 +134,9 @@ class Database:
     ) -> Any:
         if debug._scope.get() is not None:
             debug.record(f"update_many:{model}:{fields}:{json.dumps(filters)}", lambda: f"UPDATE {model} SET {', '.join(fields)} ... (update_many)")
+        filters_json, params = _with_scope(json.dumps(filters), params, key="filters")
         return await self._engine.update_many(
-            model, fields, rows, json.dumps(filters), params, returning, batch_size, self._tx(), db, without_defaults,
+            model, fields, rows, filters_json, params, returning, batch_size, self._tx(), db, without_defaults,
             allowed_writes(),
         )
 
@@ -267,7 +302,7 @@ class Database:
         global _default
         if self._root is not self:
             return await self._root.close()
-        await self._engine.close()
+        await self._base.close()
         for replica in self._replicas:
             await replica.close()
         if _default is self:
@@ -304,6 +339,30 @@ async def connect(
     if default:
         _default = db
     return db
+
+
+@contextmanager
+def scope(**values: Any) -> Iterator[None]:
+    """``with orm.scope(shop=shop.id):`` — the values that ``scope.<name>`` reads in
+    default filters (``@@query.filter("shop_id == scope.shop")``). A query on a model
+    whose default filter reads a value that no enclosing ``scope()`` sets raises
+    ``QueryError``. Inner values replace outer ones; tasks started in the block get them."""
+    token = _scope.set({**_scope.get(), **values})
+    try:
+        yield
+    finally:
+        _scope.reset(token)
+
+
+def _with_scope(op: str, params: list[Any], key: str | None = None) -> tuple[str, list[Any]]:
+    """``op`` (a statement's IR, or with ``key`` a list wrapped under it) with the scope's
+    parameter indexes, and ``params`` with the scope's values appended."""
+    values = _scope.get()
+    if not values:
+        return op, params
+    index = json.dumps({name: len(params) + i for i, name in enumerate(values)})
+    op = f'{{"{key}":{op},"scope":{index}}}' if key else f'{op[:-1]},"scope":{index}}}'
+    return op, [*params, *values.values()]
 
 
 def get_database() -> Database:

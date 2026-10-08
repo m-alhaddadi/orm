@@ -4,7 +4,7 @@
  */
 
 import { Builder } from "./build.js";
-import { resolve, type Database } from "./db.js";
+import { resolve, withScope, type Database } from "./db.js";
 import {
   asCondition,
   Column,
@@ -1101,8 +1101,9 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     }
     const db = this.db();
     if (debugging()) record(`updateMany:${this.meta.name}:${prepared.fields}:${JSON.stringify(ir["filters"])}`, () => `UPDATE ${this.meta.name} SET ${prepared.fields.join(", ")} ... (updateMany)`);
+    const [filters, scoped] = withScope(JSON.stringify(ir["filters"]), params, "filters");
     const res = await db_wait(db, (tx) =>
-      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, JSON.stringify(ir["filters"]), params, returning, batchSize ?? null, tx, this.state.withoutDefaults, allowedWrites()),
+      db.engine.updateMany(this.meta.name, prepared.fields, prepared.rows, filters, scoped, returning, batchSize ?? null, tx, this.state.withoutDefaults, allowedWrites()),
     );
     return returning ? (new Builder(db.registry, this.state.db).returned(res as NativeReturned) as M["row"][]) : (res as number);
   }

@@ -144,6 +144,11 @@ impl<'a> Parser<'a> {
         Ok(match token.as_str() {
             "(" => { let value = self.boolean(0)?; if self.take()? != ")" { return Err("expected ')'".into()); } value },
             "parent.default_filter" => self.parent.cloned().ok_or("parent.default_filter has no inherited filter")?,
+            _ if token.starts_with("scope.") => {
+                let name = &token["scope.".len()..];
+                if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') { return Err(format!("invalid scope value {token}: write scope.<name>")); }
+                json!({"t":"scope","name":name})
+            }
             "null" => Value::Null,
             "true" | "false" => json!({"t":"const","value":token == "true"}),
             _ if token.starts_with('"') => json!({"t":"text","value":serde_json::from_str::<String>(&token).map_err(|e| e.to_string())?}),
@@ -298,6 +303,13 @@ mod tests {
         lower(&mut schema).unwrap();
         assert_eq!(schema.behavior.query_defaults[1].order, schema.behavior.query_defaults[0].order);
         assert_eq!(schema.behavior.query_defaults[1].order.len(), 2);
+    }
+    #[test]
+    fn scope_values() {
+        let filter = Parser::parse("shop_id == scope.shop and active == true", None).unwrap();
+        assert_eq!(filter["items"][0]["r"], json!({"t":"scope","name":"shop"}));
+        assert!(Parser::parse("shop_id == scope.", None).is_err());
+        assert!(Parser::parse("shop_id == scope.a.b", None).is_err());
     }
     #[test]
     fn operator_precedence_and_null() {

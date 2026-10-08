@@ -9,7 +9,7 @@ expressions over model attributes, Django-style managers on top::
 """
 
 from . import debug, fields
-from .db import Database, connect, get_database
+from .db import Database, connect, get_database, scope
 from .errors import (
     DatabaseError,
     DoesNotExist,
@@ -61,6 +61,7 @@ __all__ = [
     "loads",
     "Database",
     "connect",
+    "scope",
     "get_database",
     "Model",
     "registry",

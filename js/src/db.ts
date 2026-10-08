@@ -13,6 +13,10 @@ let defaultDb: Database | undefined;
 
 /** The innermost open transaction of the current async context, and its database. */
 const current = new AsyncLocalStorage<{ readonly db: Database; readonly tx: NativeTransaction }>();
+/** For each database in a `tenant()` call: its primary and replica engines with the tenant set. */
+const tenants = new AsyncLocalStorage<ReadonlyMap<Database, { readonly primary: NativeEngine; readonly replicas: readonly NativeEngine[] }>>();
+/** The `scope.<name>` values of default filters. */
+const scopeValues = new AsyncLocalStorage<Readonly<Record<string, unknown>>>();
 /** For each database with an open transaction: the onCommit callbacks of the innermost one. */
 const callbacks = new AsyncLocalStorage<ReadonlyMap<Database, (() => unknown)[]>>();
 
@@ -47,15 +51,20 @@ export class Database {
 
   /** @internal */
   constructor(
-    readonly engine: NativeEngine,
+    private readonly base: NativeEngine,
     readonly url: string,
     readonly registry: Registry,
     private readonly replicas: readonly NativeEngine[] = [],
   ) {}
 
+  /** @internal The primary's engine, with the tenant of an enclosing `tenant()` call. */
+  get engine(): NativeEngine {
+    return tenants.getStore()?.get(this.root)?.primary ?? this.base;
+  }
+
   /** This database without its replicas: every statement goes to the primary. */
   get primary(): Database {
-    const view = new Database(this.engine, this.url, this.registry);
+    const view = new Database(this.base, this.url, this.registry);
     view.root = this.root;
     return view;
   }
@@ -71,8 +80,31 @@ export class Database {
     if (this.replicas.length === 0 || this.tx() !== null) {
       return this.engine;
     }
-    this.turn = (this.turn + 1) % this.replicas.length;
-    return this.replicas[this.turn]!;
+    const replicas = tenants.getStore()?.get(this.root)?.replicas ?? this.replicas;
+    this.turn = (this.turn + 1) % replicas.length;
+    return replicas[this.turn]!;
+  }
+
+  /**
+   * Runs `fn` with a tenant: every transaction on this database in it first runs
+   * `SELECT set_config('app.tenant', <id>, true)` (`SET LOCAL`), so Postgres row-level
+   * security policies can read `current_setting('app.tenant')`. A statement outside a
+   * transaction runs in a transaction of its own. A transaction that is already open keeps
+   * its setting. Gives what `fn` gives.
+   */
+  tenant<T>(id: string | number | bigint, fn: () => Promise<T>): Promise<T> {
+    if (this.url.startsWith("sqlite://")) {
+      throw new QueryError("db.tenant() sets a Postgres setting for row-level security; sqlite has none");
+    }
+    if (!["string", "number", "bigint"].includes(typeof id)) {
+      throw new TypeError(`tenant id must be a string or a number, got ${String(id)}`);
+    }
+    const root = this.root, value = [String(id)];
+    const engines = {
+      primary: root.base.withSettings(["app.tenant"], value),
+      replicas: root.replicas.map((r) => r.withSettings(["app.tenant"], value)),
+    };
+    return tenants.run(new Map(tenants.getStore() ?? []).set(root, engines), fn);
   }
 
   /** @internal */
@@ -82,6 +114,7 @@ export class Database {
 
   /** @internal */
   runJson(json: string, params: unknown[]): Promise<unknown> {
+    [json, params] = withScope(json, params);
     if (debugging()) record(`run:${json}`, () => this.registry.native().statement(json, params));
     const engine = READ.test(json) ? this.reader() : this.engine;
     return wait(() => engine.run(json, params, this.tx(), allowedWrites()));
@@ -230,7 +263,7 @@ export class Database {
     if (this.root !== this) {
       return this.root.close();
     }
-    await wait(() => this.engine.close());
+    await wait(() => this.base.close());
     for (const replica of this.replicas) {
       await wait(() => replica.close());
     }
@@ -285,6 +318,29 @@ export function getDatabase(): Database {
     throw new NotConnected("no default database; call `await connect(url)` first");
   }
   return defaultDb;
+}
+
+/**
+ * Runs `fn` with the values that `scope.<name>` reads in default filters
+ * (`@@query.filter("shop_id == scope.shop")`). A query on a model whose default filter
+ * reads a value that no enclosing `scope()` sets throws `QueryError`. Inner values
+ * replace outer ones. Gives what `fn` gives.
+ */
+export function scope<T>(values: Readonly<Record<string, unknown>>, fn: () => Promise<T>): Promise<T> {
+  return scopeValues.run({ ...scopeValues.getStore(), ...values }, fn);
+}
+
+/** @internal `json` (a statement's IR, or with `key` a list wrapped under it) with the
+ * scope's parameter indexes, and `params` with the scope's values appended. */
+export function withScope(json: string, params: unknown[], key?: string): [string, unknown[]] {
+  const values = scopeValues.getStore();
+  if (values === undefined || Object.keys(values).length === 0) {
+    return [json, params];
+  }
+  const names = Object.keys(values);
+  const index = JSON.stringify(Object.fromEntries(names.map((n, i) => [n, params.length + i])));
+  const op = key === undefined ? `${json.slice(0, -1)},"scope":${index}}` : `{"${key}":${json},"scope":${index}}`;
+  return [op, [...params, ...names.map((n) => values[n])]];
 }
 
 /** A validated lock key: a decimal 64-bit integer, or the UTF-8 name the engine hashes. */

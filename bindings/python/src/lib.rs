@@ -99,9 +99,9 @@ fn update_many_plan<'py>(
         .into_iter()
         .map(|r| r.into_iter().map(|v| v.expect("no DEFAULT in update_many")).collect())
         .collect();
-    let filters: Vec<ir::Expr> =
-        serde_json::from_str(filters_json).map_err(|e| query_err(format!("invalid filter IR: {e}")))?;
-    exec::plan_update_many(schema, target, model, fields, values, &filters, &PyParams(params), returning, batch_size, without_defaults)
+    let (filters, scope) = orm_engine::params::scoped_filters(filters_json).map_err(engine_err)?;
+    let params = orm_engine::params::Scoped { params: &PyParams(params), scope: &scope };
+    exec::plan_update_many(schema, target, model, fields, values, &filters, &params, returning, batch_size, without_defaults)
         .map_err(engine_err)
 }
 
@@ -439,6 +439,13 @@ impl Engine {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             conn.advisory_lock(key, exclusive, nowait).await.map_err(db_err)
         })
+    }
+
+    /// This engine on the same pool, with `set_config(name, value, true)` for each
+    /// setting at the start of every transaction (statements outside one get their own).
+    fn with_settings(&self, names: Vec<String>, values: Vec<String>) -> Engine {
+        let driver: Arc<dyn Driver> = Arc::new(db::WithSettings::new(self.driver.clone(), names.into_iter().zip(values).collect()));
+        Engine { driver, target: self.target, schema: self.schema.clone(), classes: self.classes.clone() }
     }
 
     /// Session advisory lock on a pinned connection; `None` when it is not taken.

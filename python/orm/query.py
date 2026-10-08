@@ -869,7 +869,7 @@ class Prepared(Generic[M]):
     def _start(self, kind: str, values: Mapping[str, Any]) -> Awaitable[Any]:
         """Starts the statement; the engine's awaitable comes back as is, without a
         coroutine around it."""
-        from .db import resolve
+        from .db import _with_scope, resolve
 
         c = self._statement(kind)
         params = c.bind(values, self._names)
@@ -879,7 +879,8 @@ class Prepared(Generic[M]):
         db = resolve(qs._db)
         if debug._scope.get() is not None:
             debug.record("run:" + c.json, lambda: str(qs._native().statement(c.json, params)))
-        return db._reader().run(c.json, params, db._tx(), None, qs._db, allowed_writes())
+        op, params = _with_scope(c.json, params)
+        return db._reader().run(op, params, db._tx(), None, qs._db, allowed_writes())
 
     def __call__(self, **values: Any) -> Awaitable[list[M]]:
         """The rows, like awaiting the query set."""
