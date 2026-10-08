@@ -27,7 +27,7 @@ use crate::error::{query_err, Error, Result};
 use crate::params::Params;
 use orm_core::ir::{
     ArithOp, Assignment, CmpOp, ColType, Count, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Nulls, Operation, Order, ParamRef,
-    Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType, When,
+    JsonKey, Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType, When,
 };
 use orm_core::dialect::{Capabilities, Dialect, Target};
 use orm_core::schema::{Model, Schema};
@@ -329,7 +329,7 @@ fn col_paths<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
                 col_paths(v, out, has_not);
             }
         }
-        Expr::IsNull { item, .. } => col_paths(item, out, has_not),
+        Expr::IsNull { item, .. } | Expr::JsonPath { item, .. } => col_paths(item, out, has_not),
         Expr::Case { whens, default } => {
             for part in case_parts(whens, default) {
                 col_paths(part, out, has_not);
@@ -928,12 +928,13 @@ impl<'s> Planner<'s> {
     fn leaf(&mut self, e: &Expr) -> Result<SExpr> {
         Ok(match e {
             Expr::Cmp { op, l, r } => {
-                if self.target.dialect == Dialect::Sqlite && matches!(op, CmpOp::Contains | CmpOp::ContainedBy | CmpOp::Overlaps) {
-                    return Err(Error::query("sqlite does not support PostgreSQL containment or overlap operators"));
+                if self.target.dialect == Dialect::Sqlite && matches!(op, CmpOp::Contains | CmpOp::ContainedBy | CmpOp::Overlaps | CmpOp::HasKey) {
+                    return Err(Error::query("sqlite does not support PostgreSQL containment, overlap or JSON key operators"));
                 }
                 let hint = self.hint_of(l).or(self.hint_of(r));
                 let l = self.value(l, hint)?;
-                let r = self.value(r, hint)?;
+                // The key of `?` is text, whatever the JSON column's type.
+                let r = self.value(r, if matches!(op, CmpOp::HasKey) { Hint::ty(ColType::Text) } else { hint })?;
                 match op {
                     CmpOp::Eq => l.eq(r),
                     CmpOp::Ne => l.ne(r),
@@ -944,6 +945,7 @@ impl<'s> Planner<'s> {
                     CmpOp::Contains => SExpr::cust_with_exprs("$1 @> $2", [l, r]),
                     CmpOp::ContainedBy => SExpr::cust_with_exprs("$1 <@ $2", [l, r]),
                     CmpOp::Overlaps => SExpr::cust_with_exprs("$1 && $2", [l, r]),
+                    CmpOp::HasKey => SExpr::cust_with_exprs("$1 ? $2", [l, r]),
                 }
             }
             Expr::In { item, values, neg } => {
@@ -1081,7 +1083,7 @@ impl<'s> Planner<'s> {
             }
             // Arithmetic results are plain values: no write_sql cast.
             Expr::Arith { l, r, .. } => Hint { ty: self.hint_of(l).or(self.hint_of(r)).ty, field: None },
-            Expr::Func { .. } | Expr::Subquery { .. } | Expr::Window { .. } | Expr::Case { .. } => {
+            Expr::Func { .. } | Expr::Subquery { .. } | Expr::Window { .. } | Expr::Case { .. } | Expr::JsonPath { .. } => {
                 Hint { ty: self.expr_type(e).ok(), field: None }
             }
             _ => Hint::default(),
@@ -1165,10 +1167,15 @@ impl<'s> Planner<'s> {
             }
             Expr::Func { name, args, rel, distinct, filter } => self.func(name, args, rel.as_deref(), *distinct, filter.as_deref())?,
             Expr::Case { whens, default } => self.case(whens, default.as_deref(), hint)?,
+            Expr::JsonPath { item, path, text } => self.json_path(item, path, *text)?,
             Expr::Arith { op, l, r } => {
+                if matches!(op, ArithOp::JsonMerge) && self.target.dialect == Dialect::Sqlite {
+                    return Err(Error::query("sqlite does not support the JSON || merge"));
+                }
                 let inner = self.hint_of(l).or(self.hint_of(r));
                 let hint = match op {
                     ArithOp::Concat => Hint { ty: Some(ValueType::scalar(ColType::Text)), field: None },
+                    ArithOp::JsonMerge => Hint { ty: Some(ValueType::scalar(ColType::Json)), field: None },
                     _ => Hint { ty: inner.ty.or(hint.ty), field: None },
                 };
                 let l = self.value(l, hint)?;
@@ -1178,11 +1185,39 @@ impl<'s> Planner<'s> {
                     ArithOp::Sub => l.sub(r),
                     ArithOp::Mul => l.mul(r),
                     ArithOp::Div => l.div(r),
-                    ArithOp::Concat => template(self.target.dialect, "$1 || $2", vec![l, r]),
+                    ArithOp::Concat | ArithOp::JsonMerge => template(self.target.dialect, "$1 || $2", vec![l, r]),
                 }
             }
             cond => self.cond(cond)?,
         })
+    }
+
+    /// `<item> -> 'a' -> 0 ...` (`->>` for the last step with `text`): keys bind as text,
+    /// indexes are written into the SQL.
+    fn json_path(&mut self, item: &Expr, path: &[JsonKey], text: bool) -> Result<SExpr> {
+        if self.target.dialect == Dialect::Sqlite {
+            return Err(Error::query("sqlite does not support JSON paths"));
+        }
+        if path.is_empty() {
+            return Err(Error::query("a JSON path needs at least one key or index"));
+        }
+        if self.expr_type(item)? != ValueType::scalar(ColType::Json) {
+            return Err(Error::query("a JSON path needs a Json column"));
+        }
+        let mut exprs = vec![self.value(item, Hint::default())?];
+        let mut sql = String::from("$1");
+        for (k, key) in path.iter().enumerate() {
+            let op = if text && k + 1 == path.len() { "->>" } else { "->" };
+            let base = if k == 0 { sql } else { format!("({sql})") };
+            sql = match key {
+                JsonKey::Index(i) => format!("{base} {op} {i}"),
+                JsonKey::Key(s) => {
+                    exprs.push(SExpr::val(s.clone()));
+                    format!("{base} {op} ${}", exprs.len())
+                }
+            };
+        }
+        Ok(template(self.target.dialect, sql, exprs))
     }
 
     /// `CASE WHEN ... THEN ... ELSE ... END`. Plain values bind with the type the context
@@ -1250,6 +1285,9 @@ impl<'s> Planner<'s> {
                 None => return Err(Error::query("case() needs a value whose type is known: a column, an expression or a non-null value")),
             },
             Expr::Arith { op: ArithOp::Concat, .. } => scalar(ColType::Text),
+            Expr::Arith { op: ArithOp::JsonMerge, .. } => scalar(ColType::Json),
+            Expr::JsonPath { text: true, .. } => scalar(ColType::Text),
+            Expr::JsonPath { .. } => scalar(ColType::Json),
             Expr::Arith { l, r, .. } => match self.expr_type(l) {
                 Ok(t) => t,
                 Err(_) => self.expr_type(r)?,

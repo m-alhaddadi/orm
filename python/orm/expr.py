@@ -46,6 +46,7 @@ __all__ = [
     "excluded",
     "Func",
     "Case",
+    "JsonPath",
     "Labeled",
     "Window",
     "WindowDef",
@@ -261,13 +262,44 @@ class Expression(Node, Generic[T]):
     def __getitem__(self: Expression[list[E]], index: int) -> Func[E | None]: ...
     @overload
     def __getitem__(self: Expression[list[E] | None], index: int) -> Func[E | None]: ...
-    def __getitem__(self: Expression[Any], index: int) -> Func[Any]:
+    @overload
+    def __getitem__(self: Expression[Any], index: str) -> JsonPath: ...
+    def __getitem__(self: Expression[Any], index: int | str) -> Expression[Any]:
         """Array columns: the element at SQL's 1-based ``index`` (``col[1]`` is the first),
-        ``None`` out of range. PostgreSQL only."""
+        ``None`` out of range. JSON columns: the value under a key or at a 0-based array
+        index (``meta["tags"][0]``, ``meta -> 'tags' -> 0``). PostgreSQL only."""
+        if isinstance(self, JsonPath) or (isinstance(self, ColumnRef) and self._field.type_name == "json"):
+            return JsonPath(self, (index,))
+        if isinstance(index, str):
+            raise TypeError(f"{self!r} is not a JSON column; a string key needs one")
         return Func("element", (self, _Int(index)))
 
     # ``__getitem__`` alone would make every expression iterable.
     __iter__ = None
+
+    # JSON -----------------------------------------------------------------------------------
+
+    def json_contains(self, value: Any) -> Condition:
+        """JSON: the value contains ``value`` at the top level (``col @> value``):
+        ``Post.meta.json_contains({"tags": ["a"]})``. PostgreSQL only."""
+        return Comparison("contains", self, Literal(value))
+
+    def json_contained_by(self, value: Any) -> Condition:
+        """JSON: ``value`` contains the value (``col <@ value``). PostgreSQL only."""
+        return Comparison("contained_by", self, Literal(value))
+
+    def has_key(self, key: str) -> Condition:
+        """JSON: the object has the top-level key ``key``, or the array the string element
+        (``col ? key``). PostgreSQL only."""
+        if not isinstance(key, str):
+            raise TypeError(f"has_key() takes a string, got {key!r}")
+        return Comparison("has_key", self, Literal(key))
+
+    def json_merge(self, value: Any) -> Expression[Any]:
+        """JSON: ``col || value``: the objects merged (the keys of ``value`` win), or the
+        arrays joined. For updates: ``update(meta=Post.meta.json_merge({"seen": True}))``.
+        PostgreSQL only."""
+        return Arith("json_merge", self, value if isinstance(value, Node) else Literal(value))
 
     # Strings -------------------------------------------------------------------------------
 
@@ -743,6 +775,41 @@ class Case(Expression[T]):
         return f"func.case({whens}{'' if self._default is None else f', default={self._default!r}'})"
 
 
+class JsonPath(Expression[Any]):
+    """``Post.meta["a"]["b"]``: a ``jsonb`` value inside a JSON column. It compares as JSON
+    (``== "x"`` is the JSON string ``"x"``); :meth:`as_text` reads it as text."""
+
+    __slots__ = ("_item", "_path", "_text")
+
+    def __init__(self, item: Expression[Any], path: tuple[str | int, ...], text: bool = False) -> None:
+        for key in path:
+            if isinstance(key, bool) or not isinstance(key, (str, int)):
+                raise TypeError(f"JSON path steps are str keys or int indexes, got {key!r}")
+        if isinstance(item, JsonPath):
+            inner: JsonPath = item
+            if inner._text:
+                raise TypeError("as_text() ends a JSON path")
+            item, path = inner._item, inner._path + path
+        self._item: Expression[Any] = item
+        self._path: tuple[str | int, ...] = path
+        self._text: bool = text
+
+    def as_text(self) -> Expression[str | None]:
+        """The value as text (the last step is ``->>``): a JSON string without quotes, so
+        ``like``, ``contains`` and string functions work on it."""
+        return JsonPath(self._item, self._path, text=True)
+
+    def _ir(self, ctx: IRContext) -> IR:
+        ir: IR = {"t": "json_path", "item": self._item._ir(ctx), "path": list(self._path)}
+        if self._text:
+            ir["text"] = True
+        return ir
+
+    def __repr__(self) -> str:
+        steps = "".join(f"[{k!r}]" for k in self._path)
+        return f"{self._item!r}{steps}{'.as_text()' if self._text else ''}"
+
+
 class ScalarSubquery(Expression[T]):
     """``qs.select(x).as_scalar()``: a one-column subquery used as a value."""
 
@@ -1073,7 +1140,7 @@ class Comparison(Condition):
         return {"t": "cmp", "op": self.op, "l": self.left._ir(ctx), "r": self.right._ir(ctx)}
 
     def __repr__(self) -> str:
-        sym = {"eq": "==", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">="}[self.op]
+        sym = {"eq": "==", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">="}.get(self.op, self.op)
         return f"({self.left!r} {sym} {self.right!r})"
 
 
@@ -1089,7 +1156,7 @@ class Arith(Expression[Any]):
         return {"t": "arith", "op": self.op, "l": self.left._ir(ctx), "r": self.right._ir(ctx)}
 
     def __repr__(self) -> str:
-        sym = {"add": "+", "sub": "-", "mul": "*", "div": "/", "concat": "||"}[self.op]
+        sym = {"add": "+", "sub": "-", "mul": "*", "div": "/", "concat": "||", "json_merge": "||"}[self.op]
         return f"({self.left!r} {sym} {self.right!r})"
 
 

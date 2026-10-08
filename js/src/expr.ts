@@ -18,7 +18,7 @@
 
 import { Decimal } from "./decimal.js";
 import { QueryError } from "./errors.js";
-import type { FieldMeta, Hop, In, ModelSpec } from "./meta.js";
+import type { FieldMeta, Hop, In, JsonValue, ModelSpec } from "./meta.js";
 
 export type IR = { [key: string]: unknown };
 
@@ -307,6 +307,46 @@ export abstract class Expression<T, S extends string = never, P = {}> extends No
    * out of range. PostgreSQL only. */
   element<E>(this: Expression<readonly E[] | null, S, P>, index: number): Func<E | null, S, P> {
     return new Func("element", [this, new Int(index)]);
+  }
+
+  // JSON -------------------------------------------------------------------------------------
+
+  /** JSON columns: the value under each key or 0-based array index in turn
+   * (`meta.get("tags", 0)` is `meta -> 'tags' -> 0`), `null` when absent. It compares as
+   * JSON; `.asText()` reads it as text. PostgreSQL only. */
+  get(this: Expression<JsonValue | null, S, P>, ...path: readonly (string | number)[]): JsonPath<S, P> {
+    if (!path.length) {
+      throw new TypeError("get() needs at least one key or index");
+    }
+    return this instanceof JsonPath ? this.extend(path) : new JsonPath(this, path, false);
+  }
+
+  /** JSON: the value contains `value` at the top level (`col @> value`). PostgreSQL only. */
+  jsonContains(this: Expression<JsonValue | null, S, P>, value: JsonValue): Condition<S, P> {
+    return new Comparison("contains", this, new Literal(value));
+  }
+
+  /** JSON: `value` contains the value (`col <@ value`). PostgreSQL only. */
+  jsonContainedBy(this: Expression<JsonValue | null, S, P>, value: JsonValue): Condition<S, P> {
+    return new Comparison("contained_by", this, new Literal(value));
+  }
+
+  /** JSON: the object has the top-level key `key`, or the array the string element
+   * (`col ? key`). PostgreSQL only. */
+  hasKey(this: Expression<JsonValue | null, S, P>, key: string): Condition<S, P> {
+    if (typeof key !== "string") {
+      throw new TypeError(`hasKey() takes a string, got ${typeof key}`);
+    }
+    return new Comparison("has_key", this, new Literal(key));
+  }
+
+  /** JSON: `col || value`, the objects merged (the keys of `value` win) or the arrays
+   * joined: `update({ meta: Post.meta.jsonMerge({ seen: true }) })`. PostgreSQL only. */
+  jsonMerge<S2 extends string = never, P2 = {}>(
+    this: Expression<JsonValue | null, S, P>,
+    value: JsonValue | Expression<JsonValue | null, S2, P2>,
+  ): Expression<JsonValue, S | S2, P & P2> {
+    return new Arith("json_merge", this, value instanceof Node ? value : new Literal(value)) as never;
   }
 
   // Strings ----------------------------------------------------------------------------------
@@ -676,6 +716,44 @@ export class Func<T, S extends string = never, P = {}> extends Expression<T, S, 
     }
     const spec = (a ?? {}) as OverSpec<string, unknown>;
     return new Window(this, undefined, many(spec.partitionBy), orderings(spec.orderBy), frameIr(spec));
+  }
+}
+
+/** `Post.meta.get("a", "b")`: a `jsonb` value inside a JSON column. */
+export class JsonPath<S extends string = never, P = {}> extends Expression<JsonValue | null, S, P> {
+  constructor(
+    readonly item: Node,
+    readonly path: readonly (string | number)[],
+    readonly text: boolean,
+  ) {
+    super();
+    for (const key of path) {
+      if (typeof key !== "string" && !Number.isSafeInteger(key)) {
+        throw new TypeError(`JSON path steps are string keys or integer indexes, got ${String(key)}`);
+      }
+    }
+  }
+
+  /** @internal */
+  extend(path: readonly (string | number)[]): JsonPath<S, P> {
+    if (this.text) {
+      throw new TypeError("asText() ends a JSON path");
+    }
+    return new JsonPath(this.item, [...this.path, ...path], false);
+  }
+
+  /** The value as text (the last step is `->>`): a JSON string without quotes, so `like`,
+   * `contains` and string functions work on it. */
+  asText(): Expression<string | null, S, P> {
+    return new JsonPath(this.item, this.path, true) as never;
+  }
+
+  ir(ctx: IRContext): IR {
+    const ir: IR = { t: "json_path", item: this.item.ir(ctx), path: [...this.path] };
+    if (this.text) {
+      ir["text"] = true;
+    }
+    return ir;
   }
 }
 

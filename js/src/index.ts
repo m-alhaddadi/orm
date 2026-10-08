@@ -22,6 +22,7 @@ export {
   Condition,
   Expression,
   Case,
+  JsonPath,
   Func,
   Ordering,
   ParamRef,

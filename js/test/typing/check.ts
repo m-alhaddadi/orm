@@ -57,6 +57,15 @@ export async function aggregateFilters() {
   func.count({ filter: Post.views });
 }
 
+export function json(meta: import("../../src/index.js").Column<JsonValue, "Post">) {
+  same<ReturnType<typeof meta.get>, import("../../src/index.js").JsonPath<"Post", {}>>();
+  same<ReturnType<ReturnType<typeof meta.get>["asText"]>, import("../../src/index.js").Expression<string | null, "Post", {}>>();
+  void meta.jsonContains({ a: [1] }).and(meta.hasKey("a"));
+  void Post.objects.update({ views: 1 });
+  // @ts-expect-error JSON paths need a JSON value
+  Post.views.get("a");
+}
+
 export async function filters() {
   await User.objects.filter(User.email.eq("a"), User.posts.views.gt(3)).all();
   await Post.objects.filter(Post.published).all();

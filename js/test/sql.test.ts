@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Func, QueryError, and, exists, excluded, func, or, outer } from "../src/index.js";
+import { Func, QueryError, Registry, and, exists, excluded, func, loads, or, outer } from "../src/index.js";
 import { Comment, Post, Profile, Tag, User } from "./blog/models.js";
 
 const Y = new Date("2026-10-01T00:00:00Z");
@@ -300,6 +300,18 @@ test("aggregate FILTER SQL", () => {
   );
   assert.ok(Post.objects.select({ s: func.sum(Post.views, { filter: Post.published }).over({ partitionBy: Post.authorId }) }).sql()
     .includes('SUM("posts"."views") FILTER (WHERE "posts"."published" = TRUE) OVER (PARTITION BY "posts"."author_id")'));
+});
+
+test("JSON path, containment and merge SQL", () => {
+  const registry = new Registry();
+  const Doc = loads(`model Doc {\n id BigInt @id\n meta Json\n title String\n @@map("docs")\n}`, { registry })["Doc"] as any;
+  const w = (c: unknown) => where(Doc.objects.filter(c));
+  assert.equal(w(Doc.meta.get("author", "name").eq("Ann")), `(("docs"."meta" -> 'author') -> 'name') = '"Ann"'`);
+  assert.equal(w(Doc.meta.get("tags").get(0).asText().eq("x")), `(("docs"."meta" -> 'tags') ->> 0) = 'x'`);
+  assert.equal(w(Doc.meta.jsonContains({ kind: "post" })), `"docs"."meta" @> '{"kind":"post"}'`);
+  assert.equal(w(Doc.meta.hasKey("tags")), `"docs"."meta" ? 'tags'`);
+  assert.throws(() => Doc.meta.get("a").asText().get("b"), /ends a JSON path/);
+  assert.throws(() => Doc.meta.get(), /at least one/);
 });
 
 test("string functions and concatenation SQL", () => {

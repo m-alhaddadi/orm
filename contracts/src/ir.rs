@@ -538,6 +538,8 @@ pub enum CmpOp {
     ContainedBy,
     /// Arrays: `l && r` (an element in common).
     Overlaps,
+    /// JSON: `l ? r`, the object has the key `r` (or the array the string element).
+    HasKey,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug)]
@@ -549,6 +551,8 @@ pub enum ArithOp {
     Div,
     /// `l || r`: string concatenation; NULL when either side is NULL.
     Concat,
+    /// `l || r` on `jsonb`: the objects merged (keys of `r` win), or the arrays joined.
+    JsonMerge,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -589,6 +593,14 @@ pub enum Expr {
         whens: Vec<When>,
         #[serde(default)]
         default: Option<Box<Expr>>,
+    },
+    /// `<item> -> <key> -> ...`: a `jsonb` value inside a JSON column; with `text`, the
+    /// last step is `->>` and the value is text.
+    JsonPath {
+        item: Box<Expr>,
+        path: Vec<JsonKey>,
+        #[serde(default)]
+        text: bool,
     },
     /// `<item> [NOT] IN (SELECT <one column> ...)`.
     InSelect { item: Box<Expr>, select: Box<Select>, #[serde(default)] neg: bool },
@@ -632,6 +644,14 @@ pub enum Expr {
 pub struct When {
     pub cond: Expr,
     pub value: Expr,
+}
+
+/// One step of a JSON path: an object key or an array index.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum JsonKey {
+    Index(i64),
+    Key(String),
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

@@ -91,3 +91,34 @@ fn aggregate_filter() {
     let lower = json!({"t":"func","name":"lower","args":[col("title")],"filter":cmp("gt", col("views"), int(1))});
     assert!(plan(Dialect::Postgres, vec![lower], vec![]).unwrap_err().contains("only aggregates take a filter"));
 }
+
+#[test]
+fn json_paths_containment_and_merge() {
+    let mut fields = vec![
+        json!({"name":"id","column":"id","type":"big_int","primary_key":true}),
+        json!({"name":"meta","column":"meta","type":"json"}),
+        json!({"name":"title","column":"title","type":"text"}),
+    ];
+    let schema = |dialect: &str, fields: &Vec<Value>| Schema::from_ir(serde_json::from_value(json!({"dialect": dialect, "models":[{"name":"Doc","table":"docs","fields":fields}]})).unwrap()).unwrap();
+    let pg = schema("postgres", &fields);
+    let plan = |schema: &Schema, dialect: Dialect, columns: Vec<Value>| -> Result<String, String> {
+        let columns = columns.into_iter().map(|e| json!({"t":"expr","expr":e})).collect::<Vec<_>>();
+        let op: Operation = serde_json::from_value(json!({"op":"select","model":"Doc","columns":columns})).unwrap();
+        match Planner::plan(schema, Target::new(dialect), &op, &NoParams).map_err(|e| e.to_string())? {
+            Plan::Select(p) => Ok(db::build(dialect, &p.stmt).0),
+            _ => panic!("select"),
+        }
+    };
+    let path = json!({"t":"json_path","item":col("meta"),"path":["a", 0, "b"],"text":true});
+    let has = json!({"t":"cmp","op":"has_key","l":col("meta"),"r":text("k")});
+    let merge = json!({"t":"arith","op":"json_merge","l":col("meta"),"r":col("meta")});
+    assert_eq!(plan(&pg, Dialect::Postgres, vec![path.clone(), has.clone(), merge.clone()]).unwrap(),
+        r#"SELECT (("docs"."meta" -> $1) -> 0) ->> $2, "docs"."meta" ? $3, "docs"."meta" || "docs"."meta" FROM "docs""#);
+    let not_json = json!({"t":"json_path","item":col("title"),"path":["a"]});
+    assert!(plan(&pg, Dialect::Postgres, vec![not_json]).unwrap_err().contains("needs a Json column"));
+    fields.truncate(3);
+    let lite = schema("sqlite", &fields);
+    for e in [path, has, merge] {
+        assert!(plan(&lite, Dialect::Sqlite, vec![e]).unwrap_err().contains("sqlite does not support"));
+    }
+}

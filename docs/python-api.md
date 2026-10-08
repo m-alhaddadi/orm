@@ -235,6 +235,29 @@ await Profile.objects.select(func.unnest(Profile.links))                # one ro
   text, and an index out of range gives `None`. `func.unnest(...)` returns one row per
   element, so it is valid only as a `select()` column. SQLite has no array columns.
 
+### JSON columns
+
+```python
+await Doc.objects.filter(Doc.meta["author"]["name"] == "Ann")       # meta -> 'author' -> 'name' = '"Ann"'
+await Doc.objects.filter(Doc.meta["n"] > 3)                         # jsonb ordering: numbers compare as numbers
+await Doc.objects.filter(Doc.meta["tags"][0].as_text() == "x")      # ->> : text, no JSON quotes
+await Doc.objects.filter(Doc.meta["name"].as_text().icontains("an"))
+await Doc.objects.filter(Doc.meta.json_contains({"kind": "post"}))  # meta @> '{"kind": "post"}'
+Doc.meta.json_contained_by(value) / Doc.meta.has_key("tags")        # <@ / ?
+await Doc.objects.filter(...).update(meta=Doc.meta.json_merge({"seen": True}))   # meta || '{...}'
+```
+
+* A path step is a string key or a 0-based integer index. The value is `jsonb`, so a
+  comparison binds the other side as JSON: `== "x"` is the JSON string `"x"`, `== 5` the
+  number. `as_text()` ends a path and reads the value as text (`->>`).
+* On an array column, `col[1]` stays SQL's 1-based element access; a string key on a
+  column that is not `Json` is a `TypeError`.
+* `json_contains`, `json_contained_by` and `has_key` work on the column and on a path,
+  and use a GIN index on the column (`@@index([meta], type: Gin)`).
+* `json_merge(value)` is `||`: objects merge one level deep (the keys of `value` win);
+  arrays join.
+* PostgreSQL only: on SQLite these are a `QueryError`.
+
 ### Big tables: batches
 
 ```python

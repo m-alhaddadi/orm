@@ -191,6 +191,11 @@ first true condition, else `default` (`null` without one). It works in `select()
 Aggregates take `{ filter: cond }` (`FILTER (WHERE cond)`), for example
 `func.count({ filter: Post.published })` or
 `func.count(User.posts, { filter: User.posts.published })`.
+JSON columns: `Doc.meta.get("author", "name").eq("Ann")` (`meta -> 'author' -> 'name'`,
+compared as JSON), `.asText()` for the last step as text (`->>`),
+`Doc.meta.jsonContains({ kind: "post" })` (`@>`), `.jsonContainedBy(...)` (`<@`),
+`.hasKey("tags")` (`?`) and `update({ meta: Doc.meta.jsonMerge({ seen: true }) })` (`||`).
+Keys are strings, indexes 0-based integers. PostgreSQL only.
 The result types follow the SQL: `count` is a `bigint`, `sum(Int)` is `number | null`,
 `sum(Decimal)` is `Decimal | null`, and `avg` is `number | null`. A column read through a
 nullable relation becomes nullable.
