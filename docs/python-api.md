@@ -661,8 +661,10 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
 
 * The scope counts its queries by statement shape: the query without its values.
   Tasks started in the scope count too, and so do the queries of an inner scope.
+  An inner scope cannot raise the threshold of an outer scope; the outer scope also counts the inner queries.
   The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `in_bulk()`) count as one query.
 * The call site is the line that awaits the query (`await qs`, `await p.customers.all()`).
+  A query that `asyncio.gather()` or `create_task()` runs reports the line that started the event loop.
 * When the block ends, a shape that ran more than `threshold` times (default 5) raises `orm.debug.NPlusOne` with `fail=True`, or gives an `orm.debug.NPlusOneWarning`.
   The exception and the `with ... as report` value carry the report: each shape, its SQL, its count, the call site of its first query and the fix.
 * The fix is `select_related(...)` for a repeated `load_x()`, and `prefetch_related(...)` for a repeated unchanged to-many or many-to-many query (`await post.comments`, `await post.tags`).

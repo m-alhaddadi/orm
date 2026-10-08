@@ -618,8 +618,11 @@ fn client_defaults_stay_out_of_the_database_schema() {
         let error = field(f).unwrap_err();
         assert!(error.contains(message), "{f}: {error}");
     }
-    let ir = field("d Decimal @client_default(1.5)").unwrap();
-    assert_eq!(serde_json::to_value(&ir.models[0].fields[1].client_default).unwrap(), json!({"value": 1.5}));
+    // A Decimal number keeps every digit; an f64 would store 12345678901234568.
+    let ir = field("d Decimal @client_default(12345678901234567.89)").unwrap();
+    assert_eq!(serde_json::to_value(&ir.models[0].fields[1].client_default).unwrap(), json!({"value": "12345678901234567.89"}));
+    let ir = field("d Decimal[] @client_default([1.5, 123456789012345678901234567890])").unwrap();
+    assert_eq!(serde_json::to_value(&ir.models[0].fields[1].client_default).unwrap(), json!({"value": ["1.5", "123456789012345678901234567890"]}));
 }
 
 #[test]
@@ -683,14 +686,14 @@ fn the_generic_pass_owns_generic_and_reverse_fields() {
     assert_eq!(members(&items, 1).len(), 1);
     // The pass builds these members, so an ordinary attribute on one has nowhere to go.
     for (from, to, message) in [
-        ("@generic.relation(targets: [\"Post\"])", "@generic.relation(targets: [\"Post\"]) @unique", "Tag.target: @unique is not allowed on a Generic field"),
-        ("@generic.relation(targets: [\"Post\"])", "@map(\"zz\") @generic.relation(targets: [\"Post\"])", "Tag.target: @map is not allowed on a Generic field"),
-        ("@generic.reverse", "@generic.reverse @map(\"zz\")", "Post.tags: @map is not allowed on a @generic.reverse field"),
-        ("@generic.reverse", "@generic.reverse @relation(\"x\")", "Post.tags: @relation is not allowed on a @generic.reverse field"),
+        ("@generic.relation(targets: [\"Post\"])", "@generic.relation(targets: [\"Post\"]) @unique", "Tag.target: @unique is not allowed on a Generic field; use the explicit @@generic.relation form"),
+        ("@generic.relation(targets: [\"Post\"])", "@map(\"zz\") @generic.relation(targets: [\"Post\"])", "Tag.target: @map is not allowed on a Generic field; use the explicit @@generic.relation form"),
+        ("@generic.reverse", "@generic.reverse @map(\"zz\")", "Post.tags: @map is not allowed on a @generic.reverse field; remove it"),
+        ("@generic.reverse", "@generic.reverse @relation(\"x\")", "Post.tags: @relation is not allowed on a @generic.reverse field; remove it"),
     ] {
         let mut items = syntax::parse(&source.replace(from, to)).unwrap();
         let error = super::lower::behavior_declarations(&mut items, "t.prisma", std::slice::from_ref(&manifest)).unwrap_err().msg;
-        assert!(error.contains(message) && error.contains("use the explicit @@generic.relation form"), "{error}");
+        assert!(error.contains(message), "{error}");
     }
     // A Generic field without @generic.relation is not the pass's member.
     let mut items = syntax::parse("model Tag {\n id Int @id\n x Generic\n}").unwrap();

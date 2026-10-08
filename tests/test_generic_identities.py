@@ -187,3 +187,29 @@ def test_moving_to_the_generic_field_form_needs_no_migration(tmp_path):
         orm.load(schema, registry=registry)
         made = Migrations(directory, registry).make("initial")
         assert (made is None) == (i == 1)
+
+
+async def test_a_proxy_that_keeps_a_generic_field_fails_and_one_without_it_loads(tmp_path):
+    from orm import _native
+
+    capabilities = json.loads(_native.native_artifact())["capabilities"]
+    if "generic-relations" not in capabilities or "proxy-models" not in capabilities:
+        pytest.skip("needs an artifact with generic-relations and proxy-models")
+    schema = tmp_path / "schema.prisma"
+    tag = 'model Tag {\nid Int @id\ntarget Generic? @generic.relation(targets: ["Post"])\nnote String\n@@map("generic_field_tags")\n}\n'
+    for fields in ['include: ["id", "note"]', 'exclude: ["target"]']:
+        schema.write_text(GENERIC_HEADER + tag + f"model NotedTag {{\n@@proxy.of(Tag)\n@@proxy.fields({fields})\n}}")
+        generate(schema)
+        registry = orm.Registry()
+        models = orm.load(schema, registry=registry)
+        db = await orm.connect("sqlite://:memory:", registry=registry, default=False)
+        try:
+            await db.create_tables()
+            await models["Tag"].objects.using(db).insert(id=1, target_type=models["ContentType"].Post, target_id=7, note="n")
+            assert [(t.id, t.note) for t in await models["NotedTag"].objects.using(db)] == [(1, "n")]
+        finally:
+            await db.close()
+    # The identity manifest of the same models stays; a full proxy keeps the Generic field.
+    schema.write_text(GENERIC_HEADER + tag + "model NotedTag {\n@@proxy.of(Tag)\n}")
+    with pytest.raises(orm.SchemaError, match="Tag.target: NotedTag keeps the Generic field"):
+        orm.load(schema, registry=orm.Registry())

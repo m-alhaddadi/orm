@@ -65,11 +65,14 @@ model Post {
 The pass also adds `@@index([target_type, target_id])`; `index: false` disables it.
 An equal `@@index` replaces the added index.
 `type:` and `key:` name existing fields instead of created ones.
-A schema in the explicit form moves to the field form with no migration when it keeps its pair `@@index`, or when it uses `index: false` and has no pair index.
+A schema in the explicit form moves to the field form with no migration in two cases.
+It keeps its pair `@@index`, or it uses `index: false` and has no pair index.
 A created name that collides with a member fails; name an existing field with `type:` or `key:` then.
 `Generic` is only a type on a field with `@generic.relation`; elsewhere it is an unknown type.
-A `Generic` or `@generic.reverse` field takes no other attribute, such as `@map`, `@unique` or `@db.*`; use the explicit form for those.
-A model with a proxy or a composed child cannot have a `Generic` field, because those passes copy fields before the generic pass runs; use the explicit form there.
+A `Generic` field takes no other attribute, such as `@map`, `@unique` or `@db.*`; use the explicit form for those.
+A `@generic.reverse` field takes no other attribute.
+The proxy and composition passes copy fields before the generic pass runs.
+So a proxy or a composed child cannot keep a `Generic` field: exclude the field there, or use the explicit form.
 
 `tags Tag[] @generic.reverse` is the reverse side: the field name is the relation name, and `Tag[]` is the source.
 It is no ordinary relation, because no foreign key exists.
