@@ -60,3 +60,22 @@ fn array_element_and_unnest() {
         assert!(error.contains("sqlite does not support"), "{error}");
     }
 }
+
+fn cmp(op: &str, l: Value, r: Value) -> Value { json!({"t":"cmp","op":op,"l":l,"r":r}) }
+fn int(value: i64) -> Value { json!({"t":"int","value":value}) }
+
+#[test]
+fn case_expression() {
+    let case = json!({"t":"case","whens":[
+        {"cond":cmp("gt", col("views"), int(10)),"value":text("hot")},
+        {"cond":cmp("gt", col("views"), int(0)),"value":col("title")},
+    ],"default":text("cold")});
+    assert_eq!(plan(Dialect::Postgres, vec![case.clone()], vec![]).unwrap(),
+        r#"SELECT CASE WHEN "notes"."views" > (10) THEN $1 WHEN "notes"."views" > (0) THEN "notes"."title" ELSE $2 END FROM "notes""#);
+    let sqlite = plan(Dialect::Sqlite, vec![case], vec![]).unwrap();
+    assert!(sqlite.contains(r#"CASE WHEN "notes"."views" > (10) THEN ? WHEN "notes"."views" > (0) THEN "notes"."title" ELSE ? END"#), "{sqlite}");
+    let nullable = json!({"t":"case","whens":[{"cond":cmp("gt", col("views"), int(1)),"value":col("views")}]});
+    assert!(plan(Dialect::Postgres, vec![nullable], vec![]).unwrap().contains(r#"THEN "notes"."views" END"#));
+    let empty = json!({"t":"case","whens":[]});
+    assert!(plan(Dialect::Postgres, vec![col("id")], vec![cmp("eq", empty, text("x"))]).unwrap_err().contains("at least one"));
+}

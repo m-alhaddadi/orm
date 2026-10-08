@@ -45,6 +45,7 @@ __all__ = [
     "Excluded",
     "excluded",
     "Func",
+    "Case",
     "Labeled",
     "Window",
     "WindowDef",
@@ -707,6 +708,31 @@ class Outer(Expression[T]):
         return f"outer({self._column!r})"
 
 
+class Case(Expression[T]):
+    """``func.case((cond, value), ..., default=v)``: ``CASE WHEN ... END``."""
+
+    __slots__ = ("_whens", "_default")
+
+    def __init__(self, whens: tuple[tuple[Any, Any], ...], default: Any) -> None:
+        if not whens:
+            raise TypeError("case() needs at least one (condition, value) branch")
+        for w in whens:
+            if not isinstance(w, tuple) or len(w) != 2:
+                raise TypeError(f"case() branches are (condition, value) tuples, got {w!r}")
+        self._whens = [(as_condition(c), _wrap(v)) for c, v in whens]
+        self._default = None if default is None else _wrap(default)
+
+    def _ir(self, ctx: IRContext) -> IR:
+        ir: IR = {"t": "case", "whens": [{"cond": c._ir(ctx), "value": v._ir(ctx)} for c, v in self._whens]}
+        if self._default is not None:
+            ir["default"] = self._default._ir(ctx)
+        return ir
+
+    def __repr__(self) -> str:
+        whens = ", ".join(f"({c!r}, {v!r})" for c, v in self._whens)
+        return f"func.case({whens}{'' if self._default is None else f', default={self._default!r}'})"
+
+
 class ScalarSubquery(Expression[T]):
     """``qs.select(x).as_scalar()``: a one-column subquery used as a value."""
 
@@ -830,6 +856,25 @@ class _Functions:
 
     def now(self) -> Func[datetime]:
         return Func("now")
+
+    # Branches of expressions only first: mypy can't solve `T` from `Expression[T] | T`
+    # when no plain value pins it.
+    @overload
+    def case(self, *whens: tuple[ConditionLike, Expression[T]], default: Expression[T] | T) -> Case[T]: ...
+    @overload
+    def case(self, *whens: tuple[ConditionLike, Expression[T]]) -> Case[T | None]: ...
+    @overload
+    def case(self, *whens: tuple[ConditionLike, Expression[T]] | tuple[ConditionLike, T], default: Expression[T] | T) -> Case[T]: ...
+    @overload
+    def case(self, *whens: tuple[ConditionLike, Expression[T]] | tuple[ConditionLike, T]) -> Case[T | None]: ...
+    def case(self, *whens: tuple[ConditionLike, Any], default: Any = None) -> Case[Any]:
+        """``CASE WHEN cond THEN value ... ELSE default END``: the value of the first true
+        condition, else ``default`` (``None`` when not given)::
+
+            func.case((Post.views > 100, "hot"), (Post.views > 10, "warm"), default="cold")
+            func.sum(func.case((Post.published, 1), default=0))
+        """
+        return Case(whens, default)
 
     # Window functions: only valid with .over(...).
 

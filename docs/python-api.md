@@ -375,6 +375,22 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
   `group_by` or `distinct`. `select_related` / `prefetch_related` don't combine with
   `select()`.
 * A condition is a boolean column once labelled: `select(User.name, (User.id > 3).label("big"))`.
+* **`CASE`** is `func.case((cond, value), ..., default=v)`: the value of the first true
+  condition, else `default` (`None` without one). It is a value like any other, in
+  `select()`, `filter()`, `order_by()`, `update()` and `do_update()`:
+
+  ```python
+  heat = func.case((Post.views >= 50, "hot"), (Post.views >= 20, "warm"), default="cold")
+  await Post.objects.filter(heat == "hot")
+  # Django's Sum(Case(When(published=True, then=1), default=0)):
+  await Post.objects.select(Post.author_id, func.sum(func.case((Post.published, 1), default=0))).group_by(Post.author_id)
+  await Post.objects.update(views=func.case((Post.views > 100, 100), default=Post.views))
+  ```
+
+  Plain values bind with the type the context expects (the updated field, the other side
+  of a comparison), else with the type of the first branch that is not a plain value.
+  With only plain values, a float or `Decimal` among integers makes the result a float or
+  `Decimal`.
 
 ## Subqueries: `exists()`, scalar values, `outer()`
 

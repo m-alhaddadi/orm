@@ -184,6 +184,10 @@ replace substr strpos` plus the window functions. `func.concat(a, " ", b)` reads
 part as an empty string; `a.concat(b)` (`a || b`) is `null` when either side is `null`.
 `Profile.links.element(1)` is SQL's 1-based element access (`null` out of range), and
 `func.unnest(...)` is valid only as a `select()` column; SQLite has no array columns.
+`func.case([cond, value], ..., { default })` is `CASE WHEN ... END`: the value of the
+first true condition, else `default` (`null` without one). It works in `select()`,
+`filter()`, `orderBy()` and `update()`, for example
+`func.sum(func.case([Post.published, 1], { default: 0 }))` for a conditional count.
 The result types follow the SQL: `count` is a `bigint`, `sum(Int)` is `number | null`,
 `sum(Decimal)` is `Decimal | null`, and `avg` is `number | null`. A column read through a
 nullable relation becomes nullable.

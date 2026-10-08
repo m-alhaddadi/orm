@@ -277,6 +277,20 @@ test("orderings place NULLs first or last", () => {
   assert.throws(() => Comment.authorId.desc({ nulls: "middle" as never }), /nulls is "first" or "last"/);
 });
 
+test("CASE SQL", () => {
+  const sql = Post.objects.select({ a: Post.authorId, n: func.sum(func.case([Post.published, 1], { default: 0 })) }).groupBy(Post.authorId).sql();
+  assert.equal(sql, 'SELECT "posts"."author_id", CAST(SUM(CASE WHEN "posts"."published" = TRUE THEN 1 ELSE 0 END) AS BIGINT) FROM "posts" GROUP BY "posts"."author_id"');
+  const heat = func.case([Post.views.gt(100), "hot"], [Post.views.gt(10), "warm"], { default: "cold" });
+  assert.equal(where(Post.objects.filter(heat.eq("hot"))), '(CASE WHEN "posts"."views" > 100 THEN \'hot\' WHEN "posts"."views" > 10 THEN \'warm\' ELSE \'cold\' END) = \'hot\'');
+  assert.ok(Post.objects.orderBy(func.case([Post.published, 0], { default: 1 })).sql().endsWith('ORDER BY CASE WHEN "posts"."published" = TRUE THEN 0 ELSE 1 END ASC'));
+  assert.equal(
+    where(User.objects.filter(func.case([User.posts.views.gt(3), User.name]).eq("x"))),
+    'EXISTS(SELECT 1 FROM "posts" AS "t1" WHERE "t1"."author_id" = "users"."id" AND (CASE WHEN "t1"."views" > 3 THEN "users"."name" END) = \'x\')',
+  );
+  assert.throws(() => (func.case as (...a: unknown[]) => unknown)({ default: 1 }), /at least one/);
+  assert.throws(() => (func.case as (...a: unknown[]) => unknown)(Post.published), /pairs/);
+});
+
 test("string functions and concatenation SQL", () => {
   const sql = Post.objects.select({
     c: func.concat(Post.title, " by ", Post.views), p: Post.title.concat("!"), t: func.trim(Post.title), l: func.ltrim(Post.title),

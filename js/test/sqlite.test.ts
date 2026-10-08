@@ -168,6 +168,25 @@ test("SQLite string functions and concatenation", async () => {
   } finally { await db.close(); }
 });
 
+test("SQLite CASE", async () => {
+  const registry = new Registry();
+  const Note = loads(`
+    datasource db { provider = "sqlite" }
+    model Note {
+      id BigInt @id @default(autoincrement())
+      n Int
+    }`, { registry })["Note"] as any;
+  const db = await connect("sqlite://:memory:", { registry, default: false });
+  try {
+    await db.createTables();
+    await Note.objects.using(db).insertMany([{ n: 1 }, { n: 5 }, { n: 10 }]);
+    const size = func.case([Note.n.gte(10), "big"], [Note.n.gte(5), "mid"], { default: "small" });
+    assert.deepEqual((await Note.objects.using(db).orderBy(Note.id).select({ s: size }).all()).map((r: any) => r.s), ["small", "mid", "big"]);
+    await Note.objects.using(db).update({ n: func.case([Note.n.eq(1), 100], { default: Note.n }) });
+    assert.deepEqual((await Note.objects.using(db).orderBy(Note.id).all()).map((r: any) => r.n), [100, 5, 10]);
+  } finally { await db.close(); }
+});
+
 test("SQLite UUID, date, timestamp and inline trigger conversions", async () => {
   const registry = new Registry();
   const Event = loads(`

@@ -671,6 +671,59 @@ export class Func<T, S extends string = never, P = {}> extends Expression<T, S, 
   }
 }
 
+/** `func.case([cond, value], ..., { default })`: `CASE WHEN ... END`. */
+export class Case<T, S extends string = never, P = {}> extends Expression<T, S, P> {
+  readonly whens: readonly (readonly [Node, Node])[];
+  readonly fallback: Node | undefined;
+
+  constructor(branches: readonly unknown[], fallback: unknown) {
+    super();
+    if (!branches.length) {
+      throw new TypeError("case() needs at least one [condition, value] branch");
+    }
+    this.whens = branches.map((b) => {
+      if (!Array.isArray(b) || b.length !== 2) {
+        throw new TypeError(`case() branches are [condition, value] pairs, got ${String(b)}`);
+      }
+      return [asCondition(b[0]), wrap(b[1])] as const;
+    });
+    this.fallback = fallback === undefined ? undefined : wrap(fallback);
+  }
+
+  ir(ctx: IRContext): IR {
+    const ir: IR = { t: "case", whens: this.whens.map(([c, v]) => ({ cond: c.ir(ctx), value: v.ir(ctx) })) };
+    if (this.fallback !== undefined) {
+      ir["default"] = this.fallback.ir(ctx);
+    }
+    return ir;
+  }
+}
+
+/** One `[condition, value]` branch of {@link Functions.case}. The condition is `unknown`
+ * here so it gives no contextual type (that would widen its scope to `string`);
+ * {@link CaseOf} checks it. */
+export type CaseBranch = readonly [unknown, unknown];
+/** The `Case` of these branches, or `never` when a condition is not a boolean expression. */
+type CaseOf<Br extends CaseBranch, T, S extends string, P> = [Exclude<Br[0], Expression<boolean | null, string, unknown>>] extends [never]
+  ? Case<T, S, P>
+  : never;
+/** The options of {@link Functions.case}: the value when no condition holds. */
+export type CaseDefault = { readonly default: unknown };
+/** The value type of a branch value: an expression's type, or a plain value's widened type. */
+type CaseValue<V> = V extends Expression<infer T, string, unknown>
+  ? T
+  : V extends number
+    ? number
+    : V extends string
+      ? string
+      : V extends boolean
+        ? boolean
+        : V;
+type ScopeOfNode<V> = V extends Expression<unknown, infer S, unknown> ? S : never;
+type ParamsOfNode<V> = V extends Expression<unknown, string, infer P> ? P : {};
+type CaseScope<B extends CaseBranch> = B extends unknown ? ScopeOfNode<B[0]> | ScopeOfNode<B[1]> : never;
+type CaseParams<B extends CaseBranch> = UnionToIntersection<B extends unknown ? ParamsOfNode<B[0]> & ParamsOfNode<B[1]> : never>;
+
 /** A window-only function (`rowNumber()`, `lag()`, ...): usable only with `.over()`. */
 export class WindowFunc<T, S extends string = never, P = {}> {
   /** @internal */
@@ -948,6 +1001,32 @@ class Functions {
 
   now(): Func<Date> {
     return new Func("now");
+  }
+
+  /**
+   * `CASE WHEN cond THEN value ... ELSE default END`: the value of the first true
+   * condition, else `default` (`null` when not given).
+   *
+   * ```ts
+   * func.case([Post.views.gt(100), "hot"], [Post.views.gt(10), "warm"], { default: "cold" })
+   * func.sum(func.case([Post.published, 1], { default: 0 }))
+   * ```
+   */
+  case<const B extends readonly CaseBranch[]>(...branches: B): CaseOf<B[number], CaseValue<B[number][1]> | null, CaseScope<B[number]>, CaseParams<B[number]>>;
+  case<const A extends readonly [...CaseBranch[], CaseDefault]>(
+    ...args: A
+  ): CaseOf<
+    Extract<A[number], CaseBranch>,
+    CaseValue<Extract<A[number], CaseBranch>[1]> | CaseValue<Extract<A[number], CaseDefault>["default"]>,
+    CaseScope<Extract<A[number], CaseBranch>> | ScopeOfNode<Extract<A[number], CaseDefault>["default"]>,
+    CaseParams<Extract<A[number], CaseBranch>> & ParamsOfNode<Extract<A[number], CaseDefault>["default"]>
+  >;
+  case(...args: unknown[]): Case<unknown, string, unknown> {
+    const last = args[args.length - 1];
+    if (last !== undefined && !Array.isArray(last) && !(last instanceof Node) && typeof last === "object" && last !== null) {
+      return new Case(args.slice(0, -1), (last as { default?: unknown }).default);
+    }
+    return new Case(args, undefined);
   }
 
   // Window functions: only valid with .over(...).

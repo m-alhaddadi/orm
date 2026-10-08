@@ -581,6 +581,12 @@ pub enum Expr {
         #[serde(default)]
         distinct: bool,
     },
+    /// `CASE WHEN <cond> THEN <value> ... ELSE <default> END`; `ELSE NULL` without one.
+    Case {
+        whens: Vec<When>,
+        #[serde(default)]
+        default: Option<Box<Expr>>,
+    },
     /// `<item> [NOT] IN (SELECT <one column> ...)`.
     InSelect { item: Box<Expr>, select: Box<Select>, #[serde(default)] neg: bool },
     /// An integer written into the SQL (window function offsets, `ntile` buckets).
@@ -616,6 +622,13 @@ pub enum Expr {
         #[serde(default)]
         frame: Option<Frame>,
     },
+}
+
+/// One `WHEN <cond> THEN <value>` branch of `Expr::Case`.
+#[derive(Deserialize, Debug, Clone)]
+pub struct When {
+    pub cond: Expr,
+    pub value: Expr,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

@@ -43,6 +43,13 @@ export async function stringsAndArrays() {
   Post.title.element(1);
 }
 
+export async function caseExpressions() {
+  const rows = await Post.objects.select({ h: func.case([Post.views.gt(3), "hot"], { default: "cold" }), t: func.case([Post.published, Post.title]), n: func.case([Post.published, Post.views], [Post.views.gt(1), 2], { default: 0 }) }).all();
+  same<(typeof rows)[number], { h: string; t: string | null; n: number }>();
+  // @ts-expect-error a branch is a [condition, value] pair
+  func.case(Post.published);
+}
+
 export async function filters() {
   await User.objects.filter(User.email.eq("a"), User.posts.views.gt(3)).all();
   await Post.objects.filter(Post.published).all();

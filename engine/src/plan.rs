@@ -27,7 +27,7 @@ use crate::error::{query_err, Error, Result};
 use crate::params::Params;
 use orm_core::ir::{
     ArithOp, Assignment, CmpOp, ColType, Count, Cte, Delete, Expr, FieldIr, Frame, FrameKind, Lock, Nulls, Operation, Order, ParamRef,
-    Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType,
+    Prefetch, RelKind, RelationIr, Select, SelectItem, Update, ValueType, When,
 };
 use orm_core::dialect::{Capabilities, Dialect, Target};
 use orm_core::schema::{Model, Schema};
@@ -239,8 +239,14 @@ fn has_local_aggregate(e: &Expr) -> bool {
         Expr::Cmp { l, r, .. } | Expr::Arith { l, r, .. } => has_local_aggregate(l) || has_local_aggregate(r),
         Expr::And { items } | Expr::Or { items } => items.iter().any(has_local_aggregate),
         Expr::Not { item } | Expr::IsNull { item, .. } => has_local_aggregate(item),
+        Expr::Case { whens, default } => case_parts(whens, default).any(has_local_aggregate),
         _ => false,
     }
+}
+
+/// The conditions, values and default of a `CASE`.
+fn case_parts<'e>(whens: &'e [When], default: &'e Option<Box<Expr>>) -> impl Iterator<Item = &'e Expr> {
+    whens.iter().flat_map(|w| [&w.cond, &w.value]).chain(default.as_deref())
 }
 
 /// Whether `e` contains a window function (outside subqueries).
@@ -254,6 +260,7 @@ fn has_window(e: &Expr) -> bool {
         Expr::Not { item } | Expr::IsNull { item, .. } | Expr::Like { item, .. } | Expr::InSelect { item, .. } => {
             has_window(item)
         }
+        Expr::Case { whens, default } => case_parts(whens, default).any(has_window),
         _ => false,
     }
 }
@@ -323,6 +330,11 @@ fn col_paths<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
             }
         }
         Expr::IsNull { item, .. } => col_paths(item, out, has_not),
+        Expr::Case { whens, default } => {
+            for part in case_parts(whens, default) {
+                col_paths(part, out, has_not);
+            }
+        }
         Expr::Like { item, pattern, .. } => {
             col_paths(item, out, has_not);
             col_paths(pattern, out, has_not);
@@ -1069,7 +1081,7 @@ impl<'s> Planner<'s> {
             }
             // Arithmetic results are plain values: no write_sql cast.
             Expr::Arith { l, r, .. } => Hint { ty: self.hint_of(l).or(self.hint_of(r)).ty, field: None },
-            Expr::Func { .. } | Expr::Subquery { .. } | Expr::Window { .. } => {
+            Expr::Func { .. } | Expr::Subquery { .. } | Expr::Window { .. } | Expr::Case { .. } => {
                 Hint { ty: self.expr_type(e).ok(), field: None }
             }
             _ => Hint::default(),
@@ -1152,6 +1164,7 @@ impl<'s> Planner<'s> {
                 self.window(func, base.as_deref(), partition_by, order_by, frame)?
             }
             Expr::Func { name, args, rel, distinct } => self.func(name, args, rel.as_deref(), *distinct)?,
+            Expr::Case { whens, default } => self.case(whens, default.as_deref(), hint)?,
             Expr::Arith { op, l, r } => {
                 let inner = self.hint_of(l).or(self.hint_of(r));
                 let hint = match op {
@@ -1172,6 +1185,48 @@ impl<'s> Planner<'s> {
         })
     }
 
+    /// `CASE WHEN ... THEN ... ELSE ... END`. Plain values bind with the type the context
+    /// expects (an assigned field, the other side of a comparison), else the case's own.
+    fn case(&mut self, whens: &[When], default: Option<&Expr>, hint: Hint<'s>) -> Result<SExpr> {
+        if whens.is_empty() {
+            return Err(Error::query("case() needs at least one (condition, value) branch"));
+        }
+        let hint = Hint { ty: hint.ty.or_else(|| self.case_type(whens, default)), field: hint.field };
+        let mut parts = vec![];
+        let mut sql = String::from("CASE");
+        for w in whens {
+            parts.push(self.cond(&w.cond)?);
+            parts.push(self.value(&w.value, hint)?);
+            sql += &format!(" WHEN ${} THEN ${}", parts.len() - 1, parts.len());
+        }
+        if let Some(d) = default {
+            parts.push(self.value(d, hint)?);
+            sql += &format!(" ELSE ${}", parts.len());
+        }
+        sql += " END";
+        Ok(template(self.target.dialect, sql, parts))
+    }
+
+    /// The type of a `CASE`: of its first value that is not a plain value, else the
+    /// widest of its plain values (a float or decimal among integers wins).
+    fn case_type(&self, whens: &[When], default: Option<&Expr>) -> Option<ValueType> {
+        let values = || whens.iter().map(|w| &w.value).chain(default);
+        if let Some(t) = values().filter(|v| !matches!(v, Expr::Param { .. })).find_map(|v| self.expr_type(v).ok()) {
+            return Some(t);
+        }
+        let mut found: Option<ValueType> = None;
+        for v in values() {
+            let Expr::Param { i } = v else { continue };
+            let Some(t) = self.params.value(*i, None).ok().and_then(|v| crate::params::type_of(&v)) else { continue };
+            found = match found.map(|f| f.ty) {
+                None => Some(t),
+                Some(ColType::Int | ColType::BigInt) if matches!(t.ty, ColType::Float | ColType::Decimal) => Some(t),
+                _ => found,
+            };
+        }
+        found
+    }
+
     // -- functions ----------------------------------------------------------------------
 
     /// The column type of an expression's result, which decodes it.
@@ -1190,6 +1245,10 @@ impl<'s> Planner<'s> {
             Expr::Text { .. } => scalar(ColType::Text),
             Expr::Subquery { select } => self.child(select)?.expr_type(Self::one_column(select, "as_scalar()")?)?,
             Expr::Window { func, .. } => self.expr_type(func)?,
+            Expr::Case { whens, default } => match self.case_type(whens, default.as_deref()) {
+                Some(t) => t,
+                None => return Err(Error::query("case() needs a value whose type is known: a column, an expression or a non-null value")),
+            },
             Expr::Arith { op: ArithOp::Concat, .. } => scalar(ColType::Text),
             Expr::Arith { l, r, .. } => match self.expr_type(l) {
                 Ok(t) => t,

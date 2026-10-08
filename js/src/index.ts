@@ -21,6 +21,7 @@ export {
   Column,
   Condition,
   Expression,
+  Case,
   Func,
   Ordering,
   ParamRef,
