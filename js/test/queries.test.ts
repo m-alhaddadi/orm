@@ -346,12 +346,40 @@ test("select the model with aggregates over relations", async () => {
   const rows = await User.objects.select({ user: User, posts: func.count(User.posts), views: func.sum(User.posts.views) }).orderBy(User.id).all();
   assert.deepEqual(rows.map((r) => [r.user.name, r.posts, r.views]), [["Alice", 2n, 55n], ["Bob", 1n, 100n], ["Carol", 0n, null]]);
   assert.equal(rows[0]!.user.id, alice.id);
+  // Per-aggregate filter and distinct inside one shared subquery, next to another relation.
+  const shared = await User.objects
+    .select({ name: User.name, popular: func.count(User.posts, { filter: User.posts.views.gt(10) }), views: func.sum(User.posts.views, { filter: User.posts.views.gt(10) }), d: func.count(User.posts.views, { distinct: true }), c: func.count(User.comments) })
+    .orderBy(User.id)
+    .all();
+  assert.deepEqual(shared, [{ name: "Alice", popular: 1n, views: 50n, d: 2n, c: 1n }, { name: "Bob", popular: 1n, views: 100n, d: 1n, c: 1n }, { name: "Carol", popular: 0n, views: null, d: 0n, c: 0n }]);
   // Two counts over different relations don't multiply each other (no JOIN fan-out).
   const counts = await User.objects.select({ name: User.name, posts: func.count(User.posts), c: func.count(User.comments) }).orderBy(User.id).all();
   assert.deepEqual(counts, [{ name: "Alice", posts: 2n, c: 1n }, { name: "Bob", posts: 1n, c: 1n }, { name: "Carol", posts: 0n, c: 0n }]);
   assert.equal(await User.objects.filter(User.id.eq(alice.id)).select({ n: func.count(User.posts.comments) }).scalar(), 2n);
   assert.deepEqual(names(await User.objects.filter(func.count(User.posts).gte(1)).all()), ["Alice", "Bob"]);
   assert.deepEqual(names(await User.objects.filter(func.coalesce(func.sum(User.posts.views), 0).gt(60)).all()), ["Bob"]);
+});
+
+test("array_agg: order, filter, distinct, NULL and empty results", async () => {
+  const { alice, bob } = await seed();
+  const rows = await User.objects
+    .select({
+      name: User.name,
+      titles: func.arrayAgg(User.posts.title, { orderBy: User.posts.views.desc() }),
+      small: func.arrayAgg(User.posts.title, { filter: User.posts.views.lt(50), orderBy: User.posts.title }),
+      n: func.count(User.posts),
+    })
+    .orderBy(User.id)
+    .all();
+  assert.deepEqual(rows, [
+    { name: "Alice", titles: ["new post", "old draft"], small: ["old draft"], n: 2n },
+    { name: "Bob", titles: ["bob's old"], small: null, n: 1n },
+    { name: "Carol", titles: null, small: null, n: 0n },
+  ]);
+  assert.deepEqual(await Post.objects.select({ v: func.arrayAgg(Post.views, { orderBy: Post.views.desc() }) }).scalar(), [100, 50, 5]);
+  assert.deepEqual(await Post.objects.select({ v: func.arrayAgg(Post.authorId, { distinct: true, orderBy: Post.authorId }) }).scalar(), [alice.id, bob.id]);
+  assert.equal(await Post.objects.filter(Post.views.gt(100000)).select({ v: func.arrayAgg(Post.title) }).scalar(), null);
+  assert.deepEqual(await Comment.objects.select({ a: func.arrayAgg(Comment.authorId, { orderBy: Comment.body }) }).scalar(), [null, alice.id, bob.id]);
 });
 
 test("subqueries with in()", async () => {

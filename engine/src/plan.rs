@@ -143,6 +143,7 @@ impl<'s> Hint<'s> {
     }
 }
 
+#[derive(Clone)]
 struct Scope {
     path: Vec<String>,
     model: usize,
@@ -216,7 +217,7 @@ fn fold(items: Vec<SExpr>, and: bool) -> SExpr {
     }
 }
 
-const AGGREGATES: [&str; 5] = ["count", "sum", "avg", "min", "max"];
+const AGGREGATES: [&str; 6] = ["count", "sum", "avg", "min", "max", "array_agg"];
 const SCALAR_FUNCS: [&str; 16] = [
     "lower", "upper", "length", "abs", "coalesce", "now", "cardinality", "concat", "trim", "ltrim", "rtrim", "replace",
     "substr", "strpos", "element", "unnest",
@@ -241,10 +242,10 @@ fn is_aggregate(name: &str) -> bool {
 /// window).
 fn has_local_aggregate(e: &Expr) -> bool {
     match e {
-        Expr::Func { name, args, rel, filter, .. } => {
+        Expr::Func { name, args, rel, filter, order_by, .. } => {
             let mut paths = vec![];
             let mut has_not = false;
-            for a in args.iter().chain(filter.as_deref()) {
+            for a in args.iter().chain(filter.as_deref()).chain(order_by.iter().map(|o| &o.expr)) {
                 col_paths_all(a, &mut paths, &mut has_not);
             }
             (is_aggregate(name) && rel.is_none() && paths.iter().all(|p| p.is_empty()))
@@ -282,12 +283,52 @@ fn has_window(e: &Expr) -> bool {
 /// Like `col_paths`, but also inside aggregates.
 fn col_paths_all<'e>(e: &'e Expr, out: &mut Vec<&'e [String]>, has_not: &mut bool) {
     match e {
-        Expr::Func { args, filter, .. } => {
-            for a in args.iter().chain(filter.as_deref()) {
+        Expr::Func { args, filter, order_by, .. } => {
+            for a in args.iter().chain(filter.as_deref()).chain(order_by.iter().map(|o| &o.expr)) {
                 col_paths_all(a, out, has_not);
             }
         }
         other => col_paths(other, out, has_not),
+    }
+}
+
+/// The paths below `base` that an aggregate reads, with its `rel`.
+fn below_paths<'e>(
+    base: &[String],
+    rel: Option<&'e [String]>,
+    args: &'e [Expr],
+    filter: Option<&'e Expr>,
+    order_by: &'e [Order],
+) -> Vec<&'e [String]> {
+    let mut paths = vec![];
+    let mut has_not = false;
+    for a in args.iter().chain(filter).chain(order_by.iter().map(|o| &o.expr)) {
+        col_paths_all(a, &mut paths, &mut has_not);
+    }
+    rel.into_iter().chain(paths.into_iter().filter(|p| p.len() > base.len() && p.starts_with(base))).collect()
+}
+
+/// The relation path of each aggregate in `e` that is computed per row over a relation
+/// (see `Planner::func`), outside subqueries and windows.
+fn relation_aggregates(e: &Expr, base: &[String], out: &mut Vec<Vec<String>>) {
+    match e {
+        Expr::Func { name, args, rel, filter, order_by, .. } if is_aggregate(name) => {
+            let below = below_paths(base, rel.as_deref(), args, filter.as_deref(), order_by);
+            if let Some(first) = below.first() {
+                if below.iter().all(|p| p == first) {
+                    out.push(first.to_vec());
+                }
+            }
+        }
+        Expr::Func { args, .. } => args.iter().for_each(|a| relation_aggregates(a, base, out)),
+        Expr::Cmp { l, r, .. } | Expr::Arith { l, r, .. } => {
+            relation_aggregates(l, base, out);
+            relation_aggregates(r, base, out);
+        }
+        Expr::And { items } | Expr::Or { items } => items.iter().for_each(|i| relation_aggregates(i, base, out)),
+        Expr::Not { item } | Expr::IsNull { item, .. } => relation_aggregates(item, base, out),
+        Expr::Case { whens, default } => case_parts(whens, default).for_each(|c| relation_aggregates(c, base, out)),
+        _ => {}
     }
 }
 
@@ -410,6 +451,26 @@ pub fn derive_ctes(schema: &Schema, target: Target, ctes: &[Cte], params: &dyn P
     Ok(virt)
 }
 
+/// An aggregate call: the function, its arguments and options.
+struct AggCall<'e> {
+    name: &'e str,
+    args: &'e [Expr],
+    count_rows: bool,
+    distinct: bool,
+    filter: Option<&'e Expr>,
+    order_by: &'e [Order],
+}
+
+/// Relation aggregates over one path in a `select()`, computed together in one
+/// `LEFT JOIN LATERAL`: one scan of the relation per parent row instead of one per aggregate.
+struct LateralGroup {
+    path: Vec<String>,
+    alias: String,
+    /// The subquery and the scopes of its hops, once its first aggregate is planned.
+    sub: Option<(SelectStatement, Vec<Scope>)>,
+    columns: usize,
+}
+
 pub struct Planner<'s> {
     schema: &'s Schema,
     /// The statement's CTEs, as models (see `derive_ctes`).
@@ -434,6 +495,9 @@ pub struct Planner<'s> {
     /// The query's named windows (`WINDOW`), which window functions can refer to.
     windows: Vec<String>,
     next_alias: usize,
+    /// Set while the select list is planned: its relation aggregates join these groups.
+    lateral: Vec<LateralGroup>,
+    lateral_open: bool,
     /// `EXCLUDED.<field>` is only valid in an upsert's `DO UPDATE SET`.
     allow_excluded: bool,
     /// Window functions are only valid in the select list and `ORDER BY`.
@@ -472,6 +536,8 @@ impl<'s> Planner<'s> {
             joined: vec![],
             windows: vec![],
             next_alias,
+            lateral: vec![],
+            lateral_open: false,
             allow_excluded: false,
             allow_window: false,
             allow_unnest: false,
@@ -1222,7 +1288,9 @@ impl<'s> Planner<'s> {
                 // Postgres rejects a set-returning function in a window.
                 self.with_unnest(false, |p| p.window(func, base.as_deref(), partition_by, order_by, frame))?
             }
-            Expr::Func { name, args, rel, distinct, filter } => self.func(name, args, rel.as_deref(), *distinct, filter.as_deref())?,
+            Expr::Func { name, args, rel, distinct, filter, order_by } => {
+                self.func(name, args, rel.as_deref(), *distinct, filter.as_deref(), order_by)?
+            }
             Expr::Case { whens, default } => self.case(whens, default.as_deref(), hint)?,
             Expr::JsonPath { item, path, text } => self.json_path(item, path, *text)?,
             Expr::Arith { op, l, r } => {
@@ -1390,6 +1458,10 @@ impl<'s> Planner<'s> {
                         ColType::Decimal => scalar(ColType::Decimal),
                         _ => scalar(ColType::Float),
                     },
+                    "array_agg" => match first()? {
+                        t if t.array => return Err(Error::query("array_agg() of an array column is not supported")),
+                        t => ValueType { array: true, ..t },
+                    },
                     "length" | "ntile" | "cardinality" | "strpos" => scalar(ColType::Int),
                     "lower" | "upper" | "concat" | "trim" | "ltrim" | "rtrim" | "replace" | "substr" => scalar(ColType::Text),
                     "element" | "unnest" if self.target.dialect == Dialect::Sqlite => {
@@ -1433,7 +1505,15 @@ impl<'s> Planner<'s> {
     /// the current scope is computed per row, in a correlated subquery over those
     /// relations: `func.count(User.posts)` is `(SELECT COUNT(*) FROM posts WHERE
     /// posts.author_id = users.id)`, never a JOIN that would multiply rows.
-    fn func(&mut self, name: &str, args: &[Expr], rel: Option<&[String]>, distinct: bool, filter: Option<&Expr>) -> Result<SExpr> {
+    fn func(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        rel: Option<&[String]>,
+        distinct: bool,
+        filter: Option<&Expr>,
+        order_by: &[Order],
+    ) -> Result<SExpr> {
         if WINDOW_FUNCS.contains(&name) {
             return Err(Error::query(format!("{name}() is a window function: add .over(...)")));
         }
@@ -1442,26 +1522,24 @@ impl<'s> Planner<'s> {
         }
         if is_aggregate(name) {
             let base = self.scope().path.clone();
-            let mut paths = vec![];
-            let mut has_not = false;
-            for a in args.iter().chain(filter) {
-                col_paths_all(a, &mut paths, &mut has_not);
-            }
-            let below: Vec<&[String]> =
-                rel.into_iter().chain(paths.into_iter().filter(|p| p.len() > base.len() && p.starts_with(&base))).collect();
+            let below = below_paths(&base, rel, args, filter, order_by);
             if let Some(path) = below.first().map(|p| p.to_vec()) {
                 if below.iter().any(|p| *p != path.as_slice()) {
                     return Err(Error::query(format!(
                         "{name}() over relations needs all its columns on one relation path"
                     )));
                 }
-                return self.aggregate_subquery(name, args, &path, rel.is_some(), distinct, filter);
+                let call = AggCall { name, args, count_rows: rel.is_some(), distinct, filter, order_by };
+                if let Some(e) = self.lateral_member(&call, &path)? {
+                    return Ok(e);
+                }
+                return self.aggregate_subquery(&call, &path);
             }
             if rel.is_none() && args.is_empty() && name != "count" {
                 return Err(Error::query(format!("{name}() needs an argument")));
             }
         }
-        self.call(name, args, distinct, filter)
+        self.call(name, args, distinct, filter, order_by)
     }
 
     /// `<func> OVER (PARTITION BY ... ORDER BY ... <frame>)`, over this query's rows.
@@ -1480,13 +1558,16 @@ impl<'s> Planner<'s> {
                     .into(),
             ));
         }
-        let Expr::Func { name, args, rel, distinct, filter } = func else {
+        let Expr::Func { name, args, rel, distinct, filter, order_by: agg_order } = func else {
             return Err(Error::query("over() applies to a function"));
         };
         if rel.is_some() || !(is_aggregate(name) || WINDOW_FUNCS.contains(&name.as_str())) {
             return Err(Error::query(format!("{name}() can't be used as a window function")));
         }
-        let (call, cast) = self.call_parts(name, args, *distinct, filter.as_deref())?;
+        if !agg_order.is_empty() {
+            return Err(Error::query(format!("{name}(order_by=...) can't be a window function: put the order in over(order_by=...)")));
+        }
+        let (call, cast) = self.call_parts(name, args, *distinct, filter.as_deref(), &[])?;
         let mut exprs = vec![call];
         let mut clauses = vec![];
         if let Some(b) = base {
@@ -1544,8 +1625,8 @@ impl<'s> Planner<'s> {
     }
 
     /// The SQL call itself, arguments planned in the current scope.
-    fn call(&mut self, name: &str, args: &[Expr], distinct: bool, filter: Option<&Expr>) -> Result<SExpr> {
-        let (e, cast) = self.call_parts(name, args, distinct, filter)?;
+    fn call(&mut self, name: &str, args: &[Expr], distinct: bool, filter: Option<&Expr>, order_by: &[Order]) -> Result<SExpr> {
+        let (e, cast) = self.call_parts(name, args, distinct, filter, order_by)?;
         Ok(match cast {
             Some(ty) => template(self.target.dialect, format!("CAST($1 AS {ty})"), vec![e]),
             None => e,
@@ -1553,7 +1634,20 @@ impl<'s> Planner<'s> {
     }
 
     /// The call, and the type its result is cast to (outside a window's `OVER`).
-    fn call_parts(&mut self, name: &str, args: &[Expr], distinct: bool, filter: Option<&Expr>) -> Result<(SExpr, Option<&'static str>)> {
+    fn call_parts(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        distinct: bool,
+        filter: Option<&Expr>,
+        order_by: &[Order],
+    ) -> Result<(SExpr, Option<&'static str>)> {
+        if !order_by.is_empty() && name != "array_agg" {
+            return Err(Error::query(format!("{name}() takes no order_by: its result does not depend on the order of its rows")));
+        }
+        if name == "array_agg" && self.target.dialect == Dialect::Sqlite {
+            return Err(Error::query("sqlite does not support array_agg()"));
+        }
         if filter.is_some() && !is_aggregate(name) {
             return Err(Error::query(format!("{name}() is not an aggregate: only aggregates take a filter")));
         }
@@ -1610,6 +1704,20 @@ impl<'s> Planner<'s> {
                 }
                 one(&format!("AVG({d}$1)"), planned)?
             }
+            "array_agg" => {
+                let [arg] = <[SExpr; 1]>::try_from(planned).map_err(|_| Error::query("array_agg() takes one argument"))?;
+                if self.expr_type(&args[0])?.array {
+                    return Err(Error::query("array_agg() of an array column is not supported"));
+                }
+                let mut exprs = vec![arg];
+                let mut slots = vec![];
+                for o in order_by {
+                    exprs.push(self.value(&o.expr, Hint::default())?);
+                    slots.push(format!("${}{}", exprs.len(), order_sql(o)));
+                }
+                let order = if slots.is_empty() { String::new() } else { format!(" ORDER BY {}", slots.join(", ")) };
+                template(dialect, format!("ARRAY_AGG({d}$1{order})"), exprs)
+            }
             "min" => one("MIN($1)", planned)?,
             "max" => one("MAX($1)", planned)?,
             "lower" => one("LOWER($1)", planned)?,
@@ -1651,30 +1759,103 @@ impl<'s> Planner<'s> {
     }
 
     /// `(SELECT <agg> FROM <hop 1> a1 [JOIN <hop 2> a2 ON ...] WHERE a1.to = <scope>.from)`.
-    fn aggregate_subquery(
-        &mut self,
-        name: &str,
-        args: &[Expr],
-        path: &[String],
-        count_rows: bool,
-        distinct: bool,
-        filter: Option<&Expr>,
-    ) -> Result<SExpr> {
+    fn aggregate_subquery(&mut self, call: &AggCall, path: &[String]) -> Result<SExpr> {
+        let pushed = self.scopes.len();
+        let mut sub = self.open_hops(path)?;
+        let agg = self.agg_call(call);
+        self.scopes.truncate(pushed);
+        sub.expr(agg?);
+        Ok(SExpr::SubQuery(None, Box::new(sub.into())))
+    }
+
+    /// `FROM <hop 1> a1 [JOIN <hop 2> a2 ON ...] WHERE a1.to = <scope>.from`, with a scope
+    /// pushed for each hop (the caller truncates them).
+    fn open_hops(&mut self, path: &[String]) -> Result<SelectStatement> {
         let base = self.scope().path.clone();
         let hops = &path[base.len()..];
         let mut sub = Query::select();
         let mut outer = (self.scope().alias.clone(), self.scope().model);
-        let pushed = self.scopes.len();
         for (k, hop) in hops.iter().enumerate() {
             let (rel, target) = self.model(outer.1).relation(hop).map_err(query_err)?;
             let alias = self.add_hop(&mut sub, k == 0, (&outer.0, outer.1), rel, target, "a")?;
             self.scopes.push(Scope { path: path[..base.len() + k + 1].to_vec(), model: target, alias: alias.clone() });
             outer = (alias, target);
         }
-        let agg = if count_rows && args.is_empty() { self.call("count", &[], false, filter) } else { self.call(name, args, distinct, filter) };
+        Ok(sub)
+    }
+
+    fn agg_call(&mut self, c: &AggCall) -> Result<SExpr> {
+        if c.count_rows && c.args.is_empty() {
+            self.call("count", &[], false, c.filter, &[])
+        } else {
+            self.call(c.name, c.args, c.distinct, c.filter, c.order_by)
+        }
+    }
+
+    /// The aggregate as a column of the `LATERAL` subquery its path shares with other
+    /// aggregates of the select list; `None` when it has no group (it is its own subquery).
+    fn lateral_member(&mut self, call: &AggCall, path: &[String]) -> Result<Option<SExpr>> {
+        if !self.lateral_open || self.scopes.len() != 1 {
+            return Ok(None);
+        }
+        let Some(i) = self.lateral.iter().position(|g| g.path == path) else { return Ok(None) };
+        let pushed = self.scopes.len();
+        let mut opened = None;
+        match self.lateral[i].sub.as_ref() {
+            Some((_, scopes)) => {
+                let scopes = scopes.clone();
+                self.scopes.extend(scopes);
+            }
+            None => opened = Some(self.open_hops(path)?),
+        }
+        let agg = self.agg_call(call);
+        let hops = self.scopes[pushed..].to_vec();
         self.scopes.truncate(pushed);
-        sub.expr(agg?);
-        Ok(SExpr::SubQuery(None, Box::new(sub.into())))
+        let agg = agg?;
+        let group = &mut self.lateral[i];
+        if let Some(sub) = opened {
+            group.sub = Some((sub, hops));
+        }
+        group.columns += 1;
+        let column = format!("c{}", group.columns);
+        if let Some((sub, _)) = group.sub.as_mut() {
+            sub.expr_as(agg, Alias::new(&column));
+        }
+        Ok(Some(col(&group.alias, &column)))
+    }
+
+    /// Groups the select list's relation aggregates by path, for the paths with at least
+    /// two of them. A lone aggregate stays a scalar subquery.
+    fn plan_lateral(&mut self, q: &Select, items: &[SelectItem], cte: bool) {
+        self.lateral.clear();
+        self.lateral_open = false;
+        let plain = self.caps.lateral_join
+            && !cte
+            && q.lock.is_none()
+            && q.group_by.is_empty()
+            && q.having.is_empty()
+            && !q.distinct
+            && q.distinct_on.is_empty()
+            && items.iter().all(|i| match i {
+                SelectItem::Expr { expr, .. } => !has_local_aggregate(expr) && !has_window(expr),
+                SelectItem::Model => true,
+            });
+        if !plain {
+            return;
+        }
+        let base = self.scope().path.clone();
+        let mut paths = vec![];
+        for item in items {
+            if let SelectItem::Expr { expr, .. } = item {
+                relation_aggregates(expr, &base, &mut paths);
+            }
+        }
+        for path in &paths {
+            if paths.iter().filter(|p| *p == path).count() > 1 && !self.lateral.iter().any(|g| g.path == *path) {
+                let alias = self.alias("l");
+                self.lateral.push(LateralGroup { path: path.clone(), alias, sub: None, columns: 0 });
+            }
+        }
     }
 
     // -- select(...) ----------------------------------------------------------------------
@@ -1698,6 +1879,7 @@ impl<'s> Planner<'s> {
         let mut computations = vec![];
         let mut aggregated = !q.group_by.is_empty() || !q.having.is_empty();
         let mut windowed = false;
+        self.plan_lateral(q, items, cte);
         for item in items {
             match item {
                 SelectItem::Model => {
@@ -1729,6 +1911,7 @@ impl<'s> Planner<'s> {
                     types.push(self.expr_type(expr)?);
                     self.allow_window = true;
                     self.allow_unnest = true;
+                    self.lateral_open = true;
                     #[cfg(feature = "composition")]
                     let computed = match expr {
                         Expr::Col { path, name } => {
@@ -1748,6 +1931,7 @@ impl<'s> Planner<'s> {
                     let e = self.value(expr, Hint::default());
                     self.allow_window = false;
                     self.allow_unnest = false;
+                    self.lateral_open = false;
                     let mut e = e?;
                     let read_sql = match expr {
                         Expr::Col { path, name } => {
@@ -1809,6 +1993,11 @@ impl<'s> Planner<'s> {
         windowed |= q.order.iter().any(|o| has_window(&o.expr));
         self.base_select(q, &mut stmt, true)?;
         self.declare_windows(q, &mut stmt)?;
+        for group in std::mem::take(&mut self.lateral) {
+            if let Some((sub, _)) = group.sub {
+                stmt.join_lateral(JoinType::LeftJoin, sub, Alias::new(&group.alias), SExpr::cust("TRUE"));
+            }
+        }
         self.apply_joins(&mut stmt);
         if let Some(lock) = q.lock {
             if aggregated || windowed || q.distinct || !q.distinct_on.is_empty() {

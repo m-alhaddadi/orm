@@ -7,6 +7,18 @@ import { test } from "node:test";
 import { connect, func, IntegrityError, loads, Migrations, Migrator, outer, QueryError, Registry, SchemaError } from "../src/index.js";
 import { Author, Book, Status, sqliteRegistry } from "./sqlite/models.js";
 
+test("SQLite has no array_agg and no LATERAL join", async () => {
+  const db = await connect("sqlite://:memory:", { registry: sqliteRegistry, default: false });
+  try {
+    await db.createTables();
+    await assert.rejects(Author.objects.using(db).select({ n: func.arrayAgg(Author.name) }).scalar(), /sqlite does not support array_agg/);
+    const rows = await Author.objects.using(db).select({ id: Author.id, n: func.count(Author.books), p: func.max(Author.books.pages) }).all();
+    assert.deepEqual(rows, []);
+  } finally {
+    await db.close();
+  }
+});
+
 test("SQLite CRUD, relations, enums, JSON, bulk defaults and CASE updates", async () => {
   const db = await connect("sqlite://:memory:", { registry: sqliteRegistry, default: false });
   try {

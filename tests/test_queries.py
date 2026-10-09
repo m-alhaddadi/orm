@@ -572,8 +572,7 @@ async def test_select_model_with_relation_aggregates(clean):
     alice, bob, carol, (a1, a2, b1) = await seed()
     from orm import func
 
-    # Optimization opportunity (human-issue2.md, issue 8): combine these same-relation
-    # aggregates to avoid repeated scans while preserving empty and independent-relation results.
+    # Same-relation aggregates share one LATERAL subquery: empty counts stay 0, empty sums None.
     rows = await User.objects.select(
         User, func.count(User.posts).label("posts"), func.sum(User.posts.views)
     ).order_by(User.id)
@@ -588,6 +587,15 @@ async def test_select_model_with_relation_aggregates(clean):
         User.name, func.count(User.posts), func.count(User.comments).label("c")
     ).order_by(User.id)
     assert rows == [("Alice", 2, 1), ("Bob", 1, 1), ("Carol", 0, 0)]
+    # Per-aggregate filter and distinct inside one shared subquery, next to another relation.
+    rows = await User.objects.select(
+        User.name,
+        func.count(User.posts, filter=User.posts.views > 10).label("popular"),
+        func.sum(User.posts.views, filter=User.posts.views > 10),
+        func.count(User.posts.views, distinct=True),
+        func.count(User.comments).label("comments"),
+    ).order_by(User.id)
+    assert rows == [("Alice", 1, 50, 2, 1), ("Bob", 1, 100, 1, 1), ("Carol", 0, None, 0, 0)]
     # Comments on a user's posts: two hops in one subquery.
     assert (
         await User.objects.filter(User.id == alice.id)

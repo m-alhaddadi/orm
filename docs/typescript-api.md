@@ -259,6 +259,13 @@ first true condition, else `default` (`null` without one). It works in `select()
 Aggregates take `{ filter: cond }` (`FILTER (WHERE cond)`), for example
 `func.count({ filter: Post.published })` or
 `func.count(User.posts, { filter: User.posts.published })`.
+`func.arrayAgg(expr, { orderBy, distinct, filter })` is `ARRAY_AGG`: an array with the `null`
+values kept, `null` (not `[]`) over no rows; `orderBy` fixes the element order (with `distinct`
+it must use the same expression). It works over a relation, takes no array column, is not a
+window function, and is PostgreSQL only. Other aggregates take no `orderBy`.
+In a `select()` without `groupBy()`, `distinct()` or `lock()`, two or more aggregates over the
+same relation path share one `LEFT JOIN LATERAL` subquery (same results: `0n` empty counts,
+`null` empty sums, per-aggregate `filter` and `distinct`); SQLite keeps scalar subqueries.
 JSON columns: `Doc.meta.get("author", "name").eq("Ann")` (`meta -> 'author' -> 'name'`,
 compared as JSON), `.asText()` for the last step as text (`->>`),
 `Doc.meta.jsonContains({ kind: "post" })` (`@>`), `.jsonContainedBy(...)` (`<@`),

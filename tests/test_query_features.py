@@ -9,6 +9,7 @@ from blog.models import Comment, Post, User
 import orm
 from conftest import DATABASE_URL
 from orm import QueryError, exists, func, outer, window
+from orm.expr import Func
 
 NOW = datetime.now(timezone.utc)
 
@@ -171,6 +172,48 @@ async def test_aggregate_filter(clean):
         Post.title, func.count(filter=Post.views >= 50).over(order_by=Post.created_at)
     )
     assert [tuple(r) for r in running] == [("b1", 1), ("a1", 1), ("a2", 2), ("a3", 2)]
+
+
+async def test_array_agg(clean):
+    (alice, bob, carol), _ = await seed()
+    # Grouped: the elements in the order given; the empty group does not exist.
+    rows = await Post.objects.order_by(Post.author_id).select(
+        Post.author_id,
+        func.array_agg(Post.title, order_by=Post.views.desc()).label("by_views"),
+        func.array_agg(Post.views, order_by=[Post.views]).label("views"),
+        func.array_agg(Post.title, filter=Post.views >= 20, order_by=Post.title).label("popular"),
+    ).group_by(Post.author_id)
+    assert [tuple(r) for r in rows] == [
+        (alice.id, ["a2", "a3", "a1"], [5, 20, 50], ["a2", "a3"]),
+        (bob.id, ["b1"], [100], ["b1"]),
+    ]
+    assert await Post.objects.select(func.array_agg(Post.views, distinct=True, order_by=Post.views)).scalar() == [5, 20, 50, 100]
+    # NULL elements are kept; no rows gives None, not [].
+    comments = await Comment.objects.select(func.array_agg(Comment.author_id, order_by=Comment.body)).scalar()
+    assert comments == [bob.id, None, alice.id]
+    assert await Post.objects.filter(Post.views > 1000).select(func.array_agg(Post.title)).scalar() is None
+    # Over a relation: one correlated subquery per user, None for a user without posts.
+    users = await User.objects.order_by(User.id).select(
+        User.name,
+        func.array_agg(User.posts.title, order_by=User.posts.views.desc()).label("titles"),
+        func.count(User.posts).label("n"),
+    )
+    assert [tuple(u) for u in users] == [("Alice", ["a2", "a3", "a1"], 3), ("Bob", ["b1"], 1), ("Carol", None, 0)]
+    assert users[0].titles == ["a2", "a3", "a1"]
+    filtered = await User.objects.order_by(User.id).select(
+        func.array_agg(User.posts.title, filter=User.posts.views < 50, order_by=User.posts.title)
+    ).scalars()
+    assert filtered == [["a1", "a3"], None, None]
+
+
+async def test_array_agg_errors(clean):
+    await seed()
+    with pytest.raises(QueryError, match="takes no order_by"):
+        await Post.objects.select(Func("sum", (Post.views,), order_by=Post.views))
+    with pytest.raises(QueryError, match="can't be a window function"):
+        await Post.objects.select(func.array_agg(Post.title, order_by=Post.views).over(partition_by=Post.author_id))
+    with pytest.raises(QueryError, match="over relations needs all its columns on one relation path"):
+        await User.objects.select(func.array_agg(User.posts.title, order_by=User.comments.body))
 
 
 async def test_outer_through_relation_paths(clean):

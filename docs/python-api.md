@@ -515,6 +515,21 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
   Over a relation, the filter applies inside the correlated subquery; it must read the
   same relation path as the aggregate. With `.over(...)` the filter comes before `OVER`.
   SQLite supports `FILTER` since 3.30 (the bundled SQLite is newer).
+* **`func.array_agg(expr, order_by=, distinct=, filter=)`** collects the values into a
+  `list` (`ARRAY_AGG`); `NULL` values are kept as `None`. Over no rows it gives `None`,
+  not `[]` (like `sum`). `order_by=Post.views.desc()` (or a list) fixes the element order;
+  with `distinct=True` it must use the same expression. It works over a relation
+  (`func.array_agg(User.posts.title, order_by=User.posts.title)`, `None` for a user without
+  posts). It does not take an array column, and it can't be a window function.
+  PostgreSQL only: SQLite raises `QueryError`. The other aggregates take no `order_by`
+  (their result does not depend on row order).
+* **Same-relation aggregates share one subquery.** In a `select()` (without `group_by()`,
+  `distinct()` or `lock()`), two or more aggregates over the same relation path become one
+  `LEFT JOIN LATERAL (SELECT COUNT(*), SUM(...) ...)` instead of one scalar subquery each.
+  The result is the same: one row per parent (no fan-out), `0` for an empty count, `None` for
+  an empty sum, and each aggregate keeps its own `filter` and `distinct`. Aggregates in
+  `filter()`, `order_by()` and `having()` stay scalar subqueries. SQLite has no `LATERAL`
+  and keeps the scalar subqueries.
 * **String concatenation** has two forms with different `NULL` rules:
   `func.concat(a, " ", b)` is `CONCAT(...)` and reads a `NULL` part as an empty string;
   `a.concat(b)` is `a || b` and is `NULL` when either side is `NULL`.

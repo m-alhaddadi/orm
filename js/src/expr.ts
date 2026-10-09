@@ -674,10 +674,15 @@ export class Func<T, S extends string = never, P = {}> extends Expression<T, S, 
     readonly rel: RelationPath<ModelSpec, string, readonly Hop[]> | undefined = undefined,
     readonly distinct = false,
     filter: unknown = undefined,
+    orderBy: unknown = undefined,
   ) {
     super();
     this.filter = filter === undefined ? undefined : asCondition(filter);
+    this.order = orderings(orderBy);
   }
+
+  /** @internal `ORDER BY` inside an `arrayAgg` call. */
+  readonly order: readonly Ordering<string, unknown>[];
 
   /** @internal `FILTER (WHERE ...)` of an aggregate. */
   readonly filter: Node | undefined;
@@ -695,6 +700,9 @@ export class Func<T, S extends string = never, P = {}> extends Expression<T, S, 
     }
     if (this.filter) {
       ir["filter"] = this.filter.ir(ctx);
+    }
+    if (this.order.length) {
+      ir["order_by"] = this.order.map((o) => o.ir(ctx));
     }
     return ir;
   }
@@ -1008,6 +1016,10 @@ export interface AggregateOptions<S extends string, P> {
   readonly distinct?: boolean;
   readonly filter?: Expression<boolean | null, S, P>;
 }
+/** Options of `arrayAgg`: {@link AggregateOptions} and the order of the elements. */
+export interface ArrayAggOptions<S extends string, P, S2 extends string, P2> extends AggregateOptions<S, P> {
+  readonly orderBy?: Expression<unknown, S2, P2> | Ordering<S2, P2> | readonly (Expression<unknown, S2, P2> | Ordering<S2, P2>)[];
+}
 type AnyExpr<T, S extends string, P> = Expression<T, S, P>;
 /** `SUM` of integers is a `bigint` (cast so); of floats a number; of decimals a Decimal. */
 type SumOf<T> = [NonNullable<T>] extends [number | bigint] ? (number extends NonNullable<T> ? number | bigint : bigint) : NonNullable<T>;
@@ -1052,6 +1064,18 @@ class Functions {
     options?: AggregateOptions<S2, P2>,
   ): Func<([NonNullable<T>] extends [Decimal] ? Decimal : number) | null, Exclude<S | S2, Many>, P & P2> {
     return new Func("avg", [expr], undefined, options?.distinct ?? false, options?.filter);
+  }
+
+  /**
+   * `ARRAY_AGG(expr [ORDER BY ...])`: the values as an array, `null` values included.
+   * `null` (not `[]`) over no rows. `orderBy` fixes the order of the elements; with
+   * `distinct` it must use the same expression. Not for array columns; PostgreSQL only.
+   */
+  arrayAgg<T, S extends string, P, S2 extends string = never, P2 = {}, S3 extends string = never, P3 = {}>(
+    expr: AnyExpr<T, S, P>,
+    options?: ArrayAggOptions<S2, P2, S3, P3>,
+  ): Func<T[] | null, Exclude<S | S2 | S3, Many>, P & P2 & P3> {
+    return new Func("array_agg", [expr], undefined, options?.distinct ?? false, options?.filter, options?.orderBy);
   }
 
   min<T, S extends string, P, S2 extends string = never, P2 = {}>(

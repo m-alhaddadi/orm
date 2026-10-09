@@ -554,7 +554,7 @@ class Labeled(Expression[T]):
 class Func(Expression[T]):
     """A SQL function call; build it with :data:`func`."""
 
-    __slots__ = ("_name", "_args", "_rel", "_distinct", "_filter")
+    __slots__ = ("_name", "_args", "_rel", "_distinct", "_filter", "_order")
 
     def __init__(
         self,
@@ -563,12 +563,14 @@ class Func(Expression[T]):
         rel: RelationPath[Any] | None = None,
         distinct: bool = False,
         filter: ConditionLike | None = None,
+        order_by: Expression[Any] | Ordering | Iterable[Expression[Any] | Ordering] | None = None,
     ) -> None:
         self._name = name
         self._args = tuple(_wrap(a) for a in args)
         self._rel = rel
         self._distinct = distinct
         self._filter = None if filter is None else as_condition(filter)
+        self._order = _orderings(order_by)
 
     def _ir(self, ctx: IRContext) -> IR:
         ir: IR = {"t": "func", "name": self._name, "args": [a._ir(ctx) for a in self._args]}
@@ -581,10 +583,14 @@ class Func(Expression[T]):
             ir["distinct"] = True
         if self._filter is not None:
             ir["filter"] = self._filter._ir(ctx)
+        if self._order:
+            ir["order_by"] = [o._ir(ctx) for o in self._order]
         return ir
 
     def __repr__(self) -> str:
         args = [repr(a) for a in self._args] + ([repr(self._rel)] if self._rel is not None else [])
+        if self._order:
+            args.append(f"order_by={self._order!r}")
         if self._filter is not None:
             args.append(f"filter={self._filter!r}")
         return f"func.{self._name}({', '.join(args)})"
@@ -885,7 +891,8 @@ class _Functions:
     columns, aggregates summarize the rows of each ``group_by()`` group (or all rows).
 
     Every aggregate takes ``filter=cond``: ``FILTER (WHERE cond)``, so it reads only the
-    rows where ``cond`` holds: ``func.count(filter=Post.published)``.
+    rows where ``cond`` holds: ``func.count(filter=Post.published)``. Only ``array_agg``
+    takes ``order_by``: the other aggregates do not depend on the order of their rows.
     """
 
     __slots__ = ()
@@ -926,6 +933,20 @@ class _Functions:
     def avg(self, expr: Expression[Any], *, distinct: bool = False, filter: ConditionLike | None = None) -> Func[Any]:
         """``AVG``: a ``float``, or a ``Decimal`` for decimal columns (exact)."""
         return Func("avg", (expr,), distinct=distinct, filter=filter)
+
+    def array_agg(
+        self,
+        expr: Expression[T],
+        *,
+        order_by: Expression[Any] | Ordering | Iterable[Expression[Any] | Ordering] | None = None,
+        distinct: bool = False,
+        filter: ConditionLike | None = None,
+    ) -> Func[list[T] | None]:
+        """``ARRAY_AGG(expr [ORDER BY ...])``: the values as a list, ``NULL`` values included.
+        ``None`` (not ``[]``) over no rows. ``order_by`` fixes the order of the elements
+        (``order_by=Post.views.desc()``); with ``distinct`` it must use the same expression.
+        Not for array columns; PostgreSQL only."""
+        return Func("array_agg", (expr,), distinct=distinct, filter=filter, order_by=order_by)
 
     def min(self, expr: Expression[T], *, filter: ConditionLike | None = None) -> Func[T | None]:
         return Func("min", (expr,), filter=filter)
