@@ -82,3 +82,50 @@ async def test_composed_create_attach_update_delete(provider):
     finally:
         await db.drop_tables()
         await db.close()
+
+
+SCOPED = '''
+model Person {
+ id Int @id @default(autoincrement())
+ name String
+ @@map("composition06_scoped_people")
+}
+model Employee {
+ shop_id Int
+ @@composition.model(parent: "Person", parentRef: "person", childRef: "employee")
+ @@query.filter("shop_id == scope.shop")
+ @@map("composition06_scoped_employees")
+}
+'''
+
+
+@pytest.mark.skipif("query-defaults" not in json.loads(_native.native_artifact())["capabilities"],
+                    reason="requires a query-defaults native artifact")
+@pytest.mark.parametrize("provider", ["sqlite", "postgresql"])
+async def test_composed_writes_read_the_scope(provider):
+    url = "sqlite://:memory:" if provider == "sqlite" else os.environ.get("ORM_TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("set ORM_TEST_DATABASE_URL for PostgreSQL")
+    registry = orm.Registry()
+    models = orm.loads(f'datasource db {{\n provider = "{provider}"\n}}\n' + SCOPED, registry=registry)
+    Employee = models["Employee"]
+    db = await orm.connect(url, registry=registry, default=False)
+    await db.drop_tables()
+    await db.create_tables()
+    try:
+        employees = Employee.objects.using(db)
+        with orm.scope(shop=1):
+            ann = await employees.insert(name="Ann", shop_id=1)
+            assert (ann.name, ann.shop_id) == ("Ann", 1)
+        with orm.scope(shop=2):
+            await employees.insert(name="Bob", shop_id=2)
+            # Inserts do not read the scope, and the identity read skips the filter.
+            assert (await employees.insert(name="Cid", shop_id=1)).name == "Cid"
+        with orm.scope(shop=1):
+            assert await employees.filter(Employee.name == "Ann").update(name="Ann 2") == 1
+            assert await employees.filter(Employee.name == "Bob").delete() == 0
+        assert await employees.without_defaults().filter(Employee.name == "Bob").update(name="Bob 2") == 1
+        assert sorted(e.name for e in await employees.without_defaults()) == ["Ann 2", "Bob 2", "Cid"]
+    finally:
+        await db.drop_tables()
+        await db.close()

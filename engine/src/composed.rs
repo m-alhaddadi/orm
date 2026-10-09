@@ -48,9 +48,11 @@ fn owner_chain(schema: &Schema, owner: OwnerId) -> Vec<&PreparedOwnerLink> {
     chain
 }
 
-/// An unfiltered select of the whole logical model.
-fn model_select(model: &str) -> Result<Select> {
-    serde_json::from_value(serde_json::json!({ "model": model })).map_err(|e| query_err(e.to_string()))
+/// An unfiltered select of the whole logical model. The identity reads skip the default
+/// filters: they read back rows by key, which a filter (or an unset `scope.<name>`) must not hide.
+fn model_select(model: &str, without_defaults: bool) -> Result<Select> {
+    serde_json::from_value(serde_json::json!({ "model": model, "without_defaults": without_defaults }))
+        .map_err(|e| query_err(e.to_string()))
 }
 
 /// Ends `tx` by the result; a nested `tx` is a savepoint, so the outer scope stays open.
@@ -133,7 +135,7 @@ pub fn prepare_insert(
         }
         prepared.push(steps);
     }
-    let read = plan::plan_select(schema, target, &model_select(model)?, &NoParams)?.stmt;
+    let read = plan::plan_select(schema, target, &model_select(model, true)?, &NoParams)?.stmt;
     Ok(Insert {
         rows: prepared,
         read,
@@ -237,12 +239,13 @@ fn mutation(
     params: &dyn crate::Params,
     returning: bool,
     delete: bool,
+    without_defaults: bool,
     prepared_match: Option<SelectStatement>,
 ) -> Result<Mutation> {
     let model_idx = schema.model_idx(model).map_err(query_err)?;
     let logical = schema.model(model_idx);
-    let mut query = model_select(model)?;
-    let read = plan::plan_select(schema, target, &query, &NoParams)?.stmt;
+    let read = plan::plan_select(schema, target, &model_select(model, true)?, &NoParams)?.stmt;
+    let mut query = model_select(model, without_defaults)?;
     query.filters = filters;
     query.with = with;
     let mut matched = match prepared_match {
@@ -305,6 +308,7 @@ pub fn prepare_delete(
         params,
         query.returning,
         true,
+        query.without_defaults,
         None,
     )
 }
@@ -326,6 +330,7 @@ pub fn prepare_update(
         params,
         query.returning,
         false,
+        query.without_defaults,
         Some(matched),
     )?;
     let logical = schema.model(plan.model);

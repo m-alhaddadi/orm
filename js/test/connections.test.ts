@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { connect, define, getDatabase, loads, param, Registry, scope, type QueryEvent } from '../src/index.js';
+import { connect, define, getDatabase, loads, param, Registry, scope, type Database, type QueryEvent } from '../src/index.js';
 import { native } from '../src/native.js';
 import { User } from './blog/models.js';
 import { useDatabase, otherDatabase } from './helpers.js';
@@ -32,6 +35,61 @@ test('onCommit runs after the outer commit, and a rolled-back savepoint drops it
     assert.deepEqual(seen, [1, 'released']);
   } finally {
     await other.close();
+  }
+});
+
+async function twoSqliteFiles() {
+  const registry = new Registry();
+  const { Item } = loads(SQLITE, { registry }) as any;
+  const dir = mkdtempSync(join(tmpdir(), 'orm-s6-'));
+  const dbs = [await connect(`sqlite://${join(dir, 'a.db')}`, { registry, default: false }), await connect(`sqlite://${join(dir, 'b.db')}`, { registry, default: false })];
+  for (const db of dbs) await db.createTables();
+  return { Item, a: dbs[0]!, b: dbs[1]! };
+}
+
+test('transactions and onCommit are kept per database', async () => {
+  const { Item, a, b } = await twoSqliteFiles();
+  const seen: string[] = [];
+  try {
+    await assert.rejects(a.transaction(async () => {
+      await b.transaction(async () => {
+        // A's transaction is still open inside B's.
+        assert.notEqual(a.tx(), null);
+        await Item.objects.using(a).insert({});
+        await a.onCommit(() => seen.push('a'));
+      });
+      throw new Error('undo');
+    }), /undo/);
+    assert.equal(seen.length, 0);
+    assert.equal(await Item.objects.using(a).count(), 0);
+    await a.transaction(async () => {
+      await b.transaction(async () => {
+        await a.onCommit(() => seen.push('a'));
+        await b.onCommit(() => seen.push('b'));
+      });
+      assert.deepEqual(seen, ['b']);
+    });
+    assert.deepEqual(seen, ['b', 'a']);
+  } finally {
+    await a.close();
+    await b.close();
+  }
+});
+
+test('onCommit after the transaction ended throws', async () => {
+  const { a, b } = await twoSqliteFiles();
+  let end!: () => void;
+  const ended = new Promise<void>((resolve) => { end = resolve; });
+  let late!: Promise<void>;
+  try {
+    await a.transaction(async () => {
+      late = (async () => { await ended; await a.onCommit(() => undefined); })();
+    });
+    end();
+    await assert.rejects(late, /has ended/);
+  } finally {
+    await a.close();
+    await b.close();
   }
 });
 
@@ -112,6 +170,25 @@ test('a session lock is released on error, and shared locks share', async () => 
   }
 });
 
+test('a session lock keeps the error of its function when the unlock fails, and checks its options', async () => {
+  const db = getDatabase();
+  const kill = "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND objid = 4243 AND granted";
+  await assert.rejects(db.lock(4243, { session: true }, async () => { await db.execute(kill); throw new Error('mine'); }), /mine/);
+  assert.equal(await db.lock(4243, { session: true }, async () => { await db.execute(kill); return 1; }), 1);
+  assert.equal(await db.lock(5, { session: true, timeout: Infinity }, async () => 2), 2);
+  for (const timeout of [-1, 3e6, NaN]) {
+    await assert.rejects(db.lock(5, { session: true, timeout }, async () => 3), /lock timeout/);
+  }
+  await db.transaction(async () => {
+    await assert.rejects((db.lock as any)(5, {}, async () => 4), /session: true/);
+    await assert.rejects(db.lock(5, { timeout: 1 } as never), /session: true/);
+  });
+  await assert.rejects(db.lock(2 ** 53, { session: true }, async () => 5), /pass it as a bigint/);
+  // The transaction form is the last overload, so helper types see it.
+  const args: Parameters<Database['lock']> = [1, { exclusive: true }];
+  assert.equal(args.length, 2);
+});
+
 test('a session lock needs Postgres', async () => {
   const db = await sqliteDb();
   try {
@@ -121,34 +198,47 @@ test('a session lock needs Postgres', async () => {
   }
 });
 
-/** A second database with the same tables, standing in for a replica. */
-async function replicaUrl(): Promise<string> {
+/** Another database with the same tables, standing in for a replica: replica `n` holds `n`
+ * users. Its name comes from the test database, so parallel runs do not share it. */
+async function replicaUrl(n = 1): Promise<string> {
   const db = getDatabase();
-  const url = db.url.replace(/\/[^/]*$/, '/orm_s6_replica_js');
-  if ((await db.fetchText("SELECT 1 FROM pg_database WHERE datname = 'orm_s6_replica_js'")).length === 0) {
-    await db.execute('CREATE DATABASE orm_s6_replica_js');
+  const name = `${db.url.split('/').pop()}_s6_replica_js${n}`;
+  const url = db.url.replace(/\/[^/]*$/, `/${name}`);
+  if ((await db.fetchText(`SELECT 1 FROM pg_database WHERE datname = '${name}'`)).length === 0) {
+    await db.execute(`CREATE DATABASE "${name}"`);
   }
   const replica = await connect(url, { default: false, maxConnections: 1 });
   try {
     await replica.dropTables();
     await replica.createTables();
-    await User.objects.using(replica).insert({ email: 'r@example.com', name: 'Replica' });
+    const names = n === 1 ? ['Replica'] : Array.from({ length: n }, (_, i) => `R${n}-${i}`);
+    await User.objects.using(replica).insertMany(names.map((u) => ({ email: `${u}@example.com`, name: u })));
   } finally {
     await replica.close();
   }
   return url;
 }
 
+async function backends(url: string): Promise<number> {
+  const rows = await getDatabase().fetchText(`SELECT count(*) FROM pg_stat_activity WHERE datname = '${url.split('/').pop()}'`);
+  return Number(rows[0]![0]);
+}
+
 test('replicas answer reads outside a transaction; writes and transactions use the primary', async () => {
-  const db = getDatabase(), url = await replicaUrl();
-  const routed = await connect(db.url, { replicas: [url, url], default: false, maxConnections: 2 });
+  const db = getDatabase(), url = await replicaUrl(), url2 = await replicaUrl(2);
+  const routed = await connect(db.url, { replicas: [url, url2], default: false, maxConnections: 2 });
   try {
     await User.objects.using(routed).insert({ email: 'p@example.com', name: 'Primary' });
     const users = User.objects.using(routed);
-    assert.deepEqual((await users).map((u) => u.name), ['Replica']);
-    assert.equal(await users.count(), 1);
+    // Reads take the replicas in turn.
+    const reads = [];
+    for (let i = 0; i < 2; i++) reads.push((await User.objects.using(routed)).map((u) => u.name).sort().join());
+    assert.deepEqual(reads.sort(), ['R2-0,R2-1', 'Replica']);
+    assert.deepEqual([await users.count(), await users.count()].sort(), [1, 2]);
+    const r2 = users.filter(User.name.eq('R2-0'));
+    assert.deepEqual([await r2.exists(), await r2.exists()].sort(), [false, true]);
     const byName = users.filter(User.name.eq(param('n'))).prepare();
-    assert.deepEqual((await byName.all({ n: 'Replica' })).map((u) => u.name), ['Replica']);
+    assert.deepEqual([(await byName.all({ n: 'Replica' })).length, (await byName.all({ n: 'Replica' })).length].sort(), [0, 1]);
     assert.deepEqual((await users.using('primary')).map((u) => u.name), ['Primary']);
     assert.deepEqual((await User.objects.using(routed.primary)).map((u) => u.name), ['Primary']);
     await routed.transaction(async () => {
@@ -159,8 +249,24 @@ test('replicas answer reads outside a transaction; writes and transactions use t
     assert.deepEqual((await User.objects.using(db)).map((u) => u.name), ['P2']);
     assert.throws(() => User.objects.using('replica' as never), TypeError);
   } finally {
-    await routed.close();
+    // Closing a primary view closes the whole database: the primary and each replica.
+    await routed.primary.close();
   }
+  assert.deepEqual([await backends(url), await backends(url2)], [0, 0]);
+  // A replica that fails to open closes the pools opened before it.
+  const before = await backends(url);
+  await assert.rejects(connect(db.url, { replicas: [url, url.replace(/\/[^/]*$/, '/orm_s6_missing')], default: false }));
+  assert.equal(await backends(url), before);
+});
+
+test('tenant ids are checked', async () => {
+  const db = getDatabase();
+  for (const bad of [true, null, NaN, Infinity]) {
+    assert.throws(() => db.tenant(bad as never, async () => {}), /tenant id/);
+  }
+  // An empty id would look like no tenant: Postgres gives '' for a setting a pooled
+  // connection had before.
+  assert.throws(() => db.tenant('', async () => {}), /empty/);
 });
 
 const NOTES = `datasource db { provider = "postgresql" }
@@ -247,9 +353,9 @@ for (const dialect of ['postgres', 'sqlite']) {
     try {
       const [s1, s2] = await Shop.objects.using(sdb).insertMany([{ name: 'one' }, { name: 'two' }]).returning();
       const orders = Order.objects.using(sdb);
-      const [, , o3] = await orders.insertMany([{ shopId: s1.id, total: 10 }, { shopId: s1.id, total: 20 }, { shopId: s2.id, total: 30 }]).returning();
+      const [o1, , o3] = await orders.insertMany([{ shopId: s1.id, total: 10 }, { shopId: s1.id, total: 20 }, { shopId: s2.id, total: 30 }]).returning();
       for (const read of [() => orders.all(), () => orders.count(), () => Shop.objects.using(sdb).filter(Shop.orders.total.gt(25)).count()]) {
-        await assert.rejects(read(), /scope\.shop/);
+        await assert.rejects(read(), /default filter of Order reads scope\.shop/);
       }
       assert.equal(await orders.withoutDefaults().count(), 3);
       await scope({ shop: s1.id }, async () => {
@@ -258,6 +364,13 @@ for (const dialect of ['postgres', 'sqlite']) {
         assert.deepEqual((await orders.filter(Order.total.gt(param('min'))).prepare().all({ min: 15 })).map((o: any) => o.total), [20]);
         assert.equal(await Shop.objects.using(sdb).filter(Shop.orders.total.gt(25)).count(), 0);
         await scope({ shop: s2.id }, async () => assert.deepEqual((await orders.all()).map((o: any) => o.total), [30]));
+        // A plain function that gives a query set (a thenable) still runs in the scope.
+        assert.deepEqual((await scope({ shop: s2.id }, (() => orders) as never) as any[]).map((o: any) => o.total), [30]);
+        // Every path that plans a statement reads the scope.
+        assert.match(orders.sql(), /s6_js_orders/);
+        assert.match(orders.filter(Order.total.gt(param('t'))).prepare().sql({ t: 1 }), /s6_js_orders/);
+        assert.match(orders.select({ total: Order.total }).sql(), /s6_js_orders/);
+        assert.equal(orders.filter(Order.id.eq(o1.id)).prepareUpdate({ total: 11 }).unique, true);
         assert.equal(await orders.update({ total: 0 }), 2);
         assert.equal(await orders.updateMany([{ id: o3.id, total: 99 }]), 0);
         assert.equal(await orders.filter(Order.id.eq(o3.id)).delete(), 0);

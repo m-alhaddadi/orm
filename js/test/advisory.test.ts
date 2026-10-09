@@ -31,9 +31,10 @@ test('advisory validation retains errors and precedence', async () => {
   const db = getDatabase();
   await assert.rejects(db.lock(true as never), TransactionRequired);
   await db.transaction(async () => {
-    for (const value of [true, 1.5, null, Number.MAX_SAFE_INTEGER + 1]) {
+    for (const value of [true, 1.5, null]) {
       await assert.rejects(db.lock(value as never), {name:'TypeError', message:`lock key must be an integer or a string, got ${String(value)}`});
     }
+    await assert.rejects(db.lock(Number.MAX_SAFE_INTEGER + 1), {name:'TypeError', message:'lock key 9007199254740992 is not a safe integer: pass it as a bigint'});
     for (const value of [-(1n<<63n)-1n, 1n<<63n]) {
       await assert.rejects(db.lock(value), {name:'RangeError', message:'lock key must fit in 64 bits'});
     }

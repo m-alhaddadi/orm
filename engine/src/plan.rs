@@ -534,7 +534,7 @@ impl<'s> Planner<'s> {
                 let mut p = Planner::new(schema, &virt, target, &q.model, None, params, vec![], 0)?;
                 #[cfg(feature = "model-composition")]
                 if crate::composed::is_composed(schema, &q.model)? {
-                    let mut select: Select = serde_json::from_value(serde_json::json!({"model":q.model})).map_err(|e| query_err(e.to_string()))?;
+                    let mut select: Select = serde_json::from_value(serde_json::json!({"model":q.model,"without_defaults":q.without_defaults})).map_err(|e| query_err(e.to_string()))?;
                     select.filters = q.filters.clone(); select.with = q.with.clone();
                     let mut matched = p.build_select(&select)?.stmt;
                     let prior_joins = p.joins.len();
@@ -1041,17 +1041,28 @@ impl<'s> Planner<'s> {
 
     // -- value expressions --------------------------------------------------------------
 
-    /// `i`, checked against the parameter list.
     /// The parameter of `scope.<name>`; without one, the statement fails (closed by default).
     fn scope_param(&self, name: &str) -> Result<usize> {
-        match self.params.scope(name) {
-            Some(i) => self.param(i),
-            None => Err(Error::query(format!(
-                "a default filter reads scope.{name}, which is not set: run the query inside `scope({name}=...)`, or use without_defaults()"
-            ))),
+        if let Some(i) = self.params.scope(name) {
+            return self.param(i);
         }
+        // Only for the message: `Expr` has no visitor, and its Debug form names each scope node.
+        #[cfg(feature = "query-defaults")]
+        let node = format!("{:?}", Expr::Scope { name: name.to_owned() });
+        #[cfg(not(feature = "query-defaults"))]
+        let models: Vec<&str> = Vec::new();
+        #[cfg(feature = "query-defaults")]
+        let models: Vec<&str> = self.schema.models.iter()
+            .filter(|m| m.query_defaults.filter.as_ref().is_some_and(|f| str::contains(&format!("{f:?}"), node.as_str())))
+            .map(|m| m.ir.name.as_str())
+            .collect();
+        Err(Error::query(format!(
+            "the default filter of {} reads scope.{name}, which is not set: set it with scope(), or use without_defaults()",
+            models.join(", ")
+        )))
     }
 
+    /// `i`, checked against the parameter list.
     fn param(&self, i: usize) -> Result<usize> {
         if i < self.params.len() {
             Ok(i)

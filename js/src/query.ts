@@ -932,7 +932,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     void check;
     const params: unknown[] = [];
     const ir = this.selectIr("select", params);
-    return call(() => this.meta.registry.native().sql(JSON.stringify(ir), params));
+    return call(() => this.meta.registry.native().sql(...withScope(JSON.stringify(ir), params)));
   }
 
   /**
@@ -1156,7 +1156,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
     this.db();
     const params: unknown[] = [];
     const ir = this.mutationIr("update", params, values);
-    const unique = call(() => this.meta.registry.native().uniqueRowUpdate(JSON.stringify(ir), params, allowedWrites()));
+    const unique = call(() => this.meta.registry.native().uniqueRowUpdate(...withScope(JSON.stringify(ir), params), allowedWrites()));
     return { unique, execute: (data = values, options = {}) => this.updateValues(data, options.returning ?? false) };
   }
 
@@ -1691,7 +1691,7 @@ export class Prepared<M extends ModelSpec, R, P> {
   sql(...[values]: Values<P>): string {
     const c = this.statement("select");
     const params = c.bind(values ?? {}, this.params as Set<string>);
-    return call(() => this.qs.meta.registry.native().sql(c.json, params));
+    return call(() => this.qs.meta.registry.native().sql(...withScope(c.json, params)));
   }
 }
 

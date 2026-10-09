@@ -16,7 +16,7 @@
  */
 
 import { Builder } from "./build.js";
-import type { Database } from "./db.js";
+import { withScope, type Database } from "./db.js";
 import { DoesNotExist, MultipleObjectsReturned, QueryError, TransactionRequired } from "./errors.js";
 import {
   Column,
@@ -261,7 +261,7 @@ export class Select<M extends ModelSpec, Row extends object, S extends string, P
     void check;
     const params: unknown[] = [];
     const ir = this.ir(params);
-    return call(() => this.qs.meta.registry.native().sql(JSON.stringify(ir), params));
+    return call(() => this.qs.meta.registry.native().sql(...withScope(JSON.stringify(ir), params)));
   }
 
   // -- execution ------------------------------------------------------------------------------

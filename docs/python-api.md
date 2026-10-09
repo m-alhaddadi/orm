@@ -816,6 +816,9 @@ A rollback drops the callback. A rolled-back savepoint drops only the callbacks 
 Outside a transaction, `fn()` runs at once.
 Callbacks run in registration order, outside the transaction.
 An error in a callback goes to the caller of `transaction()`, and the later callbacks do not run; the transaction is already committed.
+`on_commit` is a coroutine: without `await`, the callback is not registered (Python warns "coroutine was never awaited").
+Transactions and callbacks are kept for each database: a callback on `a` inside a transaction on `b` inside a transaction on `a` waits for `a`'s commit.
+A task that the transaction started and that calls `on_commit` after the transaction ended raises `TransactionRequired`.
 
 ### Database errors
 
@@ -906,8 +909,8 @@ async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction ne
   some fields locks the whole row. With `skip_locked`, a row locked elsewhere (or
   deleted) gives `False` and leaves the instance unchanged; otherwise a missing row
   raises `DoesNotExist`. The lock options without `lock=True` raise `TypeError`.
-* Locks are held until the transaction ends, so both `lock()` and `db.lock()` raise
-  `orm.TransactionRequired` outside `db.transaction()`. `count()` / `exists()` /
+* Row locks and `db.lock(key)` without `session=True` are held until the transaction
+  ends, so they raise `orm.TransactionRequired` outside `db.transaction()`. `count()` / `exists()` /
   `update()` / `delete()` on a locked query set raise `QueryError` (writes lock the rows
   they change anyway).
 * `db.lock(key)` is a transaction-scoped Postgres advisory lock. Postgres keys are
@@ -916,11 +919,16 @@ async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction ne
 * `async with db.lock(key, session=True, timeout=5):` is a session advisory lock: it
   holds the lock for the block, with no transaction, so the block can make slow calls
   (HTTP) without an open transaction. The lock pins one pool connection; queries in the
-  block use other connections. It waits at most `timeout` seconds (forever when `None`,
-  not at all with `nowait=True`) and raises `orm.LockNotAvailable` when another session
-  still holds the lock. The lock is released when the block ends, also on an error;
-  when the unlock fails or the task is cancelled, the connection is closed, so the
-  server releases the lock.
+  block use other connections. A lock that waits also uses its pool connection while it
+  waits. It waits at most `timeout` seconds (forever when `None` or `inf`, not at all with
+  `nowait=True`; at most 2147483.647, the Postgres limit) and raises
+  `orm.LockNotAvailable` when another session still holds the lock. `timeout` without
+  `session=True` raises `TypeError`. The lock is released when the block ends, also on
+  an error. When the unlock fails, the connection is closed, so the server releases the
+  lock, and the block's own result or error stays. A task cancelled while it waits
+  cancels the wait on the server.
+  Reads in the block go to a replica when the database has replicas: read in a
+  transaction or with `.using("primary")` to see the last write of the previous holder.
 * Optimistic locking (version columns) is not in the core.
   Select the `orm-locking` extension and mark the field `@locking.version`; see `schema-extensions.md`.
 
@@ -951,6 +959,9 @@ with db.tenant(shop.id):                 # a sync `with`: it does no I/O
 * A statement outside a transaction runs in a transaction of its own: `BEGIN`, `set_config`, the statement, `COMMIT`. That is four round trips instead of one (estimated); put many statements in one `db.transaction()`.
 * A transaction that is already open keeps its setting. Savepoints use the setting of their transaction.
 * The setting ends with each transaction, so pooled connections keep no tenant.
+  A connection that had a tenant reads `''` (not `NULL`) for the setting after that, so a policy should read `NULLIF(current_setting('app.tenant', true), '')`; `tenant("")` raises `ValueError`.
+* Raw `db.execute(...)` in the block also runs in a transaction of its own, so a statement that cannot run in a transaction (`CREATE INDEX CONCURRENTLY`, `VACUUM`) fails there; run it outside the block.
+* A composed model (model composition) stores its rows in a table for each level: each of these tables needs its own policy, for example a child policy `USING (EXISTS (SELECT 1 FROM parent p WHERE p.id = child.id))`.
 * Replicas get the same setting. Session locks (`session=True`) do not.
 * The policy must read the setting, for example `USING (shop_id::text = current_setting('app.tenant', true))`. The ORM does not create policies. A superuser and the table owner bypass RLS unless the table has `FORCE ROW LEVEL SECURITY`.
 * SQLite raises `QueryError`.

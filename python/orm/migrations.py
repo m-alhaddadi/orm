@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from . import _native
-from .db import Database, _callbacks, _current_tx
+from .db import Database, _callbacks, _Callbacks, _current_tx
 from .db import connect as orm_connect
 from ._native import MigrationError
 from .model import Registry
@@ -294,8 +294,10 @@ class Migrator:
             tx = await self.db._engine.migration_begin(m.name, str(m.path))
             if tx is None:
                 continue
-            token = _current_tx.set((self.db, tx))
-            callbacks, cb_token = self.db._collect_callbacks()
+            root = self.db._root
+            token = _current_tx.set({**_current_tx.get(), root: tx})
+            callbacks = _Callbacks()
+            cb_token = _callbacks.set({**_callbacks.get(), root: callbacks})
             try:
                 if run is not None:
                     await run(self.db)
@@ -304,6 +306,7 @@ class Migrator:
                     await tx.rollback()
                 raise
             finally:
+                callbacks.ended = True
                 _callbacks.reset(cb_token)
                 _current_tx.reset(token)
             await self.db._engine.migration_finish(tx, m.name, str(m.path))

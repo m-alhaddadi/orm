@@ -20,20 +20,28 @@ __all__ = ["Database", "QueryEvent", "connect", "get_database", "scope"]
 
 T = TypeVar("T")
 
+# Postgres `lock_timeout` takes at most 2^31 - 1 ms.
+_MAX_TIMEOUT = 2147483.647
+
 # Statements a replica may answer.
 _READS = frozenset({"select", "count", "exists"})
 
 _default: Database | None = None
-# The innermost open transaction of the current task, with the database it belongs to.
-_current_tx: ContextVar[tuple[Database, _native.Transaction] | None] = ContextVar(
-    "orm_current_tx", default=None
-)
+# For each database (its root) with an open transaction in the current task: the innermost one.
+_current_tx: ContextVar[dict[Database, _native.Transaction]] = ContextVar("orm_current_tx", default={})
 # For each database in a `tenant()` block: its primary and replica engines with the tenant set.
 _tenants: ContextVar[dict[Database, tuple[_native.Engine, list[_native.Engine]]]] = ContextVar("orm_tenants", default={})
 # The `scope.<name>` values of default filters.
 _scope: ContextVar[dict[str, Any]] = ContextVar("orm_scope", default={})
 # For each database with an open transaction: the on_commit callbacks of the innermost one.
-_callbacks: ContextVar[dict[Database, list[Callable[[], Any]]]] = ContextVar("orm_on_commit", default={})
+_callbacks: ContextVar[dict[Database, _Callbacks]] = ContextVar("orm_on_commit", default={})
+
+
+class _Callbacks(list[Callable[[], Any]]):
+    """The on_commit callbacks of one transaction. ``ended`` is set when it commits or rolls
+    back: a task that it started can still see it after that."""
+
+    ended = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +90,7 @@ class Database:
         return self._base if tenant is None else tenant[0]
 
     def _tx(self) -> _native.Transaction | None:
-        cur = _current_tx.get()
-        return cur[1] if cur is not None and cur[0]._root is self._root else None
+        return _current_tx.get().get(self._root)
 
     def _reader(self) -> _native.Engine:
         """The engine for a read: the next replica outside a transaction, else the primary."""
@@ -105,6 +112,8 @@ class Database:
             raise QueryError("db.tenant() sets a Postgres setting for row-level security; sqlite has none")
         if isinstance(id, bool) or not isinstance(id, (str, int)):
             raise TypeError(f"tenant id must be a str or an int, got {id!r}")
+        if id == "":
+            raise ValueError("tenant id must not be empty: a pooled connection reads '' for no tenant")
         root, value = self._root, [str(id)]
         engines = (
             root._base.with_settings(["app.tenant"], value),
@@ -218,23 +227,22 @@ class Database:
         """
         outer = self._tx() is None
         tx = await self._engine.begin(self._tx())
-        token = _current_tx.set((self, tx))
-        callbacks, cb_token = self._collect_callbacks()
+        token = _current_tx.set({**_current_tx.get(), self._root: tx})
+        callbacks = _Callbacks()
+        cb_token = _callbacks.set({**_callbacks.get(), self._root: callbacks})
         try:
             yield
         except BaseException:
+            callbacks.ended = True
             _callbacks.reset(cb_token)
             _current_tx.reset(token)
             await tx.rollback()
             raise
+        callbacks.ended = True
         _callbacks.reset(cb_token)
         _current_tx.reset(token)
         await tx.commit()
         await self._after_commit(callbacks, outer)
-
-    def _collect_callbacks(self) -> tuple[list[Callable[[], Any]], Any]:
-        callbacks: list[Callable[[], Any]] = []
-        return callbacks, _callbacks.set({**_callbacks.get(), self._root: callbacks})
 
     async def _after_commit(self, callbacks: list[Callable[[], Any]], outer: bool) -> None:
         """A released savepoint hands its callbacks to the enclosing transaction."""
@@ -251,9 +259,13 @@ class Database:
         rollback drops it (a rolled-back savepoint drops only the callbacks registered
         inside it). Outside a transaction, ``fn()`` runs at once. An awaitable result is
         awaited. Callbacks run in order, outside the transaction; an error in one goes to
-        the caller of ``transaction()`` and the later ones do not run."""
+        the caller of ``transaction()`` and the later ones do not run. A task that the
+        transaction started and that calls this after the transaction ended raises
+        ``TransactionRequired``."""
         callbacks = _callbacks.get().get(self._root)
-        if callbacks is not None and self._tx() is not None:
+        if callbacks is not None and callbacks.ended:
+            raise TransactionRequired("on_commit(): the transaction of this task has ended")
+        if callbacks is not None:
             callbacks.append(fn)
             return
         result = fn()
@@ -301,6 +313,8 @@ class Database:
         """
         if session:
             return self._session_lock(key, exclusive, nowait, timeout)
+        if timeout is not None:
+            raise TypeError("lock(timeout=...) needs session=True; a transaction lock waits or uses nowait")
         return self._xact_lock(key, exclusive, nowait)
 
     def _lock_key(self, key: int | str) -> tuple[int, bytes | None]:
@@ -331,9 +345,9 @@ class Database:
         if self.url.startswith("sqlite://"):
             raise QueryError("sqlite does not support advisory locks")
         k, name = self._lock_key(key)
-        if timeout is not None and not timeout >= 0:
-            raise ValueError("lock timeout must be a number of seconds >= 0")
-        timeout_ms = None if timeout is None else math.ceil(timeout * 1000)
+        if timeout is not None and not (timeout == math.inf or 0 <= timeout <= _MAX_TIMEOUT):
+            raise ValueError(f"lock timeout must be a number of seconds from 0 to {_MAX_TIMEOUT}, or inf")
+        timeout_ms = None if timeout is None or timeout == math.inf else min(math.ceil(timeout * 1000), 2**31 - 1)
         engine = self._engine
         held = await self._call(lambda t: engine.session_lock(k, name, bool(exclusive), bool(nowait), timeout_ms, t))
         if held is None:

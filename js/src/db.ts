@@ -11,14 +11,17 @@ import { active as debugging, capture, record } from "./debug.js";
 
 let defaultDb: Database | undefined;
 
-/** The innermost open transaction of the current async context, and its database. */
-const current = new AsyncLocalStorage<{ readonly db: Database; readonly tx: NativeTransaction }>();
+/** For each database (its root) with an open transaction in the current async context: the innermost one. */
+const current = new AsyncLocalStorage<ReadonlyMap<Database, NativeTransaction>>();
 /** For each database in a `tenant()` call: its primary and replica engines with the tenant set. */
 const tenants = new AsyncLocalStorage<ReadonlyMap<Database, { readonly primary: NativeEngine; readonly replicas: readonly NativeEngine[] }>>();
 /** The `scope.<name>` values of default filters. */
 const scopeValues = new AsyncLocalStorage<Readonly<Record<string, unknown>>>();
 /** For each database with an open transaction: the onCommit callbacks of the innermost one. */
 const callbacks = new AsyncLocalStorage<ReadonlyMap<Database, (() => unknown)[]>>();
+/** The callback lists of transactions that committed or rolled back: a call started in the
+ * transaction can still see its list after that. */
+const ended = new WeakSet<(() => unknown)[]>();
 
 export interface LockOptions {
   /** A shared lock (any number of shared holders, but no exclusive one). */
@@ -50,9 +53,12 @@ export interface SessionLockOptions {
   readonly exclusive?: boolean;
   /** Throw `LockNotAvailable` at once when the lock is held. */
   readonly nowait?: boolean;
-  /** Seconds to wait before `LockNotAvailable` (no limit when absent). */
+  /** Seconds to wait before `LockNotAvailable` (no limit when absent or `Infinity`). */
   readonly timeout?: number;
 }
+
+/** Postgres `lock_timeout` takes at most 2^31 - 1 ms. */
+const MAX_TIMEOUT = 2147483.647;
 
 /** Statements a replica may answer (the IR starts with its `op`). */
 const READ = /^\{"op":"(select|count|exists)"/;
@@ -64,7 +70,12 @@ const READ = /^\{"op":"(select|count|exists)"/;
 export async function inTransaction(db: Database, tx: NativeTransaction, fn: () => Promise<unknown>): Promise<(() => unknown)[]> {
   const mine: (() => unknown)[] = [];
   const scoped = new Map(callbacks.getStore() ?? []).set(db.root, mine);
-  await current.run({ db, tx }, () => callbacks.run(scoped, fn));
+  const txs = new Map(current.getStore() ?? []).set(db.root, tx);
+  try {
+    await current.run(txs, () => callbacks.run(scoped, fn));
+  } finally {
+    ended.add(mine);
+  }
   return mine;
 }
 
@@ -134,8 +145,7 @@ export class Database {
 
   /** @internal The transaction queries on this database run in, if any. */
   tx(): NativeTransaction | null {
-    const c = current.getStore();
-    return c !== undefined && c.db.root === this.root ? c.tx : null;
+    return current.getStore()?.get(this.root) ?? null;
   }
 
   /** @internal The engine for a read: the next replica outside a transaction, else the primary. */
@@ -159,15 +169,18 @@ export class Database {
     if (this.url.startsWith("sqlite://")) {
       throw new QueryError("db.tenant() sets a Postgres setting for row-level security; sqlite has none");
     }
-    if (!["string", "number", "bigint"].includes(typeof id)) {
-      throw new TypeError(`tenant id must be a string or a number, got ${String(id)}`);
+    if (!["string", "number", "bigint"].includes(typeof id) || (typeof id === "number" && !Number.isFinite(id))) {
+      throw new TypeError(`tenant id must be a string or a finite number, got ${String(id)}`);
+    }
+    if (id === "") {
+      throw new RangeError("tenant id must not be empty: a pooled connection reads '' for no tenant");
     }
     const root = this.root, value = [String(id)];
     const engines = {
       primary: root.base.withSettings(["app.tenant"], value),
       replicas: root.replicas.map((r) => r.withSettings(["app.tenant"], value)),
     };
-    return tenants.run(new Map(tenants.getStore() ?? []).set(root, engines), fn);
+    return tenants.run(new Map(tenants.getStore() ?? []).set(root, engines), async () => await fn());
   }
 
   /** @internal */
@@ -194,12 +207,15 @@ export class Database {
     const mine: (() => unknown)[] = [];
     const scoped = new Map(callbacks.getStore() ?? []).set(this.root, mine);
     let result: T;
+    const txs = new Map(current.getStore() ?? []).set(this.root, tx);
     try {
-      result = await current.run({ db: this, tx }, () => callbacks.run(scoped, fn));
+      result = await current.run(txs, () => callbacks.run(scoped, fn));
     } catch (e) {
+      ended.add(mine);
       await wait(() => tx.rollback());
       throw e;
     }
+    ended.add(mine);
     await wait(() => tx.commit());
     await this.afterCommit(mine, outer);
     return result;
@@ -221,11 +237,15 @@ export class Database {
    * drops it (a rolled-back savepoint drops only the callbacks registered inside it).
    * Outside a transaction, `fn()` runs at once. A promise result is awaited. Callbacks
    * run in order, outside the transaction; an error in one goes to the caller of
-   * `transaction()` and the later ones do not run.
+   * `transaction()` and the later ones do not run. A call that the transaction started and
+   * that runs this after the transaction ended throws `TransactionRequired`.
    */
   async onCommit(fn: () => unknown): Promise<void> {
     const mine = callbacks.getStore()?.get(this.root);
-    if (mine !== undefined && this.tx() !== null) {
+    if (mine !== undefined && ended.has(mine)) {
+      throw new TransactionRequired("onCommit(): the transaction of this call has ended");
+    }
+    if (mine !== undefined) {
       mine.push(fn);
       return;
     }
@@ -242,14 +262,15 @@ export class Database {
    *
    * `db.lock(key, { session: true, timeout }, fn)` holds the lock while `fn` runs, on a
    * connection of its own, with no transaction, and gives what `fn` gives. It waits at
-   * most `timeout` seconds (no limit when absent; not at all with `nowait`) and throws
+   * most `timeout` seconds (no limit when absent or `Infinity`; not at all with `nowait`) and throws
    * `LockNotAvailable` when another session still holds the lock.
    *
    * A string key is hashed to a 64-bit one the way the Python package hashes it (the
    * first 8 bytes of its BLAKE2b digest, signed big-endian), so both lock the same name.
    */
-  lock(key: bigint | number | string, options?: LockOptions): Promise<boolean>;
+  // The transaction form is last: `Parameters<Database["lock"]>` takes the last overload.
   lock<T>(key: bigint | number | string, options: SessionLockOptions, fn: () => Promise<T>): Promise<T>;
+  lock(key: bigint | number | string, options?: LockOptions): Promise<boolean>;
   async lock<T>(
     key: bigint | number | string,
     options: LockOptions | SessionLockOptions = {},
@@ -257,6 +278,9 @@ export class Database {
   ): Promise<boolean | T> {
     if (options.session === true) {
       return this.sessionLock(key, options, fn!);
+    }
+    if (fn !== undefined || (options as { timeout?: unknown }).timeout !== undefined) {
+      throw new TypeError("db.lock(key, options, fn) and a timeout need `{ session: true }`");
     }
     if (this.url.startsWith("sqlite://")) {
       throw new QueryError("sqlite does not support advisory locks");
@@ -280,10 +304,10 @@ export class Database {
     }
     const [k, name] = lockKey(key);
     const { exclusive = true, nowait = false, timeout } = options;
-    if (timeout !== undefined && !(timeout >= 0)) {
-      throw new RangeError("lock timeout must be a number of seconds >= 0");
+    if (timeout !== undefined && !(timeout === Infinity || (timeout >= 0 && timeout <= MAX_TIMEOUT))) {
+      throw new RangeError(`lock timeout must be a number of seconds from 0 to ${MAX_TIMEOUT}, or Infinity`);
     }
-    const timeoutMs = timeout === undefined ? null : Math.ceil(timeout * 1000);
+    const timeoutMs = timeout === undefined || timeout === Infinity ? null : Math.min(Math.ceil(timeout * 1000), 2 ** 31 - 1);
     const engine = this.engine;
     const held = await this.send((_, trace) => engine.sessionLock(k, name, Boolean(exclusive), Boolean(nowait), timeoutMs, trace));
     if (held === null) {
@@ -379,8 +403,15 @@ export async function connect(url: string, options: ConnectOptions = {}): Promis
     wait(() => call(() => native().connect(u, schema, options.maxConnections ?? 10, [...(options.disable ?? [])])));
   const engine = await open(url);
   const readers: NativeEngine[] = [];
-  for (const replica of options.replicas ?? []) {
-    readers.push(await open(replica));
+  try {
+    for (const replica of options.replicas ?? []) {
+      readers.push(await open(replica));
+    }
+  } catch (e) {
+    for (const opened of [engine, ...readers]) {
+      await wait(() => opened.close());
+    }
+    throw e;
   }
   const db = new Database(engine, url, reg, readers);
   if (options.default ?? true) {
@@ -404,7 +435,8 @@ export function getDatabase(): Database {
  * replace outer ones. Gives what `fn` gives.
  */
 export function scope<T>(values: Readonly<Record<string, unknown>>, fn: () => Promise<T>): Promise<T> {
-  return scopeValues.run({ ...scopeValues.getStore(), ...values }, fn);
+  // `await` inside: a returned thenable (a query set) must run while the values are set.
+  return scopeValues.run({ ...scopeValues.getStore(), ...values }, async () => await fn());
 }
 
 /** @internal `json` (a statement's IR, or with `key` a list wrapped under it) with the
@@ -431,6 +463,9 @@ function lockKey(key: bigint | number | string): [string, Buffer | null] {
       throw new RangeError("lock key must fit in 64 bits");
     }
     return [String(k), null];
+  }
+  if (typeof key === "number" && Number.isInteger(key)) {
+    throw new TypeError(`lock key ${key} is not a safe integer: pass it as a bigint`);
   }
   throw new TypeError(`lock key must be an integer or a string, got ${String(key)}`);
 }

@@ -72,12 +72,13 @@ def prepare_insert(qs: QuerySet[M], values: Mapping[str, Any]) -> PreparedInsert
 
 def prepare_update(qs: QuerySet[M], values: Mapping[str, Any]) -> PreparedUpdate[M]:
     """Check ``qs.update(**values)`` as ``update()`` does, without SQL or I/O."""
-    from .db import resolve
+    from .db import _with_scope, resolve
 
     resolve(qs._db)
     params: list[Any] = []
     ir = qs._mutation_ir("update", params, values)
-    unique: bool = qs.model._meta.registry.native().unique_row_update(json.dumps(ir), params, list(allowed_writes()))
+    op, params = _with_scope(json.dumps(ir), params)
+    unique: bool = qs.model._meta.registry.native().unique_row_update(op, params, list(allowed_writes()))
     return PreparedUpdate(qs, values, unique)
 
 

@@ -384,6 +384,8 @@ A rollback drops the callback. A rolled-back savepoint drops only the callbacks 
 Outside a transaction, `fn()` runs at once.
 Callbacks run in registration order, outside the transaction.
 An error in a callback rejects the `transaction()` promise, and the later callbacks do not run; the transaction is already committed.
+Transactions and callbacks are kept for each database: a callback on `a` inside a transaction on `b` inside a transaction on `a` waits for `a`'s commit.
+A call that the transaction started and that calls `onCommit` after the transaction ended throws `TransactionRequired`.
 
 ### Protected writes
 
@@ -422,9 +424,14 @@ See `docs/schema.md`, "Protected writes".
 * `db.lock(key, { session: true, timeout: 5 }, async () => {...})` is a session advisory
   lock: it holds the lock while the function runs, with no transaction, on a pool
   connection of its own, and gives what the function gives. It waits at most `timeout`
-  seconds (no limit when absent, not at all with `nowait`) and throws `LockNotAvailable`
-  when another session still holds the lock. The lock is released when the function
-  settles; when the unlock fails, the connection is closed, so the server releases it.
+  seconds (no limit when absent or `Infinity`, not at all with `nowait`; at most
+  2147483.647, the Postgres limit) and throws `LockNotAvailable` when another session
+  still holds the lock. A lock that waits also uses its pool connection while it waits.
+  The lock is released when the function settles. When the unlock fails, the connection
+  is closed, so the server releases the lock, and the function's own result or error
+  stays. A function or a `timeout` without `session: true` throws `TypeError`.
+  Reads in the function go to a replica when the database has replicas: read in a
+  transaction or with `using("primary")` to see the last write of the previous holder.
 
 The transaction-scoped forms throw `TransactionRequired` when called outside a transaction.
 
@@ -442,6 +449,9 @@ There are no health checks or failover. `maxConnections` applies to each pool, a
 `await db.tenant(shop.id, async () => {...})` runs `SELECT set_config('app.tenant', '<id>', true)` (`SET LOCAL`) at the start of every transaction on `db` in the function, so RLS policies can read `current_setting('app.tenant', true)`.
 A statement outside a transaction runs in a transaction of its own (four round trips instead of one, estimated).
 A transaction that is already open keeps its setting, and the setting ends with each transaction.
+A connection that had a tenant reads `''` (not `NULL`) for the setting after that, so a policy should read `NULLIF(current_setting('app.tenant', true), '')`; an empty id throws `RangeError`.
+Raw `db.execute(...)` in the function also runs in a transaction of its own, so `CREATE INDEX CONCURRENTLY` or `VACUUM` fails there.
+Each table of a composed model needs its own policy.
 Replicas get the same setting. SQLite throws `QueryError`.
 `scope({ shop }, fn)` is the application-side filter (see `docs/selection-and-defaults.md`, "Scope values").
 
