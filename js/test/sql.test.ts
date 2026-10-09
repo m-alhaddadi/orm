@@ -62,6 +62,20 @@ test("to-one filters and columns compared across a relation", () => {
   assert.ok(where(Post.objects.filter(Post.comments.createdAt.lt(Post.createdAt))).includes('"t1"."created_at" < "posts"."created_at"'));
 });
 
+test("aggregates over the same relation share one LATERAL join", () => {
+  assert.equal(
+    User.objects.select({ id: User.id, posts: func.count(User.posts), top: func.max(User.posts.views) }).sql(),
+    'SELECT "users"."id", "l1"."c1", "l1"."c2" FROM "users" LEFT JOIN LATERAL ' +
+      '(SELECT COUNT(*) AS "c1", MAX("a2"."views") AS "c2" FROM "posts" AS "a2" WHERE "a2"."author_id" = "users"."id") AS "l1" ON TRUE',
+  );
+  const sql = User.objects
+    .select({ n: func.count(User.posts, { filter: User.posts.views.gt(10) }), s: func.sum(User.posts.views, { distinct: true }), c: func.count(User.comments) })
+    .sql();
+  assert.equal(sql.split("LATERAL").length, 2);
+  assert.ok(sql.includes('COUNT(*) FILTER (WHERE "a2"."views" > 10) AS "c1"') && sql.includes('SUM(DISTINCT "a2"."views")'));
+  assert.ok(!User.objects.filter(func.count(User.posts).gt(1), func.sum(User.posts.views).gt(1)).select({ id: User.id }).sql().includes("LATERAL"));
+});
+
 test("selectRelated and orderBy use LEFT JOINs", () => {
   const sql = Comment.objects.selectRelated(Comment.post.author).orderBy(Comment.post.title.desc()).sql();
   assert.ok(sql.includes('LEFT JOIN "posts" AS "j1" ON "j1"."id" = "comments"."post_id"'));
@@ -159,11 +173,11 @@ test("select with groupBy and having", () => {
 
 test("an aggregate over a relation is a correlated subquery", () => {
   assert.equal(
-    User.objects.select({ id: User.id, posts: func.count(User.posts), top: func.max(User.posts.views) }).sql(),
-    'SELECT "users"."id", ' +
-      '(SELECT COUNT(*) FROM "posts" AS "a1" WHERE "a1"."author_id" = "users"."id"), ' +
-      '(SELECT MAX("a2"."views") FROM "posts" AS "a2" WHERE "a2"."author_id" = "users"."id") FROM "users"',
+    User.objects.select({ id: User.id, posts: func.count(User.posts) }).sql(),
+    'SELECT "users"."id", (SELECT COUNT(*) FROM "posts" AS "a1" WHERE "a1"."author_id" = "users"."id") FROM "users"',
   );
+  const two = User.objects.select({ id: User.id, posts: func.count(User.posts), c: func.count(User.comments) }).sql();
+  assert.ok(!two.includes("LATERAL") && two.split("(SELECT COUNT(*)").length === 3);
   assert.equal(
     where(User.objects.filter(func.count(User.posts.comments).gt(3))),
     '(SELECT COUNT(*) FROM "posts" AS "a1" INNER JOIN "comments" AS "a2" ON "a2"."post_id" = "a1"."id" ' +

@@ -611,6 +611,9 @@ pub enum Expr {
         /// Aggregates: `FILTER (WHERE <filter>)`, the rows the aggregate reads.
         #[serde(default)]
         filter: Option<Box<Expr>>,
+        /// Ordered-input aggregates (`array_agg`): `ORDER BY` inside the call.
+        #[serde(default)]
+        order_by: Vec<Order>,
     },
     /// `CASE WHEN <cond> THEN <value> ... ELSE <default> END`; `ELSE NULL` without one.
     Case {

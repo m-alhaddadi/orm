@@ -104,6 +104,7 @@ async def check() -> None:
     assert_type(grouped[0][1], int)
     grouped[0].anything  # untyped name access
     assert_type(await Post.objects.select(func.max(Post.views)).scalar(), int | None)
+    assert_type(await Post.objects.select(func.array_agg(Post.title, order_by=Post.views.desc())).scalar(), list[str] | None)
     assert_type(await Post.objects.select(Post.title).scalars(), list[str])
     pairs = await User.objects.select(User, func.count(User.posts))
     assert_type(pairs[0][0], User)

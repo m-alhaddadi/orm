@@ -41,6 +41,8 @@ pub struct Capabilities {
     pub savepoints: bool,
     /// `SELECT DISTINCT ON (...)`.
     pub distinct_on: bool,
+    /// `LEFT JOIN LATERAL (SELECT ...) ON TRUE`: relation aggregates share one subquery.
+    pub lateral_join: bool,
     /// Most bound parameters one statement can take (the wire protocol's limit).
     /// Statements with more values are split: `update_many` batches, prefetch keys.
     pub max_params: usize,
@@ -62,7 +64,7 @@ impl Dialect {
                 returning: true, on_conflict: true, ilike: false,
                 lock_exclusive: false, lock_shared: false, lock_of: false,
                 lock_nowait: false, lock_skip_locked: false,
-                update_from_values: false, savepoints: true, distinct_on: false,
+                update_from_values: false, savepoints: true, distinct_on: false, lateral_join: false,
                 max_params: 32_766,
             },
             Dialect::Postgres => Capabilities {
@@ -77,6 +79,7 @@ impl Dialect {
                 update_from_values: true,
                 savepoints: true,
                 distinct_on: true,
+                lateral_join: true,
                 max_params: 65_535,
             },
         }
@@ -117,6 +120,7 @@ impl Target {
                 "update_from_values" => &mut self.caps.update_from_values,
                 "savepoints" => &mut self.caps.savepoints,
                 "distinct_on" => &mut self.caps.distinct_on,
+                "lateral_join" => &mut self.caps.lateral_join,
                 other => return Err(format!("unknown capability {other:?}")),
             };
             *flag = false;

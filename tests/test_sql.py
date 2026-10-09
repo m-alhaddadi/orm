@@ -207,18 +207,40 @@ def test_select_group_by_having():
 
 
 def test_aggregate_over_relation_is_a_correlated_subquery():
-    sql = User.objects.select(User.id, func.count(User.posts), func.max(User.posts.views)).sql()
-    assert sql == (
-        'SELECT "users"."id", '
-        '(SELECT COUNT(*) FROM "posts" AS "a1" WHERE "a1"."author_id" = "users"."id"), '
-        '(SELECT MAX("a2"."views") FROM "posts" AS "a2" WHERE "a2"."author_id" = "users"."id") FROM "users"'
+    one = User.objects.select(User.id, func.count(User.posts)).sql()
+    assert one == (
+        'SELECT "users"."id", (SELECT COUNT(*) FROM "posts" AS "a1" WHERE "a1"."author_id" = "users"."id") FROM "users"'
     )
+    # Aggregates over different relations stay separate subqueries.
+    two = User.objects.select(User.id, func.count(User.posts), func.count(User.comments).label("c")).sql()
+    assert two.count("LATERAL") == 0 and two.count("(SELECT COUNT(*)") == 2
     # Two hops join inside the subquery; in WHERE it filters per row, no EXISTS / JOIN outside.
     w = where(User.objects.filter(func.count(User.posts.comments) > 3))
     assert w == (
         '(SELECT COUNT(*) FROM "posts" AS "a1" INNER JOIN "comments" AS "a2" ON "a2"."post_id" = "a1"."id" '
         'WHERE "a1"."author_id" = "users"."id") > 3'
     )
+
+
+def test_same_relation_aggregates_share_one_lateral_join():
+    sql = User.objects.select(User.id, func.count(User.posts), func.max(User.posts.views)).sql()
+    assert sql == (
+        'SELECT "users"."id", "l1"."c1", "l1"."c2" FROM "users" LEFT JOIN LATERAL '
+        '(SELECT COUNT(*) AS "c1", MAX("a2"."views") AS "c2" FROM "posts" AS "a2" WHERE "a2"."author_id" = "users"."id") '
+        'AS "l1" ON TRUE'
+    )
+    # Per-aggregate options stay inside their FILTER / DISTINCT; the other relation is its own subquery.
+    sql = User.objects.select(
+        func.count(User.posts, filter=User.posts.views > 10).label("popular"),
+        func.sum(User.posts.views, distinct=True),
+        func.count(User.comments).label("comments"),
+    ).sql()
+    assert sql.count("LATERAL") == 1
+    assert 'COUNT(*) FILTER (WHERE "a2"."views" > 10) AS "c1"' in sql and 'SUM(DISTINCT "a2"."views")' in sql
+    assert '(SELECT COUNT(*) FROM "comments"' in sql
+    # Grouped, locked and filter-only uses keep the correlated subqueries.
+    assert "LATERAL" not in User.objects.filter(func.count(User.posts) > 1, func.sum(User.posts.views) > 1).select(User.id).sql()
+    assert "LATERAL" not in User.objects.select(User.id, func.count(User.posts), func.sum(User.posts.views), func.count().label("all")).group_by(User.id).sql()
 
 
 def test_select_to_one_columns_join_and_to_many_is_rejected():

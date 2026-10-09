@@ -52,6 +52,11 @@ export async function caseExpressions() {
   func.case(Post.published);
 }
 
+export async function arrayAggregates() {
+  const rows = await Post.objects.select({ t: func.arrayAgg(Post.title, { orderBy: Post.views.desc(), filter: Post.published }), v: func.arrayAgg(Post.views, { distinct: true }) }).all();
+  same<(typeof rows)[number], { t: string[] | null; v: number[] | null }>();
+}
+
 export async function aggregateFilters() {
   const rows = await Post.objects.select({ c: func.count({ filter: Post.published }), s: func.sum(Post.views, { filter: Post.views.gt(3) }), m: func.max(Post.title, { filter: Post.published }) }).all();
   same<(typeof rows)[number], { c: bigint; s: number | bigint | null; m: string | null }>();
