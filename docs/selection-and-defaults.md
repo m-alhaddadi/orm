@@ -1,10 +1,10 @@
 # Partial models and schema query defaults
 
-`select()` retains its projection-row/scalar behavior. `only()` returns model
+`select()` retains its projection-row/scalar behavior. `load()` with columns returns model
 instances with an explicit public scalar-field selection:
 
 ```python
-row = await User.objects.only(User.name, User.note).get(User.id == 1)
+row = await User.objects.load(User.name, User.note).get(User.id == 1)
 row.name                     # loaded value
 row.note                     # None is a loaded SQL NULL
 row.bio                      # raises orm.NotLoaded
@@ -15,13 +15,13 @@ await row.refresh(User.bio)   # expands it with an explicit field
 await row.update(name="new") # preserves the public selection
 ```
 
-TypeScript uses the same `only(User.name, User.note)` syntax, `NotLoaded`,
+TypeScript uses the same `load(User.name, User.note)` syntax, `NotLoaded`,
 `toJSON()`, and `refresh(...columns)`. Explicit refresh columns add to the
-current projection. Its partial result is `Partial<ModelRow> & Instance<ModelSpec>`;
-methods and `pk` remain available.
+current projection. Its partial result type has only the loaded fields
+(`Pick<UserData, "name" | "note"> & Instance<UserSpec>`); methods and `pk` remain available.
 Python returns the generated model class; field annotations describe a loaded
 value, and omitted field access raises `NotLoaded` rather than returning `None`.
-`only()` without columns resets to every public scalar field. It does not change
+Columns of later `load()` calls add to the selection. `load()` without items resets to every public scalar field. It does not change
 filters or reference loading. Column expressions and writes remain usable for
 excluded fields. Insert requirements remain unchanged.
 
@@ -92,10 +92,9 @@ cycles and recursive default loading reject during compilation/definition.
 Related paths use schema names separated by dots and must be to-one references.
 
 Python `without_defaults()` and TypeScript `withoutDefaults()` bypass default
-filters, selections and eager loading, including `select_related` and
-`prefetch_related` targets, while preserving caller filters and explicit
-loading/selection. `without_related()` / `withoutRelated()` clears default and
-current explicit eager loading; subsequent explicit loading adds references.
+filters, selections and eager loading, including joined and `IN (...)` loads, while preserving caller filters and explicit
+loading/selection. `without_related()` / `withoutRelated()` clears the default joins and the joins
+`load()` asked for so far (relations loaded by `IN (...)` query stay); later `load()` calls add references.
 Defaults affect reads, count/exists, and queryset update/delete selection, including
 bulk updates. Inserts use declared client/database defaults and caller values;
 filters never provide inserted values.
@@ -137,7 +136,7 @@ The schema load checks the resolved order of each model, inherited ones included
 Index the order columns: without an index, each read sorts all matching rows.
 A composed child that inherits the order reads the parent's columns through a subquery, which no index serves.
 
-The default order applies to model reads that give no `order_by()` / `orderBy()`, which include `first()`, `last()` and the rows of a `Prefetch` query set without its own order.
+The default order applies to model reads that give no `order_by()` / `orderBy()`, which include `first()`, `last()` and the rows of a relation query set in `load()` without its own order.
 An explicit order replaces it, and `without_defaults()` removes it.
 `select(...)` rows, subqueries, `count`, `exists`, `update` and `delete` ignore it.
 For a composed model, the internal reads of an insert, update or delete keep it; it does not change which rows they write.
@@ -159,7 +158,7 @@ Insert and bulk-update returning retain their existing complete-row result contr
 Internally, `ResultShape` maps logical `FieldId`s to actual row slots and marks
 public versus helper fields. PK, reference keys and computation dependencies can
 be fetched privately. `Select.model_helpers` requests additional private columns.
-Whole-model shapes, including `only()` without columns, retain the original
+Whole-model shapes, including `load()` without items, retain the original
 materialization fast path. Binding loaders
 use Python `_field_value(name)` or TypeScript `fieldValue(row,name)` to read helper
 keys; neither operation changes public loaded state.

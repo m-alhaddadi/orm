@@ -249,9 +249,9 @@ async def test_nested_and_reverse_paths(clean):
     )
 
 
-async def test_select_related(clean):
+async def test_load_to_one(clean):
     await seed()
-    comments = await Comment.objects.select_related(
+    comments = await Comment.objects.load(
         Comment.post.author, Comment.author
     ).order_by(Comment.id)
     first, anon, _ = comments
@@ -264,15 +264,15 @@ async def test_select_related(clean):
 async def test_unloaded_to_one_raises(clean):
     await seed()
     post = await Post.objects.first()
-    with pytest.raises(orm.NotLoaded, match="select_related"):
+    with pytest.raises(orm.NotLoaded, match=r"load\(Post.author\)"):
         post.author  # noqa: B018
     c = await Comment.objects.filter(Comment.author_id == None).get()  # noqa: E711
     assert c.author is None  # null FK needs no loading
 
 
-async def test_prefetch_related(clean):
+async def test_load_to_many(clean):
     await seed()
-    users = await User.objects.prefetch_related(User.posts).order_by(User.name)
+    users = await User.objects.load(User.posts).order_by(User.name)
     assert [len(u.posts.cached) for u in users] == [2, 1, 0]
     alice = users[0]
     assert [p.title for p in await alice.posts] == ["old draft", "new post"]
@@ -662,7 +662,7 @@ async def test_batches(clean, monkeypatch):
         .limit(None)
         .batches(25)
     ] == [25]
-    batch = await anext(Post.objects.select_related(Post.author).batches(3))
+    batch = await anext(Post.objects.load(Post.author).batches(3))
     assert batch[0].author == alice
     with pytest.raises(orm.QueryError):
         await anext(Post.objects.order_by(Post.title).batches(10))
@@ -712,7 +712,7 @@ async def test_row_locks(clean):
 
     async with db.transaction():
         await (
-            Post.objects.select_related(Post.author)
+            Post.objects.load(Post.author)
             .lock(exclusive=False)
             .filter(Post.id == a1.id)
         )

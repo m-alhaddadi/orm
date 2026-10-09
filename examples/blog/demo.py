@@ -50,9 +50,9 @@ async def main(url: str) -> None:
     ).count())
 
     # Eager loading: JOIN for to-one, one extra IN query for to-many.
-    for c in await Comment.objects.select_related(Comment.post.author, Comment.author):
+    for c in await Comment.objects.load(Comment.post.author, Comment.author):
         print(f"{c.author.name if c.author else '?'} on {c.post.author.name}'s {c.post.title!r}: {c.body}")
-    for u in await User.objects.prefetch_related(User.posts).order_by(User.name):
+    for u in await User.objects.load(User.posts).order_by(User.name):
         print(u.name, [p.title for p in u.posts.cached])
 
     # Set-based UPDATE, and a single-row update that refreshes the instance.

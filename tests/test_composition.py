@@ -72,7 +72,7 @@ async def test_composed_create_attach_update_delete(provider):
         assert (await Manager.objects.using(db).get(Manager.id == alice.id)).level == 4
         assert (await Employee.objects.using(db).filter(Employee.name == "Alice").get()).salary == 20
 
-        person = await Person.objects.using(db).select_related(Person.employee, Person.customer).get()
+        person = await Person.objects.using(db).load(Person.employee, Person.customer).get()
         assert (person.employee.salary, person.customer.points) == (20, 5)
 
         # Deleting a child keeps its parent and the sibling child.

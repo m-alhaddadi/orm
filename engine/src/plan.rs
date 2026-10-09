@@ -760,7 +760,7 @@ impl<'s> Planner<'s> {
     /// A CTE's query: its columns as stored (no `read_sql`), named after the CTE's columns.
     fn cte_body(&mut self, q: &Select, recursive: Option<&str>) -> Result<SelectStatement> {
         if !q.with.is_empty() || !q.prefetch.is_empty() || !q.select_related.is_empty() || q.lock.is_some() {
-            return Err(Error::query("a CTE's query can't declare CTEs, prefetch, select_related or lock"));
+            return Err(Error::query("a CTE's query can't declare CTEs, load relations or lock"));
         }
         let mut p =
             Planner::new(self.schema, self.virt, self.target, &q.model, q.from.as_deref(), self.params, vec![], self.next_alias)?;
@@ -1673,7 +1673,7 @@ impl<'s> Planner<'s> {
     fn select_columns(&mut self, q: &Select, items: &[SelectItem], cte: bool) -> Result<SelectPlan> {
         self.enter(q)?;
         if !q.select_related.is_empty() || !q.prefetch.is_empty() {
-            return Err(Error::query("select() can't be combined with select_related / prefetch_related"));
+            return Err(Error::query("select() can't be combined with load() of relations"));
         }
         if items.is_empty() {
             return Err(Error::query("select() needs at least one column"));
@@ -1958,7 +1958,7 @@ impl<'s> Planner<'s> {
         }
         self.require(c.lock_nowait || !lock.nowait, "lock(nowait=True)")?;
         self.require(c.lock_skip_locked || !lock.skip_locked, "lock(skip_locked=True)")?;
-        self.require(c.lock_of || self.joins.is_empty(), "lock() together with select_related")?;
+        self.require(c.lock_of || self.joins.is_empty(), "lock() together with load() of a to-one relation")?;
         apply_lock(stmt, lock, c.lock_of.then(|| self.root_alias()));
         Ok(())
     }
@@ -2056,20 +2056,20 @@ impl<'s> Planner<'s> {
             types.push(f.value_type());
         }
         if let Some(r) = q.related_fields.iter().find(|r| !q.select_related.contains(&r.path)) {
-            return Err(Error::query(format!("only() names fields of {} without select_related", r.path.join("."))));
+            return Err(Error::query(format!("load() names fields of {} without joining it", r.path.join("."))));
         }
         let mut joins: Vec<JoinShape> = vec![];
         for path in &q.select_related {
-            let (alias, model) = self.ensure_join(path, "select_related")?;
+            let (alias, model) = self.ensure_join(path, "load()")?;
             let m = self.model(model);
             let parent = match path.len() {
-                0 => return Err(Error::query("select_related needs a relation")),
+                0 => return Err(Error::query("load() needs a relation")),
                 1 => None,
                 n => Some(
                     q.select_related
                         .iter()
                         .position(|p| p.as_slice() == &path[..n - 1])
-                        .ok_or_else(|| Error::query("select_related paths must list their prefixes first"))?,
+                        .ok_or_else(|| Error::query("joined load() paths must list their prefixes first"))?,
                 ),
             };
             let named = q.related_fields.iter().find(|r| r.path == *path).map(|r| r.fields.as_slice());

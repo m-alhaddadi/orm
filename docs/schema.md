@@ -391,7 +391,7 @@ followers User[]  @relation(through: Follow, through_fields: [followee, follower
   their targets, or named with `through_fields: [<to this model>, <to the target>]`
   (needed when both point at the same model, as in followers). The join model is an
   ordinary model: give it a `@@unique([post_id, tag_id])` and any extra columns, and
-  query it directly too. Filters, aggregates and `prefetch_related` go through it in one
+  query it directly too. Filters, aggregates and `load()` go through it in one
   hop (see [`python-api.md`](python-api.md)). Prisma's implicit many-to-many (no join
   model) isn't supported.
 

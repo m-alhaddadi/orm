@@ -60,6 +60,8 @@ class _UserPath(RelationPath[User]):
     posts: _PostPath
     comments: _CommentPath
     profile: _ProfilePath
+    @property
+    def objects(self) -> UserQuerySet: ...
 
 class UserInsert(TypedDict):
     id: NotRequired[int]
@@ -111,6 +113,8 @@ class _ProfilePath(RelationPath[Profile]):
     balance: ColumnRef[Decimal]
     links: ColumnRef[list[str]]
     user: _UserPath
+    @property
+    def objects(self) -> ProfileQuerySet: ...
 
 class ProfileInsert(TypedDict):
     id: NotRequired[int]
@@ -179,6 +183,8 @@ class _PostPath(RelationPath[Post]):
     comments: _CommentPath
     tags: _TagPath
     post_tags: _PostTagPath
+    @property
+    def objects(self) -> PostQuerySet: ...
 
 class PostInsert(TypedDict):
     id: NotRequired[int]
@@ -246,6 +252,8 @@ class _CommentPath(RelationPath[Comment]):
     created_at: ColumnRef[datetime]
     post: _PostPath
     author: _UserPath
+    @property
+    def objects(self) -> CommentQuerySet: ...
 
 class CommentInsert(TypedDict):
     id: NotRequired[int]
@@ -304,6 +312,8 @@ class _TagPath(RelationPath[Tag]):
     priority: ColumnRef[Priority]
     posts: _PostPath
     post_tags: _PostTagPath
+    @property
+    def objects(self) -> TagQuerySet: ...
 
 class TagInsert(TypedDict):
     id: NotRequired[int]
@@ -353,6 +363,8 @@ class _PostTagPath(RelationPath[PostTag]):
     position: ColumnRef[int | None]
     post: _PostPath
     tag: _TagPath
+    @property
+    def objects(self) -> PostTagQuerySet: ...
 
 class PostTagInsert(TypedDict):
     id: NotRequired[int]

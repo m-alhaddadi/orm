@@ -39,9 +39,9 @@ async def test_crud_relations_defaults_and_upserts(sqlite):
     assert [x.pages for x in books] == [0, 7, 0]
     assert books[0].status is m["Status"].draft
     assert books[1].metadata == {"tags": [1, True]}
-    loaded = await Book.objects.using(db).select_related(Book.author).order_by(Book.id)
+    loaded = await Book.objects.using(db).load(Book.author).order_by(Book.id)
     assert [x.author.name for x in loaded] == ["Alice", "Alice", "Bob"]
-    loaded = await Author.objects.using(db).prefetch_related(Author.books).order_by(Author.id)
+    loaded = await Author.objects.using(db).load(Author.books).order_by(Author.id)
     assert [len(x.books.cached) for x in loaded] == [2, 1]
     assert await Author.objects.using(db).filter(Author.books.pages > 0).count() == 1
     assert await Book.objects.using(db).exists()
@@ -243,7 +243,7 @@ async def test_unsupported_queries(sqlite):
 
 
 async def test_aggregates_windows_ctes_sliced_prefetch_and_bulk_updates(sqlite):
-    from orm import func, Prefetch
+    from orm import func
     db, m, _ = sqlite
     Author, Book = m["Author"], m["Book"]
     authors = await Author.objects.using(db).insert_many([
@@ -260,8 +260,8 @@ async def test_aggregates_windows_ctes_sliced_prefetch_and_bulk_updates(sqlite):
     totals = Book.objects.using(db).select(Book.author_id, func.sum(Book.pages).label("pages")).group_by(Book.author_id).cte("totals")
     rows = await Author.objects.using(db).join(totals, totals.c.author_id == Author.id).select(Author.name, totals.c.pages).order_by(Author.id)
     assert [tuple(r) for r in rows] == [("A", 21), ("B", 21)]
-    second = Book.objects.order_by(Book.pages.desc())[1:2]
-    rows = await Author.objects.using(db).prefetch_related(Prefetch(Author.books, second)).order_by(Author.id)
+    second = Author.books.objects.order_by(Book.pages.desc())[1:2]
+    rows = await Author.objects.using(db).load(second).order_by(Author.id)
     assert [[b.title for b in a.books.cached] for a in rows] == [["A7"], ["B7"]]
     rows = await Book.objects.using(db).update_many([{"id": b.id, "pages": b.pages + 1} for b in books]).returning()
     assert sorted(b.pages for b in rows) == [4, 4, 8, 8, 12, 12]
@@ -482,7 +482,7 @@ async def test_self_many_to_many_has_both_sides():
         assert [p.name for p in await people.filter(Person.followers.name == "bob")] == ["cat"]
         rows = await people.select(Person.name, orm.func.count(Person.followers)).order_by(Person.id)
         assert [tuple(r) for r in rows] == [("ann", 0), ("bob", 1), ("cat", 1)]
-        loaded = await people.prefetch_related(Person.following, Person.followers).order_by(Person.id)
+        loaded = await people.load(Person.following, Person.followers).order_by(Person.id)
         assert [([f.name for f in p.following.cached], [f.name for f in p.followers.cached]) for p in loaded] == [
             (["bob"], []),
             (["cat"], ["ann"]),

@@ -39,7 +39,7 @@ async def verify():
             assert (await child.load_parent()).id == 1
         else:
             assert not any(name.startswith("_reference_") for name in child.__dict__)
-            joined = await m["Child"].objects.using(db).select_related(m["Child"].parent).get()
+            joined = await m["Child"].objects.using(db).load(m["Child"].parent).get()
             assert joined.parent.id == 1
     finally:
         await db.close()

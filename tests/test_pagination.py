@@ -106,12 +106,12 @@ async def test_pages_follow_the_order(items, order):
 
 async def test_page_shape_and_related_rows(items):
     Item, qs = items
-    page = await qs.select_related(Item.owner).only(Item.name).order_by(-Item.at).paginate(first=5)
+    page = await qs.load(Item.owner).load(Item.name).order_by(-Item.at).paginate(first=5)
     assert len(page.items) == 5 and page.has_next and not page.has_previous
     assert page.items[0].owner.name == "o"
     with pytest.raises(orm.NotLoaded):
         page.items[0].at
-    rest = await qs.only(Item.name).order_by(-Item.at).paginate(first=100, after=page.next_cursor)
+    rest = await qs.load(Item.name).order_by(-Item.at).paginate(first=100, after=page.next_cursor)
     assert len(rest.items) == 18 and not rest.has_next and rest.has_previous
     empty = await qs.order_by(-Item.at).paginate(first=5, after=rest.next_cursor)
     assert empty.items == [] and empty.next_cursor is None and empty.previous_cursor is None

@@ -51,7 +51,7 @@ async def test_proxy_warning_rows_defaults_writes_and_relation_targets(dialect, 
         assert physical.name is None and physical.status is Status.OLD
         await Post.objects.using(db).insert(id=1, user_id=1)
         capfd.readouterr()
-        posts = await Post.objects.using(db).select_related(Post.user)
+        posts = await Post.objects.using(db).load(Post.user)
         assert type(posts[0].user) is Active and posts[0].user.status is Status.OLD
         assert len([line for line in capfd.readouterr().err.splitlines() if '"code":"orm.proxy.shape"' in line]) == 2
         await Active.objects.using(db).filter(Active.id == 4).delete()

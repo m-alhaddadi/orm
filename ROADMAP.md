@@ -55,7 +55,7 @@ LEFT JOIN shop_configs j2 ON j2.shop_id = orders.shop_id
   to apply a selective filter on C first. Needs the same FK condition. For filters,
   `EXISTS(B ... AND EXISTS(C ...))` can become `EXISTS(B ...) AND EXISTS(C ...)`
   without a FK, since B's key is unique.
-* `select_related` of B always keeps the join.
+* A `load()` join of B always keeps the join.
 
 Why not leave it to Postgres: for inner joins it derives `orders.shop_id =
 shop_configs.shop_id` but still joins `shops`, since it doesn't trust FKs for join
@@ -65,8 +65,8 @@ removal; for LEFT JOINs it derives nothing. Where: `ensure_join` and `exists_via
 ## JS / TypeScript
 
 Status: a first binding shipped ([`docs/typescript-api.md`](docs/typescript-api.md),
-[`PLAN.md`](PLAN.md)). It mirrors the Python API (class instances, `selectRelated` /
-`prefetchRelated`, `AsyncLocalStorage` transactions, awaitable query sets) with types
+[`PLAN.md`](PLAN.md)). It mirrors the Python API (class instances, `load()`,
+`AsyncLocalStorage` transactions, awaitable query sets) with types
 that follow the query; it already settles camelCase fields and the value mapping
 (`bigint`, decimal.js, `Date`). The items below are proposals on top of it. The
 Python API is Django / SQLAlchemy-shaped; ported as is (operators → `.eq()`), it would

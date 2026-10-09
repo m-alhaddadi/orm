@@ -67,7 +67,7 @@ model User {
             await db.create_tables()
             await main.User.objects.using(db).insert(id=1)
             await child.Invoice.objects.using(db).insert(id=2, user_id=1)
-            invoices = await child.Invoice.objects.using(db).select_related(child.Invoice.user)
+            invoices = await child.Invoice.objects.using(db).load(child.Invoice.user)
             assert len(invoices) == 1 and invoices[0].user.id == 1
         finally:
             await db.close()

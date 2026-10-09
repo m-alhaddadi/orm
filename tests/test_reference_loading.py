@@ -98,7 +98,7 @@ async def test_identity_reload_fk_invalidation_and_counts(references, monkeypatc
     with pytest.raises(orm.NotLoaded):
         _ = row.owner
     assert (await row.load_owner()).id == 1
-    eager = await m["Required"].objects.using(db).select_related(m["Required"].owner).get()
+    eager = await m["Required"].objects.using(db).load(m["Required"].owner).get()
     assert await eager.load_owner() is eager.owner
     assert calls == 4
 

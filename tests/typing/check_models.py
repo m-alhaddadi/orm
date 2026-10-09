@@ -16,7 +16,6 @@ from orm import (
     ManyRelatedSet,
     Ordering,
     Page,
-    Prefetch,
     Prepared,
     RelatedSet,
     Row,
@@ -39,6 +38,10 @@ async def check() -> None:
     # Class access gives columns, relation paths continue into the related model.
     assert_type(User.email, ColumnRef[str])
     assert_type(User.posts.created_at, ColumnRef[datetime])
+    # A relation query set is the target's query-set class.
+    assert_type(User.posts.objects, PostQuerySet)
+    assert_type(User.posts.objects.filter(Post.published)[:3].label("top"), PostQuerySet)
+    assert_type(await Post.objects.load(Post.title, Post.author.name, Post.comments.objects.as_prefetch()), list[Post])
     assert_type(User.posts.author.email, ColumnRef[str])
     assert_type(Comment.author_id, ColumnRef[int | None])
     assert_type(User.posts.created_at < yesterday, Condition)
@@ -53,7 +56,7 @@ async def check() -> None:
     assert_type(u.email, str)
     assert_type(u.posts, RelatedSet[Post])
     assert_type(await u.posts, list[Post])
-    post = await Post.objects.select_related(Post.author).get(Post.id == 1)
+    post = await Post.objects.load(Post.author).get(Post.id == 1)
     assert_type(post.author, User)
     c = await Comment.objects.first()
     if c is not None:
@@ -136,7 +139,7 @@ async def check() -> None:
     totals = Post.objects.select(Post.author_id, func.count().label("n")).group_by(Post.author_id).cte("totals")
     assert_type(User.objects.join(totals, totals.c.author_id == User.id, outer=True), UserQuerySet)
     assert_type(
-        await User.objects.prefetch_related(User.posts.comments, Prefetch(User.posts, Post.objects.all()[:3])),
+        await User.objects.load(User.posts.comments, User.posts.objects.all()[:3].label("top")),
         list[User],
     )
 
@@ -179,7 +182,7 @@ async def check() -> None:
     await post.tags.add(await Tag.objects.get(Tag.id == 1))
     assert_type(await post.tags.remove(1), int)
     assert_type(await post.tags.insert(name="go"), Tag)
-    assert_type(await Post.objects.prefetch_related(Post.tags), list[Post])
+    assert_type(await Post.objects.load(Post.tags), list[Post])
 
     # Prepared queries keep the model type.
     by_author = Post.objects.filter(Post.author_id == param("a")).limit(param("n")).prepare()
@@ -206,7 +209,7 @@ async def errors() -> None:
     u.name = "B"  # E: instances are read-only
     await u.update(name=1)  # E: wrong type
     u.posts = []  # E: read-only relation
-    Prefetch(User.posts, Comment.objects.all())  # E: query set of the wrong model
+    User.objects.load(1)  # E: not a column, relation or relation query set
     func.ntile("2")  # E: buckets are ints
     func.sum(Post.views).over(window(), rows=(None, "x"))  # E: frame bounds are ints
     await Profile.objects.insert(user_id=1, role="boss")  # E: roles are Role members

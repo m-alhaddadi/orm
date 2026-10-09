@@ -41,7 +41,7 @@ async def test_a_hook_gets_each_statement_with_its_shape_time_and_rows(shop):
     Person, Customer, db = shop
     events: list[orm.QueryEvent] = []
     remove = db.on_query(events.append)
-    people = await Person.objects.using(db).prefetch_related(Person.customers).order_by(Person.id)
+    people = await Person.objects.using(db).load(Person.customers).order_by(Person.id)
     assert [len(p.customers.cached) for p in people] == [2, 2, 0]
     select, prefetch = events
     assert select.sql.startswith("SELECT") and '"person"' in select.sql and select.rows == 3
@@ -184,7 +184,7 @@ async def test_postgres_events_and_row_counts(clean):
     events: list[orm.QueryEvent] = []
     remove = db.on_query(events.append)
     try:
-        await Post.objects.prefetch_related(Post.comments).filter(Post.id == post.id)
+        await Post.objects.load(Post.comments).filter(Post.id == post.id)
         assert await Comment.objects.filter(Comment.post_id == post.id).update(body="x") == 3
     finally:
         remove()

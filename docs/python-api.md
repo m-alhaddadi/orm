@@ -1,7 +1,7 @@
 # Python API (Phase 1 prototype)
 
 The query style is SQLAlchemy's: typed expressions over model attributes. The model
-layer is Django's: `Model.objects` managers, `select_related` / `prefetch_related`,
+layer is Django's: `Model.objects` managers, `load()` (Django's `only` / `select_related` / `prefetch_related`),
 `DoesNotExist` per model. Everything is async. Queries compile to the ORM IR in Python
 and cross into Rust once per operation. Rust plans the SQL with sea-query and runs it
 with its own Postgres driver (tokio-postgres; see [Drivers and dialects](#drivers-and-dialects)).
@@ -19,7 +19,7 @@ automatically: each relation hop becomes a correlated `EXISTS`.
 
 | Path | What |
 |---|---|
-| `python/orm/` | Python package: `expr.py` (expressions, `func`, `outer` / `exists`, windows → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet, `Prefetch`), `select.py` (`select()`, `Row`), `cte.py` (CTEs), `write.py` (insert / update / delete statements), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
+| `python/orm/` | Python package: `expr.py` (expressions, `func`, `outer` / `exists`, windows → IR), `fields.py` (descriptors), `model.py`, `query.py` (QuerySet, `load()`), `select.py` (`select()`, `Row`), `cte.py` (CTEs), `write.py` (insert / update / delete statements), `db.py` (connections, transactions), `schema.py` / `migrations.py` / `ext/` (schema objects, migrations, extensions: [`schema.md`](schema.md)) |
 | `core/` | Rust crate `orm-core`, no binding code: schema language, IR (`ir.rs`), extensions, migrations, code generation, the `orm` CLI (see [`schema.md`](schema.md)) |
 | `engine/` | Rust crate `orm-engine`, shared by both bindings: `plan.rs` (IR → sea-query statements), `db/` (drivers: `mod.rs` traits, `postgres.rs`), `exec.rs` (running plans, prefetch, `update_many`), `migrate.rs` (applying migrations), `params.rs` (the values a binding passes in) |
 | `cli/` | Rust crate `orm-cli`: the `orm` command line, run as the `orm` binary, `python -m orm` and `npx orm` |
@@ -106,7 +106,7 @@ Then `Post.objects` is a `PostQueries`, and the methods chain with every builder
   `use_query_set(Model, cls)` also takes the class itself, for models from `orm.load()`.
 * Relation sets have the methods too: `await user.posts.published()`, `post.tags.<method>()`.
   The stub does not type them on a relation set yet; `Post.objects.published().filter(Post.author_id == user.id)` is typed.
-* `Prefetch(User.posts, Post.objects.published())` uses them for related rows.
+* `User.posts.objects.published()` uses them for related rows in `load()`.
 * The class must subclass `QuerySet` and must not declare `__slots__` (it mixes with the relation-set classes); `use_query_set` raises `TypeError` otherwise.
   Keep state in the query, not in attributes: builder methods copy the instance `__dict__`, but nothing else.
 
@@ -135,7 +135,7 @@ qs.sql()                                      # SQL with values inlined, for deb
 ```
 
 `.asc(nulls="first")` and `.desc(nulls="last")` place NULLs; without `nulls`, the database decides.
-`-column` is a descending `Ordering`, for `order_by()` and a `Prefetch` query set.
+`-column` is a descending `Ordering`, for `order_by()` and a relation query set.
 It is never SQL negation: write `0 - Post.views` for that.
 `-` works on a column only, and an ordering in `filter()` or `select()` is a `TypeError`.
 
@@ -181,22 +181,23 @@ Async code can't lazy-load on attribute access, so access is explicit (like SQLA
 `lazy="raise"`):
 
 ```python
-cs = await Comment.objects.select_related(Comment.post.author, Comment.author)  # LEFT JOINs
+cs = await Comment.objects.load(Comment.post.author, Comment.author)  # to-one: LEFT JOINs
 cs[0].post.author.name
 
-us = await User.objects.prefetch_related(User.posts)   # +1 query: WHERE author_id IN (...)
+us = await User.objects.load(User.posts)   # to-many: +1 query, WHERE author_id IN (...)
 us[0].posts.cached                  # list[Post], no await; post.author is set back to the user
-await us[0].posts                   # uses the prefetched rows if present, else queries
+await us[0].posts                   # uses the loaded rows if present, else queries
 await us[0].posts.filter(Post.published).count()
 await us[0].posts.insert(title=..., body=...)   # author_id filled in
-post.author                         # NotLoaded unless select_related or prefetched
+post.author                         # NotLoaded unless loaded
 
-await User.objects.prefetch_related(User.posts.comments)   # +2 queries: posts, then their comments
-await Comment.objects.prefetch_related(Comment.post)       # to-one too: comment.post
-await User.objects.prefetch_related(
-    Prefetch(User.posts, Post.objects.filter(Post.published).order_by(Post.views.desc())[:3]),
-    Prefetch(User.comments, Comment.objects.select_related(Comment.post), to_attr="recent"),
+await User.objects.load(User.posts.comments)   # +2 queries: posts, then their comments
+await Post.objects.load(Post.title, Post.author.name)   # partial posts and partial authors
+await User.objects.load(
+    User.posts.objects.filter(Post.published).order_by(Post.views.desc())[:3],
+    User.comments.objects.load(Comment.post).label("recent"),
 )
+await Comment.objects.load(Comment.post.objects.as_prefetch())   # to-one by IN (...) query
 ```
 
 The main query and its prefetch queries run in the same Rust call, one query per
@@ -206,35 +207,44 @@ split into several queries; the split is between parents, so ordering and slices
 parent are unaffected. (Django doesn't split: on Postgres it inlines the values into the
 SQL text client-side, so the limit doesn't apply to it.)
 
-* A path loads every relation along it: `User.posts.comments` fills `user.posts` and
-  each post's `comments`. Paths with a common prefix share its query.
-* `Prefetch(path, queryset, to_attr=None)` gives the related rows their own query set:
-  filters, ordering, `select_related` and further `prefetch_related` (nested under it).
-  As in Django, the rows fill the relation itself, so `user.posts.cached` and `await
-  user.posts` then give the filtered rows; `user.posts.filter(...)` and other new
-  queries still see every post. With `to_attr` they go to a plain list attribute
-  (`user.recent`) and the relation stays unloaded. Two different query sets for the same
-  attribute raise `ValueError`.
+`load()` takes columns, relation paths and relation query sets; calls add up.
+
+* A column of the model makes its instances partial: they hold the named fields, and, hidden, the primary key and the relation keys. Reading another field raises `NotLoaded`.
+  Without a column of the model itself, its instances keep their normal selection: `load(Post.author)` gives whole posts.
+  A related model is partial in the same way when a column of it is named (`Post.author.name`) and no bare path ends at it (`load(Post.author, Post.author.name)` gives whole authors).
+  `load()` without items gives whole instances again (see [`selection-and-defaults.md`](selection-and-defaults.md)).
+* A path loads every relation along it: `User.posts.comments` fills `user.posts` and each post's `comments`.
+  Paths with a common prefix share its query.
+* To-one relations are joined. A path with a to-many hop is loaded with an `IN (...)` query from its first hop, and every item under that hop uses the query.
+* `User.posts.objects` is the relation query set: `Post.objects` (with its query-set class and query defaults) bound to `User.posts`.
+  It gives the related rows their own filters, ordering, slice and `.load(...)` (nested under it).
+  As in Django, the rows fill the relation itself, so `user.posts.cached` and `await user.posts` then give the filtered rows; `user.posts.filter(...)` and other new queries still see every post.
+  With `.label("recent")` they go to a plain list attribute (`user.recent`), and the relation stays unloaded; `.label("best", one=True)` stores the first row, or `None`.
+  A path never goes under a label: `User.posts.comments` fills `user.posts`; a labeled query set loads its own items with `.load()`.
+  A label that is a field, relation or member of the model, one label for two relations, or two different unlabeled query sets for one relation raise `ValueError`.
+* `.as_prefetch()` loads a to-one relation with an `IN (...)` query instead of a join; the rows are the same.
+  A to-one relation query set that filters, orders, slices or labels uses the query without it.
+* `.label()` and `.as_prefetch()` exist only on a relation query set (else `TypeError`). The type checkers don't know a labeled attribute.
 * A **slice applies per parent**: `[:3]` above is each user's three most viewed posts,
   planned as `ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY views DESC, id)` in a
   subquery and `WHERE _rn <= 3` around it (Django 4.2 does the same).
 
-**Instances you already have.** `await orm.prefetch(instances, *paths)` loads relations onto them, as `prefetch_related` does for the rows of a query (Django's `prefetch_related_objects`):
+**Instances you already have.** `await orm.prefetch(instances, *items)` loads relations onto them, as `load()` does for the rows of a query (Django's `prefetch_related_objects`):
 
 ```python
 bundle = await Bundle.objects.get(Bundle.id == 1)
-await orm.prefetch([bundle], Bundle.items.product, Prefetch(Bundle.versions, Version.objects.order_by(-Version.id)[:1], to_attr="latest"))
+await orm.prefetch([bundle], Bundle.items.product, Bundle.versions.objects.order_by(-Version.id)[:1].label("latest"))
 ```
 
-It takes the same paths and `Prefetch` objects. Only the prefetch queries run: the keys come from the instances, so their own rows are not read again.
+It takes the items of `load()` except columns of the instances' model, and loads every relation with an `IN (...)` query. Only those queries run: the keys come from the instances, so their own rows are not read again.
 The instances are of one model, and the queries run on the database each came from (`using=db` names another).
 
 ### One-to-one and many-to-many
 
 ```python
 # One-to-one (`profile Profile?` on User, Profile.user_id unique)
-us = await User.objects.select_related(User.profile)        # LEFT JOIN; user.profile is a Profile or None
-us = await User.objects.prefetch_related(User.profile)      # +1 query; profile.user is set back too
+us = await User.objects.load(User.profile)                  # LEFT JOIN; user.profile is a Profile or None
+us = await User.objects.load(User.profile.objects.as_prefetch())  # +1 query; profile.user is set back too
 await User.objects.filter(User.profile.role == Role.admin)  # EXISTS, like any relation
 
 # Many-to-many (`tags Tag[] @relation(through: PostTag)`)
@@ -247,11 +257,11 @@ await post.tags.clear()
 tag = await post.tags.insert(name="go")             # insert a Tag and link it, in one transaction
 await Post.objects.filter(Post.tags.name == "rust") # one EXISTS over tags JOIN post_tags
 await Post.objects.select(Post.title, func.count(Post.tags))
-await Post.objects.prefetch_related(Post.tags)      # +1 query: tags JOIN post_tags WHERE post_id IN (...)
-await Tag.objects.prefetch_related(Tag.posts.author)
+await Post.objects.load(Post.tags)                  # +1 query: tags JOIN post_tags WHERE post_id IN (...)
+await Tag.objects.load(Tag.posts.author)
 ```
 
-* `user.profile` raises `NotLoaded` until `select_related` / `prefetch_related` loads
+* `user.profile` raises `NotLoaded` until `load()` loads
   it, like a to-one relation; it is never a query in disguise.
 * A many-to-many hop is planned as one hop through the join table, so Django's
   semantics hold: conditions in one `filter()` call must hold for the same tag, separate
@@ -265,7 +275,7 @@ await Tag.objects.prefetch_related(Tag.posts.author)
   key fields can't be set this way. The join model stays an ordinary model for
   anything else (bulk inserts: `await PostTag.objects.insert_many(...)`).
 * Prefetching selects the join row's key next to each tag, so a tag linked to two posts
-  comes back once per post. `Prefetch(Post.tags, Tag.objects...[:3])` slices per post.
+  comes back once per post. `Post.tags.objects...[:3]` slices per post.
 
 ### Decimal, enum and array columns
 
@@ -344,15 +354,14 @@ func.to_tsquery("english", "cat & !dog") / func.plainto_tsquery("english", text)
 
 ### Partial rows, OR of query sets, column paths
 
-* `only(...)` gives partial instances (see [`selection-and-defaults.md`](selection-and-defaults.md)).
-  A column through to-one relations trims the joined instance: `Comment.objects.only(Comment.body, Comment.post.title)` loads `comment.post` with `select_related`, with only `title` public.
-  Without a column of the model itself (`only(Comment.post.title)`), the model's instances keep only their primary key and relation keys, hidden, as Django's `only("post__title")`.
-  A to-many path raises `TypeError`.
+* `load(...)` with columns gives partial instances (see "Loading related objects" and [`selection-and-defaults.md`](selection-and-defaults.md)).
+  A column through relations trims the related instance: `Comment.objects.load(Comment.body, Comment.post.title)` joins `comment.post`, with only `title` public; `User.objects.load(User.posts.title)` loads partial posts by `IN (...)` query.
+  Unlike Django's `only("post__title")`, a column of a related model leaves the model itself whole; name `Comment.id` for a key-only root.
 * `qs1 | qs2` is one query set with the filter `(filters of qs1) OR (filters of qs2)`; order, loading and `using` come from `qs1`.
   `qs2` must set nothing but filters, neither may be sliced, and each side has at most one `filter()`/`exclude()` call, else `QueryError`:
   conditions of one call through a to-many relation must hold for one related row, so two calls can't be joined into one.
-* `Prefetch(User.posts, Post.objects.order_by(-Post.views), to_attr="best", one=True)` stores the first related row, or `None`, in `user.best` instead of a list.
-  It needs `to_attr` and a to-many relation, and takes no slice (it is a limit of one per parent).
+* `User.posts.objects.order_by(-Post.views).label("best", one=True)` in `load()` stores the first related row, or `None`, in `user.best` instead of a list.
+  It needs a to-many relation and takes no slice (it is a limit of one per parent).
 * `orm.column(Bundle, "items.product.title")` is the column a dotted path names, the same as `Bundle.items.product.title`.
   Each name before the last is a relation, the last a field; an unknown name raises `LookupError`.
   It is for adapters that map request names to columns (search and ordering filters). It is a function, not `Model.column`, so it can't collide with a field named `column`.
@@ -367,8 +376,8 @@ async for batch in Post.objects.batches(500):      # list[Post] per batch
 ```
 
 Each batch is `WHERE <filters> AND id > <last id> ORDER BY id LIMIT n` (keyset paging, no
-`OFFSET`), so memory stays flat and every batch is an index range scan. `select_related`,
-`prefetch_related` and `lock()` apply per batch; `order_by` and slicing are rejected.
+`OFFSET`), so memory stays flat and every batch is an index range scan. `load()` and
+`lock()` apply per batch; `order_by` and slicing are rejected.
 
 ### Cursor pagination
 
@@ -384,7 +393,7 @@ A deep page stays fast when an index matches the order and its first column is N
 With a nullable first column there is no such bound, and Postgres reads the index from its start to the cursor.
 The order is `order_by()`, else the schema default order, else the primary key.
 The primary key is added as the last order column when no column of the order is unique.
-`select_related`, `prefetch_related`, `only()` and query defaults apply to each page.
+`load()` and query defaults apply to each page.
 
 * `next_cursor` is the cursor of the last item, and `previous_cursor` that of the first; both are `None` on an empty page.
 * `has_next` / `has_previous` come from one extra row in the direction of reading. In the other direction, they are `True` when the call gave a cursor.
@@ -404,7 +413,7 @@ on each call:
 
 ```python
 # module level: the query set, its IR and the IR's JSON are built once
-post_by_id = Post.objects.select_related(Post.author).filter(Post.id == orm.param("id")).prepare()
+post_by_id = Post.objects.load(Post.author).filter(Post.id == orm.param("id")).prepare()
 latest = (Post.objects.filter(Post.author_id == orm.param("user"))
           .order_by(Post.created_at.desc())
           .limit(orm.param("n")).offset(orm.param("skip")).prepare())
@@ -422,7 +431,7 @@ reuses the statement, which is prepared once per connection.
 
 * A `param()` stands for one value: in comparisons and arithmetic, `like` / `contains`
   / `startswith` / `endswith` (the pattern is escaped when the value is bound),
-  `has()`, `limit()` and `offset()`, and in filters of `Prefetch` query sets.
+  `has()`, `limit()` and `offset()`, and in filters of relation query sets in `load()`.
 * Values can't be `None`: whether a comparison is `= $1` or `IS NULL` is fixed when the
   query is built, so write `is_null()` into the query instead.
 * `in_(param(...))` is rejected, because the number of values is part of the query. A
@@ -514,7 +523,7 @@ await Post.objects.filter(Post.author_id.in_(User.objects.filter(...).select(Use
 * Columns through to-one relations are `LEFT JOIN`ed; a to-many column outside an
   aggregate is rejected (it would repeat rows).
 * `lock()` works with plain column selects, not with aggregates, window functions,
-  `group_by` or `distinct`. `select_related` / `prefetch_related` don't combine with
+  `group_by` or `distinct`. `load()` of relations doesn't combine with
   `select()`.
 * A condition is a boolean column once labelled: `select(User.name, (User.id > 3).label("big"))`.
 * **`CASE`** is `func.case((cond, value), ..., default=v)`: the value of the first true
@@ -638,7 +647,7 @@ await User.objects.from_(chain)
   a query set with joins.
 * **Subqueries in `FROM`**: `Model.objects.from_(cte)` reads the model's rows from a
   CTE with the model's columns (`Post.objects....cte(...)` or a `select(Post, ...)`),
-  so filters, relation paths, `select_related`, `prefetch_related`, `count()` and
+  so filters, relation paths, `load()`, `count()` and
   `select()` work as usual; its extra columns are `cte.c.<name>`. Writes refuse a
   `from_()` query set.
 * `cte.select(...)` queries a CTE with no model: filter, group, order and slice it like
@@ -882,7 +891,7 @@ async with db.lock("shop:7:sync", session=True, timeout=5):  # no transaction ne
 
 * `lock(exclusive=True, *, nowait=False, skip_locked=False)`: `exclusive` is
   `FOR UPDATE`, otherwise `FOR SHARE`. Only the model's own rows are locked
-  (`FOR ... OF <table>`), never rows joined by `select_related`.
+  (`FOR ... OF <table>`), never rows joined by `load()`.
 * `instance.refresh(*fields, lock=False, exclusive=True, nowait=False, skip_locked=False)`
   reloads the row with the query set's `lock()` options and returns `True`. A refresh of
   some fields locks the whole row. With `skip_locked`, a row locked elsewhere (or
@@ -948,7 +957,7 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
     for c in customers:
         await c.load_person()
 # orm.debug.NPlusOne: 20 queries with one shape `SELECT ... FROM "person" WHERE "person"."id" = $1 ...`
-#   at app/views.py:42; use select_related(Customer.person)
+#   at app/views.py:42; use load(Customer.person)
 ```
 
 * The scope counts its statements by shape: the SQL with placeholders, without values.
@@ -960,7 +969,7 @@ with orm.debug.n_plus_one(threshold=5, fail=True):
   A query that `asyncio.gather()` or `create_task()` runs reports the line that started the event loop.
 * When the block ends, a shape that ran more than `threshold` times (default 5) raises `orm.debug.NPlusOne` with `fail=True`, or gives an `orm.debug.NPlusOneWarning`.
   The exception and the `with ... as report` value carry the report: each shape, its SQL, its count, the call site of its first query and the fix.
-* The fix is `select_related(...)` for a repeated `load_x()`, and `prefetch_related(...)` for a repeated unchanged to-many or many-to-many query (`await post.comments`, `await post.tags`).
+* The fix is `load(...)` for a repeated `load_x()` and for a repeated unchanged to-many or many-to-many query (`await post.comments`, `await post.tags`).
 * The call site and the SQL text are captured only inside the scope.
   Outside it, each query pays one `ContextVar` read (about 15 ns, measured).
 * In a test suite, add `pytest_plugins = ["orm.testing"]` to `conftest.py`.
@@ -1089,14 +1098,14 @@ QuerySet ──(IR json + params list)──▶ Engine.run ──▶ planner (se
 * Rust builds the result objects (`bindings/python/src/build.rs`). `Schema` holds each model's
   class (passed by `Registry.native()`), and an instance is made as `cls.__new__(cls)`
   would make it, its fields written straight into its `__dict__`: no Python code runs per
-  row. `select_related` objects, prefetched lists, the reverse to-one (`post.author`)
+  row. joined objects, prefetched lists, the reverse to-one (`post.author`)
   and `_db` (for `using()`) are attached in the same pass; `select()` rows are built as
   `Row` objects; `insert` / `.returning()` rows are instances too.
 
 Rough numbers (release build, localhost TCP, 1000-row reads): building a query set and its
 IR costs ~15 µs of Python. A 1-row read is ~0.1 ms over a bare `SELECT 1` on the same
 connection. Reading 1000 posts takes ~1.9 ms (Django async was 10.4 ms in Phase 0), and
-1000 posts + author via `select_related` ~3.1 ms (Django 18.1 ms). Building instances in
+1000 posts + author via `load(Post.author)` ~3.1 ms (Django 18.1 ms). Building instances in
 Rust took these from ~2.3 / ~4.3 ms, below the Phase 0 prototype's 2.5 / 4.7 ms
 (`bench/engine_bench.py`, numbers in
 [`bench/RESULTS.md`](../bench/RESULTS.md#instances-built-in-rust)).
@@ -1107,7 +1116,7 @@ Rust took these from ~2.3 / ~4.3 ms, below the Phase 0 prototype's 2.5 / 4.7 ms
    and `insert()` take keyword arguments, typed per model in the stub.
 2. **Awaitable query sets** (your call): `await qs`, `await qs.first()`, `async for`.
 3. **`EXISTS` for every relation hop in filters**, with Django's grouping rules (see
-   above). JOINs only for `select_related` and `order_by`, and only along to-one
+   above). JOINs only for `load()` of to-one relations and `order_by`, and only along to-one
    relations. Ordering by a to-many column is rejected.
 4. **Explicit both sides of a relation** in the generated code (`BelongsTo` +
    `HasMany`) rather than Django's implicit `related_name`. The schema names both.
@@ -1160,7 +1169,7 @@ planner ──sea-query statement──▶ db::build(dialect) ──(SQL, [Value
 
 SeaORM was the engine until this point; only its sea-query and pool were in use (its
 entities, relations and loaders need Rust types compiled per schema, and its
-`find_also_related` / `load_many` are what `select_related` / `prefetch_related` already
+`find_also_related` / `load_many` are what `load()` already
 do). Replacing it with tokio-postgres made most operations 5–33% faster with TLS off (with
 TLS on, the TLS cost hides the difference)
 (`bench/engine_bench.py`, numbers in [`bench/RESULTS.md`](../bench/RESULTS.md#engine-seaorm-vs-tokio-postgres)).
@@ -1177,5 +1186,5 @@ TLS on, the TLS cost hides the difference)
   a fix in sea-query (or our own SELECT writer); see Window functions.
 * Composite keys. (One-to-one, many-to-many, decimal, enum, array, UUID and JSON
   columns are done, see [`schema.md`](schema.md).)
-* `select_related` through a many-to-many relation (it would repeat rows; use
-  `prefetch_related`).
+* A join through a many-to-many relation (it would repeat rows; `load()` uses an
+  `IN (...)` query).
