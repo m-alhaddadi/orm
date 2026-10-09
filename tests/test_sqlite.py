@@ -72,6 +72,14 @@ async def test_bulk_writes(sqlite):
     assert len(await Author.objects.using(db).insert_many(rows).returning()) == 20_000
     first, created = await Author.objects.using(db).get_or_insert(email="u0@x.io", defaults={"name": "x"})
     assert not created and first.name == "U0"
+    # A failed later batch rolls back the earlier ones.
+    with pytest.raises(orm.IntegrityError):
+        await Author.objects.using(db).insert_many([{"email": "n1@x.io", "name": "N"}, {"email": "u1@x.io", "name": "N"}], batch_size=1)
+    assert not await Author.objects.using(db).filter(Author.email == "n1@x.io").exists()
+    # A boolean partial-index predicate: SQLite matches it only as a literal.
+    await db.execute("CREATE UNIQUE INDEX authors_active_name ON author (name) WHERE active")
+    for _ in range(2):
+        await Author.objects.using(db).insert(email="v@x.io", name="U0").on_conflict(Author.name, where=Author.active, update=False)
 
 
 async def test_outer_through_a_relation_path(sqlite):

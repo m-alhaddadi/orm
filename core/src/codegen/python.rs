@@ -339,6 +339,18 @@ pub fn generate_with(ir: &SchemaIr, schema: &Schema, source: &str, options: &sup
                 writeln!(body, "    {}: {target}", r.name).unwrap();
             }
         }
+        // get_or_insert lookup and defaults: plain values, none required
+        writeln!(body, "\nclass {name}Lookup(TypedDict, total=False):").unwrap();
+        for (position, f) in m.fields().iter().enumerate() {
+            #[cfg(feature = "composition")]
+            if m.native.computed().contains(&position) { continue; }
+            #[cfg(not(feature = "composition"))]
+            let _ = position;
+            writeln!(body, "    {}: {}", f.name, file_value_type(m, f)).unwrap();
+            if let Some(r) = belongs(&f.name) {
+                writeln!(body, "    {}: {}", r.name, r.target).unwrap();
+            }
+        }
         writeln!(body, "\nclass {name}QuerySet(QuerySet[{name}]):").unwrap();
         if composed_names.contains(&&m.ir.name) {
             let key_type = value_type(m.pk_field());
@@ -354,6 +366,12 @@ pub fn generate_with(ir: &SchemaIr, schema: &Schema, source: &str, options: &sup
             "    @overload  # type: ignore[override]\n    def insert_many(self, rows: Iterable[{name}Insert], *, batch_size: int | None = None, \
              copy: Literal[False] = False) -> InsertMany[{name}]: ...\n    @overload\n    def insert_many(self, rows: Iterable[{name}Insert], \
              *, copy: Literal[True]) -> CopyInsert[{name}]: ..."
+        )
+        .unwrap();
+        writeln!(
+            body,
+            "    async def get_or_insert(self, defaults: {name}Lookup | None = None, **lookup: Unpack[{name}Lookup]) \
+             -> tuple[{name}, bool]: ...  # type: ignore[override]"
         )
         .unwrap();
         writeln!(
@@ -378,10 +396,10 @@ pub fn generate_with(ir: &SchemaIr, schema: &Schema, source: &str, options: &sup
          #     a read-only str on an instance), relation descriptors and typed `update()`;\n\
          #   * a path class (`_UserPath`): what a relation to the model evaluates to on the class\n\
          #     side, so `User.posts.created_at` autocompletes and type-checks as ColumnRef[datetime];\n\
-         #   * `UserInsert` / `UserUpdate` / `UserUpdateRow` TypedDicts: the row shapes accepted by\n\
-         #     insert / update / update_many;\n\
-         #   * a query set class (`UserQuerySet`): typed `insert()`, `insert_many()`, `update()`,\n\
-         #     `update_many()`.\n\n\
+         #   * `UserInsert` / `UserUpdate` / `UserUpdateRow` / `UserLookup` TypedDicts: the row\n\
+         #     shapes accepted by insert / update / update_many / get_or_insert;\n\
+         #   * a query set class (`UserQuerySet`): typed `insert()`, `insert_many()`,\n\
+         #     `get_or_insert()`, `update()`, `update_many()`.\n\n\
          from collections.abc import Iterable\n",
     );
     let dt: Vec<&str> = ["date", "datetime"].into_iter().filter(|d| used.contains(d)).collect();

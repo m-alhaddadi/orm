@@ -411,7 +411,12 @@ pub fn plan_inserts(
     let m = schema.model(schema.model_idx(model).map_err(query_err)?);
     // Client defaults can add columns, so the row width is known only after them.
     let (fields, mut rows) = crate::client_default::fill(m, fields, rows)?;
-    let mut chunk = target.caps.max_params.saturating_sub(params.len()) / fields.len().max(1);
+    // A `write_sql` template binds its value once per `{}`.
+    let width = fields
+        .iter()
+        .map(|f| Ok(crate::plan::param_template(m.field(f).map_err(query_err)?).map_or(1, |t| t.matches("{}").count().max(1))))
+        .sum::<Result<usize>>()?;
+    let mut chunk = target.caps.max_params.saturating_sub(params.len()) / width.max(1);
     if fields.is_empty() {
         chunk = 1; // `DEFAULT VALUES` inserts one row
     }
@@ -485,7 +490,7 @@ pub async fn run_inserts(conn: &dyn Executor, target: Target, mut plans: Vec<Pla
 }
 
 /// A bulk load planned by [`plan_copy`]: run it with [`run_copy`].
-pub struct Copy {
+pub struct BulkCopy {
     table: String,
     columns: Vec<String>,
     rows: Vec<Vec<Value>>,
@@ -496,7 +501,7 @@ pub struct Copy {
 /// defaults fill values first. COPY has no per-row `DEFAULT`, so a field must be set in
 /// every row or in none. COPY writes values as they are, so models whose writes run
 /// native code or SQL templates are rejected.
-pub fn plan_copy(schema: &Schema, target: Target, model: &str, fields: &[String], rows: Vec<Vec<Option<Value>>>) -> Result<Copy> {
+pub fn plan_copy(schema: &Schema, target: Target, model: &str, fields: &[String], rows: Vec<Vec<Option<Value>>>) -> Result<BulkCopy> {
     if target.dialect != orm_core::dialect::Dialect::Postgres {
         return Err(Error::query("insert_many(copy=True) needs Postgres"));
     }
@@ -542,11 +547,11 @@ pub fn plan_copy(schema: &Schema, target: Target, model: &str, fields: &[String]
         .into_iter()
         .map(|mut r| keep.iter().map(|&i| r[i].take().expect("checked above")).collect())
         .collect();
-    Ok(Copy { table: m.table().to_owned(), columns, rows })
+    Ok(BulkCopy { table: m.table().to_owned(), columns, rows })
 }
 
 /// Runs a [`plan_copy`] load on `conn` (the pool or a transaction): the rows written.
-pub async fn run_copy(conn: &dyn Executor, copy: Copy) -> Result<u64> {
+pub async fn run_copy(conn: &dyn Executor, copy: BulkCopy) -> Result<u64> {
     if copy.rows.is_empty() {
         return Ok(0);
     }

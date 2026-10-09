@@ -5,10 +5,10 @@
 #     a read-only str on an instance), relation descriptors and typed `update()`;
 #   * a path class (`_UserPath`): what a relation to the model evaluates to on the class
 #     side, so `User.posts.created_at` autocompletes and type-checks as ColumnRef[datetime];
-#   * `UserInsert` / `UserUpdate` / `UserUpdateRow` TypedDicts: the row shapes accepted by
-#     insert / update / update_many;
-#   * a query set class (`UserQuerySet`): typed `insert()`, `insert_many()`, `update()`,
-#     `update_many()`.
+#   * `UserInsert` / `UserUpdate` / `UserUpdateRow` / `UserLookup` TypedDicts: the row
+#     shapes accepted by insert / update / update_many / get_or_insert;
+#   * a query set class (`UserQuerySet`): typed `insert()`, `insert_many()`,
+#     `get_or_insert()`, `update()`, `update_many()`.
 
 from collections.abc import Iterable
 from datetime import datetime
@@ -79,12 +79,19 @@ class UserUpdateRow(TypedDict, total=False):
     name: str
     created_at: datetime
 
+class UserLookup(TypedDict, total=False):
+    id: int
+    email: str
+    name: str
+    created_at: datetime
+
 class UserQuerySet(QuerySet[User]):
     def insert(self, **values: Unpack[UserInsert]) -> InsertOne[User]: ...  # type: ignore[override]
     @overload  # type: ignore[override]
     def insert_many(self, rows: Iterable[UserInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[User]: ...
     @overload
     def insert_many(self, rows: Iterable[UserInsert], *, copy: Literal[True]) -> CopyInsert[User]: ...
+    async def get_or_insert(self, defaults: UserLookup | None = None, **lookup: Unpack[UserLookup]) -> tuple[User, bool]: ...  # type: ignore[override]
     def update(self, **values: Unpack[UserUpdate]) -> Update[User]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[UserUpdateRow], *, batch_size: int | None = None) -> UpdateMany[User]: ...  # type: ignore[override]
 
@@ -137,12 +144,21 @@ class ProfileUpdateRow(TypedDict, total=False):
     balance: Decimal
     links: list[str]
 
+class ProfileLookup(TypedDict, total=False):
+    id: int
+    user_id: int
+    user: User
+    role: Role
+    balance: Decimal
+    links: list[str]
+
 class ProfileQuerySet(QuerySet[Profile]):
     def insert(self, **values: Unpack[ProfileInsert]) -> InsertOne[Profile]: ...  # type: ignore[override]
     @overload  # type: ignore[override]
     def insert_many(self, rows: Iterable[ProfileInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[Profile]: ...
     @overload
     def insert_many(self, rows: Iterable[ProfileInsert], *, copy: Literal[True]) -> CopyInsert[Profile]: ...
+    async def get_or_insert(self, defaults: ProfileLookup | None = None, **lookup: Unpack[ProfileLookup]) -> tuple[Profile, bool]: ...  # type: ignore[override]
     def update(self, **values: Unpack[ProfileUpdate]) -> Update[Profile]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[ProfileUpdateRow], *, batch_size: int | None = None) -> UpdateMany[Profile]: ...  # type: ignore[override]
 
@@ -211,12 +227,23 @@ class PostUpdateRow(TypedDict, total=False):
     published: bool
     created_at: datetime
 
+class PostLookup(TypedDict, total=False):
+    id: int
+    author_id: int
+    author: User
+    title: str
+    body: str
+    views: int
+    published: bool
+    created_at: datetime
+
 class PostQuerySet(QuerySet[Post]):
     def insert(self, **values: Unpack[PostInsert]) -> InsertOne[Post]: ...  # type: ignore[override]
     @overload  # type: ignore[override]
     def insert_many(self, rows: Iterable[PostInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[Post]: ...
     @overload
     def insert_many(self, rows: Iterable[PostInsert], *, copy: Literal[True]) -> CopyInsert[Post]: ...
+    async def get_or_insert(self, defaults: PostLookup | None = None, **lookup: Unpack[PostLookup]) -> tuple[Post, bool]: ...  # type: ignore[override]
     def update(self, **values: Unpack[PostUpdate]) -> Update[Post]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[PostUpdateRow], *, batch_size: int | None = None) -> UpdateMany[Post]: ...  # type: ignore[override]
 
@@ -275,12 +302,22 @@ class CommentUpdateRow(TypedDict, total=False):
     body: str
     created_at: datetime
 
+class CommentLookup(TypedDict, total=False):
+    id: int
+    post_id: int
+    post: Post
+    author_id: int | None
+    author: User
+    body: str
+    created_at: datetime
+
 class CommentQuerySet(QuerySet[Comment]):
     def insert(self, **values: Unpack[CommentInsert]) -> InsertOne[Comment]: ...  # type: ignore[override]
     @overload  # type: ignore[override]
     def insert_many(self, rows: Iterable[CommentInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[Comment]: ...
     @overload
     def insert_many(self, rows: Iterable[CommentInsert], *, copy: Literal[True]) -> CopyInsert[Comment]: ...
+    async def get_or_insert(self, defaults: CommentLookup | None = None, **lookup: Unpack[CommentLookup]) -> tuple[Comment, bool]: ...  # type: ignore[override]
     def update(self, **values: Unpack[CommentUpdate]) -> Update[Comment]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[CommentUpdateRow], *, batch_size: int | None = None) -> UpdateMany[Comment]: ...  # type: ignore[override]
 
@@ -320,12 +357,18 @@ class TagUpdateRow(TypedDict, total=False):
     name: str
     priority: Priority
 
+class TagLookup(TypedDict, total=False):
+    id: int
+    name: str
+    priority: Priority
+
 class TagQuerySet(QuerySet[Tag]):
     def insert(self, **values: Unpack[TagInsert]) -> InsertOne[Tag]: ...  # type: ignore[override]
     @overload  # type: ignore[override]
     def insert_many(self, rows: Iterable[TagInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[Tag]: ...
     @overload
     def insert_many(self, rows: Iterable[TagInsert], *, copy: Literal[True]) -> CopyInsert[Tag]: ...
+    async def get_or_insert(self, defaults: TagLookup | None = None, **lookup: Unpack[TagLookup]) -> tuple[Tag, bool]: ...  # type: ignore[override]
     def update(self, **values: Unpack[TagUpdate]) -> Update[Tag]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[TagUpdateRow], *, batch_size: int | None = None) -> UpdateMany[Tag]: ...  # type: ignore[override]
 
@@ -380,12 +423,21 @@ class PostTagUpdateRow(TypedDict, total=False):
     tag: Tag
     position: int | None
 
+class PostTagLookup(TypedDict, total=False):
+    id: int
+    post_id: int
+    post: Post
+    tag_id: int
+    tag: Tag
+    position: int | None
+
 class PostTagQuerySet(QuerySet[PostTag]):
     def insert(self, **values: Unpack[PostTagInsert]) -> InsertOne[PostTag]: ...  # type: ignore[override]
     @overload  # type: ignore[override]
     def insert_many(self, rows: Iterable[PostTagInsert], *, batch_size: int | None = None, copy: Literal[False] = False) -> InsertMany[PostTag]: ...
     @overload
     def insert_many(self, rows: Iterable[PostTagInsert], *, copy: Literal[True]) -> CopyInsert[PostTag]: ...
+    async def get_or_insert(self, defaults: PostTagLookup | None = None, **lookup: Unpack[PostTagLookup]) -> tuple[PostTag, bool]: ...  # type: ignore[override]
     def update(self, **values: Unpack[PostTagUpdate]) -> Update[PostTag]: ...  # type: ignore[override]
     def update_many(self, rows: Iterable[PostTagUpdateRow], *, batch_size: int | None = None) -> UpdateMany[PostTag]: ...  # type: ignore[override]
 

@@ -29,6 +29,25 @@ export function useDatabase(): void {
   });
 }
 
+/** A second database `name` with the same tables and one user, standing in for a
+ * replica that lags behind the primary. */
+export async function replicaUrl(name: string): Promise<string> {
+  const db = getDatabase();
+  const url = db.url.replace(/\/[^/]*$/, `/${name}`);
+  if ((await db.fetchText(`SELECT 1 FROM pg_database WHERE datname = '${name}'`)).length === 0) {
+    await db.execute(`CREATE DATABASE ${name}`);
+  }
+  const replica = await connect(url, { default: false, maxConnections: 1 });
+  try {
+    await replica.dropTables();
+    await replica.createTables();
+    await User.objects.using(replica).insert({ email: "r@example.com", name: "Replica" });
+  } finally {
+    await replica.close();
+  }
+  return url;
+}
+
 /** A second pool: queries `.using()` it run outside the default pool's transaction. */
 export async function otherDatabase(): Promise<Database> {
   return connect(DATABASE_URL, { maxConnections: 2, default: false });

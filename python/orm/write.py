@@ -196,8 +196,8 @@ class _Insert:
         batch_size: int | None = None,
         where: dict[str, Any] | None = None,
     ) -> None:
-        if batch_size is not None and batch_size < 1:
-            raise ValueError("batch_size must be at least 1")
+        if batch_size is not None and (isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1):
+            raise ValueError("batch_size must be an integer of at least 1")
         self._qs = qs
         self._fields = fields
         self._rows = rows

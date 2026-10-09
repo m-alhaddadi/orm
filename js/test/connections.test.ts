@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { connect, define, getDatabase, loads, param, Registry, scope, type QueryEvent } from '../src/index.js';
 import { native } from '../src/native.js';
 import { User } from './blog/models.js';
-import { useDatabase, otherDatabase } from './helpers.js';
+import { useDatabase, otherDatabase, replicaUrl } from './helpers.js';
 
 useDatabase();
 
@@ -121,26 +121,8 @@ test('a session lock needs Postgres', async () => {
   }
 });
 
-/** A second database with the same tables, standing in for a replica. */
-async function replicaUrl(): Promise<string> {
-  const db = getDatabase();
-  const url = db.url.replace(/\/[^/]*$/, '/orm_s6_replica_js');
-  if ((await db.fetchText("SELECT 1 FROM pg_database WHERE datname = 'orm_s6_replica_js'")).length === 0) {
-    await db.execute('CREATE DATABASE orm_s6_replica_js');
-  }
-  const replica = await connect(url, { default: false, maxConnections: 1 });
-  try {
-    await replica.dropTables();
-    await replica.createTables();
-    await User.objects.using(replica).insert({ email: 'r@example.com', name: 'Replica' });
-  } finally {
-    await replica.close();
-  }
-  return url;
-}
-
 test('replicas answer reads outside a transaction; writes and transactions use the primary', async () => {
-  const db = getDatabase(), url = await replicaUrl();
+  const db = getDatabase(), url = await replicaUrl('orm_s6_replica_js');
   const routed = await connect(db.url, { replicas: [url, url], default: false, maxConnections: 2 });
   try {
     await User.objects.using(routed).insert({ email: 'p@example.com', name: 'Primary' });
@@ -271,7 +253,7 @@ for (const dialect of ['postgres', 'sqlite']) {
 }
 
 test('query hooks see replica reads and session locks', async () => {
-  const db = getDatabase(), url = await replicaUrl();
+  const db = getDatabase(), url = await replicaUrl('orm_s6_replica_js');
   const routed = await connect(db.url, { replicas: [url], default: false, maxConnections: 2 });
   const events: QueryEvent[] = [];
   const off = routed.onQuery((e) => events.push(e));

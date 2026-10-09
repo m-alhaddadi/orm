@@ -1271,15 +1271,27 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
   async getOrInsert(lookup: Partial<M["insert"]>, options?: { readonly defaults?: Partial<M["insert"]> }): Promise<[M["row"], boolean]> {
     const key = lookupValues(this.meta, lookup);
     const cols = [...key.keys()].map((f) => this.meta.column(this.meta.fieldByIr.get(f)!));
-    const values = { ...options?.defaults, ...lookup } as M["insert"];
+    const given = Object.fromEntries(Object.entries(lookup).filter(([, v]) => v !== undefined));
+    const values = { ...options?.defaults, ...given } as M["insert"];
+    const where = cols.map((c) => c.eq(key.get(c.field.ir) as never)) as never[];
+    // A replica can lag behind the insert's conflict, so the reads see the primary too.
+    const reads = this.using("primary").clone({ limit: undefined, offset: undefined });
+    const read = async (): Promise<M["row"] | null> => {
+      const found = await reads.filter(...where).limit(2).fetch();
+      return found.length ? (one(this.meta, found) as M["row"]) : null;
+    };
+    let found = await read();
     for (let round = 0; round < GET_OR_INSERT_ROUNDS; round++) {
-      const found = await this.filter(...(cols.map((c) => c.eq(key.get(c.field.ir) as never)) as never[])).limit(2).fetch();
-      if (found.length) {
-        return [one(this.meta, found) as M["row"], false];
+      if (found !== null) {
+        return [found, false];
       }
       const row = await this.insert(values).onConflict(cols as never, { update: false }).returning();
       if (row !== null) {
         return [row, true];
+      }
+      found = await read();
+      if (found === null && (await new QuerySet<M>(this.meta, { ...EMPTY, db: reads.state.db, withoutDefaults: true }).filter(...where).exists())) {
+        throw new QueryError(`getOrInsert: a ${this.meta.name} row matching the lookup exists, but the query set's filters hide it`);
       }
     }
     throw new QueryError(`getOrInsert: a ${this.meta.name} row matching the lookup was deleted concurrently ${GET_OR_INSERT_ROUNDS} times`);
@@ -1311,7 +1323,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
 
   /** @internal */
   protected async copyRows(rows: readonly object[], options: CopyOptions): Promise<number> {
-    if ("onConflict" in options || "batchSize" in options) {
+    if ("onConflict" in options || (options as BatchOptions).batchSize !== undefined) {
       throw new TypeError("insertMany(rows, { copy: true }) can't be combined with onConflict or batchSize");
     }
     const prepared = prepareRows(this.meta, rows);
@@ -1319,7 +1331,7 @@ export class QuerySet<M extends ModelSpec, R = M["row"], S extends string = M["n
       return 0;
     }
     const db = this.db();
-    return (await db_wait(db, (tx) => db.engine.copyInsert(this.meta.name, prepared.fields, prepared.rows, tx, allowedWrites()))) as number;
+    return (await db_wait(db, (tx, allowed, trace) => db.engine.copyInsert(this.meta.name, prepared.fields, prepared.rows, tx, allowed, trace))) as number;
   }
 
   /**
@@ -1742,6 +1754,12 @@ export class RelatedSet<M extends ModelSpec, L extends string = never> extends Q
     return new InsertOne(bound((conflict, returning) => this.insertRows([{ ...values, ...this.link() }], conflict, returning, null)));
   }
 
+  /** The related row matching `lookup`, or a new one pointing at this instance; the link
+   * field is part of the lookup. */
+  override getOrInsert(lookup: Partial<M["insert"]>, options?: { readonly defaults?: Partial<M["insert"]> }): Promise<[M["row"], boolean]> {
+    return super.getOrInsert({ ...lookup, ...this.link() } as Partial<M["insert"]>, options);
+  }
+
   /** Inserts related rows pointing at this instance. */
   override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options?: BatchOptions): InsertMany<M>;
   override insertMany(rows: readonly DistributiveOmit<M["insert"], L>[], options: CopyOptions): Promise<number>;
@@ -1859,6 +1877,10 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
   async add(...args: readonly unknown[]): Promise<void> {
     const last = args.at(-1);
     const options = isPlainObject(last) ? (last as AddOptions) : undefined;
+    const unknown = Object.keys(options ?? {}).filter((k) => k !== "throughDefaults");
+    if (unknown.length) {
+      throw new TypeError(`add() options take throughDefaults only, got ${unknown.join(", ")}`);
+    }
     const objs = options === undefined ? args : args.slice(0, -1);
     const extra = this.throughDefaults(options?.throughDefaults);
     const keys = this.targetKeys(objs);
@@ -1889,6 +1911,11 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     if (bad.length) {
       throw new TypeError(`throughDefaults can't set the link's key ${bad.join(", ")}`);
     }
+    const known = new Set([...[...join.fieldByIr.values()].map((f) => f.name), ...join.relations.keys()]);
+    const unknown = Object.keys(values ?? {}).filter((k) => !known.has(k)).sort();
+    if (unknown.length) {
+      throw new TypeError(`throughDefaults: ${join.name} has no field ${unknown.join(", ")}`);
+    }
     return { ...values };
   }
 
@@ -1910,13 +1937,15 @@ export class ManyRelatedSet<M extends ModelSpec> extends QuerySet<M> {
     return n;
   }
 
-  /** Makes the given instances (or keys) exactly the linked ones; `throughDefaults` sets
-   * other fields of the new join rows. */
+  /** Makes the given instances (or keys) exactly the linked ones, in one transaction;
+   * `throughDefaults` sets other fields of the new join rows. */
   async set(objs: readonly (M["data"] | In<M["pk"]>)[], options?: AddOptions): Promise<void> {
     this.throughDefaults(options?.throughDefaults);
     const keys = this.targetKeys(objs);
-    await this.links().filter(this.targetColumn().notIn(keys as never) as never).delete();
-    await this.add(...(keys as never[]), { throughDefaults: options?.throughDefaults ?? {} });
+    await resolve(this.state.db ?? (this.instance[DB] as Database | undefined)).transaction(async () => {
+      await this.links().filter(this.targetColumn().notIn(keys as never) as never).delete();
+      await this.add(...(keys as never[]), { throughDefaults: options?.throughDefaults ?? {} });
+    });
   }
 
   /** Inserts a related row and links it, in one transaction. No `onConflict`: upsert

@@ -109,6 +109,10 @@ impl Executor for Traced {
     fn query_text(&self, sql: String) -> BoxFuture<'_, DbResult<Vec<Vec<Option<String>>>>> {
         Box::pin(self.timed(sql.clone(), self.conn.query_text(sql), |r| r.len() as u64))
     }
+    fn copy_in(&self, table: String, columns: Vec<String>, rows: Vec<Vec<Value>>) -> BoxFuture<'_, DbResult<u64>> {
+        let sql = format!("COPY {table} ({}) FROM STDIN (FORMAT binary)", columns.join(", "));
+        Box::pin(self.timed(sql, self.conn.copy_in(table, columns, rows), |n| *n))
+    }
     fn advisory_lock(&self, key: i64, exclusive: bool, nowait: bool) -> BoxFuture<'_, DbResult<bool>> {
         let sql = crate::advisory::sql(key, exclusive, nowait);
         Box::pin(self.timed(sql, self.conn.advisory_lock(key, exclusive, nowait), |_| 1))

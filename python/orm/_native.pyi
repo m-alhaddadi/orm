@@ -109,7 +109,13 @@ class Engine:
         returning: bool = True,
     ) -> Awaitable[Any]: ...
     def copy_insert(
-        self, model: str, fields: list[str], rows: list[list[Any]], tx: Transaction | None = None, allowed: Sequence[str] = ...
+        self,
+        model: str,
+        fields: list[str],
+        rows: list[list[Any]],
+        tx: Transaction | None = None,
+        allowed: Sequence[str] = ...,
+        trace: Trace | None = None,
     ) -> Awaitable[int]: ...
     def attach(self, model: str, parent_id: Any, fields: list[str], rows: list[list[Any]], tx: Transaction | None = None, db: Any = None, allowed: Sequence[str] = ..., trace: Trace | None = None) -> Awaitable[list[Any]]: ...
     def update_many(

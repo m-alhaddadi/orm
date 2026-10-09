@@ -126,7 +126,7 @@ export interface NativeEngine {
     trace?: NativeTrace | null,
     returning?: boolean,
   ): Promise<unknown>;
-  copyInsert(model: string, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[]): Promise<number>;
+  copyInsert(model: string, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[], trace?: NativeTrace | null): Promise<number>;
   attach(model: string, parentId: unknown, fields: string[], rows: unknown[][], tx: NativeTransaction | null, allowed?: readonly string[], trace?: NativeTrace | null): Promise<unknown>;
   updateMany(
     model: string,

@@ -180,7 +180,7 @@ pub(crate) fn bind(v: sea_query::Value, f: Option<&FieldIr>) -> SExpr {
 
 /// The template of a parameter for field `f`. A text parameter compares as text, where the
 /// padded `char(n)` value of a row differs from the same value read back; bpchar ignores the padding.
-fn param_template(f: &FieldIr) -> Option<&str> {
+pub(crate) fn param_template(f: &FieldIr) -> Option<&str> {
     if let Some(t) = &f.write_sql {
         return Some(t);
     }
@@ -953,6 +953,27 @@ impl<'s> Planner<'s> {
                 None => self.leaf(leaf),
             },
         }
+    }
+
+    /// A partial unique index's predicate: [`Self::cond`], with `col = TRUE` as the bare
+    /// column, the only form of a boolean predicate that SQLite matches to the index.
+    fn index_cond(&mut self, e: &Expr) -> Result<SExpr> {
+        match e {
+            Expr::And { items } => Ok(fold(items.iter().map(|i| self.index_cond(i)).collect::<Result<_>>()?, true)),
+            Expr::Cmp { op: CmpOp::Eq, l, r } if matches!(**l, Expr::Col { .. }) && self.is_true(r)? => {
+                let hint = self.hint_of(l);
+                self.value(l, hint)
+            }
+            _ => self.cond(e),
+        }
+    }
+
+    fn is_true(&self, e: &Expr) -> Result<bool> {
+        Ok(match e {
+            Expr::Const { value } => *value,
+            Expr::Param { i } => matches!(self.params.value(*i, None)?, sea_query::Value::Bool(Some(true))),
+            _ => false,
+        })
     }
 
     fn leaf(&mut self, e: &Expr) -> Result<SExpr> {
@@ -2624,10 +2645,17 @@ pub fn plan_insert(
                 })
                 .collect()
         };
+        // The predicate goes in as SQL literals: the database infers a partial index only
+        // from a predicate it can read, and a parameter is unknown to a generic plan
+        // (Postgres, from the sixth run of a prepared statement) and to SQLite.
         let index_where = |filter: Option<Expr>| -> Result<Option<SExpr>> {
             let Some(filter) = filter else { return Ok(None) };
             let mut planner = Planner::new(schema, &[], target, model, None, params, vec![], 0)?;
-            Ok(Some(planner.cond(&filter)?))
+            let mut probe = Query::select();
+            probe.expr(SExpr::val(1)).and_where(planner.index_cond(&filter)?);
+            let sql = crate::db::to_string(target.dialect, &probe);
+            let (_, cond) = sql.split_once(" WHERE ").expect("a WHERE clause");
+            Ok(Some(SExpr::cust(cond.to_owned())))
         };
         let clause = match oc {
             OnConflict::Nothing(conflict, filter) => {

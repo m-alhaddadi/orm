@@ -267,6 +267,29 @@ fn quote(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// `v` as the server's column type `ty` wants it: binary COPY has no parameter types of
+/// its own, so an `Int` field on a `smallint` column must be sent as two bytes.
+fn fit<'a>(v: &'a Value, ty: &Type) -> DbResult<std::borrow::Cow<'a, Value>> {
+    use std::borrow::Cow;
+    let int = match v {
+        Value::TinyInt(i) => i.map(i64::from),
+        Value::SmallInt(i) => i.map(i64::from),
+        Value::Int(i) => i.map(i64::from),
+        Value::BigInt(i) => *i,
+        Value::Float(f) if *ty == Type::FLOAT8 => return Ok(Cow::Owned(Value::Double(f.map(f64::from)))),
+        #[allow(clippy::cast_possible_truncation)]
+        Value::Double(f) if *ty == Type::FLOAT4 => return Ok(Cow::Owned(Value::Float(f.map(|f| f as f32)))),
+        _ => return Ok(Cow::Borrowed(v)),
+    };
+    let range = |e| DbError::other(format!("{e}: value out of range for a {} column", ty.name()));
+    Ok(Cow::Owned(match *ty {
+        Type::INT2 => Value::SmallInt(int.map(i16::try_from).transpose().map_err(range)?),
+        Type::INT4 => Value::Int(int.map(i32::try_from).transpose().map_err(range)?),
+        Type::INT8 => Value::BigInt(int),
+        _ => return Ok(Cow::Borrowed(v)),
+    }))
+}
+
 /// Binary `COPY ... FROM STDIN`. The column types come from the server, so enums,
 /// `json` and arrays encode as the columns expect.
 async fn copy_in(c: &ClientWrapper, table: &str, columns: &[String], rows: &[Vec<Value>]) -> DbResult<u64> {
@@ -278,7 +301,8 @@ async fn copy_in(c: &ClientWrapper, table: &str, columns: &[String], rows: &[Vec
     let writer = BinaryCopyInWriter::new(sink, &types);
     let mut writer = std::pin::pin!(writer);
     for row in rows {
-        let params: Vec<Param<'_>> = row.iter().map(Param).collect();
+        let row = row.iter().zip(&types).map(|(v, ty)| fit(v, ty)).collect::<DbResult<Vec<_>>>()?;
+        let params: Vec<Param<'_>> = row.iter().map(|v| Param(v)).collect();
         let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
         writer.as_mut().write(&refs).await.map_err(pg_err)?;
     }

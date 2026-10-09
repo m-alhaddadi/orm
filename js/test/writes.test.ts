@@ -4,9 +4,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DatabaseError, Decimal, IntegrityError, connect, excluded, getDatabase } from "../src/index.js";
+import { DatabaseError, Decimal, IntegrityError, QueryError, connect, excluded, getDatabase, type QueryEvent } from "../src/index.js";
 import { Comment, Post, PostTag, Priority, Profile, Tag, User, type TagInsert } from "./blog/models.js";
-import { DATABASE_URL, useDatabase } from "./helpers.js";
+import { DATABASE_URL, replicaUrl, useDatabase } from "./helpers.js";
 
 useDatabase();
 
@@ -97,6 +97,26 @@ test("onConflict where picks a partial unique index", () =>
     ]);
     assert.equal(await Comment.objects.count(), 3);
   }));
+
+test("onConflict where with a boolean column", async () => {
+  // The predicate is SQL text: a parameter would stop matching the index from the sixth
+  // run of the prepared statement, when Postgres plans it generically.
+  await getDatabase().execute("CREATE UNIQUE INDEX posts_published_title ON posts (author_id, title) WHERE published");
+  const db = await connect(DATABASE_URL, { maxConnections: 1, default: false });
+  try {
+    const posts = Post.objects.using(db);
+    const alice = await User.objects.using(db).insert({ email: "a@x.io", name: "A" });
+    for (let i = 0; i < 8; i++) {
+      await posts
+        .insert({ author: alice, title: "t", body: `b${i}`, published: true })
+        .onConflict([Post.authorId, Post.title], { where: Post.published.eq(true), update: true, updateFields: [Post.body] });
+    }
+    assert.deepEqual((await posts).map((p) => p.body), ["b7"]);
+  } finally {
+    await db.close();
+    await getDatabase().execute("DROP INDEX posts_published_title");
+  }
+});
 
 // -- getOrInsert ----------------------------------------------------------------------------------
 
@@ -195,6 +215,40 @@ test("getOrInsert checks the lookup", async () => {
   await assert.rejects(User.objects.getOrInsert({ name: "A" }, { defaults: { email: "a@x.io" } }), /no unique or exclusion constraint/);
 });
 
+test("getOrInsert reads the primary", async () => {
+  // The replica lags: it has none of the primary's rows.
+  const routed = await connect(DATABASE_URL, { replicas: [await replicaUrl("orm_s3_replica_js")], default: false, maxConnections: 2 });
+  try {
+    const users = User.objects.using(routed);
+    const [user, created] = await users.getOrInsert({ email: "a@x.io" }, { defaults: { name: "A" } });
+    const [again, createdAgain] = await users.getOrInsert({ email: "a@x.io" });
+    assert.ok(created && !createdAgain);
+    assert.equal(again.id, user.id);
+  } finally {
+    await routed.close();
+  }
+});
+
+test("getOrInsert names a row the filters hide", async () => {
+  await User.objects.insert({ email: "a@x.io", name: "A" });
+  await assert.rejects(User.objects.filter(User.name.eq("B")).getOrInsert({ email: "a@x.io" }, { defaults: { name: "B" } }), (e) => e instanceof QueryError && /filters hide it/.test(e.message));
+  // The limit and offset do not apply to the read.
+  const [user, created] = await User.objects.offset(1).limit(1).getOrInsert({ email: "a@x.io" });
+  assert.ok(!created);
+  assert.equal(user.name, "A");
+});
+
+test("getOrInsert on a related set", async () => {
+  const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+  const post = await Post.objects.insert({ author: alice, title: "t", body: "b" });
+  const tag = await Tag.objects.insert({ name: "a" });
+  const [link, created] = await post.postTags.getOrInsert({ tag });
+  const [again, createdAgain] = await post.postTags.getOrInsert({ tag });
+  assert.ok(created && !createdAgain);
+  assert.equal(link.postId, post.id);
+  assert.equal(again.id, link.id);
+});
+
 // -- many-to-many add() with throughDefaults ------------------------------------------------
 
 test("add with throughDefaults", async () => {
@@ -230,6 +284,22 @@ test("throughDefaults cannot set the link keys", async () => {
     await assert.rejects(post.tags.add(tag, { throughDefaults: { [key]: 1 } }), /link's key/);
   }
   assert.equal(await PostTag.objects.count(), 0);
+  // An unknown field or option raises also when every link exists.
+  await post.tags.add(tag);
+  await assert.rejects(post.tags.add(tag, { throughDefaults: { nope: 1 } }), /no field nope/);
+  await assert.rejects(post.tags.add(tag, { throughDefault: {} } as never), /throughDefaults only/);
+});
+
+test("set keeps the links when it fails", async () => {
+  const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+  const post = await Post.objects.insert({ author: alice, title: "t", body: "b" });
+  const [t1, t2] = (await Tag.objects.insertMany([{ name: "a" }, { name: "b" }]).returning()) as [Tag, Tag];
+  await post.tags.add(t1);
+  // Checked before the delete, and a failed insert rolls the delete back.
+  for (const bad of [{ tagId: 1 }, { nope: 1 }, { position: "x" }]) {
+    await assert.rejects(post.tags.set([t2], { throughDefaults: bad }));
+  }
+  assert.deepEqual((await PostTag.objects.all()).map((l) => l.tagId), [t1.id]);
 });
 
 // -- COPY -----------------------------------------------------------------------------------------
@@ -270,6 +340,18 @@ test("insertMany copy in a transaction", async () => {
     RangeError,
   );
   assert.equal(await Tag.objects.count(), 0);
+});
+
+test("insertMany copy in a tenant block and seen by query hooks", async () => {
+  const db = getDatabase();
+  const events: QueryEvent[] = [];
+  const off = db.onQuery((e) => events.push(e));
+  try {
+    await db.tenant(7, async () => assert.equal(await Tag.objects.insertMany([{ name: "a" }, { name: "b" }], { copy: true, batchSize: undefined } as never), 2));
+  } finally {
+    off();
+  }
+  assert.deepEqual(events.map((e) => [e.sql.split(" ", 1)[0], e.rows]), [["COPY", 2]]);
 });
 
 test("insertMany copy rejections", async () => {

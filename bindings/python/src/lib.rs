@@ -454,7 +454,8 @@ impl Engine {
 
     /// Bulk load with Postgres `COPY` (`insert_many(rows, copy=True)`); returns the number
     /// of rows written. `rows` are sequences aligned with `fields`.
-    #[pyo3(signature = (model, fields, rows, tx = None, allowed = vec![]))]
+    #[pyo3(signature = (model, fields, rows, tx = None, allowed = vec![], trace = None))]
+    #[allow(clippy::too_many_arguments)]
     fn copy_insert<'py>(
         &self,
         py: Python<'py>,
@@ -463,11 +464,12 @@ impl Engine {
         rows: &Bound<'py, PyList>,
         tx: Option<&Bound<'py, Transaction>>,
         allowed: Vec<String>,
+        trace: Option<&Bound<'py, Trace>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         protect::ensure_writable(&self.schema, model, &allowed).map_err(engine_err)?;
         let values = convert_rows(&self.schema, model, &fields, rows, true)?;
         let copy = exec::plan_copy(&self.schema, self.target, model, &fields, values).map_err(engine_err)?;
-        let conn = self.conn(tx);
+        let conn = self.traced(tx, trace);
         pyo3_async_runtimes::tokio::future_into_py(py, async move { exec::run_copy(conn.as_ref(), copy).await.map_err(engine_err) })
     }
 

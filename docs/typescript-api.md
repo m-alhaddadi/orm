@@ -225,7 +225,8 @@ key is filled in. Many-to-many sets also have `post.tags.add(tag, ...)`, `.remov
 `.clear()` and `.set([...])`. An options object as the last argument of `add()` (or
 the second argument of `set()`) gives other fields of the new join rows:
 `post.tags.add(tag, { throughDefaults: { position: 1 } })`. Existing links keep their
-values.
+values; an unknown field or option throws. `set()` runs in one transaction: when it
+fails, the old links stay.
 
 ### Prepared queries
 
@@ -343,18 +344,25 @@ The other writes run when they are called and return a `Promise`:
   the conflict columns is overwritten. An empty `updateFields` or `updateValues`, and
   either one with `update: false`, throw `TypeError`.
 * `onConflict(columns, { where: cond, update })` picks a partial unique index:
-  `ON CONFLICT (...) WHERE cond`. The condition must match the index predicate
-  without parameters (`Task.deletedAt.isNull()`, a boolean column).
+  `ON CONFLICT (...) WHERE cond`. The database uses the condition to find the index,
+  so it goes into the SQL text with its values written out, not as parameters.
+  `Task.active.eq(true)` gives the bare column, the form SQLite needs.
 * `insertMany(rows, { copy: true })` loads the rows with Postgres `COPY` (binary) and
   gives the row count. A duplicate key stops the whole load. A field must be set in
-  every row or in none. `onConflict`, `batchSize` and SQLite are rejected.
+  every row or in none. Values fit the column's type (`Int` on a `smallint` column).
+  `onConflict`, `batchSize` and SQLite are rejected.
 * `getOrInsert(lookup, { defaults })` gives `[row, created]`: the row that matches
   `lookup`, or a new row of `lookup` and `defaults`. The insert is
-  `ON CONFLICT (lookup) DO NOTHING`, so concurrent calls give one row. The lookup
-  fields must be the fields of one unique constraint; a `null` lookup value throws.
+  `ON CONFLICT (lookup) DO NOTHING`, so concurrent calls give one row. The reads go
+  to the primary and see the query set's filters, but not its limit and offset; when
+  the filters hide the row that has the key, `QueryError` says so. On a related set
+  the link field is part of the lookup. The lookup fields must be the fields of one
+  unique constraint; a `null` lookup value throws.
 * `insertMany` splits the rows so that no statement has more parameters than the
   database accepts (65,535 on Postgres, 32,766 on SQLite). `{ batchSize: n }` sets a
   lower number of rows for each statement. All the statements run in one transaction.
+  An upsert sees one batch at a time: two rows with the same conflict key throw in one
+  statement, but in two batches the second one updates the row of the first.
 * `qs.update({...}, { returning })` gives a count, or the rows when `returning` is set.
 * `qs.delete()`.
 * `updateMany(rows, { batchSize, returning })` does a bulk update by primary key with

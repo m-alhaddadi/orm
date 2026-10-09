@@ -902,19 +902,36 @@ class QuerySet(Generic[M]):
 
         ``lookup`` names the fields of one unique constraint (the database checks this).
         Safe under concurrency: the insert is ``ON CONFLICT (lookup) DO NOTHING``, and a
-        row that a concurrent insert wins is read back."""
+        row that a concurrent insert wins is read back. The reads go to the primary, see
+        the query set's filters and ignore its limit and offset; a row that the filters
+        hide raises ``QueryError``."""
         key = lookup_values(self._model, lookup)
         fields = self._model._meta.fields
         cols: list[ColumnRef[Any]] = [ColumnRef(self._model, (), fields[name]) for name in key]
         values = {**(defaults or {}), **lookup}
-        for _ in range(GET_OR_INSERT_ROUNDS):
+        where = [c == key[c._field.name] for c in cols]
+        # A replica can lag behind the insert's conflict, so the reads see the primary too.
+        reads = self.using("primary")._clone(_limit=None, _offset=None)
+
+        async def read() -> M | None:
             try:
-                return await self.get(*(c == key[c._field.name] for c in cols)), False
+                return await reads.get(*where)
             except self._model.DoesNotExist:
-                pass
+                return None
+
+        found = await read()
+        for _ in range(GET_OR_INSERT_ROUNDS):
+            if found is not None:
+                return found, False
             row = await self.insert(**values).on_conflict(*cols, update=False).returning()
             if row is not None:
                 return row, True
+            found = await read()
+            if found is None and await QuerySet(self._model)._clone(_db=reads._db, _without_defaults=True).filter(*where).exists():
+                raise QueryError(
+                    f"get_or_insert: a {self._model.__name__} row matching the lookup exists, "
+                    f"but the query set's filters hide it"
+                )
         raise QueryError(
             f"get_or_insert: a {self._model.__name__} row matching the lookup was deleted "
             f"concurrently {GET_OR_INSERT_ROUNDS} times"
@@ -1240,7 +1257,12 @@ class RelatedSet(QuerySet[M]):
 
     def insert(self, **values: Any) -> InsertOne[M]:
         """Insert a related row pointing at this instance."""
-        return super().insert(**values, **self._link())
+        return super().insert(**{**values, **self._link()})
+
+    async def get_or_insert(self, defaults: Mapping[str, Any] | None = None, **lookup: Any) -> tuple[M, bool]:
+        """The related row matching ``lookup``, or a new one pointing at this instance;
+        the link field is part of the lookup."""
+        return await super().get_or_insert(defaults, **{**lookup, **self._link()})
 
     @overload
     def insert_many(
@@ -1372,6 +1394,10 @@ class ManyRelatedSet(QuerySet[M]):
         bad = sorted(keys & set(values or ()))
         if bad:
             raise TypeError(f"through_defaults can't set the link's key {', '.join(bad)}")
+        known = set(join._meta.input_fields) | set(join._meta.relations)
+        unknown = sorted(set(values or ()) - known)
+        if unknown:
+            raise TypeError(f"through_defaults: {join.__name__} has no field {', '.join(unknown)}")
         return dict(values or {})
 
     async def remove(self, *objs: Any) -> int:
@@ -1391,12 +1417,15 @@ class ManyRelatedSet(QuerySet[M]):
 
     async def set(self, objs: Iterable[Any], *, through_defaults: Mapping[str, Any] | None = None) -> None:
         """Make the given instances (or keys) exactly the linked ones;
-        ``through_defaults`` sets other fields of the new join rows."""
+        ``through_defaults`` sets other fields of the new join rows. One transaction."""
+        from .db import resolve
+
         self._through_defaults(through_defaults)
         keys = self._target_keys(objs)
         col = self._target_col()
-        await self._links().filter(col.not_in(keys)).delete()
-        await self.add(*keys, through_defaults=through_defaults)
+        async with resolve(self._db if self._db is not None else self._instance.__dict__.get("_db")).transaction():
+            await self._links().filter(col.not_in(keys)).delete()
+            await self.add(*keys, through_defaults=through_defaults)
 
     async def insert(self, **values: Any) -> M:  # type: ignore[override]
         """Insert a related row and link it, in one transaction."""
