@@ -200,6 +200,12 @@ test("getOrInsert", async () => {
   assert.equal(same.id, profile.id);
 });
 
+test("getOrInsert ignores an undefined lookup key", async () => {
+  const [user, created] = await User.objects.getOrInsert({ email: "a@x.io", name: undefined } as never, { defaults: { name: "D" } });
+  assert.ok(created);
+  assert.equal(user.name, "D");
+});
+
 test("getOrInsert is safe under concurrency", async () => {
   const results = await Promise.all(
     Array.from({ length: 20 }, (_, i) => User.objects.getOrInsert({ email: "race@x.io" }, { defaults: { name: `U${i}` } })),
@@ -287,6 +293,13 @@ test("throughDefaults cannot set the link keys", async () => {
   // An unknown field or option raises also when every link exists.
   await post.tags.add(tag);
   await assert.rejects(post.tags.add(tag, { throughDefaults: { nope: 1 } }), /no field nope/);
+});
+
+test("add rejects an unknown option", async () => {
+  const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+  const post = await Post.objects.insert({ author: alice, title: "t", body: "b" });
+  const tag = await Tag.objects.insert({ name: "a" });
+  await post.tags.add(tag);
   await assert.rejects(post.tags.add(tag, { throughDefault: {} } as never), /throughDefaults only/);
 });
 
@@ -321,6 +334,19 @@ test("insertMany copy column types", async () => {
   assert.equal(p.role, "admin");
   assert.equal(p.balance.toString(), "12.5");
   assert.deepEqual(p.links, ["x", "y"]);
+});
+
+test("insertMany copy fits narrow columns", async () => {
+  const db = getDatabase();
+  await db.execute("ALTER TABLE posts ALTER COLUMN views TYPE smallint");
+  try {
+    const alice = await User.objects.insert({ email: "a@x.io", name: "A" });
+    assert.equal(await Post.objects.insertMany([{ author: alice, title: "t", body: "b", views: 7 }], { copy: true }), 1);
+    assert.equal(await Post.objects.filter(Post.views.eq(7)).count(), 1);
+    await assert.rejects(Post.objects.insertMany([{ author: alice, title: "u", body: "b", views: 70_000 }], { copy: true }), /out of range/);
+  } finally {
+    await db.execute("ALTER TABLE posts ALTER COLUMN views TYPE integer");
+  }
 });
 
 test("insertMany copy stops at a duplicate key", async () => {
