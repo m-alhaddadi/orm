@@ -195,7 +195,8 @@ class Database:
         )
 
     async def _copy(self, model: str, fields: list[str], rows: list[list[Any]]) -> int:
-        n: int = await self._engine.copy_insert(model, fields, rows, self._tx(), allowed_writes())
+        tx, allowed = self._tx(), allowed_writes()
+        n: int = await self._call(lambda t: self._engine.copy_insert(model, fields, rows, tx, allowed, t))
         return n
 
     async def _update_many(

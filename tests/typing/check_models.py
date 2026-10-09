@@ -65,6 +65,9 @@ async def check() -> None:
     assert_type(await User.objects.insert_many([{"email": "a", "name": "A"}], batch_size=10).returning(), list[User])
     assert_type(await User.objects.insert_many([{"email": "a", "name": "A"}], copy=True), int)
     assert_type(await User.objects.get_or_insert(email="a", defaults={"name": "A"}), tuple[User, bool])
+    await User.objects.get_or_insert(emial="a")  # E: a misspelled lookup key
+    await User.objects.get_or_insert(email=1)  # E: a lookup value of the wrong type
+    await User.objects.get_or_insert(email="a", defaults={"nme": "A"})  # E: a misspelled default key
     await User.objects.insert(email="a", name="A").on_conflict(User.email, where=User.name == "A", update=False)
     async for p in Post.objects.order_by(Post.created_at.desc())[:10]:
         assert_type(p, Post)

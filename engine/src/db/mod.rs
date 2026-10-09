@@ -233,6 +233,13 @@ impl Executor for WithSettings {
             finish(tx, out).await
         })
     }
+    fn copy_in(&self, table: String, columns: Vec<String>, rows: Vec<Vec<Value>>) -> BoxFuture<'_, DbResult<u64>> {
+        Box::pin(async move {
+            let tx = self.begin().await?;
+            let out = tx.copy_in(table, columns, rows).await;
+            finish(tx, out).await
+        })
+    }
     fn begin(&self) -> BoxFuture<'_, DbResult<Arc<dyn Transaction>>> {
         Box::pin(async move {
             let tx = self.inner.begin().await?;

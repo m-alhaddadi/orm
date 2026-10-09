@@ -70,3 +70,60 @@ fn a_count_insert_has_no_returning_clause() {
     assert!(exec::plan_inserts(&schema, old, "Item", &["name".into()], rows.clone(), None, &NoParams, None, false).is_ok());
     assert!(exec::plan_inserts(&schema, old, "Item", &["name".into()], rows, None, &NoParams, None, true).is_err());
 }
+
+/// One parameter that the statement does not use: it still counts toward the limit.
+struct OneParam;
+
+impl orm_engine::params::Params for OneParam {
+    fn len(&self) -> usize {
+        1
+    }
+    fn value(&self, _: usize, _: Option<orm_core::ir::ValueType>) -> orm_engine::error::Result<Value> {
+        Ok(Value::String(Some("p".into())))
+    }
+    fn text(&self, _: usize) -> orm_engine::error::Result<String> {
+        Ok("p".into())
+    }
+    fn count(&self, _: usize) -> orm_engine::error::Result<u64> {
+        Ok(1)
+    }
+}
+
+fn statements(schema: &orm_core::schema::Schema, target: Target, model: &str, fields: &[String], rows: Vec<Vec<Option<Value>>>, params: &dyn orm_engine::params::Params) -> Vec<usize> {
+    exec::plan_inserts(schema, target, model, fields, rows, None, params, None, true)
+        .unwrap()
+        .iter()
+        .map(|p| match p {
+            Plan::Insert(s, _) => orm_engine::db::build(target.dialect, s).1.len(),
+            _ => panic!("an insert plan"),
+        })
+        .collect()
+}
+
+#[test]
+fn the_statement_parameters_count_toward_the_limit() {
+    let (_, schema) = dsl::check(dsl::compile(SOURCE, None).unwrap()).unwrap();
+    let target = Target::new(Dialect::Postgres).without(&["max_params=6".into()]).unwrap();
+    let rows = (0..5).map(|i| vec![Some(Value::String(Some(format!("n{i}"))))]).collect();
+    // (6 - 1) / 2 = 2 rows per statement.
+    assert_eq!(statements(&schema, target, "Item", &["name".into()], rows, &OneParam), vec![4, 4, 2]);
+}
+
+#[test]
+fn rows_without_values_go_one_per_statement() {
+    let (_, schema) = dsl::check(dsl::compile("model Blank {\n id BigInt @id @default(autoincrement())\n}\n", None).unwrap()).unwrap();
+    let target = Target::new(Dialect::Postgres);
+    assert_eq!(statements(&schema, target, "Blank", &[], vec![vec![], vec![], vec![]], &NoParams), vec![0, 0, 0]);
+}
+
+#[test]
+fn a_write_template_counts_each_placeholder() {
+    let mut ir = dsl::compile(SOURCE, None).unwrap();
+    let name = ir.models[0].fields.iter_mut().find(|f| f.name == "name").unwrap();
+    name.write_sql = Some("concat({}, {})".into());
+    let (_, schema) = dsl::check(ir).unwrap();
+    let target = Target::new(Dialect::Postgres).without(&["max_params=7".into()]).unwrap();
+    let rows = (0..5).map(|i| vec![Some(Value::String(Some(format!("n{i}"))))]).collect();
+    // `name` binds twice and `token` once: 3 parameters per row, 2 rows per statement.
+    assert_eq!(statements(&schema, target, "Item", &["name".into()], rows, &NoParams), vec![6, 6, 3]);
+}

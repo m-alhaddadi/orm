@@ -271,8 +271,9 @@ await Tag.objects.load(Tag.posts.author)
   count, ...) that reads prefetched rows when unchanged, like `user.posts`. `add()`,
   `remove()`, `set()` take instances or keys. Changing the links drops the prefetched
   rows. `add()` and `set()` take `through_defaults={...}`: values of the join model's
-  other fields in the new join rows. Existing links keep their values, and the link's
-  key fields can't be set this way. The join model stays an ordinary model for
+  other fields in the new join rows. Existing links keep their values, the link's key
+  fields can't be set this way, and an unknown field raises. `set()` runs in one
+  transaction: when it fails, the old links stay. The join model stays an ordinary model for
   anything else (bulk inserts: `await PostTag.objects.insert_many(...)`).
 * Prefetching selects the join row's key next to each tag, so a tag linked to two posts
   comes back once per post. `Post.tags.objects...[:3]` slices per post.
@@ -746,17 +747,22 @@ await post.refresh(Post.views)                   # some fields
 * `insert_many(rows)` splits the rows so that no statement has more parameters than
   the database accepts (65,535 on Postgres, 32,766 on SQLite).
   `insert_many(rows, batch_size=n)` sets a lower number of rows for each statement.
-  All the statements run in one transaction (or in the current one).
+  All the statements run in one transaction (or in the current one). Rows without any
+  value go one per statement (`DEFAULT VALUES`). An upsert sees one batch at a time:
+  two rows with the same conflict key raise in one statement, but in two batches the
+  second one updates the row of the first.
 * `insert_many(rows, copy=True)` loads the rows with Postgres
   `COPY ... FROM STDIN (FORMAT binary)`, for large imports. `await` gives the row
   count, not instances. It is one statement: a duplicate key stops the whole load and
   no row is written. Client defaults fill values first; a field must be set in every
   row or in none, because COPY has no per-row `DEFAULT`. `on_conflict()`,
   `batch_size`, SQLite, composed models, models with native write behavior and fields
-  that write through an SQL template (other than enums) raise.
-  `bench/copy_insert.py` compares it with `insert_many(rows)`: 200,000 posts in 1.6 s
-  against 3.2 s (measured once on a loaded machine, when the batched insert also
-  built the instances).
+  that write through an SQL template (other than enums: arrays with a `@db.*` type and
+  extension types do) raise. Values fit the column's type (`Int` on a `smallint`
+  column); a value out of its range raises.
+  `bench/copy_insert.py` compares it with `insert_many(rows)`: 200,000 posts in
+  about 1.2 s against 1.8 s, so about x1.5 (measured 2026-10-09 on a loaded machine,
+  Postgres in Docker, best of 3; the batched insert also built the instances).
 * `on_conflict(*columns, where=None, update, update_fields=None, update_values=None)`:
   `columns` are the columns of one unique constraint (several for a composite one;
   unpack a list with `*cols`). `update` is required and keyword-only.
@@ -770,14 +776,19 @@ await post.refresh(Post.views)                   # some fields
   `update_values`, and either one with `update=False`, raise `TypeError`.
 * `on_conflict(*columns, where=cond, update=...)` picks a partial unique index:
   `.on_conflict(Task.shop, Task.task_type, where=Task.deleted_at.is_null(), update=False)` gives
-  `ON CONFLICT (shop, task_type) WHERE deleted_at IS NULL`. Postgres uses the
-  condition to find the index, so it must match the index predicate without
-  parameters (`is_null()`, a boolean column); a compared value is a parameter and
-  Postgres cannot match it.
+  `ON CONFLICT (shop, task_type) WHERE "tasks"."deleted_at" IS NULL`. The database
+  uses the condition to find the index, so the condition goes into the SQL text with
+  its values written out, not as parameters. A boolean column (`where=Task.active`)
+  gives the bare column, the form SQLite needs.
 * `get_or_insert(defaults=..., **lookup)` reads the row that matches `lookup`.
   When there is none, it inserts `lookup` and `defaults` with
   `ON CONFLICT (lookup) DO NOTHING`, and reads again when a concurrent insert wins.
   So concurrent calls give one row, and exactly one call gets `created=True`.
+  The reads go to the primary, not to a replica. They see the query set's filters
+  but not its limit and offset; when the filters hide the row that has the key,
+  `QueryError` says so. On a related set (`post.post_tags.get_or_insert(tag=t)`)
+  the link field is part of the lookup. Inside a `REPEATABLE READ` transaction, a
+  key that another session commits after the snapshot gives a serialization error.
   The lookup fields must be the fields of one unique constraint; Postgres raises
   otherwise. A `None` lookup value raises, because `NULL` never conflicts.
 * `update()` and `delete()` validate when called and return a statement: awaiting it
