@@ -5,7 +5,7 @@
 // update / updateMany take, the columns and relation paths, and the model object.
 
 /* eslint-disable */
-import { define, type Column, type Compat, type Decimal, type Expression, type Hop, type In, type Instance, type Many, type ManyRelatedSet, type ModelClass, type RelatedSet, type RelationPath, type SchemaIR } from "orm";
+import { define, type Column, type Compat, type Decimal, type Expression, type Hop, type In, type Instance, type Many, type ManyRelatedSet, type ModelClass, type QuerySetOf, type RelatedSet, type RelationPath, type SchemaIR, type Via } from "orm";
 
 const SCHEMA: SchemaIR = {"models":[{"name":"User","table":"users","fields":[{"name":"id","column":"id","type":"big_int","primary_key":true,"auto_increment":true},{"name":"email","column":"email","type":"string","unique":true,"max_length":254},{"name":"name","column":"name","type":"string","max_length":100},{"name":"created_at","column":"created_at","type":"date_time","default_now":true}],"relations":[{"name":"posts","kind":"many","target":"Post","from":"id","to":"author_id"},{"name":"comments","kind":"many","target":"Comment","from":"id","to":"author_id"},{"name":"profile","kind":"one","target":"Profile","from":"id","to":"user_id"}]},{"name":"Profile","table":"profiles","fields":[{"name":"id","column":"id","type":"big_int","primary_key":true,"auto_increment":true},{"name":"user_id","column":"user_id","type":"big_int","unique":true},{"name":"role","column":"role","type":"string","enum":"Role","default":"member","db_type":"\"role\"","write_sql":"CAST({} AS \"role\")"},{"name":"balance","column":"balance","type":"decimal","default":0,"db_type":"numeric(12, 2)"},{"name":"links","column":"links","type":"string","array":true,"default":[]}],"relations":[{"name":"user","kind":"one","target":"User","from":"user_id","to":"id","foreign_key":true,"on_delete":"cascade"}]},{"name":"Post","table":"posts","fields":[{"name":"id","column":"id","type":"big_int","primary_key":true,"auto_increment":true},{"name":"author_id","column":"author_id","type":"big_int","index":true},{"name":"title","column":"title","type":"string","max_length":200},{"name":"body","column":"body","type":"text"},{"name":"views","column":"views","type":"int","default":0},{"name":"published","column":"published","type":"bool","default":false},{"name":"created_at","column":"created_at","type":"date_time","default_now":true}],"relations":[{"name":"author","kind":"one","target":"User","from":"author_id","to":"id","foreign_key":true,"on_delete":"cascade"},{"name":"comments","kind":"many","target":"Comment","from":"id","to":"post_id"},{"name":"tags","kind":"many","target":"Tag","from":"id","to":"id","through":{"model":"PostTag","source":"post_id","target":"tag_id"}},{"name":"post_tags","kind":"many","target":"PostTag","from":"id","to":"post_id"}],"indexes":[{"columns":[{"field":"author_id"},{"field":"created_at","desc":true}],"where":"published"},{"columns":[{"field":"title","opclass":"gin_trgm_ops"}],"method":"gin"}],"constraints":[{"kind":"check","name":"posts_views_not_negative","expr":"views >= 0"}]},{"name":"Comment","table":"comments","fields":[{"name":"id","column":"id","type":"big_int","primary_key":true,"auto_increment":true},{"name":"post_id","column":"post_id","type":"big_int","index":true},{"name":"author_id","column":"author_id","type":"big_int","nullable":true,"index":true},{"name":"body","column":"body","type":"text"},{"name":"created_at","column":"created_at","type":"date_time","default_now":true}],"relations":[{"name":"post","kind":"one","target":"Post","from":"post_id","to":"id","foreign_key":true,"on_delete":"cascade"},{"name":"author","kind":"one","target":"User","from":"author_id","to":"id","foreign_key":true,"on_delete":"set_null"}]},{"name":"Tag","table":"tags","fields":[{"name":"id","column":"id","type":"big_int","primary_key":true,"auto_increment":true},{"name":"name","column":"name","type":"string","unique":true,"max_length":50},{"name":"priority","column":"priority","type":"int","enum":"Priority","default":2}],"relations":[{"name":"posts","kind":"many","target":"Post","from":"id","to":"id","through":{"model":"PostTag","source":"tag_id","target":"post_id"}},{"name":"post_tags","kind":"many","target":"PostTag","from":"id","to":"tag_id"}]},{"name":"PostTag","table":"post_tags","fields":[{"name":"id","column":"id","type":"big_int","primary_key":true,"auto_increment":true},{"name":"post_id","column":"post_id","type":"big_int"},{"name":"tag_id","column":"tag_id","type":"big_int","index":true},{"name":"position","column":"position","type":"int","nullable":true}],"relations":[{"name":"post","kind":"one","target":"Post","from":"post_id","to":"id","foreign_key":true,"on_delete":"cascade"},{"name":"tag","kind":"one","target":"Tag","from":"tag_id","to":"id","foreign_key":true,"on_delete":"cascade"}],"constraints":[{"kind":"unique","fields":["post_id","tag_id"]}]}],"enums":[{"name":"Role","db_name":"role","storage":"native","values":[{"name":"member","value":"member"},{"name":"editor","value":"editor"},{"name":"admin","value":"admin"}]},{"name":"Priority","db_name":"priority","storage":"int","values":[{"name":"low","value":1},{"name":"normal","value":2},{"name":"high","value":3}]}]};
 
@@ -78,10 +78,10 @@ export interface UserSpec {
 }
 
 export interface UserFields<S extends string, H extends readonly Hop[], O extends boolean> {
-  readonly id: Column<O extends true ? bigint | null : bigint, S>;
-  readonly email: Column<O extends true ? string | null : string, S>;
-  readonly name: Column<O extends true ? string | null : string, S>;
-  readonly createdAt: Column<O extends true ? Date | null : Date, S>;
+  readonly id: Column<O extends true ? bigint | null : bigint, S, "id", H>;
+  readonly email: Column<O extends true ? string | null : string, S, "email", H>;
+  readonly name: Column<O extends true ? string | null : string, S, "name", H>;
+  readonly createdAt: Column<O extends true ? Date | null : Date, S, "createdAt", H>;
   readonly posts: PostPath<S | Many, [...H, Hop<"posts", "many", PostSpec>], O>;
   readonly comments: CommentPath<S | Many, [...H, Hop<"comments", "many", CommentSpec>], O>;
   readonly profile: ProfilePath<S, [...H, Hop<"profile", "opt", ProfileSpec>], true>;
@@ -89,7 +89,10 @@ export interface UserFields<S extends string, H extends readonly Hop[], O extend
 
 export interface UserPath<S extends string, H extends readonly Hop[], O extends boolean>
   extends RelationPath<UserSpec, S, H>,
-    UserFields<S, H, O> {}
+    UserFields<S, H, O> {
+  /** The relation query set for `load()`: `User.objects` bound to this relation. */
+  readonly objects: QuerySetOf<UserSpec, User, "User", {}, never, Via<H, undefined, false, S>>;
+}
 
 export interface UserModel extends ModelClass<UserSpec>, UserFields<"User", [], false> {}
 
@@ -150,17 +153,20 @@ export interface ProfileSpec {
 }
 
 export interface ProfileFields<S extends string, H extends readonly Hop[], O extends boolean> {
-  readonly id: Column<O extends true ? bigint | null : bigint, S>;
-  readonly userId: Column<O extends true ? bigint | null : bigint, S>;
-  readonly role: Column<O extends true ? Role | null : Role, S>;
-  readonly balance: Column<O extends true ? Decimal | null : Decimal, S>;
-  readonly links: Column<O extends true ? string[] | null : string[], S>;
+  readonly id: Column<O extends true ? bigint | null : bigint, S, "id", H>;
+  readonly userId: Column<O extends true ? bigint | null : bigint, S, "userId", H>;
+  readonly role: Column<O extends true ? Role | null : Role, S, "role", H>;
+  readonly balance: Column<O extends true ? Decimal | null : Decimal, S, "balance", H>;
+  readonly links: Column<O extends true ? string[] | null : string[], S, "links", H>;
   readonly user: UserPath<S, [...H, Hop<"user", "one", UserSpec>], O>;
 }
 
 export interface ProfilePath<S extends string, H extends readonly Hop[], O extends boolean>
   extends RelationPath<ProfileSpec, S, H>,
-    ProfileFields<S, H, O> {}
+    ProfileFields<S, H, O> {
+  /** The relation query set for `load()`: `Profile.objects` bound to this relation. */
+  readonly objects: QuerySetOf<ProfileSpec, Profile, "Profile", {}, never, Via<H, undefined, false, S>>;
+}
 
 export interface ProfileModel extends ModelClass<ProfileSpec>, ProfileFields<"Profile", [], false> {}
 
@@ -232,13 +238,13 @@ export interface PostSpec {
 }
 
 export interface PostFields<S extends string, H extends readonly Hop[], O extends boolean> {
-  readonly id: Column<O extends true ? bigint | null : bigint, S>;
-  readonly authorId: Column<O extends true ? bigint | null : bigint, S>;
-  readonly title: Column<O extends true ? string | null : string, S>;
-  readonly body: Column<O extends true ? string | null : string, S>;
-  readonly views: Column<O extends true ? number | null : number, S>;
-  readonly published: Column<O extends true ? boolean | null : boolean, S>;
-  readonly createdAt: Column<O extends true ? Date | null : Date, S>;
+  readonly id: Column<O extends true ? bigint | null : bigint, S, "id", H>;
+  readonly authorId: Column<O extends true ? bigint | null : bigint, S, "authorId", H>;
+  readonly title: Column<O extends true ? string | null : string, S, "title", H>;
+  readonly body: Column<O extends true ? string | null : string, S, "body", H>;
+  readonly views: Column<O extends true ? number | null : number, S, "views", H>;
+  readonly published: Column<O extends true ? boolean | null : boolean, S, "published", H>;
+  readonly createdAt: Column<O extends true ? Date | null : Date, S, "createdAt", H>;
   readonly author: UserPath<S, [...H, Hop<"author", "one", UserSpec>], O>;
   readonly comments: CommentPath<S | Many, [...H, Hop<"comments", "many", CommentSpec>], O>;
   readonly tags: TagPath<S | Many, [...H, Hop<"tags", "m2m", TagSpec>], O>;
@@ -247,7 +253,10 @@ export interface PostFields<S extends string, H extends readonly Hop[], O extend
 
 export interface PostPath<S extends string, H extends readonly Hop[], O extends boolean>
   extends RelationPath<PostSpec, S, H>,
-    PostFields<S, H, O> {}
+    PostFields<S, H, O> {
+  /** The relation query set for `load()`: `Post.objects` bound to this relation. */
+  readonly objects: QuerySetOf<PostSpec, Post, "Post", {}, never, Via<H, undefined, false, S>>;
+}
 
 export interface PostModel extends ModelClass<PostSpec>, PostFields<"Post", [], false> {}
 
@@ -312,18 +321,21 @@ export interface CommentSpec {
 }
 
 export interface CommentFields<S extends string, H extends readonly Hop[], O extends boolean> {
-  readonly id: Column<O extends true ? bigint | null : bigint, S>;
-  readonly postId: Column<O extends true ? bigint | null : bigint, S>;
-  readonly authorId: Column<O extends true ? bigint | null | null : bigint | null, S>;
-  readonly body: Column<O extends true ? string | null : string, S>;
-  readonly createdAt: Column<O extends true ? Date | null : Date, S>;
+  readonly id: Column<O extends true ? bigint | null : bigint, S, "id", H>;
+  readonly postId: Column<O extends true ? bigint | null : bigint, S, "postId", H>;
+  readonly authorId: Column<O extends true ? bigint | null | null : bigint | null, S, "authorId", H>;
+  readonly body: Column<O extends true ? string | null : string, S, "body", H>;
+  readonly createdAt: Column<O extends true ? Date | null : Date, S, "createdAt", H>;
   readonly post: PostPath<S, [...H, Hop<"post", "one", PostSpec>], O>;
   readonly author: UserPath<S, [...H, Hop<"author", "opt", UserSpec>], true>;
 }
 
 export interface CommentPath<S extends string, H extends readonly Hop[], O extends boolean>
   extends RelationPath<CommentSpec, S, H>,
-    CommentFields<S, H, O> {}
+    CommentFields<S, H, O> {
+  /** The relation query set for `load()`: `Comment.objects` bound to this relation. */
+  readonly objects: QuerySetOf<CommentSpec, Comment, "Comment", {}, never, Via<H, undefined, false, S>>;
+}
 
 export interface CommentModel extends ModelClass<CommentSpec>, CommentFields<"Comment", [], false> {}
 
@@ -373,16 +385,19 @@ export interface TagSpec {
 }
 
 export interface TagFields<S extends string, H extends readonly Hop[], O extends boolean> {
-  readonly id: Column<O extends true ? bigint | null : bigint, S>;
-  readonly name: Column<O extends true ? string | null : string, S>;
-  readonly priority: Column<O extends true ? Priority | null : Priority, S>;
+  readonly id: Column<O extends true ? bigint | null : bigint, S, "id", H>;
+  readonly name: Column<O extends true ? string | null : string, S, "name", H>;
+  readonly priority: Column<O extends true ? Priority | null : Priority, S, "priority", H>;
   readonly posts: PostPath<S | Many, [...H, Hop<"posts", "m2m", PostSpec>], O>;
   readonly postTags: PostTagPath<S | Many, [...H, Hop<"postTags", "many", PostTagSpec>], O>;
 }
 
 export interface TagPath<S extends string, H extends readonly Hop[], O extends boolean>
   extends RelationPath<TagSpec, S, H>,
-    TagFields<S, H, O> {}
+    TagFields<S, H, O> {
+  /** The relation query set for `load()`: `Tag.objects` bound to this relation. */
+  readonly objects: QuerySetOf<TagSpec, Tag, "Tag", {}, never, Via<H, undefined, false, S>>;
+}
 
 export interface TagModel extends ModelClass<TagSpec>, TagFields<"Tag", [], false> {}
 
@@ -444,17 +459,20 @@ export interface PostTagSpec {
 }
 
 export interface PostTagFields<S extends string, H extends readonly Hop[], O extends boolean> {
-  readonly id: Column<O extends true ? bigint | null : bigint, S>;
-  readonly postId: Column<O extends true ? bigint | null : bigint, S>;
-  readonly tagId: Column<O extends true ? bigint | null : bigint, S>;
-  readonly position: Column<O extends true ? number | null | null : number | null, S>;
+  readonly id: Column<O extends true ? bigint | null : bigint, S, "id", H>;
+  readonly postId: Column<O extends true ? bigint | null : bigint, S, "postId", H>;
+  readonly tagId: Column<O extends true ? bigint | null : bigint, S, "tagId", H>;
+  readonly position: Column<O extends true ? number | null | null : number | null, S, "position", H>;
   readonly post: PostPath<S, [...H, Hop<"post", "one", PostSpec>], O>;
   readonly tag: TagPath<S, [...H, Hop<"tag", "one", TagSpec>], O>;
 }
 
 export interface PostTagPath<S extends string, H extends readonly Hop[], O extends boolean>
   extends RelationPath<PostTagSpec, S, H>,
-    PostTagFields<S, H, O> {}
+    PostTagFields<S, H, O> {
+  /** The relation query set for `load()`: `PostTag.objects` bound to this relation. */
+  readonly objects: QuerySetOf<PostTagSpec, PostTag, "PostTag", {}, never, Via<H, undefined, false, S>>;
+}
 
 export interface PostTagModel extends ModelClass<PostTagSpec>, PostTagFields<"PostTag", [], false> {}
 

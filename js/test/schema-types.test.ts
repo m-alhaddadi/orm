@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DatabaseError, Decimal, IntegrityError, NotLoaded, Prefetch, func } from "../src/index.js";
+import { DatabaseError, Decimal, IntegrityError, NotLoaded, func } from "../src/index.js";
 import { Post, PostTag, Priority, Profile, Role, Tag, User } from "./blog/models.js";
 import { useDatabase } from "./helpers.js";
 
@@ -112,10 +112,10 @@ test("a has-one relation", async () => {
   const { alice } = await users();
   const p = await Profile.objects.insert({ user: alice, role: Role.admin });
   assert.throws(() => (alice as unknown as { profile: unknown }).profile, NotLoaded);
-  let us = await User.objects.selectRelated(User.profile).orderBy(User.id).all();
+  let us = await User.objects.load(User.profile).orderBy(User.id).all();
   assert.equal(us[0]!.profile!.id, p.id);
   assert.equal(us[1]!.profile, null);
-  const pre = await User.objects.prefetchRelated(User.profile).orderBy(User.id).all();
+  const pre = await User.objects.load(User.profile.objects.asPrefetch()).orderBy(User.id).all();
   assert.equal(pre[0]!.profile!.id, p.id);
   assert.equal(pre[1]!.profile, null);
   assert.equal((pre[0]!.profile as unknown as { user: unknown }).user, pre[0]); // the back side too
@@ -178,22 +178,22 @@ test("many-to-many links and queries", async () => {
 
 test("many-to-many prefetch", async () => {
   const { py } = await blog();
-  let posts = await Post.objects.prefetchRelated(Post.tags).orderBy(Post.id).all();
+  let posts = await Post.objects.load(Post.tags).orderBy(Post.id).all();
   assert.deepEqual(posts.map((p) => p.tags.cached.map((t) => t.name)), [["news", "rust"], ["rust"], []]);
   assert.deepEqual((await posts[1]!.tags.all()).map((t) => t.name), ["rust"]); // served from the prefetched rows
   // nested, both directions
-  const tags = await Tag.objects.prefetchRelated(Tag.posts.author).orderBy(Tag.id).all();
+  const tags = await Tag.objects.load(Tag.posts.author).orderBy(Tag.id).all();
   assert.deepEqual(tags.map((t) => t.posts.cached.map((p) => [p.title, p.author.name])), [
     [["one", "Alice"]],
     [["one", "Alice"], ["two", "Alice"]],
     [],
   ]);
   // a slice applies per parent
-  const top = new Prefetch(Post.tags, Tag.objects.orderBy(Tag.name.desc()).limit(1), { toAttr: "firstTag" });
-  const firsts = await Post.objects.prefetchRelated(top).orderBy(Post.id).all();
+  const top = Post.tags.objects.orderBy(Tag.name.desc()).limit(1).label("firstTag");
+  const firsts = await Post.objects.load(top).orderBy(Post.id).all();
   assert.deepEqual(firsts.map((p) => p.firstTag.map((t) => t.name)), [["rust"], ["rust"], []]);
   // filtered
-  posts = await Post.objects.prefetchRelated(new Prefetch(Post.tags, Tag.objects.filter(Tag.name.ne("rust")))).orderBy(Post.id).all();
+  posts = await Post.objects.load(Post.tags.objects.filter(Tag.name.ne("rust"))).orderBy(Post.id).all();
   assert.deepEqual(posts.map((p) => p.tags.cached.map((t) => t.name)), [["news"], [], []]);
   // links changed: the prefetched rows are dropped
   await posts[0]!.tags.add(py);

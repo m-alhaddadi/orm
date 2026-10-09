@@ -62,8 +62,8 @@ test("to-one filters and columns compared across a relation", () => {
   assert.ok(where(Post.objects.filter(Post.comments.createdAt.lt(Post.createdAt))).includes('"t1"."created_at" < "posts"."created_at"'));
 });
 
-test("selectRelated and orderBy use LEFT JOINs", () => {
-  const sql = Comment.objects.selectRelated(Comment.post.author).orderBy(Comment.post.title.desc()).sql();
+test("a to-one load() and orderBy use LEFT JOINs", () => {
+  const sql = Comment.objects.load(Comment.post.author).orderBy(Comment.post.title.desc()).sql();
   assert.ok(sql.includes('LEFT JOIN "posts" AS "j1" ON "j1"."id" = "comments"."post_id"'));
   assert.ok(sql.includes('LEFT JOIN "users" AS "j2" ON "j2"."id" = "j1"."author_id"'));
   assert.ok(sql.endsWith('ORDER BY "j1"."title" DESC'));
@@ -92,8 +92,8 @@ test("locks", () => {
   assert.ok(User.objects.lock({ exclusive: false }).sql().endsWith('FOR SHARE OF "users"'));
   assert.ok(User.objects.lock({ nowait: true }).sql().endsWith('FOR UPDATE OF "users" NOWAIT'));
   assert.ok(User.objects.lock({ exclusive: false, skipLocked: true }).sql().endsWith('FOR SHARE OF "users" SKIP LOCKED'));
-  // Only the model's rows: rows joined by selectRelated stay unlocked.
-  assert.ok(Post.objects.selectRelated(Post.author).filter(Post.views.gt(1)).slice(0, 5).lock().sql().endsWith('LIMIT 5 FOR UPDATE OF "posts"'));
+  // Only the model's rows: rows joined by load() stay unlocked.
+  assert.ok(Post.objects.load(Post.author).filter(Post.views.gt(1)).slice(0, 5).lock().sql().endsWith('LIMIT 5 FOR UPDATE OF "posts"'));
   assert.throws(() => User.objects.lock({ nowait: true, skipLocked: true } as never), TypeError);
 });
 
@@ -193,7 +193,7 @@ test("select validation", () => {
   assert.throws(() => Post.objects.select({ u: User as never }), /takes Post itself/);
   assert.throws(() => Post.objects.select({ x: 1 as never }), TypeError);
   assert.throws(() => Post.objects.select({}), /at least one column/);
-  assert.throws(() => Post.objects.selectRelated(Post.author).select({ id: Post.id }), QueryError);
+  assert.throws(() => Post.objects.load(Post.author).select({ id: Post.id }), QueryError);
   assert.throws(() => Post.objects.select({ x: new Func("nope", [Post.id]) }).sql(), /unknown function/);
   assert.throws(() => Post.objects.lock().select({ n: func.count() }).sql(), /lock/);
 });
@@ -259,7 +259,7 @@ test("a many-to-many filter is one EXISTS through the join table", () => {
 });
 
 test("has-one joins on the other side", () => {
-  assert.ok(User.objects.selectRelated(User.profile).sql().includes('LEFT JOIN "profiles" AS "j1" ON "j1"."user_id" = "users"."id"'));
+  assert.ok(User.objects.load(User.profile).sql().includes('LEFT JOIN "profiles" AS "j1" ON "j1"."user_id" = "users"."id"'));
 });
 
 test("orderBy takes field names, with - for descending", () => {

@@ -105,7 +105,7 @@ export class Cte<N extends string, C, M extends ModelSpec | null> implements Sou
     if (query instanceof QuerySet) {
       const s = query.state;
       if (s.prefetch.length || s.related.length || s.lock) {
-        throw new QueryError("a CTE's query can't prefetch, selectRelated or lock");
+        throw new QueryError("a CTE's query can't load relations or lock");
       }
       this.model = query.meta;
       addModel(query.meta);

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { NotLoaded, Prefetch, QueryError, connect, exists, func, getDatabase, outer, window } from "../src/index.js";
+import { NotLoaded, QueryError, connect, exists, func, getDatabase, outer, window } from "../src/index.js";
 import { DB } from "../src/model.js";
 import { Comment, Post, User } from "./blog/models.js";
 import { DATABASE_URL, useDatabase } from "./helpers.js";
@@ -256,7 +256,7 @@ test("joining a CTE", async () => {
   const busy = User.objects.join(totals, totals.c.authorId.eq(User.id)).filter(totals.c.n.gt(1));
   assert.deepEqual((await busy.all()).map((u) => u.name), ["Alice"]);
   assert.equal(await busy.count(), 1);
-  assert.deepEqual((await busy.prefetchRelated(User.posts).all()).map((u) => u.posts.cached.length), [3]);
+  assert.deepEqual((await busy.load(User.posts).all()).map((u) => u.posts.cached.length), [3]);
   // Two CTEs joined.
   const commenters = Comment.objects.select({ authorId: Comment.authorId, c: func.count() }).groupBy(Comment.authorId).cte("commenters");
   const both = await User.objects
@@ -292,10 +292,10 @@ test("reading rows from a CTE", async () => {
   const ranked = Post.objects.select({ post: Post, rank }).cte("ranked");
   let top = await Post.objects.from(ranked).filter(ranked.c.rank.lte(2)).orderBy(Post.title).all();
   assert.deepEqual(top.map((p) => p.title), ["a2", "a3", "b1"]);
-  // Relation filters, selectRelated and prefetch still work on rows read from a CTE.
-  const withAuthor = await Post.objects.from(ranked).filter(ranked.c.rank.eq(1), Post.author.name.eq("Alice")).selectRelated(Post.author).all();
+  // Relation filters, joined and prefetched loads still work on rows read from a CTE.
+  const withAuthor = await Post.objects.from(ranked).filter(ranked.c.rank.eq(1), Post.author.name.eq("Alice")).load(Post.author).all();
   assert.deepEqual(withAuthor.map((p) => [p.title, p.author.name]), [["a2", "Alice"]]);
-  const withComments = await Post.objects.from(ranked).filter(ranked.c.rank.eq(1)).prefetchRelated(Post.comments).orderBy(Post.title).all();
+  const withComments = await Post.objects.from(ranked).filter(ranked.c.rank.eq(1)).load(Post.comments).orderBy(Post.title).all();
   assert.deepEqual(withComments.map((p) => p.comments.cached.length), [2, 1]);
   assert.equal(await Post.objects.from(ranked).filter(ranked.c.rank.eq(1)).count(), 2);
   assert.equal(await Post.objects.from(ranked).filter(ranked.c.rank.eq(9)).exists(), false);
@@ -356,7 +356,7 @@ test("CTE errors", async () => {
 
 test("nested prefetch", async () => {
   await seed();
-  const [a, b, c] = await User.objects.prefetchRelated(User.posts.comments, User.comments).orderBy(User.id).all();
+  const [a, b, c] = await User.objects.load(User.posts.comments, User.comments).orderBy(User.id).all();
   assert.deepEqual(a!.posts.cached.map((p) => p.title), ["a1", "a2", "a3"]);
   assert.deepEqual(a!.posts.cached.map((p) => p.comments.cached.map((x) => x.body)), [[], ["c1", "c2"], []]);
   const back = (x: unknown, rel: string) => (x as Record<string, unknown>)[rel];
@@ -368,7 +368,9 @@ test("nested prefetch", async () => {
 
 test("to-one prefetch", async () => {
   await seed();
-  const comments = await Comment.objects.prefetchRelated(Comment.post.author, Comment.author).orderBy(Comment.id).all();
+  const toOne = Comment.post.objects.asPrefetch().load(Post.author.objects.asPrefetch());
+  const comments = await Comment.objects.load(toOne, Comment.author.objects.asPrefetch()).orderBy(Comment.id).all();
+  assert.ok(!Comment.objects.load(toOne).sql().includes("JOIN"));
   assert.deepEqual(comments.map((x) => [x.post.title, x.post.author.name]), [["a2", "Alice"], ["a2", "Alice"], ["b1", "Bob"]]);
   assert.equal(comments[0]!.post, comments[1]!.post); // one object per related row
   assert.deepEqual(comments.map((x) => x.author?.name ?? null), ["Bob", null, "Alice"]);
@@ -376,12 +378,12 @@ test("to-one prefetch", async () => {
 
 test("filtered prefetch", async () => {
   await seed();
-  let users = await User.objects.prefetchRelated(new Prefetch(User.posts, Post.objects.filter(Post.views.gte(20)).orderBy(Post.views.desc()))).orderBy(User.id).all();
+  let users = await User.objects.load(User.posts.objects.filter(Post.views.gte(20)).orderBy(Post.views.desc())).orderBy(User.id).all();
   // Like Django: the filtered rows are what user.posts holds now.
   assert.deepEqual(users[0]!.posts.cached.map((p) => p.title), ["a2", "a3"]);
   assert.deepEqual((await users[0]!.posts.all()).map((p) => p.title), ["a2", "a3"]);
   assert.equal(await users[0]!.posts.count(), 3); // a new query sees every post
-  const popular = await User.objects.prefetchRelated(new Prefetch(User.posts, Post.objects.filter(Post.views.gte(20)), { toAttr: "popular" })).orderBy(User.id).all();
+  const popular = await User.objects.load(User.posts.objects.filter(Post.views.gte(20)).label("popular")).orderBy(User.id).all();
   assert.deepEqual(popular[0]!.popular.map((p) => p.title), ["a2", "a3"]);
   assert.deepEqual(popular[2]!.popular, []);
   assert.throws(() => (popular[0]!.posts as unknown as { cached: unknown }).cached, NotLoaded);
@@ -390,21 +392,21 @@ test("filtered prefetch", async () => {
 
 test("a sliced prefetch is per parent", async () => {
   await seed();
-  const top = Post.objects.orderBy(Post.views.desc()).prefetchRelated(Post.comments).limit(2);
-  const users = await User.objects.prefetchRelated(new Prefetch(User.posts, top, { toAttr: "top" })).orderBy(User.id).all();
+  const top = User.posts.objects.orderBy(Post.views.desc()).load(Post.comments).limit(2);
+  const users = await User.objects.load(top.label("top")).orderBy(User.id).all();
   assert.deepEqual(users.map((u) => u.top.map((p) => p.title)), [["a2", "a3"], ["b1"], []]);
   assert.deepEqual(users[0]!.top.map((p) => p.comments.cached.length), [2, 0]);
-  const second = Post.objects.orderBy(Post.createdAt, Post.author.name).slice(1, 2);
-  const again = await User.objects.prefetchRelated(new Prefetch(User.posts, second)).orderBy(User.id).all();
+  const second = User.posts.objects.orderBy(Post.createdAt, Post.author.name).slice(1, 2);
+  const again = await User.objects.load(second).orderBy(User.id).all();
   assert.deepEqual(again.map((u) => u.posts.cached.map((p) => p.title)), [["a2"], [], []]);
 });
 
-test("prefetch with selectRelated and a nested query set", async () => {
+test("a relation query set with joins and a nested query set", async () => {
   await seed();
   const users = await User.objects
-    .prefetchRelated(
-      new Prefetch(User.comments, Comment.objects.selectRelated(Comment.post.author)),
-      new Prefetch(User.posts, Post.objects.prefetchRelated(new Prefetch(Post.comments, Comment.objects.filter(Comment.authorId.isNull())))),
+    .load(
+      User.comments.objects.load(Comment.post.author),
+      User.posts.objects.load(Post.comments.objects.filter(Comment.authorId.isNull())),
     )
     .orderBy(User.id)
     .all();
@@ -413,16 +415,18 @@ test("prefetch with selectRelated and a nested query set", async () => {
 });
 
 test("prefetch errors", () => {
-  assert.throws(() => User.objects.prefetchRelated(new Prefetch(User.posts, Post.objects), new Prefetch(User.posts, Post.objects.filter(Post.id.gt(0)))), /different query sets/);
-  assert.throws(() => new Prefetch(User.posts, Comment.objects as never), /query set of Post/);
-  assert.throws(() => User.objects.prefetchRelated(Post.comments as never), /does not start at User/);
-  assert.throws(() => User.objects.prefetchRelated(new Prefetch(User.posts, { toAttr: "email" })), /is a field or relation/);
+  assert.throws(() => User.objects.load(User.posts.objects, User.posts.objects.filter(Post.id.gt(0))), /different query sets/);
+  assert.throws(() => User.objects.load(Post.objects as never), /relation query set/);
+  assert.throws(() => Post.objects.label("x" as never), /relation query set/);
+  assert.throws(() => User.objects.load(Post.comments as never), /does not start at User/);
+  assert.throws(() => User.objects.load(User.posts.objects.label("email")), /is a field, relation or member/);
+  assert.throws(() => User.objects.load(User.posts.objects.label("update")), /is a field, relation or member/);
 });
 
 test("instances get their database", async () => {
   await seed();
   const db = getDatabase();
-  const users = await User.objects.using(db).prefetchRelated(User.posts).all();
+  const users = await User.objects.using(db).load(User.posts).all();
   const dbOf = (o: object) => (o as Record<symbol, unknown>)[DB];
   assert.ok(users.every((u) => dbOf(u) === db));
   assert.ok(users.every((u) => u.posts.cached.every((p) => dbOf(p) === db)));
@@ -436,7 +440,7 @@ test("a prefetch query reading a CTE", async () => {
   await seed();
   const best = Post.objects.select({ id: Post.id }).filter(Post.views.gte(50)).cte("best");
   const users = await User.objects
-    .prefetchRelated(new Prefetch(User.posts, Post.objects.filter(Post.id.in(best.select({ id: best.c.id }))), { toAttr: "best" }))
+    .load(User.posts.objects.filter(Post.id.in(best.select({ id: best.c.id }))).label("best"))
     .orderBy(User.id)
     .all();
   assert.deepEqual(users.map((u) => u.best.map((p) => p.title)), [["a2"], ["b1"], []]);
@@ -462,16 +466,17 @@ test("prefetch splits keys", async () => {
     const users = await User.objects.insertMany(Array.from({ length: 12 }, (_, i) => ({ email: `u${i}@x.io`, name: `u${i}` })));
     const posts = await Post.objects.insertMany(users.flatMap((u) => [0, 1, 2].map((j) => ({ author: u, title: `${u.name}-${j}`, body: "", views: j }))));
     await Comment.objects.insertMany(posts.filter((_, i) => i % 2 === 0).map((p) => ({ post: p, body: `on ${p.title}` })));
-    const qs = User.objects.prefetchRelated(User.posts.comments).orderBy(User.id);
+    const qs = User.objects.load(User.posts.comments).orderBy(User.id);
     const shape = (us: Awaited<ReturnType<typeof qs.all>>) => us.map((u) => u.posts.cached.map((p) => [p.title, p.comments.cached.map((c) => c.body)]));
     assert.deepEqual(shape(await qs.using(db).all()), shape(await qs.all()));
     assert.equal((await qs.using(db).all()).reduce((n, u) => n + u.posts.cached.length, 0), 36);
     // A slice per parent still holds: each parent's rows stay in one query.
-    const top = new Prefetch(User.posts, Post.objects.filter(Post.views.gte(0)).orderBy(Post.views.desc()).limit(2), { toAttr: "top" });
-    const got = await User.objects.prefetchRelated(top).orderBy(User.id).using(db).all();
+    const top = User.posts.objects.filter(Post.views.gte(0)).orderBy(Post.views.desc()).limit(2).label("top");
+    const got = await User.objects.load(top).orderBy(User.id).using(db).all();
     assert.deepEqual(got.map((u) => u.top.map((p) => p.views)), Array.from({ length: 12 }, () => [2, 1]));
     // To-one, with repeated keys.
-    const cs = await Comment.objects.prefetchRelated(Comment.post.author).orderBy(Comment.id).using(db).all();
+    const toOne = Comment.post.objects.asPrefetch().load(Post.author.objects.asPrefetch());
+    const cs = await Comment.objects.load(toOne).orderBy(Comment.id).using(db).all();
     const nameOf = new Map(users.map((u) => [u.id, u.name]));
     assert.deepEqual(cs.map((c) => c.post.author.name), posts.filter((_, i) => i % 2 === 0).map((p) => nameOf.get(p.authorId)));
   } finally {
@@ -484,7 +489,7 @@ test("prefetch beyond the parameter limit", async () => {
   const db = getDatabase();
   await db.execute("INSERT INTO users (email, name) SELECT 'u' || g || '@x.io', 'u' FROM generate_series(1, 70000) g");
   await db.execute("INSERT INTO posts (author_id, title, body) SELECT id, 't', '' FROM users WHERE id % 10000 = 0");
-  const users = await User.objects.prefetchRelated(User.posts).all();
+  const users = await User.objects.load(User.posts).all();
   assert.equal(users.length, 70000);
   assert.equal(users.reduce((n, u) => n + u.posts.cached.length, 0), 7);
 });

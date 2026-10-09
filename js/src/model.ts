@@ -418,7 +418,7 @@ export function related(o: object): Record<string, unknown> {
 
 function relationGetter(meta: ModelMeta, r: RelationMeta): (this: Row) => unknown {
   const registry = meta.registry;
-  const loadHint = `select it with selectRelated(${meta.name}.${r.name}) or prefetchRelated(${meta.name}.${r.name})`;
+  const loadHint = `load it with load(${meta.name}.${r.name})`;
   switch (r.kind) {
     case "belongsTo": {
       const via = meta.fieldByIr.get(r.from)!.name;
@@ -583,7 +583,12 @@ async function instanceRefresh(this: Row, ...args: unknown[]): Promise<boolean> 
   if (!lock && (exclusive !== undefined || nowait !== undefined || skipLocked !== undefined)) {
     throw new TypeError("refresh() takes exclusive, nowait and skipLocked only with lock: true");
   }
-  const requested = fields.length ? rowQuery(this).only(...fields).state.modelFields ?? [] : [];
+  const meta = metaOf(this);
+  for (const f of fields) {
+    if (!(f instanceof Column) || f.root !== meta || f.path.length) throw new TypeError(`refresh() takes columns of ${meta.name}`);
+  }
+  const requested = fields.map((f) => f.field.ir);
+  if (new Set(requested).size !== requested.length) throw new TypeError("duplicate model field");
   let query = loadedQuery(this, requested);
   if (lock) query = query.lock({ exclusive: exclusive ?? true, nowait: nowait ?? false, skipLocked: skipLocked ?? false } as never);
   let fresh: Row;

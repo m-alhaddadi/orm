@@ -351,7 +351,7 @@ export function makeSelect(qs: QuerySet<ModelSpec, unknown, string, unknown, str
     throw new TypeError("select() needs at least one column");
   }
   if (qs.state.related.length || qs.state.prefetch.length) {
-    throw new QueryError("select() can't be combined with selectRelated / prefetchRelated");
+    throw new QueryError("select() can't be combined with load() of relations");
   }
   const out: [string, Node | null][] = entries.map(([key, item]) => {
     const meta = modelMeta(item);

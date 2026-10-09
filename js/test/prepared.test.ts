@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Prefetch, QueryError, TransactionRequired, getDatabase, param } from "../src/index.js";
+import { QueryError, TransactionRequired, getDatabase, param } from "../src/index.js";
 import { Comment, Post, Profile, User } from "./blog/models.js";
 import { useDatabase } from "./helpers.js";
 
@@ -63,7 +63,7 @@ test("prepared reads", async () => {
   assert.equal((await byAuthor.first({ author: alice.id }))!.title, "a1");
   assert.equal(await byAuthor.first({ author: -1 }), null);
 
-  const byId = Post.objects.selectRelated(Post.author).filter(Post.id.eq(param("id"))).prepare();
+  const byId = Post.objects.load(Post.author).filter(Post.id.eq(param("id"))).prepare();
   const p = await byId.get({ id: posts[3].id });
   assert.equal(p.title, "b1");
   assert.equal(p.author.name, "Bob");
@@ -101,7 +101,7 @@ test("prepared has() and prefetch", async () => {
 
   const top = User.objects
     .orderBy(User.id)
-    .prefetchRelated(new Prefetch(User.posts, Post.objects.filter(Post.views.gte(param("min"))).orderBy(Post.views.desc()).limit(param("k"))))
+    .load(User.posts.objects.filter(Post.views.gte(param("min"))).orderBy(Post.views.desc()).limit(param("k")))
     .prepare();
   let users = await top.all({ min: 10, k: 1 });
   assert.deepEqual(users.map((u) => u.posts.cached.map((p) => p.title)), [["a_2%"], ["b1"]]);

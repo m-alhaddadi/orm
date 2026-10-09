@@ -34,7 +34,7 @@ type Objects = {
   count(): Promise<number>;
   get(...filters: unknown[]): Promise<Row>;
   filter(...filters: unknown[]): Objects;
-  selectRelated(...paths: unknown[]): Objects;
+  load(...items: unknown[]): Objects;
   update(values: Row): Promise<number>;
   delete(): Promise<number>;
 };
@@ -74,7 +74,7 @@ for (const provider of ["sqlite", "postgresql"]) {
       assert.equal((await objects(Manager).get(field(Manager, "id").eq(alice["id"])))["level"], 4);
       assert.equal((await objects(Employee).filter(field(Employee, "name").eq("Alice")).get())["salary"], 20);
 
-      const person = await objects(Person).selectRelated(field(Person, "employee"), field(Person, "customer")).get();
+      const person = await objects(Person).load(field(Person, "employee"), field(Person, "customer")).get();
       assert.deepEqual([(person["employee"] as Row)["salary"], (person["customer"] as Row)["points"]], [20, 5]);
 
       // Deleting a child keeps its parent and the sibling child.

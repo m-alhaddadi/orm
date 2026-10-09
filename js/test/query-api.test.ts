@@ -1,10 +1,10 @@
 /** Query-set API: query-set classes, prefetch on loaded instances, only() through to-one
- * paths, OR of query sets, single-row Prefetch, column paths and model metadata. */
+ * paths, OR of query sets, single-row labels, column paths and model metadata. */
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ManyRelatedSet, NotLoaded, Prefetch, QueryError, QuerySet, RelatedSet, column, describe, prefetch, useQuerySet, type ModelClass, type ModelSpec } from "../src/index.js";
+import { ManyRelatedSet, NotLoaded, QueryError, QuerySet, RelatedSet, column, describe, prefetch, useQuerySet, type ModelClass, type ModelSpec } from "../src/index.js";
 import { Comment, Post, PostTag, Profile, Tag, User, type PostSpec, type TagSpec } from "./blog/models.js";
 import { useDatabase } from "./helpers.js";
 
@@ -72,9 +72,9 @@ test("query-set classes", async (t) => {
     assert.deepEqual((await (rows[1]!.tags as unknown as TagQueries).named("py")).map((t) => t.name), ["python"]);
   });
 
-  await t.test("a Prefetch query set uses them", async () => {
+  await t.test("a relation query set uses them", async () => {
     await seed();
-    const users = await User.objects.orderBy("name").prefetchRelated(new Prefetch(User.posts, posts().published() as never));
+    const users = await User.objects.orderBy("name").load((User.posts.objects as unknown as PostQueries).published() as never);
     assert.deepEqual(users.map((u) => (u.posts as unknown as { cached: { title: string }[] }).cached.map((p) => p.title)), [["hit", "quiet"], ["bob"]]);
   });
 });
@@ -96,7 +96,7 @@ test("prefetch onto loaded instances", async () => {
   const { posts: rows } = await seed();
   await Comment.objects.insertMany([{ post: rows[1]!, body: "a" }, { post: rows[1]!, body: "b" }]);
   const users = await User.objects.orderBy("id");
-  await prefetch(users, User.posts.comments, new Prefetch(User.posts, Post.objects.filter(Post.published.eq(true)).slice(0, 1), { toAttr: "top" }));
+  await prefetch(users, User.posts.comments, User.posts.objects.filter(Post.published.eq(true)).slice(0, 1).label("top"));
   type Loaded = { posts: { cached: { title: string; comments: { cached: { body: string }[] } }[] }; top: { title: string }[] };
   const loaded = users as unknown as Loaded[];
   assert.deepEqual(loaded[0]!.posts.cached.map((p) => p.title), ["draft", "hit", "quiet"]);
@@ -182,22 +182,35 @@ test("a factory needs only describe and insert", async () => {
 
 // -- only() through to-one paths --------------------------------------------------------------
 
-test("only() through a to-one path", async () => {
+test("load() through a to-one path", async () => {
   const { posts: rows } = await seed();
-  const qs = Comment.objects.only(Comment.body, Comment.post.title);
+  const qs = Comment.objects.load(Comment.body, Comment.post.title);
   assert.ok(qs.sql().includes('"title"') && !qs.sql().includes('"views"'));
   await Comment.objects.insert({ post: rows[1]!, body: "x" });
   const [c] = (await qs) as unknown as { body: string; post: { title: string; views: number } }[];
   assert.equal(c!.body, "x");
   assert.equal(c!.post.title, "hit");
   assert.throws(() => c!.post.views, NotLoaded);
-  const [d] = (await Comment.objects.only(Comment.post.author.name)) as unknown as { body: string; post: { author: { name: string } } }[];
+  // Q2.5.4: only a column of the model itself makes it partial
+  const [d] = await Comment.objects.load(Comment.post.author.name).filter(Comment.body.eq("x"));
   assert.equal(d!.post.author.name, "Alice");
-  assert.throws(() => d!.body, NotLoaded);
-  assert.throws(() => User.objects.only(User.posts.title), /to-many relation User.posts/);
+  assert.equal(d!.body, "x");
+  assert.throws(() => (d!.post.author as unknown as { email: string }).email, NotLoaded);
+  const [e] = await Comment.objects.load(Comment.id, Comment.post.author.name).filter(Comment.body.eq("x"));
+  assert.throws(() => (e as unknown as { body: string }).body, NotLoaded);
+  const [f] = await Comment.objects.load(Comment.post.author.name, Comment.post.author).filter(Comment.body.eq("x"));
+  assert.equal(f!.post.author.email, "alice@example.com");
 });
 
-// -- or(), Prefetch one, column() ---------------------------------------------------------------
+test("load() a column through a to-many path", async () => {
+  await seed();
+  const users = await User.objects.load(User.posts.title).orderBy(User.id);
+  assert.deepEqual(users[0]!.posts.cached.map((p) => p.title).sort(), ["draft", "hit", "quiet"]);
+  assert.throws(() => (users[0]!.posts.cached[0] as unknown as { views: number }).views, NotLoaded);
+  assert.equal(users[0]!.name, "Alice");
+});
+
+// -- or(), label one, column() ---------------------------------------------------------------
 
 test("or() of query sets", async () => {
   await seed();
@@ -210,12 +223,12 @@ test("or() of query sets", async () => {
   assert.throws(() => popular.slice(0, 1).or(drafts), QueryError);
 });
 
-test("Prefetch one stores a row or null", async () => {
+test("label one stores a row or null", async () => {
   await seed();
   await User.objects.insert({ email: "carol@example.com", name: "Carol" });
-  const users = await User.objects.orderBy("id").prefetchRelated(new Prefetch(User.posts, Post.objects.orderBy("-views"), { toAttr: "best", one: true }));
+  const users = await User.objects.orderBy("id").load(User.posts.objects.orderBy("-views").label("best", { one: true }));
   assert.deepEqual(users.map((u) => u.best?.title ?? null), ["hit", "bob", null]);
-  assert.throws(() => new Prefetch(User.posts, Post.objects.slice(0, 2), { toAttr: "x", one: true }), /slice/);
+  assert.throws(() => User.objects.load(User.posts.objects.slice(0, 2).label("x", { one: true })), /slice/);
 });
 
 test("column() from a dotted path", async () => {

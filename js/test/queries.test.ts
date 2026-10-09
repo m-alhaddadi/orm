@@ -148,9 +148,9 @@ test("nested and reverse paths", async () => {
   assert.equal((await Post.objects.filter(Post.author.email.endsWith("@example.com")).all()).length, 3);
 });
 
-test("selectRelated", async () => {
+test("load a to-one relation", async () => {
   await seed();
-  const [first, anon] = await Comment.objects.selectRelated(Comment.post.author, Comment.author).orderBy(Comment.id).all();
+  const [first, anon] = await Comment.objects.load(Comment.post.author, Comment.author).orderBy(Comment.id).all();
   assert.equal(first!.post.title, "new post");
   assert.equal(first!.post.author.name, "Alice");
   assert.equal(first!.author?.name, "Bob");
@@ -160,14 +160,14 @@ test("selectRelated", async () => {
 test("an unloaded to-one relation throws", async () => {
   await seed();
   const post = (await Post.objects.first())!;
-  assert.throws(() => (post as unknown as { author: unknown }).author, (e: unknown) => e instanceof NotLoaded && /selectRelated/.test(e.message));
+  assert.throws(() => (post as unknown as { author: unknown }).author, (e: unknown) => e instanceof NotLoaded && /load\(Post\.author\)/.test(e.message));
   const c = await Comment.objects.filter(Comment.authorId.eq(null)).get();
   assert.equal((c as unknown as { author: unknown }).author, null); // a null key needs no loading
 });
 
-test("prefetchRelated", async () => {
+test("load a to-many relation", async () => {
   await seed();
-  const users = await User.objects.prefetchRelated(User.posts).orderBy(User.name).all();
+  const users = await User.objects.load(User.posts).orderBy(User.name).all();
   assert.deepEqual(users.map((u) => u.posts.cached.length), [2, 1, 0]);
   const alice = users[0]!;
   assert.deepEqual((await alice.posts.all()).map((p) => p.title), ["old draft", "new post"]);
@@ -372,7 +372,7 @@ test("batches", async () => {
   const seen = (await collect(Post.objects.filter(Post.views.eq(0)).iterate(7))).map((p) => p.id);
   assert.deepEqual(seen, posts.map((p) => p.id).sort((a, b) => (a < b ? -1 : 1)));
   assert.deepEqual(await collect(Post.objects.filter(Post.id.lt(0)).batches(10)), []);
-  const [batch] = await collect(Post.objects.selectRelated(Post.author).batches(25));
+  const [batch] = await collect(Post.objects.load(Post.author).batches(25));
   assert.equal(batch![0]!.author.id, alice.id);
   await assert.rejects(collect(Post.objects.orderBy(Post.title).batches(10)), QueryError);
   await assert.rejects(collect(Post.objects.slice(0, 5).batches(10)), QueryError);
@@ -403,7 +403,7 @@ test("row locks", async () => {
       assert.equal((await User.objects.using(other).get(User.id.eq(alice.id))).name, "Alice");
     });
     await db.transaction(async () => {
-      await Post.objects.selectRelated(Post.author).lock({ exclusive: false }).filter(Post.id.eq(a1.id)).all();
+      await Post.objects.load(Post.author).lock({ exclusive: false }).filter(Post.id.eq(a1.id)).all();
       // shared locks coexist; the joined author row isn't locked at all
       assert.equal((await other.transaction(() => Post.objects.using(other).lock({ exclusive: false, nowait: true }).filter(Post.id.eq(a1.id)).all())).length, 1);
       await other.transaction(() => User.objects.using(other).lock({ nowait: true }).get(User.id.eq(alice.id)));

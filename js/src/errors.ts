@@ -49,7 +49,7 @@ export class MultipleObjectsReturned extends ORMError {
 
 /**
  * A relation was read on an instance without being loaded first. The types only allow
- * reading relations a query loaded (`selectRelated` / `prefetchRelated`), so this is
+ * reading relations a query loaded (`load()`), so this is
  * thrown only past a cast.
  */
 export class NotLoaded extends ORMError {

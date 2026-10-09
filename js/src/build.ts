@@ -1,6 +1,6 @@
 /**
  * Objects from the rows the engine returns, built in one pass: instances (with
- * `selectRelated` objects and prefetched relations attached) and `select()` rows.
+ * joined objects and prefetched relations attached) and `select()` rows.
  */
 
 import { Decimal } from "./decimal.js";
@@ -42,7 +42,7 @@ export class Builder {
     return this.registry.get(name);
   }
 
-  /** One instance per row, `selectRelated` objects attached. */
+  /** One instance per row, joined objects attached. */
   instances(out: NativeInstances, rows: NativeRows): Obj[] {
     const { n, width, values } = rows;
     const meta = this.meta(out.model);
