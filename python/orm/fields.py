@@ -278,7 +278,7 @@ class BelongsTo(Relation[M, P]):
     """To-one relation through a foreign key column on this model.
 
     ``Post.author = BelongsTo("User", via="author_id")``: ``post.author_id`` holds the
-    key, ``post.author`` the related object once loaded with ``select_related``.
+    key, ``post.author`` the related object once loaded with ``load()``.
     """
 
     kind = "one"
@@ -320,7 +320,7 @@ class BelongsTo(Relation[M, P]):
             return None
         raise NotLoaded(
             f"{owner.__name__}.{self.name} is not loaded; use "
-            f"select_related({owner.__name__}.{self.name}) or query "
+            f"load({owner.__name__}.{self.name}) or query "
             f"{self.target_name} by {owner.__name__}.{self.via}"
         )
 
@@ -347,7 +347,7 @@ class HasMany(Relation[MM, P]):
 
     ``User.posts = HasMany("Post", via="author_id")``. On an instance, ``user.posts``
     is a :class:`~orm.query.RelatedSet` (a query over the user's posts that also serves
-    rows loaded by ``prefetch_related``).
+    rows loaded by ``load()``).
     """
 
     kind = "many"
@@ -391,7 +391,7 @@ class HasMany(Relation[MM, P]):
 class HasOne(Relation[M, P]):
     """One-to-one relation whose key is on the other model: ``User.profile`` when
     ``Profile.user_id`` (unique) points at the user. On an instance it is the related
-    object, or ``None``, once loaded with ``select_related`` / ``prefetch_related``."""
+    object, or ``None``, once loaded with ``load()``."""
 
     kind = "one"
 
@@ -415,8 +415,7 @@ class HasOne(Relation[M, P]):
         if self.name in d:
             return d[self.name]
         raise NotLoaded(
-            f"{owner.__name__}.{self.name} is not loaded; use select_related({owner.__name__}.{self.name}) "
-            f"or prefetch_related({owner.__name__}.{self.name})"
+            f"{owner.__name__}.{self.name} is not loaded; use load({owner.__name__}.{self.name})"
         )
 
     def __set__(self, obj: Model, value: Never) -> None:

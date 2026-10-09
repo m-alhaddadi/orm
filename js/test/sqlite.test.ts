@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { connect, func, IntegrityError, loads, Migrations, Migrator, outer, Prefetch, QueryError, Registry, SchemaError } from "../src/index.js";
+import { connect, func, IntegrityError, loads, Migrations, Migrator, outer, QueryError, Registry, SchemaError } from "../src/index.js";
 import { Author, Book, Status, sqliteRegistry } from "./sqlite/models.js";
 
 test("SQLite CRUD, relations, enums, JSON, bulk defaults and CASE updates", async () => {
@@ -22,9 +22,9 @@ test("SQLite CRUD, relations, enums, JSON, bulk defaults and CASE updates", asyn
     assert.deepEqual(books.map((b) => b.pages), [0, 7]);
     assert.equal(books[0]!.status, Status.draft);
     assert.deepEqual(books[1]!.metadata, { labels: [1, true] });
-    const joined = await Book.objects.using(db).selectRelated(Book.author).orderBy(Book.id).all();
+    const joined = await Book.objects.using(db).load(Book.author).orderBy(Book.id).all();
     assert.equal(joined[0]!.author.name, "Alice");
-    const prefetched = await Author.objects.using(db).prefetchRelated(Author.books).all();
+    const prefetched = await Author.objects.using(db).load(Author.books).all();
     assert.equal(prefetched[0]!.books.cached.length, 2);
     assert.equal(await Author.objects.using(db).filter(Author.name.icontains("ALI")).count(), 1);
     assert.equal(await Author.objects.using(db).filter(Author.name.contains("ali")).count(), 0);
@@ -37,7 +37,7 @@ test("SQLite CRUD, relations, enums, JSON, bulk defaults and CASE updates", asyn
     assert.deepEqual(ranked.map((b) => b.rank), [2n, 1n]);
     const totals = Book.objects.using(db).select({ authorId: Book.authorId, pages: func.sum(Book.pages) }).groupBy(Book.authorId).cte("totals");
     assert.equal(await Author.objects.using(db).join(totals, totals.c.authorId.eq(Author.id)).select({ pages: totals.c.pages }).scalar(), 7n);
-    const sliced = await Author.objects.using(db).prefetchRelated(new Prefetch(Author.books, Book.objects.orderBy(Book.pages.desc()).slice(1, 2))).all();
+    const sliced = await Author.objects.using(db).load(Author.books.objects.orderBy(Book.pages.desc()).slice(1, 2)).all();
     assert.deepEqual(sliced[0]!.books.cached.map((b) => b.title), ["one"]);
     const updated = await Book.objects.using(db).updateMany(books.map((b) => ({ id: b.id, pages: b.pages + 2 })), { returning: true });
     assert.deepEqual(updated.map((b) => b.pages), [2, 9]);

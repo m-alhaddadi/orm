@@ -50,10 +50,10 @@ async function main(url: string): Promise<void> {
 
   // Eager loading: JOIN for to-one, one extra IN query for to-many. The row types say
   // what was loaded: c.post.author is a User here, c.author a User or null.
-  for (const c of await Comment.objects.selectRelated(Comment.post.author, Comment.author)) {
+  for (const c of await Comment.objects.load(Comment.post.author, Comment.author)) {
     console.log(`${c.author?.name ?? "?"} on ${c.post.author.name}'s ${JSON.stringify(c.post.title)}: ${c.body}`);
   }
-  for (const u of await User.objects.prefetchRelated(User.posts).orderBy(User.name)) {
+  for (const u of await User.objects.load(User.posts).orderBy(User.name)) {
     console.log(u.name, u.posts.cached.map((p) => p.title));
   }
 

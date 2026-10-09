@@ -101,7 +101,7 @@ class Cte:
         self._model: type[Model] | None
         if isinstance(query, QuerySet):
             if query._prefetch or query._related or query._lock is not None:
-                raise QueryError("a CTE's query can't prefetch, select_related or lock")
+                raise QueryError("a CTE's query can't load relations or lock")
             self._model = query.model
             self.columns: tuple[str, ...] = query.model._meta.field_names
         else:

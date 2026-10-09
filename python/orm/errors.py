@@ -36,8 +36,8 @@ class MultipleObjectsReturned(ORMError, LookupError):
 class NotLoaded(ORMError, AttributeError):
     """A relation was accessed on an instance without being loaded first.
 
-    Async code can't load it implicitly on attribute access; use ``select_related`` /
-    ``prefetch_related``, or ``await obj.relation`` for to-many relations.
+    Async code can't load it implicitly on attribute access; use ``load()``,
+    or ``await obj.relation`` for to-many relations.
     """
 
 

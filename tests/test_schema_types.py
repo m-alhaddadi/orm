@@ -7,7 +7,7 @@ import pytest
 from blog.models import Post, PostTag, Priority, Profile, Role, Tag, User
 
 import orm
-from orm import Prefetch, func
+from orm import func
 
 
 async def users():
@@ -119,9 +119,9 @@ async def test_has_one(clean):
     p = await Profile.objects.insert(user=alice, role=Role.admin)
     with pytest.raises(orm.NotLoaded):
         alice.profile
-    us = await User.objects.select_related(User.profile).order_by(User.id)
+    us = await User.objects.load(User.profile).order_by(User.id)
     assert us[0].profile == p and us[1].profile is None
-    us = await User.objects.prefetch_related(User.profile).order_by(User.id)
+    us = await User.objects.load(User.profile.objects.as_prefetch()).order_by(User.id)
     assert us[0].profile == p and us[1].profile is None
     assert us[0].profile.user is us[0]  # the back side is filled in too
     assert [u.name for u in await User.objects.filter(User.profile.role == Role.admin)] == ["Alice"]
@@ -185,23 +185,23 @@ async def test_many_to_many_links_and_queries(clean):
 
 async def test_many_to_many_prefetch(clean):
     (p1, p2, p3), (news, rust, py) = await blog()
-    posts = await Post.objects.prefetch_related(Post.tags).order_by(Post.id)
+    posts = await Post.objects.load(Post.tags).order_by(Post.id)
     assert [[t.name for t in p.tags.cached] for p in posts] == [["news", "rust"], ["rust"], []]
     assert [t.name for t in await posts[1].tags] == ["rust"]  # served from the prefetched rows
     # nested, both directions
-    tags = await Tag.objects.prefetch_related(Tag.posts.author).order_by(Tag.id)
+    tags = await Tag.objects.load(Tag.posts.author).order_by(Tag.id)
     assert [[(p.title, p.author.name) for p in t.posts.cached] for t in tags] == [
         [("one", "Alice")],
         [("one", "Alice"), ("two", "Alice")],
         [],
     ]
     # a slice applies per parent
-    top = Prefetch(Post.tags, Tag.objects.order_by(Tag.name.desc())[:1], to_attr="first_tag")
-    posts = await Post.objects.prefetch_related(top).order_by(Post.id)
+    top = Post.tags.objects.order_by(Tag.name.desc())[:1].label("first_tag")
+    posts = await Post.objects.load(top).order_by(Post.id)
     assert [[t.name for t in p.first_tag] for p in posts] == [["rust"], ["rust"], []]
     # filtered
-    only = Prefetch(Post.tags, Tag.objects.filter(Tag.name != "rust"))
-    posts = await Post.objects.prefetch_related(only).order_by(Post.id)
+    only = Post.tags.objects.filter(Tag.name != "rust")
+    posts = await Post.objects.load(only).order_by(Post.id)
     assert [[t.name for t in p.tags.cached] for p in posts] == [["news"], [], []]
     # links changed: the prefetched rows are dropped
     await posts[0].tags.add(py)

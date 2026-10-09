@@ -73,8 +73,8 @@ def test_column_to_column_across_relation():
     assert '"t1"."created_at" < "posts"."created_at"' in w
 
 
-def test_select_related_and_order_use_left_joins():
-    sql = Comment.objects.select_related(Comment.post.author).order_by(Comment.post.title.desc()).sql()
+def test_to_one_load_and_order_use_left_joins():
+    sql = Comment.objects.load(Comment.post.author).order_by(Comment.post.title.desc()).sql()
     assert 'LEFT JOIN "posts" AS "j1" ON "j1"."id" = "comments"."post_id"' in sql
     assert 'LEFT JOIN "users" AS "j2" ON "j2"."id" = "j1"."author_id"' in sql
     assert sql.endswith('ORDER BY "j1"."title" DESC')
@@ -120,8 +120,8 @@ def test_lock():
     assert User.objects.lock(exclusive=False).sql().endswith('FOR SHARE OF "users"')
     assert User.objects.lock(nowait=True).sql().endswith('FOR UPDATE OF "users" NOWAIT')
     assert User.objects.lock(False, skip_locked=True).sql().endswith('FOR SHARE OF "users" SKIP LOCKED')
-    # Only the model's rows: rows joined by select_related stay unlocked.
-    sql = Post.objects.select_related(Post.author).filter(Post.views > 1)[:5].lock().sql()
+    # Only the model's rows: rows joined by load() stay unlocked.
+    sql = Post.objects.load(Post.author).filter(Post.views > 1)[:5].lock().sql()
     assert sql.endswith('LIMIT 5 FOR UPDATE OF "posts"')
     with pytest.raises(ValueError):
         User.objects.lock(nowait=True, skip_locked=True)
@@ -251,7 +251,7 @@ def test_select_validation():
     with pytest.raises(TypeError):
         Post.objects.select(1)
     with pytest.raises(QueryError):
-        Post.objects.select_related(Post.author).select(Post.id)
+        Post.objects.load(Post.author).select(Post.id)
     with pytest.raises(QueryError, match="unknown function"):
         Post.objects.select(orm_func("nope", Post.id)).sql()
     with pytest.raises(QueryError, match="lock"):
@@ -326,7 +326,7 @@ def test_many_to_many_filter_is_one_exists_through_the_join_table():
 
 
 def test_has_one_joins_on_the_other_side():
-    sql = User.objects.select_related(User.profile).sql()
+    sql = User.objects.load(User.profile).sql()
     assert 'LEFT JOIN "profiles" AS "j1" ON "j1"."user_id" = "users"."id"' in sql
 
 

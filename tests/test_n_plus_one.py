@@ -50,15 +50,15 @@ async def test_a_loader_in_a_loop_raises_with_the_shape_the_site_and_the_fix(sho
     assert shape.count == 8
     assert shape.sql.startswith('SELECT ') and '"person"' in shape.sql and "?" in shape.sql and "7" not in shape.sql
     assert shape.site.endswith("test_n_plus_one.py:47")
-    assert shape.fix == "select_related(Customer.person)"
+    assert shape.fix == "load(Customer.person)"
     assert "8 queries with one shape `SELECT " in str(raised.value)
-    assert "use select_related(Customer.person)" in str(raised.value)
+    assert "use load(Customer.person)" in str(raised.value)
 
 
-async def test_a_related_query_in_a_loop_names_prefetch_related(shop):
+async def test_a_related_query_in_a_loop_names_load(shop):
     Person, Customer, db = shop
     people = await Person.objects.using(db).order_by(Person.id)
-    with pytest.warns(debug.NPlusOneWarning, match=r"use prefetch_related\(Person.customers\)"):
+    with pytest.warns(debug.NPlusOneWarning, match=r"use load\(Person.customers\)"):
         with debug.n_plus_one(threshold=3) as report:
             for p in people:
                 await p.customers.using(db)
@@ -104,7 +104,7 @@ model PersonTag {
                         await Person.objects.using(db).filter(Person.id == p.id); here = line()  # noqa: E702
             [shape] = report.repeated
             assert shape.site.endswith(f"test_n_plus_one.py:{here}"), (loop, shape.site)
-            fix = {"related": "prefetch_related(Person.customers)", "many": "prefetch_related(Person.tags)", "filtered many": None, "query set": None}[loop]
+            fix = {"related": "load(Person.customers)", "many": "load(Person.tags)", "filtered many": None, "query set": None}[loop]
             assert shape.fix == fix, (loop, shape.fix)
     finally:
         await db.close()

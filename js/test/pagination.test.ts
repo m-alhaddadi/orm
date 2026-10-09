@@ -117,12 +117,12 @@ for (const dialect of ["sqlite", "postgres"] as const) {
   test(`page shape, related rows and new rows: ${dialect}`, async () => {
     const { db, Item, qs } = await open(dialect);
     try {
-      const page = await qs.selectRelated(Item.owner).only(Item.name).orderBy("-at").paginate({ first: 5 });
+      const page = await qs.load(Item.owner).load(Item.name).orderBy("-at").paginate({ first: 5 });
       assert.equal(page.items.length, 5);
       assert.ok(page.hasNext && !page.hasPrevious);
       assert.equal(page.items[0].owner.name, "o");
       assert.throws(() => page.items[0].at, NotLoaded);
-      const rest = await qs.only(Item.name).orderBy("-at").paginate({ first: 100, after: page.nextCursor });
+      const rest = await qs.load(Item.name).orderBy("-at").paginate({ first: 100, after: page.nextCursor });
       assert.ok(rest.items.length === 18 && !rest.hasNext && rest.hasPrevious);
       const empty = await qs.orderBy("-at").paginate({ first: 5, after: rest.nextCursor });
       assert.deepEqual([empty.items, empty.nextCursor, empty.previousCursor], [[], null, null]);

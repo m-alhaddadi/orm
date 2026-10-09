@@ -1134,8 +1134,7 @@ def excluded(column: ColumnRef[T]) -> Excluded[T]:
 class RelationPath(Generic[M]):
     """``User.posts``: a relation reached from ``root``. Attribute access continues the
     path: columns of the related model give :class:`ColumnRef`, relations give a
-    longer :class:`RelationPath`. Used in filters, ``select_related`` and
-    ``prefetch_related``.
+    longer :class:`RelationPath`. Used in filters and ``load()``; ``.objects`` gives the relation query set.
     """
 
     __slots__ = ("_root", "_path", "_target")
@@ -1162,7 +1161,13 @@ class RelationPath(Generic[M]):
 
     def __dir__(self) -> Iterable[str]:
         meta = self._target._meta
-        return [*meta.fields, *meta.relations]
+        return [*meta.fields, *meta.relations, "objects"]
+
+    @property
+    def objects(self) -> QuerySet[M]:
+        """The relation query set for :meth:`QuerySet.load`: ``self``'s target model's
+        query set, bound to this relation (``User.posts.objects.filter(...)[:3]``)."""
+        return self._target.objects._clone(_via=self)
 
     def __repr__(self) -> str:
         return ".".join((self._root.__name__, *self._path))

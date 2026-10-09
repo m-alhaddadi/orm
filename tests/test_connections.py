@@ -443,7 +443,7 @@ async def test_scope_values_in_default_filters_are_closed_by_default(db, dialect
             assert [o.total for o in await orders.filter(Order.total > 15).prepare()()] == [20]
             # A relation hop applies the scoped filter too.
             assert await Shop.objects.using(sdb).filter(Shop.orders.total > 25).count() == 0
-            shop = await Shop.objects.using(sdb).prefetch_related(Shop.orders).get(Shop.id == s1.id)
+            shop = await Shop.objects.using(sdb).load(Shop.orders).get(Shop.id == s1.id)
             assert len(await shop.orders) == 2
             with orm.scope(shop=s2.id):
                 assert [o.total for o in await orders.all()] == [30]

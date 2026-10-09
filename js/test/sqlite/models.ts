@@ -5,7 +5,7 @@
 // update / updateMany take, the columns and relation paths, and the model object.
 
 /* eslint-disable */
-import { define, Registry, type Column, type Compat, type Expression, type Hop, type In, type Instance, type JsonValue, type Many, type ManyRelatedSet, type ModelClass, type RelatedSet, type RelationPath, type SchemaIR } from "../../src/index.js";
+import { define, Registry, type Column, type Compat, type Expression, type Hop, type In, type Instance, type JsonValue, type Many, type ManyRelatedSet, type ModelClass, type QuerySetOf, type RelatedSet, type RelationPath, type SchemaIR, type Via } from "../../src/index.js";
 
 const SCHEMA: SchemaIR = {
   "dialect": "sqlite",
@@ -203,17 +203,20 @@ export interface AuthorSpec {
 }
 
 export interface AuthorFields<S extends string, H extends readonly Hop[], O extends boolean> {
-  readonly id: Column<O extends true ? bigint | null : bigint, S>;
-  readonly email: Column<O extends true ? string | null : string, S>;
-  readonly name: Column<O extends true ? string | null : string, S>;
-  readonly active: Column<O extends true ? boolean | null : boolean, S>;
-  readonly createdAt: Column<O extends true ? Date | null : Date, S>;
+  readonly id: Column<O extends true ? bigint | null : bigint, S, "id", H>;
+  readonly email: Column<O extends true ? string | null : string, S, "email", H>;
+  readonly name: Column<O extends true ? string | null : string, S, "name", H>;
+  readonly active: Column<O extends true ? boolean | null : boolean, S, "active", H>;
+  readonly createdAt: Column<O extends true ? Date | null : Date, S, "createdAt", H>;
   readonly books: BookPath<S | Many, [...H, Hop<"books", "many", BookSpec>], O>;
 }
 
 export interface AuthorPath<S extends string, H extends readonly Hop[], O extends boolean>
   extends RelationPath<AuthorSpec, S, H>,
-    AuthorFields<S, H, O> {}
+    AuthorFields<S, H, O> {
+  /** The relation query set for `load()`: `Author.objects` bound to this relation. */
+  readonly objects: QuerySetOf<AuthorSpec, Author, "Author", {}, never, Via<H, undefined, false, S>>;
+}
 
 export interface AuthorModel extends ModelClass<AuthorSpec>, AuthorFields<"Author", [], false> {}
 
@@ -278,18 +281,21 @@ export interface BookSpec {
 }
 
 export interface BookFields<S extends string, H extends readonly Hop[], O extends boolean> {
-  readonly id: Column<O extends true ? bigint | null : bigint, S>;
-  readonly authorId: Column<O extends true ? bigint | null : bigint, S>;
-  readonly title: Column<O extends true ? string | null : string, S>;
-  readonly pages: Column<O extends true ? number | null : number, S>;
-  readonly status: Column<O extends true ? Status | null : Status, S>;
-  readonly metadata: Column<O extends true ? JsonValue | null | null : JsonValue | null, S>;
+  readonly id: Column<O extends true ? bigint | null : bigint, S, "id", H>;
+  readonly authorId: Column<O extends true ? bigint | null : bigint, S, "authorId", H>;
+  readonly title: Column<O extends true ? string | null : string, S, "title", H>;
+  readonly pages: Column<O extends true ? number | null : number, S, "pages", H>;
+  readonly status: Column<O extends true ? Status | null : Status, S, "status", H>;
+  readonly metadata: Column<O extends true ? JsonValue | null | null : JsonValue | null, S, "metadata", H>;
   readonly author: AuthorPath<S, [...H, Hop<"author", "one", AuthorSpec>], O>;
 }
 
 export interface BookPath<S extends string, H extends readonly Hop[], O extends boolean>
   extends RelationPath<BookSpec, S, H>,
-    BookFields<S, H, O> {}
+    BookFields<S, H, O> {
+  /** The relation query set for `load()`: `Book.objects` bound to this relation. */
+  readonly objects: QuerySetOf<BookSpec, Book, "Book", {}, never, Via<H, undefined, false, S>>;
+}
 
 export interface BookModel extends ModelClass<BookSpec>, BookFields<"Book", [], false> {}
 

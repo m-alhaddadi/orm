@@ -37,7 +37,7 @@ test("a hook gets each statement with its shape, time and rows", async () => {
   try {
     const events: QueryEvent[] = [];
     const off = db.onQuery((e) => events.push(e));
-    const people = await Person.objects.using(db).prefetchRelated(Person.customers).orderBy(Person.id).all();
+    const people = await Person.objects.using(db).load(Person.customers).orderBy(Person.id).all();
     assert.equal(people.length, 3);
     const [select, prefetch] = events;
     assert.match(select!.sql, /^SELECT .*"person"/);

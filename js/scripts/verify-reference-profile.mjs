@@ -18,7 +18,7 @@ try {
   if (expected) assert.equal((await child.loadParent()).id, 1);
   else {
     assert.ok(!Object.getOwnPropertySymbols(child).some((symbol) => symbol.description === "orm.referenceState"));
-    const joined = await m.Child.objects.using(db).selectRelated(m.Child.parent).get();
+    const joined = await m.Child.objects.using(db).load(m.Child.parent).get();
     assert.equal(joined.parent.id, 1);
     assert.throws(() => define({ models: [] }, { requiredCapabilities: ["reference-loading"] }), /rebuild/);
   }

@@ -67,7 +67,7 @@ async function loadReference(owner: Row, meta: ModelMeta, r: RelationMeta, reloa
     }
   });
   // The loader may share one running fetch, so the call site is captured here.
-  return debugging() ? relationLoad(meta.name, r.name, "selectRelated", load) : load();
+  return debugging() ? relationLoad(meta.name, r.name, "load", load) : load();
 }
 
 /** Internal seam: caller supplies resolved dependency keys plus database/transaction context. */
@@ -110,7 +110,7 @@ export function getter(meta: ModelMeta, r: RelationMeta, baseline: (this: Row) =
         if (targetKey === key || (targetKey === MISSING && state?.keys.has(r.name) && state.keys.get(r.name) === key)) return value;
       }
     } else if (key === null) return null;
-    throw new NotLoaded(`${meta.name}.${r.name} is not loaded; use ${referenceLoaderName(r.name)}() or selectRelated(${meta.name}.${r.name})`);
+    throw new NotLoaded(`${meta.name}.${r.name} is not loaded; use ${referenceLoaderName(r.name)}() or load(${meta.name}.${r.name})`);
   };
 }
 

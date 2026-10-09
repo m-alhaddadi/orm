@@ -48,25 +48,25 @@ async def test_partial_selection(dialect):
         author = await a.insert(name="ann", bio="large", note=None)
         await a.insert(name="bob", bio="large")
         await b.insert(title="one", author_id=author.pk)
-        partial = await a.only(Author.name, Author.note).order_by(Author.id).first()
+        partial = await a.load(Author.name, Author.note).order_by(Author.id).first()
         assert partial.to_dict() == {"name": "ann", "note": None}
         assert partial.pk == author.pk
         with pytest.raises(orm.NotLoaded):
             partial.bio
         with pytest.raises(TypeError):
-            a.only(Author.name, Author.name)
+            a.load(Author.name, Author.name)
         await partial.update(name="changed")
         assert partial.to_dict() == {"name": "changed", "note": None}
         await partial.refresh(Author.bio)
         assert partial.to_dict() == {"name": "changed", "note": None, "bio": "large"}
-        assert [o.name async for batch in a.only(Author.name).batches(1) for o in batch] == ["changed", "bob"]
+        assert [o.name async for batch in a.load(Author.name).batches(1) for o in batch] == ["changed", "bob"]
         assert (await partial.books.using(db).get()).title == "one"
-        full = await a.only().order_by(Author.id).first()
+        full = await a.load().order_by(Author.id).first()
         assert "_orm_internal" not in full.__dict__ and full.bio == "large"
-        book = await b.only(Book.title).get()
+        book = await b.load(Book.title).get()
         with pytest.raises(orm.NotLoaded):
             book.author
-        assert (await b.select_related(Book.author).only(Book.title).get()).author.name == "changed"
+        assert (await b.load(Book.author).load(Book.title).get()).author.name == "changed"
     finally:
         await db.drop_tables()
         await db.close()
@@ -94,9 +94,9 @@ async def test_selection_defaults(dialect):
         assert await a.count() == 1 and await a.exists()
         assert await a.without_defaults().count() == 2
         assert await a.without_defaults().filter(Author.name == "visible").count() == 1
-        full = await a.only().get()
+        full = await a.load().get()
         assert full.bio == "large"
-        explicit = await a.only(Author.note, Author.name).get()
+        explicit = await a.load(Author.note, Author.name).get()
         assert explicit.to_dict() == {"name": "visible", "note": None}
         await explicit.refresh()
         assert explicit.to_dict() == {"name": "visible", "note": None}
@@ -116,23 +116,23 @@ async def test_selection_defaults(dialect):
         await joined[1].update(author_id=hidden.pk)
         assert joined[1]._field_value("author_id") == hidden.pk
         assert await b.filter(Book.author.name == "hidden").update_many([{"id": joined[1].pk, "title": "t"}]) == 0
-        bypassed = await b.without_defaults().select_related(Book.author).order_by(Book.id)
+        bypassed = await b.without_defaults().load(Book.author).order_by(Book.id)
         assert bypassed[0].author.name == "changed" and bypassed[0].author.visible is True
         assert bypassed[1].author.name == "hidden"
         assert await a.in_bulk() == {visible.pk: partial}
-        changed_return = await a.only(Author.name).update(name="again").returning()
+        changed_return = await a.load(Author.name).update(name="again").returning()
         assert changed_return[0].to_dict() == {"name": "again"}
         default_return = await a.filter(Author.id == visible.pk).update(note="n").returning()
         assert default_return[0].to_dict() == {"name": "again", "note": "n"}
         cleared = await b.without_related().first()
         with pytest.raises(orm.NotLoaded):
             cleared.author
-        prefetched = await a.prefetch_related(Author.books).get()
+        prefetched = await a.load(Author.books).get()
         assert prefetched.books.cached[0].title == "one"
-        bypassed_prefetch = await a.without_defaults().prefetch_related(Author.books).filter(Author.id == visible.pk).get()
+        bypassed_prefetch = await a.without_defaults().load(Author.books).filter(Author.id == visible.pk).get()
         assert bypassed_prefetch.books.cached[0].title == "one" and bypassed_prefetch.books.cached[0].author_id == visible.pk
         assert await a.filter(Author.books.title == "one").count() == 1
-        written = await a.only().update(visible=False).returning()
+        written = await a.load().update(visible=False).returning()
         assert len(written) == 1 and written[0].visible is False
         assert await a.count() == 0
         assert await a.without_defaults().update_many([{"id": hidden.pk, "name": "bulk"}]) == 1
@@ -205,11 +205,11 @@ async def test_default_order(dialect):
         for body in ["x", "z", "y"]:
             await n.insert(topic_id=c.pk, body=body)
         assert [x.body for x in await n.all()] == ["z", "y", "x"]
-        loaded = await t.prefetch_related(Topic.notes).get(Topic.name == "c")
+        loaded = await t.load(Topic.notes).get(Topic.name == "c")
         assert [x.body for x in await loaded.notes] == ["z", "y", "x"]
-        own = await t.prefetch_related(orm.Prefetch(Topic.notes, Note.objects.order_by(Note.body))).get(Topic.name == "c")
+        own = await t.load(Topic.notes.objects.order_by(Note.body)).get(Topic.name == "c")
         assert [x.body for x in await own.notes] == ["x", "y", "z"]
-        sliced = await t.prefetch_related(orm.Prefetch(Topic.notes, Note.objects.all()[:2])).get(Topic.name == "c")
+        sliced = await t.load(Topic.notes.objects.all()[:2]).get(Topic.name == "c")
         assert [x.body for x in await sliced.notes] == ["z", "y"]
     finally:
         await db.drop_tables()
@@ -252,7 +252,7 @@ async def test_a_joined_model_brings_its_related_default():
         await Book.objects.using(db).insert(id=1, author_id=1)
         await Shelf.objects.using(db).insert(id=1, book_id=1)
         # JBook's default joins its author also when JBook is itself joined.
-        shelf = await Shelf.objects.using(db).select_related(Shelf.book).get()
+        shelf = await Shelf.objects.using(db).load(Shelf.book).get()
         assert shelf.book.author.name == "ann"
     finally:
         await db.close()

@@ -72,7 +72,7 @@ for (const dialect of ["sqlite", "postgres"]) {
       await row.refresh();
       assert.throws(() => row.owner, NotLoaded);
       assert.equal((await row.loadOwner()).id, 1);
-      const eager = await Required.objects.using(db).selectRelated(Required.owner).get();
+      const eager = await Required.objects.using(db).load(Required.owner).get();
       assert.equal(await eager.loadOwner(), eager.owner);
       assert.equal(calls, 4);
       const owner = await Owner.objects.using(db).filter(Owner.id.eq(1)).get();

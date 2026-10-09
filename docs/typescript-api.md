@@ -26,7 +26,7 @@ const rows = await User.objects
 
 | Path | What |
 |---|---|
-| `js/src/` | The package: `expr.ts` (expressions, `func`, `outer` / `exists`, windows), `model.ts` (`define()`, instances, related sets), `query.ts` (`QuerySet`, `Prefetch`, `Prepared`), `select.ts` (`select()`), `cte.ts`, `write.ts`, `build.ts` (rows → instances), `db.ts` (pools, transactions, locks), `migrations.ts`, `cli.ts` |
+| `js/src/` | The package: `expr.ts` (expressions, `func`, `outer` / `exists`, windows), `model.ts` (`define()`, instances, related sets), `query.ts` (`QuerySet`, `load()`, `Prepared`), `select.ts` (`select()`), `cte.ts`, `write.ts`, `build.ts` (rows → instances), `db.ts` (pools, transactions, locks), `migrations.ts`, `cli.ts` |
 | `bindings/node/` | Rust crate `orm-node` (napi-rs) on top of `orm-engine`: `convert.rs` (JS ↔ values, strict), `js.rs`, `lib.rs` |
 | `core/src/codegen/typescript.rs` | `orm generate typescript`: `models.ts` from the schema |
 | `js/test/` | End-to-end tests (Node and Bun), SQL shape tests, `typing/check.ts` (compile-time checks) |
@@ -112,9 +112,9 @@ Then `Post.objects` is a `PostQueries`, and the methods chain with every builder
   The class is read on the first use of `Post.objects`, so `queries.ts` can import `models.ts` without an error from the import cycle.
   `useQuerySet(Model, cls)` also takes the class itself, for models from `define()` or `loads()`.
 * Relation sets have the methods too: `user.posts.published()`, `post.tags.<method>()`, typed in the generated row type.
-* `new Prefetch(User.posts, Post.objects.published())` uses them for related rows.
+* `User.posts.objects.published()` uses them for related rows in `load()`.
 * A method returns `this` with a cast. TypeScript can not change the type arguments of `this`, so a custom method gives the class's own row type:
-  call custom methods before `selectRelated()`, `prefetchRelated()` or `only()`, whose row types they would drop.
+  call custom methods before `load()`, `label()` or `asPrefetch()`, whose row and relation types they would drop.
 
 ## Queries
 
@@ -148,7 +148,7 @@ that *returns* a query set resolves it, so its caller gets rows. Return it from 
 function to pass the query on.
 
 The builders are `filter(...)`, `exclude(...)`, `orderBy(...)`, `limit(n)`, `offset(n)`,
-`slice(start, end)`, `selectRelated(...)`, `prefetchRelated(...)`, `lock(...)`,
+`slice(start, end)`, `load(...)`, `lock(...)`,
 `using(db)`, `select({...})`, `join(cte, on)`, `from(cte)` and `cte(name)`.
 
 Comparisons are methods: `.eq .ne .lt .lte .gt .gte .between .in .notIn .isNull
@@ -172,10 +172,9 @@ The types check the following:
 
 ### Partial rows, OR of query sets, column paths
 
-* `only(Comment.body, Comment.post.title)`: a column through to-one relations loads the relation with `selectRelated` and trims the joined instance to the given fields.
-  Without a column of the model itself, its instances keep only their hidden keys. A to-many path throws. The row type does not show the joined relation; cast it.
+* `load(Comment.body, Comment.post.title)`: partial comments (`Pick` of `body`, with `pk` and the methods) whose `post` is joined and has only `title`; see "Loading related objects".
 * `qs1.or(qs2)`: one query set with the filter `(filters of qs1) OR (filters of qs2)`. `qs2` sets nothing but filters, neither is sliced, and each side has at most one `filter()`/`exclude()` call.
-* `new Prefetch(User.posts, Post.objects.orderBy("-views"), { toAttr: "best", one: true })` stores the first related row, or `null`, in `user.best` (typed `Post | null`). It needs `toAttr` and takes no slice.
+* `load(User.posts.objects.orderBy("-views").label("best", { one: true }))` stores the first related row, or `null`, in `user.best` (typed `Post | null`). It takes no slice.
 * `column(Bundle, "items.product.title")` is the column a dotted path of TypeScript names gives, for adapters that map request names to columns.
 
 ### Cursor pagination
@@ -206,17 +205,24 @@ objects and an instance without a key throw `TypeError`.
 
 ### Loading related objects
 
-* `selectRelated(Comment.post.author, Comment.author)` follows to-one relations with
+`load(...)` takes columns, relation paths and relation query sets, with the rules of Python's `load()` (see [`python-api.md`](python-api.md)); calls add up.
+
+* `load(Comment.post.author, Comment.author)` follows to-one relations with
   LEFT JOINs. The row type gains the loaded objects: `c.post.author.name` is a `string`,
   and `c.author` is `User | null` because the key is nullable. Reading an unloaded
   relation is a type error, and at runtime it throws `NotLoaded`.
-* `prefetchRelated(User.posts.comments, User.profile)` runs one extra `IN` query per hop.
+* `load(User.posts.comments)` runs one extra `IN` query per relation level from the first to-many hop.
   To-many results are in `u.posts.cached`, and to-one results are on the attribute.
-* `new Prefetch(User.posts, Post.objects.filter(...).orderBy(...).limit(2), { toAttr: "top" })`
-  sets a custom query (filtered, nested, or sliced per parent) and a typed target
-  attribute (`u.top: Post[]`).
+* Columns narrow the row type to the loaded fields: `load(Post.title)` gives `Omit<Post, ...>` with `title`, `pk` and the methods; a later `load(Post.views)` adds `views`, and `load()` without items gives whole rows again.
+  `load(Post.author.name)` keeps whole posts and gives a partial `author`; `load(Post.author.name, Post.author)` gives a whole `author`. `load(User.posts.title)` gives partial posts in `u.posts.cached`.
+  Reading an unloaded field is a type error, and past a cast it throws `NotLoaded`.
+* `User.posts.objects` is the relation query set: `Post.objects` bound to `User.posts`.
+  `load(User.posts.objects.filter(...).orderBy(...).limit(2))` gives the related rows their own query (filtered, nested with `.load()`, or sliced per parent); they fill `u.posts.cached`.
+  `.label("top")` puts them in a typed plain array attribute (`u.top: Post[]`) instead; `{ one: true }` stores the first row or `null`.
+  `Comment.post.objects.asPrefetch()` loads a to-one relation with an `IN` query instead of a join.
+  A label that is a field, relation or member of the model throws `QueryError`; `label()` and `asPrefetch()` on a query set that is not a relation query set throw `TypeError`.
 
-* `await prefetch(instances, ...paths)` loads relations onto instances you already have, with the same paths and `Prefetch` objects.
+* `await prefetch(instances, ...items)` loads relations onto instances you already have, with the items of `load()` (no columns of the instances' model), always by `IN` query.
   Only the prefetch queries run: the keys come from the instances. A last `{ using: db }` argument names the database.
   The row type does not change; read the relations as `cached` or cast.
 
@@ -467,7 +473,7 @@ await debug.nPlusOne(async () => {
   for (const c of customers) await c.loadPerson();
 }, { threshold: 5, fail: true });
 // NPlusOne: 20 queries with one shape `SELECT ... FROM "person" WHERE "person"."id" = $1 ...`
-//   at src/views.ts:42; use selectRelated(Customer.person)
+//   at src/views.ts:42; use load(Customer.person)
 ```
 
 * The scope counts the statements of `fn` by shape: the SQL with placeholders, without values.
@@ -477,7 +483,7 @@ await debug.nPlusOne(async () => {
   The pages of one ORM loop (`batches()`, `iterate()`, the chunks of `inBulk()`) count as one query when they have one shape.
 * When `fn` resolves, a shape that ran more than `threshold` times (default 5) throws `debug.NPlusOne` with `fail: true`, or emits an `NPlusOneWarning` process warning.
   `error.report` has each shape, its SQL, its count, the call site of its first query and the fix.
-* The fix is `selectRelated(...)` for a repeated `loadX()`, and `prefetchRelated(...)` for a repeated unchanged to-many or many-to-many query (`post.comments.all()`, `post.tags.all()`).
+* The fix is `load(...)` for a repeated `loadX()` and for a repeated unchanged to-many or many-to-many query (`post.comments.all()`, `post.tags.all()`).
 * The call site and the SQL text are captured only inside the scope.
   Outside it, each query pays one `AsyncLocalStorage` read (about 2 ns, measured).
 * In tests, `await debug.expectNoNPlusOne(fn, { threshold })` throws `NPlusOne` when `fn` sends an N+1.

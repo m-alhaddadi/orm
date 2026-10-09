@@ -4,7 +4,7 @@
  * two types are identical. Never run.
  */
 
-import { Decimal, Prefetch, exists, func, outer, param, window, type JsonValue, type Page } from "../../src/index.js";
+import { Decimal, exists, func, outer, param, window, type JsonValue, type Page } from "../../src/index.js";
 import { Comment, Post, Priority, Profile, Role, Tag, User } from "../blog/models.js";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -21,12 +21,12 @@ export async function columns() {
   same<typeof profile.role, Role>();
   same<typeof profile.links, string[]>();
   same<typeof tag.priority, Priority>();
-  same<(typeof Comment)["authorId"], import("../../src/index.js").Column<bigint | null, "Comment">>();
+  same<(typeof Comment)["authorId"], import("../../src/index.js").Column<bigint | null, "Comment", "authorId", []>>();
   // @ts-expect-error instances are read-only
   user.name = "x";
   // @ts-expect-error to-one relations exist only on rows of queries that load them
   void post.author;
-  // @ts-expect-error prefetched rows exist only after prefetchRelated
+  // @ts-expect-error prefetched rows exist only after load()
   void user.posts.cached;
   const j: JsonValue = { a: [1, "b", null] };
   void j;
@@ -130,23 +130,51 @@ export async function filters() {
 }
 
 export async function loading() {
-  const cs = await Comment.objects.selectRelated(Comment.post.author, Comment.author).all();
+  const cs = await Comment.objects.load(Comment.post.author, Comment.author).all();
   same<(typeof cs)[number]["post"]["author"]["name"], string>();
   same<NonNullable<(typeof cs)[number]["author"]>["name"], string>();
   const nullable: (typeof cs)[number]["author"] = null;
   void nullable;
-  const us = await User.objects.prefetchRelated(User.posts.comments, User.profile).all();
+  const us = await User.objects.load(User.posts.comments, User.profile).all();
   same<(typeof us)[number]["posts"]["cached"][number]["comments"]["cached"][number]["body"], string>();
   const p: (typeof us)[number]["profile"] = null;
   void p;
-  const top = await User.objects.prefetchRelated(new Prefetch(User.posts, Post.objects.selectRelated(Post.author), { toAttr: "top" })).all();
+  const top = await User.objects.load(User.posts.objects.load(Post.author).label("top")).all();
   same<(typeof top)[number]["top"][number]["author"]["email"], string>();
-  // @ts-expect-error selectRelated follows to-one relations only
-  User.objects.selectRelated(User.posts);
+  const best = await User.objects.load(User.posts.objects.label("best", { one: true })).all();
+  same<(typeof best)[number]["best"], Post | null>();
   // @ts-expect-error a path from another model
-  User.objects.selectRelated(Post.author);
-  // @ts-expect-error a prefetch query set of the wrong model
-  new Prefetch(User.posts, Comment.objects);
+  User.objects.load(Post.author);
+  // @ts-expect-error a query set not bound to a relation
+  User.objects.load(Comment.objects);
+  // @ts-expect-error a relation query set of another model's relation
+  User.objects.load(Post.comments.objects);
+
+  // Columns narrow the rows' type to the loaded fields.
+  const partial = await Post.objects.load(Post.title, Post.views).all();
+  same<(typeof partial)[number]["title"], string>();
+  same<(typeof partial)[number]["pk"], bigint>();
+  // @ts-expect-error body is not loaded
+  void partial[0]!.body;
+  const more = await Post.objects.load(Post.title).load(Post.views).all();
+  same<(typeof more)[number]["views"], number>();
+  // @ts-expect-error body is not loaded
+  void more[0]!.body;
+  const whole = await Post.objects.load(Post.title).load().all();
+  same<(typeof whole)[number]["body"], string>();
+  const authors = await Post.objects.load(Post.author.name).all();
+  same<(typeof authors)[number]["body"], string>();
+  same<(typeof authors)[number]["author"]["name"], string>();
+  // @ts-expect-error the author is partial
+  void authors[0]!.author.email;
+  const both = await Post.objects.load(Post.author.name, Post.author).all();
+  same<(typeof both)[number]["author"]["email"], string>();
+  const titles = await User.objects.load(User.posts.title).all();
+  same<(typeof titles)[number]["posts"]["cached"][number]["title"], string>();
+  // @ts-expect-error the posts are partial
+  void titles[0]!.posts.cached[0]!.views;
+  const viaQuery = await Comment.objects.load(Comment.post.objects.asPrefetch()).all();
+  same<(typeof viaQuery)[number]["post"]["title"], string>();
 }
 
 export async function writes() {
@@ -265,7 +293,7 @@ export async function subqueries() {
 export async function awaiting() {
   const posts = await Post.objects.filter(Post.published);
   same<typeof posts, Post[]>();
-  const cs = await Comment.objects.selectRelated(Comment.post.author);
+  const cs = await Comment.objects.load(Comment.post.author);
   same<(typeof cs)[number]["post"]["author"]["name"], string>();
   const rows = await Post.objects.select({ id: Post.id, n: func.count(Post.comments) });
   same<typeof rows, { id: bigint; n: bigint }[]>();

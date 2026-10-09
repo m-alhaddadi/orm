@@ -7,7 +7,7 @@ import pytest
 from blog.models import Comment, Post, Profile, User
 
 import orm
-from orm import Prefetch, QueryError, param
+from orm import QueryError, param
 
 
 async def seed():
@@ -71,7 +71,7 @@ async def test_prepared_reads(clean):
     assert (await by_author.first(author=alice.id)).title == "a1"
     assert await by_author.first(author=-1) is None
 
-    by_id = Post.objects.select_related(Post.author).filter(Post.id == param("id")).prepare()
+    by_id = Post.objects.load(Post.author).filter(Post.id == param("id")).prepare()
     p = await by_id.get(id=posts[3].id)
     assert p.title == "b1" and p.author.name == "Bob"
     with pytest.raises(Post.DoesNotExist):
@@ -120,8 +120,8 @@ async def test_prepared_has_and_prefetch(clean):
 
     top = (
         User.objects.order_by(User.id)
-        .prefetch_related(
-            Prefetch(User.posts, Post.objects.filter(Post.views >= param("min")).order_by(Post.views.desc()).limit(param("k")))
+        .load(
+            User.posts.objects.filter(Post.views >= param("min")).order_by(Post.views.desc()).limit(param("k"))
         )
         .prepare()
     )

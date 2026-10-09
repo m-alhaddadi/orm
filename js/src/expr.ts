@@ -539,8 +539,11 @@ class Bound extends Expression<unknown, never, {}> {
   }
 }
 
-/** A column of `root`'s model, or of a model reached from it through `path`. */
-export class Column<T, S extends string = never> extends Expression<T, S, {}> {
+/** A column of `root`'s model, or of a model reached from it through `path`. `N` is the
+ * field's name and `H` the hops to its model, for `load()`'s row types. */
+export class Column<T, S extends string = never, N extends string = string, H extends readonly Hop[] = readonly Hop[]> extends Expression<T, S, {}> {
+  /** @internal Phantom: the field name and the hops. */
+  declare readonly "~column"?: [N, H];
   /** @internal */
   constructor(
     readonly root: Source,
@@ -1266,8 +1269,8 @@ export const func = new Functions();
 /**
  * `User.posts`: a relation reached from a root model. Its properties continue the path:
  * columns of the related model are {@link Column}s, its relations longer paths (the
- * generated `PostPath` types list them). Used in filters, `selectRelated`,
- * `prefetchRelated` and `func.count(User.posts)`.
+ * generated `PostPath` types list them). Used in filters, `load()` and
+ * `func.count(User.posts)`; `.objects` gives the relation query set.
  */
 /** Where a relation path keeps its state (a symbol: path objects' string keys are the
  * related model's columns and relations). */

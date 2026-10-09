@@ -32,7 +32,7 @@ for (const dialect of ["sqlite", "postgres"]) {
       const changed = await Active.objects.using(db).update({ name: null, status: "old" }, { returning: true }) as { name: null; status: string }[];
       assert.ok(changed.every((r) => r.name === null && r.status === "old"));
       await Post.objects.using(db).insert({ id: 1, userId: 1 });
-      const posts = await Post.objects.using(db).selectRelated(Post["user"] as never).all() as { user: { name: null; status: string } }[];
+      const posts = await Post.objects.using(db).load(Post["user"] as never).all() as { user: { name: null; status: string } }[];
       assert.equal(posts[0]!.user.name, null); assert.equal(posts[0]!.user.status, "old");
     } finally { await db.dropTables(); await db.close(); }
   });

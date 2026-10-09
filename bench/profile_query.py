@@ -112,9 +112,9 @@ async def main() -> None:
     cases = {
         "get by pk": (lambda: Post.objects.filter(Post.id == 500).limit(2), "select"),
         "read 50": (lambda: Post.objects.order_by(Post.id)[:50], "select"),
-        "select_related": (lambda: Post.objects.select_related(Post.author), "select"),
+        "select_related": (lambda: Post.objects.load(Post.author), "select"),
         "EXISTS count": (lambda: User.objects.filter(User.posts.views > 990), "count"),
-        "prefetch": (lambda: User.objects.prefetch_related(User.posts), "select"),
+        "prefetch": (lambda: User.objects.load(User.posts), "select"),
     }
     for name, (mk, op) in cases.items():
         qs = mk()

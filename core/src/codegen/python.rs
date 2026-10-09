@@ -265,6 +265,7 @@ pub fn generate_with(ir: &SchemaIr, schema: &Schema, source: &str, options: &sup
         for r in &m.ir.relations {
             writeln!(body, "    {}: _{}Path", r.name, r.target).unwrap();
         }
+        writeln!(body, "    @property\n    def objects(self) -> {objects}: ...").unwrap();
         body.push('\n');
 
         // insert / update shapes; a to-one relation can be given instead of its key

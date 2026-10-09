@@ -584,6 +584,17 @@ class Model:
             raise TypeError(f"{type(self).__name__} has no @soft_delete.deleted_at field")
         return name
 
+    def _refresh_fields(self, fields: tuple[ColumnRef[Any], ...]) -> tuple[str, ...]:
+        model = type(self)
+        names = []
+        for field in fields:
+            if not isinstance(field, ColumnRef) or field._root is not model or field._path:
+                raise TypeError(f"refresh() takes columns of {model.__name__}")
+            names.append(field._field.name)
+        if len(set(names)) != len(names):
+            raise TypeError("duplicate model field")
+        return tuple(names)
+
     async def refresh(
         self,
         *fields: ColumnRef[Any],
@@ -602,7 +613,7 @@ class Model:
         """
         if not lock and (exclusive is not None or nowait is not None or skip_locked is not None):
             raise TypeError("refresh() takes exclusive, nowait and skip_locked only with lock=True")
-        requested = self._row_query().only(*fields)._model_fields or () if fields else ()
+        requested = self._refresh_fields(fields)
         query = self._loaded_query(*requested)
         if lock:
             query = query.lock(

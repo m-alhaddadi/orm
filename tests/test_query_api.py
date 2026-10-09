@@ -1,5 +1,5 @@
 """Query-set API: custom query-set classes, prefetch on loaded instances, only() through
-to-one paths, OR of query sets, single-row Prefetch, column paths and model metadata."""
+to-one paths, OR of query sets, single-row labels, column paths and model metadata."""
 
 import os
 import sys
@@ -72,7 +72,7 @@ async def test_relation_sets_have_the_custom_methods(clean, custom):
 
 async def test_prefetch_query_set_uses_custom_methods(clean, custom):
     await seed()
-    users = await User.objects.order_by(User.name).prefetch_related(orm.Prefetch(User.posts, Post.objects.published()))
+    users = await User.objects.order_by(User.name).load(User.posts.objects.published())
     assert [[p.title for p in u.posts.cached] for u in users] == [["hit", "quiet"], ["bob"]]
 
 
@@ -174,7 +174,7 @@ async def test_prefetch_onto_loaded_instances(clean):
     alice, bob, posts = await seed()
     await Comment.objects.insert_many([{"post": posts[1], "body": "a"}, {"post": posts[1], "body": "b"}])
     users = await User.objects.order_by(User.id)
-    await orm.prefetch(users, User.posts.comments, orm.Prefetch(User.posts, Post.objects.filter(Post.published)[:1], to_attr="top"))
+    await orm.prefetch(users, User.posts.comments, User.posts.objects.filter(Post.published)[:1].label("top"))
     assert [p.title for p in users[0].posts.cached] == ["draft", "hit", "quiet"]
     assert [c.body for c in users[0].posts.cached[1].comments.cached] == ["a", "b"]
     assert users[0].posts.cached[0].author is users[0]
@@ -270,7 +270,7 @@ async def test_a_factory_needs_only_describe_and_insert(clean):
 
 async def test_only_through_a_to_one_path(clean):
     await seed()
-    qs = Comment.objects.only(Comment.body, Comment.post.title)
+    qs = Comment.objects.load(Comment.body, Comment.post.title)
     sql = qs.sql()
     assert '"title"' in sql and '"views"' not in sql and '"published"' not in sql
     comment = await Comment.objects.insert(post=(await Post.objects.get(Post.title == "hit")), body="x")
@@ -282,24 +282,32 @@ async def test_only_through_a_to_one_path(clean):
         c.created_at
 
 
-async def test_only_a_path_column_leaves_the_root_without_public_fields(clean):
-    # S4.4: Django's meaning of only("post__title")
+async def test_load_a_path_column_keeps_the_root_whole(clean):
+    # Q2.5.4: only a column of the model itself makes it partial
     _, _, posts = await seed()
     await Comment.objects.insert(post=posts[0], body="x")
-    (c,) = await Comment.objects.only(Comment.post.author.name)
-    assert c.post.author.name == "Alice" and c.pk is not None
+    (c,) = await Comment.objects.load(Comment.post.author.name)
+    assert c.post.author.name == "Alice" and c.body == "x" and c.post.title == posts[0].title
+    with pytest.raises(orm.NotLoaded):
+        c.post.author.email
+    (c,) = await Comment.objects.load(Comment.id, Comment.post.author.name)
     with pytest.raises(orm.NotLoaded):
         c.body
+    # a bare path to the same model asks for all its fields
+    (c,) = await Comment.objects.load(Comment.post.author.name, Comment.post.author)
+    assert c.post.author.email == "alice@example.com"
+
+
+async def test_load_a_column_through_a_to_many_path(clean):
+    await seed()
+    users = await User.objects.load(User.posts.title).order_by(User.id)
+    assert sorted(p.title for p in users[0].posts.cached) == ["draft", "hit", "quiet"]
     with pytest.raises(orm.NotLoaded):
-        c.post.title
+        users[0].posts.cached[0].views
+    assert users[0].name == "Alice"
 
 
-def test_only_rejects_a_to_many_path():
-    with pytest.raises(TypeError, match="to-many relation User.posts"):
-        User.objects.only(User.posts.title)
-
-
-# -- qs1 | qs2, Prefetch(one=True), orm.column ----------------------------------------------
+# -- qs1 | qs2, label(one=True), orm.column ----------------------------------------------
 
 
 async def test_or_of_query_sets(clean):
@@ -319,16 +327,18 @@ async def test_or_of_query_sets(clean):
 async def test_prefetch_one_stores_a_row_or_none(clean):
     await seed()
     await User.objects.insert(email="carol@example.com", name="Carol")
-    users = await User.objects.order_by(User.id).prefetch_related(
-        orm.Prefetch(User.posts, Post.objects.order_by(-Post.views), to_attr="best", one=True)
+    users = await User.objects.order_by(User.id).load(
+        User.posts.objects.order_by(-Post.views).label("best", one=True)
     )
     assert [u.best.title if u.best else None for u in users] == ["hit", "bob", None]
-    with pytest.raises(ValueError, match="to_attr"):
-        orm.Prefetch(User.posts, one=True)
     with pytest.raises(ValueError, match="slice"):
-        orm.Prefetch(User.posts, Post.objects[:2], to_attr="x", one=True)
+        User.objects.load(User.posts.objects[:2].label("x", one=True))
     with pytest.raises(orm.QueryError, match="to-many"):
-        await Post.objects.prefetch_related(orm.Prefetch(Post.author, to_attr="writer", one=True))
+        await Post.objects.load(Post.author.objects.label("writer", one=True))
+    with pytest.raises(ValueError, match="field, relation or member"):
+        User.objects.load(User.posts.objects.label("name"))
+    with pytest.raises(ValueError, match="identifier"):
+        User.posts.objects.label("_x")
 
 
 async def test_column_from_a_dotted_path(clean):

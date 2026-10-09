@@ -45,7 +45,7 @@ class ReferenceBelongsTo(BelongsTo[Any, Any]):
                     return value
         elif key is None:
             return None
-        raise NotLoaded(f"{owner.__name__}.{self.name} is not loaded; use {loader_name(self.name)}() or select_related({owner.__name__}.{self.name})")
+        raise NotLoaded(f"{owner.__name__}.{self.name} is not loaded; use {loader_name(self.name)}() or load({owner.__name__}.{self.name})")
 
 
 def loader_name(name: str) -> str:
@@ -153,7 +153,7 @@ async def load_reference(owner: Any, name: str, *, reload: bool = False, filtere
             data.setdefault("_reference_keys", {})[name] = key
     if debug._scope.get() is not None:
         # The loader runs `fetch` in its own task, so the call site is captured here.
-        with debug.relation_load(owner._meta.name, name, "select_related"):
+        with debug.relation_load(owner._meta.name, name, "load"):
             return await coalesced_load(owner, name, context, fetch, publish)
     return await coalesced_load(owner, name, context, fetch, publish)
 

@@ -120,7 +120,7 @@ class Select(Generic[Unpack[Ts]]):
         if not items:
             raise TypeError("select() needs at least one column")
         if qs._related or qs._prefetch:
-            raise QueryError("select() can't be combined with select_related / prefetch_related")
+            raise QueryError("select() can't be combined with load() of relations")
         for item in items:
             if isinstance(item, type):
                 if item is not qs.model:

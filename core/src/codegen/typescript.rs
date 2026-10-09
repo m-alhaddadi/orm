@@ -7,11 +7,12 @@
 //! * `User` (instance type): its columns as read-only properties (camelCase), its to-many
 //!   relations as query sets (`posts: RelatedSet<PostSpec, ...>`) and `update()` /
 //!   `delete()` / `refresh()`. To-one relations are absent: a query that loads them
-//!   (`selectRelated` / `prefetchRelated`) adds them to its rows' type;
+//!   (`load()`) adds them to its rows' type;
 //! * `UserInsert` / `UserUpdate` / `UserUpdateRow`: what `insert()`, `update()` and
 //!   `updateMany()` take (a required foreign key is "the key or the related row");
 //! * `UserFields` / `UserPath`: the columns and relation paths, so `User.posts.createdAt`
-//!   is a `Column<Date, "User" | "*many">`;
+//!   is a `Column<Date, "User" | "*many", "createdAt", [Hop<"posts", ...>]>` (the field
+//!   name and the hops let `load()` narrow the rows' type);
 //! * `UserSpec` tying them together, and the model object `User` (`UserModel`).
 //!
 //! Field and relation names are camelCase (`author_id` -> `authorId`), the same function
@@ -352,7 +353,7 @@ pub fn generate_with(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str
         )
         .unwrap();
         for f in m.fields() {
-            writeln!(body, "  readonly {}: Column<O extends true ? {} | null : {}, S>;", camel(&f.name), file_value_type(m, f), file_value_type(m, f))
+            writeln!(body, "  readonly {}: Column<O extends true ? {} | null : {}, S, {}, H>;", camel(&f.name), file_value_type(m, f), file_value_type(m, f), quote(&camel(&f.name)))
                 .unwrap();
         }
         for r in &m.ir.relations {
@@ -376,7 +377,10 @@ pub fn generate_with(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str
         writeln!(
             body,
             "export interface {name}Path<S extends string, H extends readonly Hop[], O extends boolean>\n  \
-             extends RelationPath<{name}Spec, S, H>,\n    {name}Fields<S, H, O> {{}}\n"
+             extends RelationPath<{name}Spec, S, H>,\n    {name}Fields<S, H, O> {{\n  \
+             /** The relation query set for `load()`: `{name}.objects` bound to this relation. */\n  \
+             readonly objects: QuerySetOf<{name}Spec, {name}, {}, {{}}, never, Via<H, undefined, false, S>>;\n}}\n",
+            quote(name)
         )
         .unwrap();
         let methods: Vec<_> = ir.behavior.methods.iter().filter(|method| method.model == *name).collect();
@@ -405,7 +409,7 @@ pub fn generate_with(ir: &SchemaIr, schema: &Schema, source: &str, runtime: &str
     );
     let mut types = vec![
         "Column", "Compat", "Expression", "Hop", "In", "Instance", "ManyRelatedSet", "Many", "ModelClass", "RelatedSet",
-        "RelationPath", "SchemaIR",
+        "QuerySetOf", "RelationPath", "SchemaIR", "Via",
     ];
     types.extend(used.iter().copied());
     if !query_sets.is_empty() {

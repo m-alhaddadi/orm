@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Generator, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Unpack, cast, overload
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, Unpack, cast, overload
 
 from ._cache import cached
 from .errors import QueryError, TransactionRequired
@@ -51,7 +51,7 @@ T4 = TypeVar("T4")
 T5 = TypeVar("T5")
 T6 = TypeVar("T6")
 
-__all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prefetch", "Prepared", "prefetch", "use_query_set"]
+__all__ = ["QuerySet", "RelatedSet", "ManyRelatedSet", "Prepared", "prefetch", "use_query_set"]
 
 # Ids per query in in_bulk(), well below Postgres' 65535 parameters.
 IN_BULK_CHUNK = 10_000
@@ -59,45 +59,25 @@ IN_BULK_CHUNK = 10_000
 GET_OR_INSERT_ROUNDS = 3
 
 
-class Prefetch(Generic[M]):
-    """A ``prefetch_related`` entry with its own query::
-
-        User.objects.prefetch_related(
-            Prefetch(User.posts, Post.objects.filter(Post.published).order_by(Post.views.desc())[:3]),
-        )
-
-    ``queryset`` filters, orders and slices the related rows (a slice applies per parent:
-    "the 3 most viewed posts of each user"); its own ``prefetch_related`` /
-    ``select_related`` apply to them. The rows fill ``user.posts`` (so
-    ``user.posts.cached`` and ``await user.posts`` give only them), or the plain list
-    attribute ``to_attr`` (``user.top_posts``) when given.
-
-    ``one=True`` (with ``to_attr``, on a to-many relation) stores the first related row by
-    the query set's order, or ``None``, instead of a list: ``user.latest_post``.
-    """
+class _Prefetch:
+    """One relation loaded by an ``IN (...)`` query: its rows fill the relation, or the
+    attribute ``to_attr`` (a ``.label()``), with ``queryset`` filtering, ordering and
+    slicing them per parent."""
 
     __slots__ = ("path", "queryset", "to_attr", "one")
 
     def __init__(
-        self, path: RelationPath[M], queryset: QuerySet[M] | None = None, *, to_attr: str | None = None, one: bool = False
+        self, path: RelationPath[Any], queryset: QuerySet[Any] | None = None, *, to_attr: str | None = None, one: bool = False
     ) -> None:
-        if not isinstance(path, RelationPath):
-            raise TypeError(f"Prefetch() takes a relation such as User.posts, got {path!r}")
-        if queryset is not None and queryset.model is not path._target:
-            raise TypeError(f"Prefetch({path!r}) needs a query set of {path._target.__name__}")
-        if to_attr is not None and (not to_attr.isidentifier() or to_attr.startswith("_")):
-            raise ValueError(f"to_attr {to_attr!r} must be an identifier not starting with '_'")
-        if one and to_attr is None:
-            raise ValueError("Prefetch(one=True) needs to_attr")
         if one and queryset is not None and (queryset._limit is not None or queryset._offset is not None):
-            raise ValueError("Prefetch(one=True) takes the first row by the query set's order; drop the slice")
+            raise ValueError("label(one=True) takes the first row by the query set's order; drop the slice")
         self.path = path
         self.queryset = queryset
         self.to_attr = to_attr
         self.one = one
 
     def __repr__(self) -> str:
-        return f"Prefetch({self.path!r}, {self.queryset!r}, to_attr={self.to_attr!r}{', one=True' if self.one else ''})"
+        return f"_Prefetch({self.path!r}, {self.queryset!r}, to_attr={self.to_attr!r}{', one=True' if self.one else ''})"
 
 
 class _Node:
@@ -110,10 +90,10 @@ class _Node:
         self.attr = attr
         self.qs = qs
         self.one = False
-        self.children: list[tuple[tuple[str, ...], Prefetch[Any]]] = []
+        self.children: list[tuple[tuple[str, ...], _Prefetch]] = []
 
 
-def _prefetch_tree(model: type[Model], items: Iterable[tuple[tuple[str, ...], Prefetch[Any]]]) -> dict[str, _Node]:
+def _prefetch_tree(model: type[Model], items: Iterable[tuple[tuple[str, ...], _Prefetch]]) -> dict[str, _Node]:
     """Nodes by attribute: paths sharing a prefix share its node, so
     ``User.posts.comments`` nests under ``User.posts``."""
     nodes: dict[str, _Node] = {}
@@ -121,30 +101,34 @@ def _prefetch_tree(model: type[Model], items: Iterable[tuple[tuple[str, ...], Pr
         hop = hops[0]
         if hop not in model._meta.relations:
             raise ValueError(f"{model.__name__} has no relation {hop!r}")
+        if len(hops) == 1 and p.to_attr is not None and (
+            p.to_attr in model._meta.fields or p.to_attr in model._meta.relations or hasattr(model, p.to_attr)
+        ):
+            raise ValueError(f"label {p.to_attr!r} is a field, relation or member of {model.__name__}")
         attr = (p.to_attr or hop) if len(hops) == 1 else hop
         node = nodes.get(attr)
         if node is None:
             node = nodes[attr] = _Node(hop, attr, None)
         elif node.relation != hop:
-            raise ValueError(f"prefetch_related stores {model.__name__}.{node.relation} and .{hop} both in {attr!r}")
+            raise ValueError(f"load() stores {model.__name__}.{node.relation} and .{hop} both in {attr!r}")
         if len(hops) == 1:
             node.one = node.one or p.one
             if p.queryset is not None:
                 if node.qs is not None and node.qs is not p.queryset:
-                    raise ValueError(f"{p.path!r} is prefetched twice with different query sets; use to_attr")
+                    raise ValueError(f"{p.path!r} is loaded twice with different query sets; label() one of them")
                 node.qs = p.queryset
         else:
             node.children.append((hops[1:], p))
     return nodes
 
 
-def _prefetch_ir(model: type[Model], items: Iterable[tuple[tuple[str, ...], Prefetch[Any]]], params: list[Any]) -> list[IR]:
+def _prefetch_ir(model: type[Model], items: Iterable[tuple[tuple[str, ...], _Prefetch]], params: list[Any]) -> list[IR]:
     out = []
     for node in _prefetch_tree(model, items).values():
         target = model._meta.relations[node.relation].target
         qs: QuerySet[Any] = node.qs if node.qs is not None else target.objects
         if qs._lock is not None:
-            raise QueryError("a prefetch query set can't lock rows")
+            raise QueryError("a relation query set in load() can't lock rows")
         children = [(p.path._path, p) for p in qs._prefetch] + node.children
         ir, ctx = qs._query_ir("select", params, prefetch=False)
         if children:
@@ -158,6 +142,98 @@ def _prefetch_ir(model: type[Model], items: Iterable[tuple[tuple[str, ...], Pref
             ir["one"] = True
         out.append(ir)
     return out
+
+
+# What load() takes: a column, a relation path or a relation query set (``User.posts.objects``).
+_LoadItem: TypeAlias = "ColumnRef[Any] | RelationPath[Any] | QuerySet[Any]"
+
+
+def _to_many(model: type[Model], hops: tuple[str, ...]) -> bool:
+    for hop in hops:
+        rel = model._meta.relations[hop]
+        if isinstance(rel, (HasMany, ManyToMany)):
+            return True
+        model = rel.target
+    return False
+
+
+def _load_path(item: _LoadItem) -> tuple[str, ...]:
+    if isinstance(item, QuerySet):
+        assert item._via is not None
+        return item._via._path
+    return item._path
+
+
+def _derive(
+    model: type[Model], loads: Iterable[_LoadItem], *, by_query: bool = False
+) -> tuple[list[str], tuple[tuple[str, ...], ...], tuple[tuple[tuple[str, ...], tuple[str, ...]], ...], tuple[_Prefetch, ...]]:
+    """The model's own fields, joined paths, fields of partial joined models and
+    ``IN (...)`` loads for ``load(*loads)``. Items under one first hop share a strategy:
+    a join, unless one of them needs a query (a to-many hop, a relation query set that
+    filters, orders, slices, labels or loads); ``by_query`` gives every hop a query."""
+    own: list[str] = []
+    groups: dict[str, list[tuple[tuple[str, ...], _LoadItem]]] = {}
+    for item in loads:
+        if isinstance(item, ColumnRef):
+            if not item._path:
+                own.append(item._field.name)
+                continue
+            hops = item._path
+        elif isinstance(item, RelationPath):
+            hops = item._path
+        else:
+            assert item._via is not None
+            hops = item._via._path
+        groups.setdefault(hops[0], []).append((hops, item))
+    related: list[tuple[str, ...]] = []
+    fields: dict[tuple[str, ...], list[str]] = {}
+    whole: set[tuple[str, ...]] = set()
+    prefetch: list[_Prefetch] = []
+    for hop, entries in groups.items():
+        if not by_query and not any(
+            _to_many(model, hops) or (isinstance(item, QuerySet) and not item._plain_relation()) for hops, item in entries
+        ):
+            for hops, item in entries:
+                related.extend(hops[:i] for i in range(1, len(hops) + 1) if hops[:i] not in related)
+                if isinstance(item, ColumnRef):
+                    names = fields.setdefault(hops, [])
+                    if item._field.name not in names:
+                        names.append(item._field.name)
+                else:
+                    whole.add(hops)
+            continue
+        target = model._meta.relations[hop].target
+        path: RelationPath[Any] = RelationPath(model, (hop,), target)
+        # a bare path to the relation asks for all its fields, so its columns add nothing
+        bare = any(len(h) == 1 and not isinstance(i, ColumnRef) and (not isinstance(i, QuerySet) or i._label is None) for h, i in entries)
+        base: QuerySet[Any] | None = None
+        inner: list[_LoadItem] = []
+        plain = False
+        for hops, item in entries:
+            rest = hops[1:]
+            if isinstance(item, QuerySet) and not rest and item._label is not None:
+                prefetch.append(_Prefetch(path, item, to_attr=item._label, one=item._one))
+                continue
+            plain = True
+            if isinstance(item, QuerySet):
+                if rest:
+                    assert item._via is not None
+                    inner.append(item._clone(_via=RelationPath(target, rest, item._via._target)))
+                elif base is not None and base is not item:
+                    raise ValueError(f"{path!r} is loaded twice with different query sets; label() one of them")
+                else:
+                    base = item
+            elif isinstance(item, ColumnRef):
+                column: ColumnRef[Any] = ColumnRef(target, rest, item._field)
+                if (rest or not bare) and not any(c._path == rest and c._field is item._field for c in inner if isinstance(c, ColumnRef)):
+                    inner.append(column)
+            elif rest:
+                inner.append(RelationPath(target, rest, item._target))
+        if plain:
+            qs = base if base is not None else target.objects
+            prefetch.append(_Prefetch(path, qs.load(*inner) if inner else qs))
+    related_fields = tuple((p, tuple(f)) for p, f in fields.items() if p not in whole)
+    return own, tuple(related), related_fields, tuple(prefetch)
 
 
 _SUBCLASS_SLOTS: dict[type, tuple[str, ...]] = {}
@@ -201,14 +277,14 @@ class QuerySet(Generic[M]):
     ``exclude(User.posts.published == False)`` keeps users with no unpublished post.
     """
 
-    __slots__ = ("_model_helpers", "_without_defaults", "_without_related", "_model_fields", "_related_fields", "_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_lock", "_db", "_from", "_joins", "_result")
+    __slots__ = ("_model_helpers", "_without_defaults", "_without_related", "_model_fields", "_related_fields", "_model", "_filters", "_order", "_limit", "_offset", "_related", "_prefetch", "_loads", "_via", "_label", "_one", "_as_prefetch", "_lock", "_db", "_from", "_joins", "_result")
 
     def __init__(self, model: type[M]) -> None:
         self._model_helpers: tuple[str, ...] = ()
         self._without_defaults = False
         self._without_related = False
         self._model_fields: tuple[str, ...] | None = None
-        # `only()` through to-one paths: the fields of each joined model, by path.
+        # load() through to-one paths: the fields of each partial joined model, by path.
         self._related_fields: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = ()
         self._model = model
         self._filters: tuple[Condition, ...] = ()
@@ -216,7 +292,14 @@ class QuerySet(Generic[M]):
         self._limit: int | Param | None = None
         self._offset: int | Param | None = None
         self._related: tuple[tuple[str, ...], ...] = ()
-        self._prefetch: tuple[Prefetch[Any], ...] = ()
+        self._prefetch: tuple[_Prefetch, ...] = ()
+        # what load() was given; _model_fields, _related, _related_fields and _prefetch derive from it
+        self._loads: tuple[_LoadItem, ...] = ()
+        # a relation query set (``User.posts.objects``): its relation, label and strategy
+        self._via: RelationPath[Any] | None = None
+        self._label: str | None = None
+        self._one = False
+        self._as_prefetch = False
         self._lock: dict[str, bool] | None = None
         self._db: Database | None = None
         self._from: Cte | None = None
@@ -243,6 +326,11 @@ class QuerySet(Generic[M]):
         new._offset = self._offset
         new._related = self._related
         new._prefetch = self._prefetch
+        new._loads = self._loads
+        new._via = self._via
+        new._label = self._label
+        new._one = self._one
+        new._as_prefetch = self._as_prefetch
         new._lock = self._lock
         new._db = self._db
         new._from = self._from
@@ -264,48 +352,93 @@ class QuerySet(Generic[M]):
         return self._clone(_without_defaults=True)
 
     def without_related(self) -> Self:
-        """Clear default and explicitly requested eager reference loading."""
-        return self._clone(_without_related=True, _related=(), _related_fields=())
+        """Clear the default joins and the joins ``load()`` asked for; relations loaded by
+        ``IN (...)`` query stay."""
+        joined = {p[0] for p in self._related}
+        loads = tuple(i for i in self._loads if not (_load_path(i)[:1] and _load_path(i)[0] in joined))
+        return self._clone(_without_related=True, _loads=loads)._derived()
 
-    def only(self, *fields: ColumnRef[Any]) -> Self:
-        """Return partial model instances. No arguments restores all public fields.
+    def load(self, *items: ColumnRef[Any] | RelationPath[Any] | QuerySet[Any]) -> Self:
+        """Choose what the model instances carry::
 
-        A column through to-one relations (``only(BundleItem.bundle.type)``) loads the
-        relation with ``select_related`` and trims the joined instance to the given
-        fields. Without a column of the model itself, the model's instances keep only
-        their primary key and relation keys, hidden."""
-        names: list[str] = []
-        related: dict[tuple[str, ...], list[str]] = {}
-        for field in fields:
-            if not isinstance(field, ColumnRef) or field._root is not self._model:
-                raise TypeError(f"only() takes columns of {self._model.__name__} or of its to-one relations")
-            if field._path:
-                self._check_to_one(field._path)
-                related.setdefault(field._path, []).append(field._field.name)
+            Post.objects.load(Post.title)                      # partial posts
+            Post.objects.load(Post.author)                     # post.author, by a join
+            Post.objects.load(Post.author.name)                # a partial post.author
+            User.objects.load(User.posts.comments)             # by IN (...) queries
+            User.objects.load(User.posts.objects.filter(Post.published).order_by(Post.views.desc())[:3])
+            User.objects.load(User.posts.objects[:3].label("top_posts"))
+
+        A column of the model makes its instances partial: they hold the named fields
+        (and, hidden, the primary key and relation keys); reading another field raises
+        :class:`~orm.NotLoaded`. A related model is partial in the same way when a column
+        of it is named and no bare path ends at it. Without a column of the model, its
+        instances keep their normal selection.
+
+        To-one relations are joined; a path with a to-many hop is loaded with one
+        ``IN (...)`` query per relation level. A relation query set (``User.posts.objects``)
+        filters, orders and slices the related rows (a slice applies per parent), loads
+        its own items with ``.load()``, and goes to the relation, or to the plain
+        attribute ``.label(name)`` (``one=True``: the first row or ``None``).
+        ``.as_prefetch()`` loads a to-one relation by ``IN (...)`` query instead of a join.
+
+        Calls add up. ``load()`` without items gives full instances again (it bypasses a
+        default selection)."""
+        if not items:
+            loads = tuple(i for i in self._loads if not (isinstance(i, ColumnRef) and not i._path))
+            return self._clone(_loads=loads, _model_fields=self._model._meta.field_names)._derived()
+        own: list[str] = []
+        for item in items:
+            if isinstance(item, QuerySet):
+                if item._via is None:
+                    raise TypeError(f"load() takes a relation query set such as {self._model.__name__}.<relation>.objects, not {item!r}")
+                self._check_path(item._via)
+            elif isinstance(item, RelationPath):
+                self._check_path(item)
+            elif isinstance(item, ColumnRef) and item._root is self._model:
+                if not item._path:
+                    own.append(item._field.name)
             else:
-                names.append(field._field.name)
-        if len(set(names)) != len(names) or any(len(set(v)) != len(v) for v in related.values()):
+                raise TypeError(f"load() takes columns, relations and relation query sets of {self._model.__name__}, got {item!r}")
+        if len(set(own)) != len(own):
             raise TypeError("duplicate model field")
-        if not fields:
-            return self._clone(_model_fields=self._model._meta.field_names, _related_fields=())
-        # a hop only() joins for a deeper column keeps only its keys, as the root does
-        for path in list(related):
-            for i in range(1, len(path)):
-                if path[:i] not in self._related:
-                    related.setdefault(path[:i], [])
-        qs = self._clone(_model_fields=tuple(names), _related_fields=tuple((p, tuple(f)) for p, f in related.items()))
-        joined = list(qs._related)
-        for path in related:
-            joined.extend(path[:i] for i in range(1, len(path) + 1) if path[:i] not in joined)
-        return qs._clone(_related=tuple(joined))
+        return self._clone(_loads=(*self._loads, *items))._derived()
 
-    def _check_to_one(self, path: tuple[str, ...]) -> None:
-        model: Any = self._model
-        for hop in path:
-            rel = model._meta.relations[hop]
-            if isinstance(rel, (HasMany, ManyToMany)):
-                raise TypeError(f"only() can't go through the to-many relation {model.__name__}.{hop}")
-            model = rel.target
+    def _derived(self) -> Self:
+        """``_model_fields``, ``_related``, ``_related_fields`` and ``_prefetch`` from ``_loads``."""
+        own, related, related_fields, prefetch = _derive(self._model, self._loads)
+        model_fields = tuple(dict.fromkeys(own)) if own else self._model_fields
+        qs = self._clone(_model_fields=model_fields, _related=related, _related_fields=related_fields, _prefetch=prefetch)
+        _prefetch_tree(self._model, ((p.path._path, p) for p in prefetch))  # validates
+        return qs
+
+    def label(self, name: str, *, one: bool = False) -> Self:
+        """Store a relation query set's rows in the plain attribute ``name`` (a list, or
+        with ``one=True`` the first row or ``None``) instead of the relation::
+
+            User.objects.load(User.posts.objects.order_by(Post.id.desc()).label("latest", one=True))
+        """
+        self._bound("label")
+        if not isinstance(name, str) or not name.isidentifier() or name.startswith("_"):
+            raise ValueError(f"label {name!r} must be an identifier not starting with '_'")
+        return self._clone(_label=name, _one=one)
+
+    def as_prefetch(self) -> Self:
+        """Load this relation with an ``IN (...)`` query instead of a join; the rows are
+        the same."""
+        self._bound("as_prefetch")
+        return self._clone(_as_prefetch=True)
+
+    def _bound(self, method: str) -> None:
+        if self._via is None:
+            raise TypeError(f"{method}() applies to a relation query set such as User.posts.objects, not to {self._model.__name__}.objects")
+
+    def _plain_relation(self) -> bool:
+        """A relation query set that asks for nothing a join can't give."""
+        return not (
+            self._filters or self._order or self._limit is not None or self._offset is not None or self._loads
+            or self._model_fields is not None or self._label is not None or self._as_prefetch or self._lock is not None
+            or self._without_defaults or self._without_related or self._from is not None or self._joins
+        )
 
     def filter(self, *conditions: ConditionLike) -> Self:
         """Keep rows matching all ``conditions``."""
@@ -352,45 +485,12 @@ class QuerySet(Generic[M]):
             limit = max(limit - start, 0)
         return self._clone(_offset=offset or None, _limit=limit)
 
-    def select_related(self, *paths: RelationPath[Any]) -> Self:
-        """Load to-one relations in the same query with LEFT JOINs.
-
-        ``Comment.objects.select_related(Comment.post.author)`` fills
-        ``comment.post`` and ``comment.post.author``.
-        """
-        related = list(self._related)
-        for p in paths:
-            self._check_path(p)
-            for i in range(1, len(p._path) + 1):
-                if p._path[:i] not in related:
-                    related.append(p._path[:i])
-        return self._clone(_related=tuple(related))
-
-    def prefetch_related(self, *relations: RelationPath[Any] | Prefetch[Any]) -> Self:
-        """Load relations with one extra ``IN (...)`` query each, in the same call::
-
-            User.objects.prefetch_related(User.posts)              # user.posts.cached
-            User.objects.prefetch_related(User.posts.comments)     # and each post's comments
-            Comment.objects.prefetch_related(Comment.post)         # to-one: comment.post
-            User.objects.prefetch_related(Prefetch(User.posts, Post.objects.filter(...)))
-
-        A path loads every relation along it. :class:`Prefetch` gives the related rows
-        a query of their own (filters, order, a slice per parent, nested loading).
-        """
-        prefetch = list(self._prefetch)
-        for p in relations:
-            item = p if isinstance(p, Prefetch) else Prefetch(p)
-            self._check_path(item.path)
-            prefetch.append(item)
-        _prefetch_tree(self._model, ((p.path._path, p) for p in prefetch))  # validates
-        return self._clone(_prefetch=tuple(prefetch))
-
     def lock(self, exclusive: bool = True, *, nowait: bool = False, skip_locked: bool = False) -> Self:
         """Lock the rows this query reads until the transaction ends.
 
         ``exclusive=True`` is ``FOR UPDATE`` (others can't lock, update or delete the
         rows), ``False`` is ``FOR SHARE`` (others can read-lock them too, but not change
-        them). Only this model's rows are locked, not rows joined by ``select_related``.
+        them). Only this model's rows are locked, not rows joined by ``load()``.
         Rows locked by another transaction are waited for, unless ``nowait`` (raise
         :class:`~orm.LockNotAvailable`) or ``skip_locked`` (leave them out, e.g. for job
         queues). Must run inside ``db.transaction()``.
@@ -518,7 +618,7 @@ class QuerySet(Generic[M]):
     async def batches(self, size: int = 1000) -> AsyncIterator[list[M]]:
         """The rows in lists of ``size``, walking the primary key (``WHERE pk > last
         ORDER BY pk LIMIT size``), so memory stays flat and each batch is an index
-        range scan. ``select_related``, ``prefetch_related`` and ``lock()`` apply per
+        range scan. ``load()`` and ``lock()`` apply per
         batch; a custom ``order_by`` or slicing is rejected.
 
         ::
@@ -746,8 +846,8 @@ class QuerySet(Generic[M]):
 
         The order is ``order_by()``, else the schema default order, else the primary key;
         the primary key is added when the order is not unique. Order columns are columns
-        of the model itself, and a nullable one needs ``nulls=``. ``select_related``,
-        ``prefetch_related``, ``only()`` and query defaults apply to each page.
+        of the model itself, and a nullable one needs ``nulls=``. ``load()`` and
+        query defaults apply to each page.
         """
         if (first is None) == (last is None):
             raise TypeError("paginate() takes first= or last=")
@@ -1097,13 +1197,13 @@ class Prepared(Generic[M]):
 
 
 async def prefetch(
-    instances: Iterable[M], *relations: RelationPath[Any] | Prefetch[Any], using: Database | None = None
+    instances: Iterable[M], *relations: ColumnRef[Any] | RelationPath[Any] | QuerySet[Any], using: Database | None = None
 ) -> None:
-    """Load relations onto instances you already have, as ``prefetch_related`` does for
-    the rows of a query: one query per relation level, and no query for the instances
-    themselves::
+    """Load relations onto instances you already have, as :meth:`QuerySet.load` does for
+    the rows of a query, but always by ``IN (...)`` query: one query per relation level,
+    and no query for the instances themselves::
 
-        await orm.prefetch([bundle], Bundle.items.product, Prefetch(Bundle.versions, ...))
+        await orm.prefetch([bundle], Bundle.items.product, Bundle.versions.objects.filter(...))
 
     The instances are of one model. They are read from the database each came from,
     unless ``using`` names another."""
@@ -1116,7 +1216,10 @@ async def prefetch(
     model = type(objs[0])
     if any(type(o) is not model for o in objs):
         raise TypeError("prefetch() takes instances of one model")
-    qs = model.objects.prefetch_related(*relations)
+    loads = model.objects.load(*relations)._loads
+    if any(isinstance(i, ColumnRef) and not i._path for i in loads):
+        raise TypeError("prefetch() loads relations; a column of the instances' own model has nothing to load")
+    qs = model.objects._clone(_prefetch=_derive(model, loads, by_query=True)[3])
     if using is not None:
         qs = qs.using(using)
     params: list[Any] = []
@@ -1200,7 +1303,7 @@ def _relation_set_class(base: type[QuerySet[Any]], model: type[Model]) -> type[Q
 class RelatedSet(QuerySet[M]):
     """``user.posts``: the rows of a to-many relation of one instance.
 
-    Awaiting it returns the rows loaded by ``prefetch_related`` when there are any,
+    Awaiting it returns the rows loaded by ``load()`` when there are any,
     otherwise it runs the query. ``.cached`` gives the prefetched rows without awaiting.
     """
 
@@ -1220,7 +1323,7 @@ class RelatedSet(QuerySet[M]):
 
     @property
     def cached(self) -> list[M]:
-        """Rows loaded with ``prefetch_related``; raises ``NotLoaded`` otherwise."""
+        """Rows loaded with ``load()``; raises ``NotLoaded`` otherwise."""
         from .errors import NotLoaded
 
         rows = self._instance.__dict__.get(self._relation.name)
@@ -1238,7 +1341,7 @@ class RelatedSet(QuerySet[M]):
         if rows is not None and self._is_pristine() and not self._prefetch and not self._related:
             return list(rows)
         if debug._scope.get() is not None and self._is_pristine():
-            with debug.relation_load(self._relation.model.__name__, self._relation.name, "prefetch_related"):
+            with debug.relation_load(self._relation.model.__name__, self._relation.name, "load"):
                 return await super()._fetch()
         return await super()._fetch()
 
@@ -1272,7 +1375,7 @@ class ManyRelatedSet(QuerySet[M]):
     """``post.tags``: the rows a many-to-many relation links to one instance.
 
     A query set over the related model (filtered through the join model), which also
-    reads rows loaded by ``prefetch_related`` (``.cached``, or awaiting it unchanged),
+    reads rows loaded by ``load()`` (``.cached``, or awaiting it unchanged),
     and changes the links: ``add()``, ``remove()``, ``set()``, ``clear()`` and
     ``insert()`` write rows of the join model.
     """
@@ -1302,7 +1405,7 @@ class ManyRelatedSet(QuerySet[M]):
 
     @property
     def cached(self) -> list[M]:
-        """Rows loaded with ``prefetch_related``; raises ``NotLoaded`` otherwise."""
+        """Rows loaded with ``load()``; raises ``NotLoaded`` otherwise."""
         from .errors import NotLoaded
 
         rows = self._instance.__dict__.get(self._relation.name)
@@ -1316,7 +1419,7 @@ class ManyRelatedSet(QuerySet[M]):
         if rows is not None and pristine and not self._prefetch and not self._related:
             return list(rows)
         if debug._scope.get() is not None and pristine:
-            with debug.relation_load(self._relation.model.__name__, self._relation.name, "prefetch_related"):
+            with debug.relation_load(self._relation.model.__name__, self._relation.name, "load"):
                 return await super()._fetch()
         return await super()._fetch()
 

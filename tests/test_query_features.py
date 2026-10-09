@@ -8,7 +8,7 @@ from blog.models import Comment, Post, User
 
 import orm
 from conftest import DATABASE_URL
-from orm import Prefetch, QueryError, exists, func, outer, window
+from orm import QueryError, exists, func, outer, window
 
 NOW = datetime.now(timezone.utc)
 
@@ -313,7 +313,7 @@ async def test_join_cte(clean):
     # Filters, instances, count, prefetch.
     busy = User.objects.join(totals, totals.c.author_id == User.id).filter(totals.c.n > 1)
     assert [u.name for u in await busy] == ["Alice"] and await busy.count() == 1
-    assert [len(u.posts.cached) for u in await busy.prefetch_related(User.posts)] == [3]
+    assert [len(u.posts.cached) for u in await busy.load(User.posts)] == [3]
     # Two CTEs joined.
     commenters = Comment.objects.select(Comment.author_id, func.count().label("c")).group_by(Comment.author_id).cte("commenters")
     rows = await (
@@ -355,10 +355,10 @@ async def test_cte_from_filters_window(clean):
     top = await Post.objects.from_(ranked).filter(ranked.c.rank <= 2).order_by(Post.title)
     assert [p.title for p in top] == ["a2", "a3", "b1"]
     assert isinstance(top[0], Post) and top[0].author_id is not None
-    # Relation filters, select_related and prefetch still work on rows read from a CTE.
-    top = await Post.objects.from_(ranked).filter(ranked.c.rank == 1, Post.author.name == "Alice").select_related(Post.author)
+    # Relation filters, joined and prefetched loads still work on rows read from a CTE.
+    top = await Post.objects.from_(ranked).filter(ranked.c.rank == 1, Post.author.name == "Alice").load(Post.author)
     assert [(p.title, p.author.name) for p in top] == [("a2", "Alice")]
-    top = await Post.objects.from_(ranked).filter(ranked.c.rank == 1).prefetch_related(Post.comments).order_by(Post.title)
+    top = await Post.objects.from_(ranked).filter(ranked.c.rank == 1).load(Post.comments).order_by(Post.title)
     assert [len(p.comments.cached) for p in top] == [2, 1]
     assert await Post.objects.from_(ranked).filter(ranked.c.rank == 1).count() == 2
     assert await Post.objects.from_(ranked).filter(ranked.c.rank == 9).exists() is False
@@ -430,7 +430,7 @@ async def test_cte_errors(clean):
 
 async def test_nested_prefetch(clean):
     (alice, bob, carol), _ = await seed()
-    users = await User.objects.prefetch_related(User.posts.comments, User.comments).order_by(User.id)
+    users = await User.objects.load(User.posts.comments, User.comments).order_by(User.id)
     a, b, c = users
     assert [p.title for p in a.posts.cached] == ["a1", "a2", "a3"]
     assert [[x.body for x in p.comments.cached] for p in a.posts.cached] == [[], ["c1", "c2"], []]
@@ -441,7 +441,9 @@ async def test_nested_prefetch(clean):
 
 async def test_to_one_prefetch(clean):
     await seed()
-    comments = await Comment.objects.prefetch_related(Comment.post.author, Comment.author).order_by(Comment.id)
+    to_one = Comment.post.objects.as_prefetch().load(Post.author.objects.as_prefetch())
+    comments = await Comment.objects.load(to_one, Comment.author.objects.as_prefetch()).order_by(Comment.id)
+    assert "JOIN" not in Comment.objects.load(to_one).sql()
     assert [(x.post.title, x.post.author.name) for x in comments] == [("a2", "Alice"), ("a2", "Alice"), ("b1", "Bob")]
     assert comments[0].post is comments[1].post  # one object per related row
     assert [x.author.name if x.author else None for x in comments] == ["Bob", None, "Alice"]
@@ -449,15 +451,15 @@ async def test_to_one_prefetch(clean):
 
 async def test_filtered_prefetch(clean):
     (alice, bob, carol), _ = await seed()
-    users = await User.objects.prefetch_related(
-        Prefetch(User.posts, Post.objects.filter(Post.views >= 20).order_by(Post.views.desc()))
+    users = await User.objects.load(
+        User.posts.objects.filter(Post.views >= 20).order_by(Post.views.desc())
     ).order_by(User.id)
     # Like Django: the filtered rows are what user.posts holds now.
     assert [p.title for p in users[0].posts.cached] == ["a2", "a3"]
     assert [p.title for p in await users[0].posts] == ["a2", "a3"]
     assert await users[0].posts.count() == 3  # a new query sees every post
-    users = await User.objects.prefetch_related(
-        Prefetch(User.posts, Post.objects.filter(Post.views >= 20), to_attr="popular"),
+    users = await User.objects.load(
+        User.posts.objects.filter(Post.views >= 20).label("popular"),
     ).order_by(User.id)
     assert [p.title for p in users[0].popular] == ["a2", "a3"] and users[2].popular == []
     with pytest.raises(orm.NotLoaded):
@@ -466,20 +468,20 @@ async def test_filtered_prefetch(clean):
 
 async def test_sliced_prefetch_is_per_parent(clean):
     await seed()
-    top = Post.objects.order_by(Post.views.desc()).prefetch_related(Post.comments)[:2]
-    users = await User.objects.prefetch_related(Prefetch(User.posts, top, to_attr="top")).order_by(User.id)
+    top = User.posts.objects.order_by(Post.views.desc()).load(Post.comments)[:2]
+    users = await User.objects.load(top.label("top")).order_by(User.id)
     assert [[p.title for p in u.top] for u in users] == [["a2", "a3"], ["b1"], []]
     assert [len(p.comments.cached) for p in users[0].top] == [2, 0]
-    second = Post.objects.order_by(Post.created_at, Post.author.name)[1:2]
-    users = await User.objects.prefetch_related(Prefetch(User.posts, second)).order_by(User.id)
+    second = User.posts.objects.order_by(Post.created_at, Post.author.name)[1:2]
+    users = await User.objects.load(second).order_by(User.id)
     assert [[p.title for p in u.posts.cached] for u in users] == [["a2"], [], []]
 
 
-async def test_prefetch_with_select_related_and_nested_queryset(clean):
+async def test_relation_query_set_with_joins_and_nested_query_set(clean):
     await seed()
-    users = await User.objects.prefetch_related(
-        Prefetch(User.comments, Comment.objects.select_related(Comment.post.author)),
-        Prefetch(User.posts, Post.objects.prefetch_related(Prefetch(Post.comments, Comment.objects.filter(Comment.author_id.is_null())))),
+    users = await User.objects.load(
+        User.comments.objects.load(Comment.post.author),
+        User.posts.objects.load(Post.comments.objects.filter(Comment.author_id.is_null())),
     ).order_by(User.id)
     assert [(x.post.title, x.post.author.name) for x in users[1].comments.cached] == [("a2", "Alice")]
     assert [[x.body for x in p.comments.cached] for p in users[0].posts.cached] == [[], ["c2"], []]
@@ -487,11 +489,13 @@ async def test_prefetch_with_select_related_and_nested_queryset(clean):
 
 async def test_prefetch_errors(clean):
     with pytest.raises(ValueError, match="different query sets"):
-        User.objects.prefetch_related(Prefetch(User.posts, Post.objects.all()), Prefetch(User.posts, Post.objects.all()))
-    with pytest.raises(TypeError, match="query set of Post"):
-        Prefetch(User.posts, Comment.objects.all())  # type: ignore[arg-type]
+        User.objects.load(User.posts.objects.all(), User.posts.objects.all())
+    with pytest.raises(TypeError, match="relation query set"):
+        User.objects.load(Post.objects.all())
+    with pytest.raises(TypeError, match="relation query set"):
+        Post.objects.label("x")
     with pytest.raises(ValueError, match="does not start at User"):
-        User.objects.prefetch_related(Post.comments)
+        User.objects.load(Post.comments)
 
 
 # -- instances built in Rust -----------------------------------------------------------------------
@@ -500,7 +504,7 @@ async def test_prefetch_errors(clean):
 async def test_instances_get_their_database(clean):
     await seed()
     db = orm.get_database()
-    users = await User.objects.using(db).prefetch_related(User.posts).select_related()
+    users = await User.objects.using(db).load(User.posts).load()
     assert all(u.__dict__["_db"] is db for u in users)
     assert all(p.__dict__["_db"] is db for u in users for p in u.posts.cached)
     rows = await User.objects.using(db).select(User, User.name)
@@ -513,8 +517,8 @@ async def test_instances_get_their_database(clean):
 async def test_prefetch_query_reading_a_cte(clean):
     await seed()
     best = Post.objects.select(Post.id).filter(Post.views >= 50).cte("best")
-    users = await User.objects.prefetch_related(
-        Prefetch(User.posts, Post.objects.filter(Post.id.in_(best.select(best.c.id))), to_attr="best")
+    users = await User.objects.load(
+        User.posts.objects.filter(Post.id.in_(best.select(best.c.id))).label("best")
     ).order_by(User.id)
     assert [[p.title for p in u.best] for u in users] == [["a2"], ["b1"], []]
 
@@ -554,17 +558,18 @@ async def test_prefetch_splits_keys(small_params):
     def shape(us):
         return [[(p.title, [c.body for c in p.comments.cached]) for p in u.posts.cached] for u in us]
 
-    qs = User.objects.prefetch_related(User.posts.comments).order_by(User.id)
+    qs = User.objects.load(User.posts.comments).order_by(User.id)
     assert shape(await qs.using(db)) == shape(await qs)
     assert sum(len(u.posts.cached) for u in await qs.using(db)) == 36
 
     # A slice per parent still holds: each parent's rows stay in one query.
-    top = Prefetch(User.posts, Post.objects.filter(Post.views >= 0).order_by(Post.views.desc())[:2], to_attr="top")
-    got = await User.objects.prefetch_related(top).order_by(User.id).using(db)
+    top = User.posts.objects.filter(Post.views >= 0).order_by(Post.views.desc())[:2].label("top")
+    got = await User.objects.load(top).order_by(User.id).using(db)
     assert [[p.views for p in u.top] for u in got] == [[2, 1]] * 12
 
     # To-one, with repeated keys.
-    cs = await Comment.objects.prefetch_related(Comment.post.author).order_by(Comment.id).using(db)
+    to_one = Comment.post.objects.as_prefetch().load(Post.author.objects.as_prefetch())
+    cs = await Comment.objects.load(to_one).order_by(Comment.id).using(db)
     names = {u.id: u.name for u in users}
     assert [c.post.author.name for c in cs] == [names[p.author_id] for p in posts[::2]]
 
@@ -574,6 +579,6 @@ async def test_prefetch_beyond_the_parameter_limit(clean):
     db = orm.get_database()
     await db.execute("INSERT INTO users (email, name) SELECT 'u' || g || '@x.io', 'u' FROM generate_series(1, 70000) g")
     await db.execute("INSERT INTO posts (author_id, title, body) SELECT id, 't', '' FROM users WHERE id % 10000 = 0")
-    users = await User.objects.prefetch_related(User.posts)
+    users = await User.objects.load(User.posts)
     assert len(users) == 70000
     assert sum(len(u.posts.cached) for u in users) == 7

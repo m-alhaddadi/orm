@@ -46,12 +46,12 @@ test("a loader in a loop throws with the shape, the call site and the fix", asyn
     const [, file, line] = /^(.*):(\d+)$/.exec(shape!.site)!;
     assert.match(file!, /n-plus-one\.test\.(ts|js)$/);
     assert.match(readFileSync(file!, "utf8").split("\n")[Number(line) - 1]!, /the call site/);
-    assert.equal(shape!.fix, "selectRelated(Customer.person)");
-    assert.match(error.message, /8 queries with one shape `SELECT [\s\S]*use selectRelated\(Customer.person\)/);
+    assert.equal(shape!.fix, "load(Customer.person)");
+    assert.match(error.message, /8 queries with one shape `SELECT [\s\S]*use load\(Customer.person\)/);
   } finally { await db.close(); }
 });
 
-test("a related query in a loop names prefetchRelated and warns without fail", async () => {
+test("a related query in a loop names load and warns without fail", async () => {
   const { Person, db } = await shop();
   const warnings: Error[] = [];
   const listener = (w: Error) => { if (w.name === "NPlusOneWarning") warnings.push(w); };
@@ -61,11 +61,11 @@ test("a related query in a loop names prefetchRelated and warns without fail", a
     await debug.nPlusOne(async () => { for (const p of people) await p.customers.using(db).all(); }, { threshold: 3 });
     await new Promise((r) => setImmediate(r));
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0]!.message, /use prefetchRelated\(Person.customers\)/);
+    assert.match(warnings[0]!.message, /use load\(Person.customers\)/);
   } finally { process.off("warning", listener); await db.close(); }
 });
 
-test("a many-to-many query in a loop names prefetchRelated", async () => {
+test("a many-to-many query in a loop names load", async () => {
   const registry = new Registry();
   const models = loads(source.replace("  customers Customer[]", "  customers Customer[]\n  tags      Tag[]      @relation(through: PersonTag)") + `model Tag {
   id Int @id
@@ -87,7 +87,7 @@ model PersonTag {
     const error = await debug.nPlusOne(async () => { for (const p of people) await p.tags.using(db).all(); }, { threshold: 3, fail: true })
       .then(() => null, (e: unknown) => e);
     assert.ok(error instanceof debug.NPlusOne);
-    assert.equal(error.report.repeated[0]!.fix, "prefetchRelated(Person.tags)");
+    assert.equal(error.report.repeated[0]!.fix, "load(Person.tags)");
     // A changed many-to-many query set is not a plain relation load, so it names no fix.
     const filtered = await debug.nPlusOne(async () => { for (const p of people) await p.tags.using(db).filter(models.Tag.id.gte(0)).all(); }, { threshold: 3, fail: true })
       .then(() => null, (e: unknown) => e);
